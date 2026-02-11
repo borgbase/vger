@@ -38,7 +38,7 @@ for target in "${TARGETS_ZIGBUILD[@]}"; do
     cargo zigbuild --release --target "$target"
 
     archive="vger-${VERSION}-${target}.tar.gz"
-    tar -czf "$DIST_DIR/$archive" -C "target/$target/release" vger
+    tar -czf "$DIST_DIR/$archive" -C "target/$target/release" vger vger-server
     echo "    Created $DIST_DIR/$archive"
 done
 
@@ -47,7 +47,7 @@ echo "==> Building $TARGET_NATIVE (native)..."
 cargo build --release --target "$TARGET_NATIVE"
 
 archive="vger-${VERSION}-${TARGET_NATIVE}.tar.gz"
-tar -czf "$DIST_DIR/$archive" -C "target/$TARGET_NATIVE/release" vger
+tar -czf "$DIST_DIR/$archive" -C "target/$TARGET_NATIVE/release" vger vger-server
 echo "    Created $DIST_DIR/$archive"
 
 # Generate checksums
