@@ -4,6 +4,7 @@ use crate::config::BorgConfig;
 use crate::crypto::chunk_id::ChunkId;
 use crate::error::Result;
 use crate::repo::format::unpack_object;
+use crate::repo::pack::read_blob_from_pack;
 use crate::repo::Repository;
 use crate::storage;
 
@@ -95,15 +96,16 @@ pub fn run(config: &BorgConfig, passphrase: Option<&str>, verify_data: bool) -> 
         archives_checked += 1;
     }
 
-    // Step 2: Verify all chunks in index exist in storage
+    // Step 2: Verify all chunks' pack files exist in storage
     let total_chunks = repo.chunk_index.len();
-    eprintln!("Verifying existence of {total_chunks} chunks...");
+    eprintln!("Verifying existence of {total_chunks} chunks in pack files...");
     let mut chunks_existence_checked: usize = 0;
-    for (chunk_id, _entry) in repo.chunk_index.iter() {
-        if !repo.storage.exists(&chunk_id.storage_key())? {
+    for (_chunk_id, entry) in repo.chunk_index.iter() {
+        let pack_key = entry.pack_id.storage_key();
+        if !repo.storage.exists(&pack_key)? {
             errors.push(CheckError {
                 context: "chunk index".into(),
-                message: format!("chunk {chunk_id} missing from storage"),
+                message: format!("pack {} missing from storage", entry.pack_id),
             });
         }
         chunks_existence_checked += 1;
@@ -119,11 +121,19 @@ pub fn run(config: &BorgConfig, passphrase: Option<&str>, verify_data: bool) -> 
     if verify_data {
         eprintln!("Verifying data integrity of {total_chunks} chunks...");
         let chunk_id_key = repo.crypto.chunk_id_key();
-        for (chunk_id, _entry) in repo.chunk_index.iter() {
-            let raw = match repo.storage.get(&chunk_id.storage_key())? {
-                Some(data) => data,
-                None => {
-                    // Already reported in existence check
+        for (chunk_id, entry) in repo.chunk_index.iter() {
+            let raw = match read_blob_from_pack(
+                repo.storage.as_ref(),
+                &entry.pack_id,
+                entry.pack_offset,
+                entry.stored_size,
+            ) {
+                Ok(data) => data,
+                Err(e) => {
+                    errors.push(CheckError {
+                        context: "verify-data".into(),
+                        message: format!("chunk {chunk_id}: read failed: {e}"),
+                    });
                     continue;
                 }
             };

@@ -75,6 +75,14 @@ impl StorageBackend for OpendalBackend {
         Ok(keys)
     }
 
+    fn get_range(&self, key: &str, offset: u64, length: u64) -> Result<Option<Vec<u8>>> {
+        match self.op.read_with(key).range(offset..offset + length).call() {
+            Ok(buf) => Ok(Some(buf.to_vec())),
+            Err(e) if e.kind() == opendal::ErrorKind::NotFound => Ok(None),
+            Err(e) => Err(BorgError::Storage(e)),
+        }
+    }
+
     fn create_dir(&self, key: &str) -> Result<()> {
         let dir_key = if key.ends_with('/') {
             key.to_string()

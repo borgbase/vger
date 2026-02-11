@@ -1,5 +1,6 @@
 use crate::compress::Compression;
 use crate::config::ChunkerConfig;
+use crate::repo::pack::PackType;
 use crate::repo::EncryptionMode;
 use crate::repo::Repository;
 use crate::testutil::{test_repo_plaintext, MemoryBackend};
@@ -11,6 +12,7 @@ fn init_creates_required_keys() {
         storage,
         EncryptionMode::None,
         ChunkerConfig::default(),
+        None,
         None,
     )
     .unwrap();
@@ -29,6 +31,7 @@ fn init_twice_fails() {
         EncryptionMode::None,
         ChunkerConfig::default(),
         None,
+        None,
     )
     .unwrap();
 
@@ -37,6 +40,7 @@ fn init_twice_fails() {
         repo.storage,
         EncryptionMode::None,
         ChunkerConfig::default(),
+        None,
         None,
     );
     assert!(result.is_err());
@@ -49,8 +53,11 @@ fn store_and_read_chunk_roundtrip() {
     let mut repo = test_repo_plaintext();
     let data = b"hello, this is chunk data for testing";
     let (chunk_id, _stored_size, is_new) =
-        repo.store_chunk(data, Compression::None).unwrap();
+        repo.store_chunk(data, Compression::None, PackType::Data).unwrap();
     assert!(is_new);
+
+    // Flush packs so chunks are readable
+    repo.flush_packs().unwrap();
 
     let read_back = repo.read_chunk(&chunk_id).unwrap();
     assert_eq!(read_back, data);
@@ -61,12 +68,15 @@ fn store_chunk_dedup() {
     let mut repo = test_repo_plaintext();
     let data = b"duplicate chunk data";
 
-    let (id1, _size1, is_new1) = repo.store_chunk(data, Compression::None).unwrap();
+    let (id1, _size1, is_new1) = repo.store_chunk(data, Compression::None, PackType::Data).unwrap();
     assert!(is_new1);
 
-    let (id2, _size2, is_new2) = repo.store_chunk(data, Compression::None).unwrap();
+    let (id2, _size2, is_new2) = repo.store_chunk(data, Compression::None, PackType::Data).unwrap();
     assert!(!is_new2, "second store should be a dedup hit");
     assert_eq!(id1, id2);
+
+    // Flush packs to commit to index
+    repo.flush_packs().unwrap();
 
     // Refcount should be 2
     let entry = repo.chunk_index.get(&id1).unwrap();
@@ -78,8 +88,11 @@ fn store_chunk_with_compression() {
     let mut repo = test_repo_plaintext();
     let data = b"compressible data that should survive lz4 round-trip";
     let (chunk_id, _stored_size, is_new) =
-        repo.store_chunk(data, Compression::Lz4).unwrap();
+        repo.store_chunk(data, Compression::Lz4, PackType::Data).unwrap();
     assert!(is_new);
+
+    // Flush packs so chunks are readable
+    repo.flush_packs().unwrap();
 
     let read_back = repo.read_chunk(&chunk_id).unwrap();
     assert_eq!(read_back, data);
@@ -89,7 +102,7 @@ fn store_chunk_with_compression() {
 fn save_state_persists_manifest_and_index() {
     let mut repo = test_repo_plaintext();
     let data = b"persistent chunk";
-    repo.store_chunk(data, Compression::None).unwrap();
+    repo.store_chunk(data, Compression::None, PackType::Data).unwrap();
     repo.save_state().unwrap();
 
     // Verify manifest and index are updated in storage

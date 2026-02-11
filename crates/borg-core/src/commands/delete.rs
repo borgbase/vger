@@ -65,7 +65,8 @@ pub fn run(
         });
     }
 
-    // Decrement refcounts for data chunks and delete orphans
+    // Decrement refcounts for data chunks
+    // Orphaned blobs remain in pack files until a future `compact` command.
     let mut chunks_deleted = 0u64;
     let mut space_freed = 0u64;
 
@@ -73,7 +74,6 @@ pub fn run(
         for chunk_ref in &item.chunks {
             if let Some((rc, size)) = repo.chunk_index.decrement(&chunk_ref.id) {
                 if rc == 0 {
-                    repo.storage.delete(&chunk_ref.id.storage_key())?;
                     chunks_deleted += 1;
                     space_freed += size as u64;
                 }
@@ -85,7 +85,6 @@ pub fn run(
     for chunk_id in &archive_meta.item_ptrs {
         if let Some((rc, size)) = repo.chunk_index.decrement(chunk_id) {
             if rc == 0 {
-                repo.storage.delete(&chunk_id.storage_key())?;
                 chunks_deleted += 1;
                 space_freed += size as u64;
             }

@@ -1,13 +1,14 @@
 use borg_core::compress::Compression;
 use borg_core::config::ChunkerConfig;
 use borg_core::repo::manifest::ArchiveEntry;
+use borg_core::repo::pack::PackType;
 use borg_core::repo::{EncryptionMode, Repository};
 use borg_core::storage::opendal_backend::OpendalBackend;
 use chrono::Utc;
 
 fn init_local_repo(dir: &std::path::Path) -> Repository {
     let storage = Box::new(OpendalBackend::local(dir.to_str().unwrap()).unwrap());
-    Repository::init(storage, EncryptionMode::None, ChunkerConfig::default(), None).unwrap()
+    Repository::init(storage, EncryptionMode::None, ChunkerConfig::default(), None, None).unwrap()
 }
 
 fn open_local_repo(dir: &std::path::Path) -> Repository {
@@ -25,8 +26,8 @@ fn init_store_reopen_read() {
     let data2 = b"chunk two data for integration test";
     let (id1, id2) = {
         let mut repo = init_local_repo(dir);
-        let (id1, _, _) = repo.store_chunk(data1, Compression::Lz4).unwrap();
-        let (id2, _, _) = repo.store_chunk(data2, Compression::Lz4).unwrap();
+        let (id1, _, _) = repo.store_chunk(data1, Compression::Lz4, PackType::Data).unwrap();
+        let (id2, _, _) = repo.store_chunk(data2, Compression::Lz4, PackType::Data).unwrap();
         repo.save_state().unwrap();
         (id1, id2)
     };

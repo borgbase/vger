@@ -56,6 +56,10 @@ pub struct RepositoryConfig {
     pub sftp_host: Option<String>,
     pub sftp_user: Option<String>,
     pub sftp_port: Option<u16>,
+    #[serde(default = "default_min_pack_size")]
+    pub min_pack_size: u32,
+    #[serde(default = "default_max_pack_size")]
+    pub max_pack_size: u32,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -139,6 +143,14 @@ fn default_algorithm() -> String {
 
 fn default_zstd_level() -> i32 {
     3
+}
+
+fn default_min_pack_size() -> u32 {
+    32 * 1024 * 1024 // 32 MiB
+}
+
+fn default_max_pack_size() -> u32 {
+    512 * 1024 * 1024 // 512 MiB
 }
 
 fn default_archive_format() -> String {

@@ -27,7 +27,7 @@ This is **not compatible** with existing Borg repositories — it uses a fresh o
 
 ### What is not (yet) implemented
 
-Mount (FUSE), compact, repair, remote SSH protocol, hardlinks, special files (devices, FIFOs), and file-level caching for incremental speedup. These are candidates for future versions.
+Mount (FUSE), compact, repair, hardlinks, special files (devices, FIFOs), and file-level caching for incremental speedup. These are candidates for future versions.
 
 ## Quick start
 
@@ -101,6 +101,8 @@ borg-rs --config borg-rs.yaml check --verify-data
 repository:
   path: "/backup/repo"           # Local path or S3 prefix
   backend: "local"               # "local" or "s3"
+  # min_pack_size: 33554432      # Pack size floor (default 32 MiB)
+  # max_pack_size: 536870912     # Pack size ceiling (default 512 MiB)
   # S3-specific options:
   # s3_bucket: "my-backups"
   # s3_region: "us-east-1"
@@ -136,7 +138,7 @@ archive_name_format: "{hostname}-{now:%Y-%m-%dT%H:%M:%S}"
 
 - **[BorgBackup](https://github.com/borgbackup/borg/)** — Architecture, chunking strategy, repository concept, and the overall backup pipeline.
 - **[Borgmatic](https://torsion.org/borgmatic/)** — YAML configuration approach.
-- **[Rustic](https://github.com/rustic-rs/rustic)** — Using [Apache OpenDAL](https://opendal.apache.org/) for the storage backend abstraction layer.
+- **[Rustic](https://github.com/rustic-rs/rustic)** — Storage backend abstraction via [Apache OpenDAL](https://opendal.apache.org/), pack file design, and general architectural reference as a mature Rust backup tool. See [ARCHITECTURE.md](ARCHITECTURE.md) for a detailed comparison.
 
 ### Key differences from Borg
 
@@ -159,7 +161,7 @@ archive_name_format: "{hostname}-{now:%Y-%m-%dT%H:%M:%S}"
 ├── manifest                  # Encrypted archive list
 ├── index                     # Encrypted chunk index
 ├── archives/<id>             # Encrypted archive metadata
-├── data/<xx>/<chunk-id>      # Encrypted data chunks (256 shard dirs)
+├── packs/<xx>/<pack-id>      # Pack files containing compressed+encrypted chunks (256 shard dirs)
 └── locks/                    # Advisory lock files
 ```
 

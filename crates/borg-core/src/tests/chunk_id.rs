@@ -42,14 +42,6 @@ fn shard_prefix_is_first_byte() {
 }
 
 #[test]
-fn storage_key_format() {
-    let id = ChunkId([0xAB; 32]);
-    let key = id.storage_key();
-    assert!(key.starts_with("data/ab/"));
-    assert_eq!(key, format!("data/ab/{}", id.to_hex()));
-}
-
-#[test]
 fn empty_data_produces_valid_id() {
     let key = test_chunk_id_key();
     let id = ChunkId::compute(&key, b"");

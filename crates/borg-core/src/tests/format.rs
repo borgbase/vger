@@ -70,10 +70,11 @@ fn object_type_from_u8_valid() {
     assert_eq!(ObjectType::from_u8(2).unwrap(), ObjectType::ArchiveMeta);
     assert_eq!(ObjectType::from_u8(3).unwrap(), ObjectType::ChunkData);
     assert_eq!(ObjectType::from_u8(4).unwrap(), ObjectType::ChunkIndex);
+    assert_eq!(ObjectType::from_u8(5).unwrap(), ObjectType::PackHeader);
 }
 
 #[test]
 fn object_type_from_u8_invalid() {
-    assert!(ObjectType::from_u8(5).is_err());
+    assert!(ObjectType::from_u8(6).is_err());
     assert!(ObjectType::from_u8(255).is_err());
 }

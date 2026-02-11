@@ -4,7 +4,7 @@ use crate::config::RepositoryConfig;
 use crate::error::{BorgError, Result};
 
 /// Abstract key-value storage for repository objects.
-/// Keys are `/`-separated string paths (e.g. "data/ab/ab01cd02...").
+/// Keys are `/`-separated string paths (e.g. "packs/ab/ab01cd02...").
 pub trait StorageBackend: Send + Sync {
     /// Read an object by key. Returns `None` if not found.
     fn get(&self, key: &str) -> Result<Option<Vec<u8>>>;
@@ -20,6 +20,9 @@ pub trait StorageBackend: Send + Sync {
 
     /// List all keys under a prefix. Returns full key paths.
     fn list(&self, prefix: &str) -> Result<Vec<String>>;
+
+    /// Read a byte range from an object. Returns `None` if not found.
+    fn get_range(&self, key: &str, offset: u64, length: u64) -> Result<Option<Vec<u8>>>;
 
     /// Create a directory marker (no-op for flat object stores).
     fn create_dir(&self, key: &str) -> Result<()>;

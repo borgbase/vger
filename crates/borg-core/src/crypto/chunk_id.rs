@@ -31,11 +31,6 @@ impl ChunkId {
     pub fn shard_prefix(&self) -> String {
         hex::encode(&self.0[..1])
     }
-
-    /// Storage key path: `data/<shard>/<full_hex>`.
-    pub fn storage_key(&self) -> String {
-        format!("data/{}/{}", self.shard_prefix(), self.to_hex())
-    }
 }
 
 impl fmt::Debug for ChunkId {

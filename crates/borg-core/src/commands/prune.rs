@@ -102,11 +102,11 @@ pub fn run(
         let items = load_archive_items(&repo, archive_name)?;
 
         // Decrement data chunk refcounts
+        // Orphaned blobs remain in pack files until a future `compact` command.
         for item in &items {
             for chunk_ref in &item.chunks {
                 if let Some((rc, size)) = repo.chunk_index.decrement(&chunk_ref.id) {
                     if rc == 0 {
-                        repo.storage.delete(&chunk_ref.id.storage_key())?;
                         total_chunks_deleted += 1;
                         total_space_freed += size as u64;
                     }
@@ -118,7 +118,6 @@ pub fn run(
         for chunk_id in &archive_meta.item_ptrs {
             if let Some((rc, size)) = repo.chunk_index.decrement(chunk_id) {
                 if rc == 0 {
-                    repo.storage.delete(&chunk_id.storage_key())?;
                     total_chunks_deleted += 1;
                     total_space_freed += size as u64;
                 }

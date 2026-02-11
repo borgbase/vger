@@ -15,6 +15,7 @@ use crate::crypto::chunk_id::ChunkId;
 use crate::error::{BorgError, Result};
 use crate::repo::format::{pack_object, ObjectType};
 use crate::repo::manifest::ArchiveEntry;
+use crate::repo::pack::PackType;
 use crate::repo::{lock, Repository};
 use crate::storage;
 
@@ -145,7 +146,7 @@ pub fn run(
                 for (offset, length) in chunk_ranges {
                     let chunk_data = &file_data[offset..offset + length];
                     let (chunk_id, csize, is_new) =
-                        repo.store_chunk(chunk_data, compression)?;
+                        repo.store_chunk(chunk_data, compression, PackType::Data)?;
 
                     stats.original_size += length as u64;
                     stats.compressed_size += csize as u64;
@@ -177,7 +178,7 @@ pub fn run(
     let mut item_ptrs: Vec<ChunkId> = Vec::new();
     for (offset, length) in item_chunk_ranges {
         let chunk_data = &items_bytes[offset..offset + length];
-        let (chunk_id, _csize, _is_new) = repo.store_chunk(chunk_data, compression)?;
+        let (chunk_id, _csize, _is_new) = repo.store_chunk(chunk_data, compression, PackType::Tree)?;
         item_ptrs.push(chunk_id);
     }
 

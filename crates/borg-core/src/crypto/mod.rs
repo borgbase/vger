@@ -1,6 +1,7 @@
 pub mod aes_gcm;
 pub mod chunk_id;
 pub mod key;
+pub mod pack_id;
 
 use crate::error::Result;
 

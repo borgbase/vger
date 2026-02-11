@@ -22,6 +22,7 @@ pub fn run(config: &BorgConfig, passphrase: Option<&str>) -> Result<Repository> 
         encryption,
         config.chunker.clone(),
         passphrase,
+        Some(&config.repository),
     )?;
 
     Ok(repo)

@@ -10,6 +10,7 @@ pub enum ObjectType {
     ArchiveMeta = 2,
     ChunkData = 3,
     ChunkIndex = 4,
+    PackHeader = 5,
 }
 
 impl ObjectType {
@@ -20,6 +21,7 @@ impl ObjectType {
             2 => Ok(Self::ArchiveMeta),
             3 => Ok(Self::ChunkData),
             4 => Ok(Self::ChunkIndex),
+            5 => Ok(Self::PackHeader),
             _ => Err(BorgError::UnknownObjectType(v)),
         }
     }

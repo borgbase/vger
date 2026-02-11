@@ -52,6 +52,22 @@ impl StorageBackend for MemoryBackend {
         Ok(keys)
     }
 
+    fn get_range(&self, key: &str, offset: u64, length: u64) -> Result<Option<Vec<u8>>> {
+        let map = self.data.lock().unwrap();
+        match map.get(key) {
+            Some(data) => {
+                let start = offset as usize;
+                let end = std::cmp::min(start + length as usize, data.len());
+                if start >= data.len() {
+                    Ok(Some(Vec::new()))
+                } else {
+                    Ok(Some(data[start..end].to_vec()))
+                }
+            }
+            None => Ok(None),
+        }
+    }
+
     fn create_dir(&self, _key: &str) -> Result<()> {
         // No-op for in-memory backend
         Ok(())
@@ -61,7 +77,7 @@ impl StorageBackend for MemoryBackend {
 /// Create a plaintext repository backed by MemoryBackend.
 pub fn test_repo_plaintext() -> Repository {
     let storage = Box::new(MemoryBackend::new());
-    Repository::init(storage, EncryptionMode::None, ChunkerConfig::default(), None)
+    Repository::init(storage, EncryptionMode::None, ChunkerConfig::default(), None, None)
         .expect("failed to init test repo")
 }
 
