@@ -1,15 +1,15 @@
 use clap::{Parser, Subcommand};
 use comfy_table::{Table, presets::UTF8_FULL_CONDENSED};
 
-use borg_core::commands;
-use borg_core::compress::Compression;
-use borg_core::config::BorgConfig;
+use vger_core::commands;
+use vger_core::compress::Compression;
+use vger_core::config::VgerConfig;
 
 #[derive(Parser)]
-#[command(name = "borg-rs", version, about = "Fast, encrypted, deduplicated backups")]
+#[command(name = "vger", version, about = "Fast, encrypted, deduplicated backups")]
 struct Cli {
     /// Path to configuration file
-    #[arg(short, long, default_value = "borg-rs.yaml")]
+    #[arg(short, long, default_value = "vger.yaml")]
     config: String,
 
     /// Verbosity level (-v, -vv, -vvv)
@@ -129,7 +129,7 @@ fn main() {
             std::process::exit(1);
         }
     };
-    let config: BorgConfig = match serde_yaml::from_str(&config_str) {
+    let config: VgerConfig = match serde_yaml::from_str(&config_str) {
         Ok(c) => c,
         Err(e) => {
             eprintln!("Error: invalid config file '{}': {e}", cli.config);
@@ -166,7 +166,7 @@ fn main() {
     }
 }
 
-fn get_passphrase(config: &BorgConfig) -> Result<Option<String>, Box<dyn std::error::Error>> {
+fn get_passphrase(config: &VgerConfig) -> Result<Option<String>, Box<dyn std::error::Error>> {
     if config.encryption.mode == "none" {
         return Ok(None);
     }
@@ -194,7 +194,7 @@ fn get_passphrase(config: &BorgConfig) -> Result<Option<String>, Box<dyn std::er
     Ok(Some(pass))
 }
 
-fn run_init(config: &BorgConfig) -> Result<(), Box<dyn std::error::Error>> {
+fn run_init(config: &VgerConfig) -> Result<(), Box<dyn std::error::Error>> {
     let passphrase = if config.encryption.mode != "none" {
         // Try config passphrase/passcommand first, fall back to interactive
         if let Some(p) = get_passphrase(config)? {
@@ -217,7 +217,7 @@ fn run_init(config: &BorgConfig) -> Result<(), Box<dyn std::error::Error>> {
 }
 
 fn run_create(
-    config: &BorgConfig,
+    config: &VgerConfig,
     archive_name: Option<String>,
     compression_override: Option<String>,
     paths: Vec<String>,
@@ -255,7 +255,7 @@ fn run_create(
 }
 
 fn run_list(
-    config: &BorgConfig,
+    config: &VgerConfig,
     archive_name: Option<String>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let passphrase = get_passphrase(config)?;
@@ -285,9 +285,9 @@ fn run_list(
         commands::list::ListResult::Items(items) => {
             for item in &items {
                 let type_char = match item.entry_type {
-                    borg_core::archive::item::ItemType::Directory => "d",
-                    borg_core::archive::item::ItemType::RegularFile => "-",
-                    borg_core::archive::item::ItemType::Symlink => "l",
+                    vger_core::archive::item::ItemType::Directory => "d",
+                    vger_core::archive::item::ItemType::RegularFile => "-",
+                    vger_core::archive::item::ItemType::Symlink => "l",
                 };
                 println!(
                     "{}{:o} {:>8} {}",
@@ -301,7 +301,7 @@ fn run_list(
 }
 
 fn run_extract(
-    config: &BorgConfig,
+    config: &VgerConfig,
     archive_name: String,
     dest: String,
     pattern: Option<String>,
@@ -328,7 +328,7 @@ fn run_extract(
 }
 
 fn run_delete(
-    config: &BorgConfig,
+    config: &VgerConfig,
     archive_name: String,
     dry_run: bool,
 ) -> Result<(), Box<dyn std::error::Error>> {
@@ -356,7 +356,7 @@ fn run_delete(
 }
 
 fn run_prune(
-    config: &BorgConfig,
+    config: &VgerConfig,
     dry_run: bool,
     list: bool,
 ) -> Result<(), Box<dyn std::error::Error>> {
@@ -400,7 +400,7 @@ fn run_prune(
 }
 
 fn run_check(
-    config: &BorgConfig,
+    config: &VgerConfig,
     verify_data: bool,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let passphrase = get_passphrase(config)?;
@@ -432,7 +432,7 @@ fn run_check(
 }
 
 fn run_compact(
-    config: &BorgConfig,
+    config: &VgerConfig,
     threshold: f64,
     max_repack_size: Option<String>,
     dry_run: bool,

@@ -13,10 +13,10 @@ use crate::config::ServerConfig;
 use crate::state::AppState;
 
 #[derive(Parser)]
-#[command(name = "borg-rs-server", version, about = "borg-rs backup server")]
+#[command(name = "vger-server", version, about = "vger backup server")]
 struct Cli {
     /// Path to configuration file
-    #[arg(short, long, default_value = "borg-server.toml")]
+    #[arg(short, long, default_value = "vger-server.toml")]
     config: String,
 }
 
@@ -73,7 +73,7 @@ async fn main() {
 
     let app = handlers::router(state);
 
-    info!("borg-rs-server listening on {listen_addr}");
+    info!("vger-server listening on {listen_addr}");
     let listener = TcpListener::bind(&listen_addr).await.unwrap_or_else(|e| {
         eprintln!("Error: cannot bind to {listen_addr}: {e}");
         std::process::exit(1);

@@ -5,13 +5,13 @@ use serde::{Deserialize, Serialize};
 use crate::crypto::chunk_id::ChunkId;
 use crate::crypto::pack_id::PackId;
 use crate::crypto::CryptoEngine;
-use crate::error::{BorgError, Result};
+use crate::error::{VgerError, Result};
 use crate::storage::StorageBackend;
 
 use super::format::{pack_object, unpack_object, ObjectType};
 
 /// Magic bytes at the start of every pack file.
-pub const PACK_MAGIC: &[u8; 8] = b"BORGPACK";
+pub const PACK_MAGIC: &[u8; 8] = b"VGERPACK";
 /// Pack format version.
 pub const PACK_VERSION: u8 = 1;
 /// Size of the pack header (magic + version byte).
@@ -133,7 +133,7 @@ impl PackWriter {
         crypto: &dyn CryptoEngine,
     ) -> Result<(PackId, Vec<(ChunkId, u32, u64, u32)>)> {
         if self.buffer.is_empty() {
-            return Err(BorgError::Other("cannot flush empty pack writer".into()));
+            return Err(VgerError::Other("cannot flush empty pack writer".into()));
         }
 
         // Build header entries
@@ -199,7 +199,7 @@ pub fn read_blob_from_pack(
 ) -> Result<Vec<u8>> {
     let data = storage
         .get_range(&pack_id.storage_key(), offset, length as u64)?
-        .ok_or_else(|| BorgError::Other(format!("pack not found: {pack_id}")))?;
+        .ok_or_else(|| VgerError::Other(format!("pack not found: {pack_id}")))?;
     Ok(data)
 }
 
@@ -211,10 +211,10 @@ pub fn read_pack_header(
 ) -> Result<Vec<PackHeaderEntry>> {
     let pack_data = storage
         .get(&pack_id.storage_key())?
-        .ok_or_else(|| BorgError::Other(format!("pack not found: {pack_id}")))?;
+        .ok_or_else(|| VgerError::Other(format!("pack not found: {pack_id}")))?;
 
     if pack_data.len() < PACK_HEADER_SIZE + 4 {
-        return Err(BorgError::InvalidFormat("pack too small".into()));
+        return Err(VgerError::InvalidFormat("pack too small".into()));
     }
 
     // Read header length from last 4 bytes
@@ -223,7 +223,7 @@ pub fn read_pack_header(
         u32::from_le_bytes(pack_data[len_offset..len_offset + 4].try_into().unwrap()) as usize;
 
     if header_len + 4 > pack_data.len() - PACK_HEADER_SIZE {
-        return Err(BorgError::InvalidFormat("invalid pack header length".into()));
+        return Err(VgerError::InvalidFormat("invalid pack header length".into()));
     }
 
     let header_start = len_offset - header_len;
@@ -242,15 +242,15 @@ pub fn scan_pack_blobs(
 ) -> Result<Vec<(u64, u32)>> {
     let pack_data = storage
         .get(&pack_id.storage_key())?
-        .ok_or_else(|| BorgError::Other(format!("pack not found: {pack_id}")))?;
+        .ok_or_else(|| VgerError::Other(format!("pack not found: {pack_id}")))?;
 
     if pack_data.len() < PACK_HEADER_SIZE {
-        return Err(BorgError::InvalidFormat("pack too small".into()));
+        return Err(VgerError::InvalidFormat("pack too small".into()));
     }
 
     // Verify magic
     if &pack_data[..8] != PACK_MAGIC {
-        return Err(BorgError::InvalidFormat("invalid pack magic".into()));
+        return Err(VgerError::InvalidFormat("invalid pack magic".into()));
     }
 
     let mut pos = PACK_HEADER_SIZE;

@@ -4,14 +4,14 @@ use std::path::Path;
 use tracing::info;
 
 use crate::archive::item::ItemType;
-use crate::config::BorgConfig;
-use crate::error::{BorgError, Result};
+use crate::config::VgerConfig;
+use crate::error::{VgerError, Result};
 use crate::repo::Repository;
 use crate::storage;
 
-/// Run `borg-rs extract`.
+/// Run `vger extract`.
 pub fn run(
-    config: &BorgConfig,
+    config: &VgerConfig,
     passphrase: Option<&str>,
     archive_name: &str,
     dest: &str,
@@ -29,7 +29,7 @@ pub fn run(
             .build()
             .map(|g| g.compile_matcher())
     }).transpose()
-    .map_err(|e| BorgError::Config(format!("invalid pattern: {e}")))?;
+    .map_err(|e| VgerError::Config(format!("invalid pattern: {e}")))?;
 
     let dest_path = Path::new(dest);
     std::fs::create_dir_all(dest_path)?;

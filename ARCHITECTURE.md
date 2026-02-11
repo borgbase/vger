@@ -6,25 +6,25 @@ Living document for design research, comparisons with other backup tools, and st
 
 ## Research: Lessons from rustic-rs (Feb 2025)
 
-rustic-rs is a mature Rust backup tool (~2,900 stars) that is **fully compatible with restic repositories**. Split across several crates (`rustic_core`, `rustic_backend`, `rustic_cdc`, `aes256ctr_poly1305aes`). This section summarizes what borg-rs can learn from their architecture.
+rustic-rs is a mature Rust backup tool (~2,900 stars) that is **fully compatible with restic repositories**. Split across several crates (`rustic_core`, `rustic_backend`, `rustic_cdc`, `aes256ctr_poly1305aes`). This section summarizes what vger can learn from their architecture.
 
 ### Encryption: AES-256-CTR + Poly1305-AES vs AES-256-GCM
 
 **rustic:** AES-256-CTR with Poly1305-AES (64-byte keys). Wire format: `[16B nonce][ciphertext][16B MAC tag]`. Inherited from restic.
 
-**borg-rs:** AES-256-GCM with 12-byte nonces. Wire format: `[1B type_tag][12B nonce][ciphertext + 16B GCM tag]`.
+**vger:** AES-256-GCM with 12-byte nonces. Wire format: `[1B type_tag][12B nonce][ciphertext + 16B GCM tag]`.
 
 **Verdict — keep AES-256-GCM:**
 - NIST-standardized, hardware-accelerated (AESNI + CLMUL for GHASH)
 - Simpler 32-byte keys vs rustic's 64-byte split keys
-- Poly1305-AES has no AAD support in rustic's impl. borg-rs uses type_tag as AAD — a security win
+- Poly1305-AES has no AAD support in rustic's impl. vger uses type_tag as AAD — a security win
 - rustic chose Poly1305-AES only for restic compatibility
 
 ### Key Derivation: scrypt vs Argon2id
 
 **rustic:** scrypt (N=2^16, r=8, p=1) — restic compatibility.
 
-**borg-rs:** Argon2id — modern, memory-hard, OWASP/IETF recommended.
+**vger:** Argon2id — modern, memory-hard, OWASP/IETF recommended.
 
 **Verdict — keep Argon2id.**
 
@@ -32,7 +32,7 @@ rustic-rs is a mature Rust backup tool (~2,900 stars) that is **fully compatible
 
 **rustic:** Unkeyed SHA-256 for all content-addressed IDs.
 
-**borg-rs:** Keyed BLAKE2b-256 MAC with `chunk_id_key` derived from master key.
+**vger:** Keyed BLAKE2b-256 MAC with `chunk_id_key` derived from master key.
 
 **Verdict — keep keyed BLAKE2b:**
 - Prevents content confirmation attacks (adversary can't check if known plaintext is in backup)
@@ -43,7 +43,7 @@ rustic-rs is a mature Rust backup tool (~2,900 stars) that is **fully compatible
 
 **rustic:** Custom `rustic_cdc` crate with Rabin64 polynomial. Default ~8 KiB average. Also supports fixed-size chunking and hierarchical multi-level dedup.
 
-**borg-rs:** `fastcdc` v3 crate.
+**vger:** `fastcdc` v3 crate.
 
 **Verdict — keep FastCDC.** Newer, benchmarks faster. Could consider making chunk sizes configurable and adding fixed-size chunking as a cheap option.
 
@@ -51,7 +51,7 @@ rustic-rs is a mature Rust backup tool (~2,900 stars) that is **fully compatible
 
 **rustic:** ZSTD only (or none). Tied to repo format version.
 
-**borg-rs:** LZ4, ZSTD, and None with 1-byte tag prefix per chunk.
+**vger:** LZ4, ZSTD, and None with 1-byte tag prefix per chunk.
 
 **Verdict — keep current approach.** Per-chunk tags are more flexible.
 
@@ -61,10 +61,10 @@ rustic-rs is a mature Rust backup tool (~2,900 stars) that is **fully compatible
 
 Chunks are grouped into **pack files** (~32 MiB) instead of being stored as individual files. This reduces file count by 1000x+, critical for cloud storage costs (fewer PUT/GET ops) and filesystem performance (fewer inodes).
 
-### borg-rs Pack File Format
+### vger Pack File Format
 
 ```
-[8B magic "BORGPACK\0"][1B version=1]
+[8B magic "VGERPACK\0"][1B version=1]
 [4B blob_0_len LE][blob_0_data]
 [4B blob_1_len LE][blob_1_data]
 ...
@@ -111,7 +111,7 @@ target = clamp(min_pack_size * sqrt(num_data_packs / 100), min_pack_size, max_pa
 
 ### Comparison with Other Approaches
 
-| Aspect | Pack files (rustic/restic/borg-rs) | Individual files (old borg-rs) |
+| Aspect | Pack files (rustic/restic/vger) | Individual files (old vger) |
 |--------|-----------------------------------|-------------------------------|
 | File count | Very low (1 file per ~32 MiB) | Very high (1 file per chunk) |
 | S3/cloud cost | Fewer PUT/GET ops, much cheaper | Many small PUTs, expensive at scale |
@@ -163,7 +163,7 @@ The index never points to a deleted pack. Sequence: write new pack → save inde
 ### CLI
 
 ```
-borg-rs compact [--threshold 10] [--max-repack-size 2G] [-n/--dry-run]
+vger compact [--threshold 10] [--max-repack-size 2G] [-n/--dry-run]
 ```
 
 ---
@@ -172,10 +172,10 @@ borg-rs compact [--threshold 10] [--max-repack-size 2G] [-n/--dry-run]
 
 ## Server Architecture (Implemented)
 
-borg-rs includes a dedicated backup server (`borg-rs-server`) for features that dumb storage (S3/WebDAV) cannot provide. The server stores data on its local filesystem, and TLS is handled by a reverse proxy. All data remains client-side encrypted — the server is opaque storage that understands repo structure but never has the encryption key.
+vger includes a dedicated backup server (`vger-server`) for features that dumb storage (S3/WebDAV) cannot provide. The server stores data on its local filesystem, and TLS is handled by a reverse proxy. All data remains client-side encrypted — the server is opaque storage that understands repo structure but never has the encryption key.
 
 ```
-borg-rs CLI (client)     reverse proxy (TLS)     borg-rs-server
+vger CLI (client)        reverse proxy (TLS)     vger-server
        │                       │                       │
        │──── HTTPS ───────────►│──── HTTP ────────────►│
        │                       │                       │──► local filesystem
@@ -185,8 +185,8 @@ borg-rs CLI (client)     reverse proxy (TLS)     borg-rs-server
 
 | Component | Location | Purpose |
 |-----------|----------|---------|
-| **borg-rs-server** | `crates/borg-server/` | axum HTTP server with all server-side features |
-| **RestBackend** | `crates/borg-core/src/storage/rest_backend.rs` | `StorageBackend` impl over HTTP (behind `backend-rest` feature) |
+| **vger-server** | `crates/vger-server/` | axum HTTP server with all server-side features |
+| **RestBackend** | `crates/vger-core/src/storage/rest_backend.rs` | `StorageBackend` impl over HTTP (behind `backend-rest` feature) |
 
 ### REST API
 
@@ -223,12 +223,12 @@ Lock endpoints:
 
 ### Authentication
 
-Single shared bearer token, constant-time compared via the `subtle` crate. Configured in `borg-server.toml`:
+Single shared bearer token, constant-time compared via the `subtle` crate. Configured in `vger-server.toml`:
 
 ```toml
 [server]
 listen = "127.0.0.1:8484"
-data_dir = "/var/lib/borg-rs"
+data_dir = "/var/lib/vger"
 token = "some-secret-token"
 ```
 
@@ -308,17 +308,17 @@ For packs with `keep_blobs: []`, the server simply deletes the pack.
 - Required files exist (`config`, `manifest`, `index`, `keys/repokey`)
 - Pack files follow `<2-char-hex>/<64-char-hex>` shard pattern
 - No zero-byte packs (minimum valid = magic 9 bytes + header length 4 bytes = 13 bytes)
-- Pack files start with `BORGPACK\0` magic bytes
+- Pack files start with `VGERPACK\0` magic bytes
 - Reports stale lock count, total size, and pack counts
 
-Full content verification (decrypt + recompute chunk IDs) stays client-side via `borg-rs check --verify-data`.
+Full content verification (decrypt + recompute chunk IDs) stays client-side via `vger check --verify-data`.
 
 ### Server Configuration
 
 ```toml
 [server]
 listen = "127.0.0.1:8484"
-data_dir = "/var/lib/borg-rs"
+data_dir = "/var/lib/vger"
 token = "some-secret-token"
 append_only = false
 log_format = "json"              # "json" or "pretty"
@@ -330,7 +330,7 @@ log_format = "json"              # "json" or "pretty"
 
 ### RestBackend (Client Side)
 
-`crates/borg-core/src/storage/rest_backend.rs` implements `StorageBackend` using `ureq` (sync HTTP client, behind `backend-rest` feature flag). Connection-pooled. Maps each trait method to the corresponding HTTP verb. `get_range` sends a `Range: bytes=<start>-<end>` header and expects `206 Partial Content`. Also exposes extra methods beyond the trait: `batch_delete()`, `repack()`, `acquire_lock()`, `release_lock()`, `stats()`.
+`crates/vger-core/src/storage/rest_backend.rs` implements `StorageBackend` using `ureq` (sync HTTP client, behind `backend-rest` feature flag). Connection-pooled. Maps each trait method to the corresponding HTTP verb. `get_range` sends a `Range: bytes=<start>-<end>` header and expects `206 Partial Content`. Also exposes extra methods beyond the trait: `batch_delete()`, `repack()`, `acquire_lock()`, `release_lock()`, `stats()`.
 
 Client config:
 ```yaml
@@ -338,7 +338,7 @@ repository:
   path: https://backup.example.com/myrepo
   backend: rest
   rest_token: "secret-token-here"
-  # rest_token_command: "pass show borg-token"
+  # rest_token_command: "pass show vger-token"
 ```
 
 ---
@@ -347,7 +347,7 @@ repository:
 
 **rustic:** Every ID type (`PackId`, `BlobId`, `SnapshotId`, `IndexId`) is a newtype around 32-byte hash. Compile-time prevention of ID confusion.
 
-**borg-rs:** `ChunkId` and `PackId` are newtypes. Other IDs (archive, manifest) are still raw bytes/strings.
+**vger:** `ChunkId` and `PackId` are newtypes. Other IDs (archive, manifest) are still raw bytes/strings.
 
 **Recommendation:** Add newtypes for `ArchiveId`, `ManifestId`, etc. Zero-cost abstractions that prevent subtle bugs.
 
@@ -355,7 +355,7 @@ repository:
 
 **rustic:** `rayon` for parallel compression/encryption, `crossbeam-channel` for worker coordination, `pariter` for parallel iterators.
 
-**borg-rs:** Currently single-threaded.
+**vger:** Currently single-threaded.
 
 **Recommendation:** `rayon` for the chunk→compress→encrypt pipeline. Natural fit since chunks are independently processable.
 
@@ -363,7 +363,7 @@ repository:
 
 **rustic:** TOML with profile-based hierarchical merging (via `conflate` crate), recursive profile includes, env var overrides, per-source backup configs.
 
-**borg-rs:** YAML config inspired by Borgmatic.
+**vger:** YAML config inspired by Borgmatic.
 
 **Nice-to-have later:** Profile inheritance, per-source configs, hooks system.
 

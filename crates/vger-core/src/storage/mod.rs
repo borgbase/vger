@@ -3,7 +3,7 @@ pub mod opendal_backend;
 pub mod rest_backend;
 
 use crate::config::RepositoryConfig;
-use crate::error::{BorgError, Result};
+use crate::error::{VgerError, Result};
 
 /// Abstract key-value storage for repository objects.
 /// Keys are `/`-separated string paths (e.g. "packs/ab/ab01cd02...").
@@ -38,7 +38,7 @@ pub fn backend_from_config(cfg: &RepositoryConfig) -> Result<Box<dyn StorageBack
             let bucket = cfg
                 .s3_bucket
                 .as_deref()
-                .ok_or_else(|| BorgError::Config("s3_bucket is required for S3 backend".into()))?;
+                .ok_or_else(|| VgerError::Config("s3_bucket is required for S3 backend".into()))?;
             let region = cfg.s3_region.as_deref().unwrap_or("us-east-1");
             Ok(Box::new(opendal_backend::OpendalBackend::s3(
                 bucket, region, &cfg.path, cfg.s3_endpoint.as_deref(),
@@ -50,9 +50,9 @@ pub fn backend_from_config(cfg: &RepositoryConfig) -> Result<Box<dyn StorageBack
             Ok(Box::new(rest_backend::RestBackend::new(&cfg.path, token)?))
         }
         #[cfg(not(feature = "backend-rest"))]
-        "rest" => Err(BorgError::UnsupportedBackend(
+        "rest" => Err(VgerError::UnsupportedBackend(
             "rest (compile with feature 'backend-rest')".into(),
         )),
-        other => Err(BorgError::UnsupportedBackend(other.into())),
+        other => Err(VgerError::UnsupportedBackend(other.into())),
     }
 }

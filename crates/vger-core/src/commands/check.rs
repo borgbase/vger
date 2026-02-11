@@ -1,6 +1,6 @@
 use crate::archive::item::ItemType;
 use crate::compress;
-use crate::config::BorgConfig;
+use crate::config::VgerConfig;
 use crate::crypto::chunk_id::ChunkId;
 use crate::error::Result;
 use crate::repo::format::unpack_object;
@@ -26,8 +26,8 @@ pub struct CheckResult {
     pub errors: Vec<CheckError>,
 }
 
-/// Run `borg-rs check`.
-pub fn run(config: &BorgConfig, passphrase: Option<&str>, verify_data: bool) -> Result<CheckResult> {
+/// Run `vger check`.
+pub fn run(config: &VgerConfig, passphrase: Option<&str>, verify_data: bool) -> Result<CheckResult> {
     let backend = storage::backend_from_config(&config.repository)?;
     let repo = Repository::open(backend, passphrase)?;
 

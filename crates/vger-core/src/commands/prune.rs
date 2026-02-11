@@ -1,7 +1,7 @@
 use chrono::Utc;
 
-use crate::config::BorgConfig;
-use crate::error::{BorgError, Result};
+use crate::config::VgerConfig;
+use crate::error::{VgerError, Result};
 use crate::prune::{apply_policy, PruneDecision};
 use crate::repo::lock;
 use crate::repo::Repository;
@@ -24,13 +24,13 @@ pub struct PruneListEntry {
 }
 
 pub fn run(
-    config: &BorgConfig,
+    config: &VgerConfig,
     passphrase: Option<&str>,
     dry_run: bool,
     list: bool,
 ) -> Result<(PruneStats, Vec<PruneListEntry>)> {
     if !config.retention.has_any_rule() {
-        return Err(BorgError::Config(
+        return Err(VgerError::Config(
             "no retention rules configured — set at least one keep_* option in the retention section".into(),
         ));
     }
@@ -96,7 +96,7 @@ pub fn run(
             .manifest
             .find_archive(archive_name)
             .map(|e| hex::encode(&e.id))
-            .ok_or_else(|| BorgError::ArchiveNotFound(archive_name.clone()))?;
+            .ok_or_else(|| VgerError::ArchiveNotFound(archive_name.clone()))?;
 
         let archive_meta = load_archive_meta(&repo, archive_name)?;
         let items = load_archive_items(&repo, archive_name)?;

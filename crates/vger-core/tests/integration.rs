@@ -1,9 +1,9 @@
-use borg_core::compress::Compression;
-use borg_core::config::ChunkerConfig;
-use borg_core::repo::manifest::ArchiveEntry;
-use borg_core::repo::pack::PackType;
-use borg_core::repo::{EncryptionMode, Repository};
-use borg_core::storage::opendal_backend::OpendalBackend;
+use vger_core::compress::Compression;
+use vger_core::config::ChunkerConfig;
+use vger_core::repo::manifest::ArchiveEntry;
+use vger_core::repo::pack::PackType;
+use vger_core::repo::{EncryptionMode, Repository};
+use vger_core::storage::opendal_backend::OpendalBackend;
 use chrono::Utc;
 
 fn init_local_repo(dir: &std::path::Path) -> Repository {

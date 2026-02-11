@@ -1,8 +1,8 @@
-# borg-rs
+# V'Ger
 
-A Rust re-implementation of [BorgBackup](https://www.borgbackup.org/), the deduplicating archiver. Configuration is YAML-based, inspired by [Borgmatic](https://torsion.org/borgmatic/).
+A fast, encrypted, deduplicated backup tool written in Rust. Named after [V'Ger](https://memory-alpha.fandom.com/wiki/V%27Ger) from *Star Trek: The Motion Picture* — a probe that assimilated everything it encountered and returned as something far more powerful.
 
-This is **not compatible** with existing Borg repositories — it uses a fresh on-disk format designed for simplicity while retaining Borg's core principles: content-defined chunking, deduplication, compression, and authenticated encryption.
+Inspired by [BorgBackup](https://www.borgbackup.org/), [Borgmatic](https://torsion.org/borgmatic/), [restic](https://restic.net/), and [rustic](https://rustic.cli.rs/). Uses its own on-disk format — **not compatible** with Borg repositories.
 
 ## Features
 
@@ -10,14 +10,14 @@ This is **not compatible** with existing Borg repositories — it uses a fresh o
 
 | Command | Description |
 |---------|-------------|
-| `borg-rs init` | Initialize a new backup repository |
-| `borg-rs create` | Create a new backup archive |
-| `borg-rs list` | List archives, or files within an archive |
-| `borg-rs extract` | Restore files from an archive |
-| `borg-rs delete` | Delete a specific archive |
-| `borg-rs prune` | Prune archives according to retention policy |
-| `borg-rs check` | Verify repository integrity (`--verify-data` for full content verification) |
-| `borg-rs compact` | Free space by repacking pack files after delete/prune |
+| `vger init` | Initialize a new backup repository |
+| `vger create` | Create a new backup archive |
+| `vger list` | List archives, or files within an archive |
+| `vger extract` | Restore files from an archive |
+| `vger delete` | Delete a specific archive |
+| `vger prune` | Prune archives according to retention policy |
+| `vger check` | Verify repository integrity (`--verify-data` for full content verification) |
+| `vger compact` | Free space by repacking pack files after delete/prune |
 
 ### Core capabilities
 
@@ -25,15 +25,15 @@ This is **not compatible** with existing Borg repositories — it uses a fresh o
 - **Compression** — LZ4 (fast, default) or Zstandard (better ratio).
 - **Encryption** — AES-256-GCM authenticated encryption with Argon2id key derivation. Plaintext mode also available.
 - **Storage backends** — Abstracted via [Apache OpenDAL](https://opendal.apache.org/). Supports local filesystem, S3-compatible storage, and a dedicated REST server out of the box.
-- **REST server** — Purpose-built backup server (`borg-rs-server`) with append-only enforcement, per-repo quotas, lock management with auto-expiry, backup freshness monitoring, server-side compaction, and structural integrity checks. See [Server Mode](#server-mode) below.
+- **REST server** — Purpose-built backup server (`vger-server`) with append-only enforcement, per-repo quotas, lock management with auto-expiry, backup freshness monitoring, server-side compaction, and structural integrity checks. See [Server Mode](#server-mode) below.
 
 ### Why a dedicated REST server instead of plain S3?
 
-Dumb storage backends (S3, WebDAV, SFTP) work well for basic backups, but they can't enforce policy or do server-side work. borg-rs-server adds capabilities that are impossible with object storage alone:
+Dumb storage backends (S3, WebDAV, SFTP) work well for basic backups, but they can't enforce policy or do server-side work. vger-server adds capabilities that are impossible with object storage alone:
 
-| Capability | S3 / dumb storage | borg-rs-server |
+| Capability | S3 / dumb storage | vger-server |
 |------------|-------------------|----------------|
-| **Append-only mode** | Not enforceable — a compromised client with S3 credentials can delete anything | Server rejects DELETE and pack overwrites. Even a fully compromised client cannot destroy backup history. |
+| **Append-only mode** | Not enforceable — a compromised client with S3 credentials can delete anything | vger-server rejects DELETE and pack overwrites. Even a fully compromised client cannot destroy backup history. |
 | **Server-side compaction** | Client must download all live blobs and re-upload — potentially GBs over the network | Server repacks locally on disk. Client sends a small JSON plan, server does the I/O. |
 | **Quota enforcement** | Requires separate S3 bucket policies or IAM tricks per repo | Built-in per-repo byte quota, checked on every PUT |
 | **Backup freshness monitoring** | Requires external monitoring to poll and parse repo metadata | Server tracks `last_backup_at` automatically on every manifest write |
@@ -44,7 +44,7 @@ All data remains **client-side encrypted**. The server never has the encryption 
 
 ### What is not (yet) implemented
 
-Mount (FUSE), repair, hardlinks, special files (devices, FIFOs), and file-level caching for incremental speedup. These are candidates for future versions.
+Mount (FUSE), repair, hardlinks, special files (devices, FIFOs), and file-level caching for incremental speedup.
 
 ## Quick start
 
@@ -54,11 +54,11 @@ Mount (FUSE), repair, hardlinks, special files (devices, FIFOs), and file-level 
 cargo build --release
 ```
 
-The binary is at `target/release/borg-rs`.
+The binary is at `target/release/vger`.
 
 ### Create a config file
 
-Create `borg-rs.yaml`:
+Create `vger.yaml`:
 
 ```yaml
 repository:
@@ -85,62 +85,62 @@ compression:
 
 ```bash
 # Initialize the repository (prompts for passphrase if encrypted)
-borg-rs --config borg-rs.yaml init
+vger --config vger.yaml init
 
 # Create a backup
-borg-rs --config borg-rs.yaml create --archive daily-2025-01-15
+vger --config vger.yaml create --archive daily-2025-01-15
 
 # List all archives
-borg-rs --config borg-rs.yaml list
+vger --config vger.yaml list
 
 # List files inside an archive
-borg-rs --config borg-rs.yaml list --archive daily-2025-01-15
+vger --config vger.yaml list --archive daily-2025-01-15
 
 # Restore to a directory
-borg-rs --config borg-rs.yaml extract --archive daily-2025-01-15 --dest /tmp/restored
+vger --config vger.yaml extract --archive daily-2025-01-15 --dest /tmp/restored
 
 # Delete a specific archive
-borg-rs --config borg-rs.yaml delete --archive daily-2025-01-15
+vger --config vger.yaml delete --archive daily-2025-01-15
 
 # Prune old archives per retention policy
-borg-rs --config borg-rs.yaml prune
+vger --config vger.yaml prune
 
 # Verify repository integrity (structural check)
-borg-rs --config borg-rs.yaml check
+vger --config vger.yaml check
 
 # Full data verification (reads and verifies every chunk)
-borg-rs --config borg-rs.yaml check --verify-data
+vger --config vger.yaml check --verify-data
 
 # Reclaim space from deleted/pruned archives (dry-run first)
-borg-rs --config borg-rs.yaml compact --dry-run
-borg-rs --config borg-rs.yaml compact
+vger --config vger.yaml compact --dry-run
+vger --config vger.yaml compact
 ```
 
 ## Server mode
 
-borg-rs includes a dedicated backup server for secure, policy-enforced remote backups. TLS is handled by a reverse proxy (nginx, caddy, etc.).
+vger includes a dedicated backup server for secure, policy-enforced remote backups. TLS is handled by a reverse proxy (nginx, caddy, etc.).
 
 ### Build the server
 
 ```bash
-cargo build --release -p borg-server
-# Binary at target/release/borg-rs-server
+cargo build --release -p vger-server
+# Binary at target/release/vger-server
 ```
 
 ### Build the client with REST support
 
 ```bash
-cargo build --release -p borg-cli --features borg-core/backend-rest
+cargo build --release -p vger-cli --features vger-core/backend-rest
 ```
 
 ### Server configuration
 
-Create `borg-server.toml`:
+Create `vger-server.toml`:
 
 ```toml
 [server]
 listen = "127.0.0.1:8484"
-data_dir = "/var/lib/borg-rs"
+data_dir = "/var/lib/vger"
 token = "some-secret-token"
 append_only = false              # true = reject all deletes
 log_format = "pretty"            # "json" for structured logging (systemd, etc.)
@@ -153,7 +153,7 @@ log_format = "pretty"            # "json" for structured logging (systemd, etc.)
 ### Start the server
 
 ```bash
-borg-rs-server --config borg-server.toml
+vger-server --config vger-server.toml
 ```
 
 ### Client configuration (REST backend)
@@ -233,14 +233,14 @@ archive_name_format: "{hostname}-{now:%Y-%m-%dT%H:%M:%S}"
 
 ### Key differences from Borg
 
-| Aspect | Borg | borg-rs |
-|--------|------|---------|
+| Aspect | Borg | vger |
+|--------|------|------|
 | Language | Python + Cython | Rust |
 | Chunker | Buzhash (custom) | FastCDC |
 | Encryption | AES-CTR+HMAC / AES-OCB / ChaCha20 | AES-256-GCM |
 | Key derivation | PBKDF2 or Argon2id | Argon2id only |
 | Serialization | msgpack | msgpack |
-| Storage | Custom borgstore + SSH RPC | OpenDAL (local, S3) + REST server with append-only/quotas |
+| Storage | Custom borgstore + SSH RPC | OpenDAL (local, S3) + vger-server with append-only/quotas |
 | Repo compatibility | Borg v1/v2/v3 formats | Own format (not compatible) |
 
 ### Repository layout

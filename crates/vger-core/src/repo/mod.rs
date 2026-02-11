@@ -12,7 +12,7 @@ use crate::config::{ChunkerConfig, RepositoryConfig};
 use crate::crypto::chunk_id::ChunkId;
 use crate::crypto::key::{EncryptedKey, MasterKey};
 use crate::crypto::{self, CryptoEngine, PlaintextEngine};
-use crate::error::{BorgError, Result};
+use crate::error::{VgerError, Result};
 use crate::index::ChunkIndex;
 use crate::storage::StorageBackend;
 
@@ -72,7 +72,7 @@ impl Repository {
     ) -> Result<Self> {
         // Check that the repo doesn't already exist
         if storage.exists("config")? {
-            return Err(BorgError::RepoAlreadyExists("repository".into()));
+            return Err(VgerError::RepoAlreadyExists("repository".into()));
         }
 
         // Generate repo ID
@@ -108,7 +108,7 @@ impl Repository {
                 EncryptionMode::Aes256Gcm => {
                     let master_key = MasterKey::generate();
                     let pass = passphrase.ok_or_else(|| {
-                        BorgError::Config("passphrase required for encrypted repository".into())
+                        VgerError::Config("passphrase required for encrypted repository".into())
                     })?;
                     let enc_key = master_key.to_encrypted(pass)?;
                     let engine = crypto::aes_gcm::Aes256GcmEngine::new(
@@ -169,11 +169,11 @@ impl Repository {
         // Read config
         let config_data = storage
             .get("config")?
-            .ok_or_else(|| BorgError::RepoNotFound("config not found".into()))?;
+            .ok_or_else(|| VgerError::RepoNotFound("config not found".into()))?;
         let repo_config: RepoConfig = rmp_serde::from_slice(&config_data)?;
 
         if repo_config.version != 1 {
-            return Err(BorgError::UnsupportedVersion(repo_config.version));
+            return Err(VgerError::UnsupportedVersion(repo_config.version));
         }
 
         // Build crypto engine
@@ -190,10 +190,10 @@ impl Repository {
             EncryptionMode::Aes256Gcm => {
                 let key_data = storage
                     .get("keys/repokey")?
-                    .ok_or_else(|| BorgError::InvalidFormat("missing keys/repokey".into()))?;
+                    .ok_or_else(|| VgerError::InvalidFormat("missing keys/repokey".into()))?;
                 let enc_key: EncryptedKey = rmp_serde::from_slice(&key_data)?;
                 let pass = passphrase.ok_or_else(|| {
-                    BorgError::Config("passphrase required for encrypted repository".into())
+                    VgerError::Config("passphrase required for encrypted repository".into())
                 })?;
                 let master_key = MasterKey::from_encrypted(&enc_key, pass)?;
                 let engine = crypto::aes_gcm::Aes256GcmEngine::new(
@@ -207,10 +207,10 @@ impl Repository {
         // Read manifest
         let manifest_data = storage
             .get("manifest")?
-            .ok_or_else(|| BorgError::InvalidFormat("missing manifest".into()))?;
+            .ok_or_else(|| VgerError::InvalidFormat("missing manifest".into()))?;
         let (obj_type, manifest_bytes) = unpack_object(&manifest_data, crypto.as_ref())?;
         if obj_type != ObjectType::Manifest {
-            return Err(BorgError::InvalidFormat("manifest has wrong type tag".into()));
+            return Err(VgerError::InvalidFormat("manifest has wrong type tag".into()));
         }
         let manifest: Manifest = rmp_serde::from_slice(&manifest_bytes)?;
 
@@ -338,7 +338,7 @@ impl Repository {
         let entry = self
             .chunk_index
             .get(chunk_id)
-            .ok_or_else(|| BorgError::Other(format!("chunk not found: {chunk_id}")))?;
+            .ok_or_else(|| VgerError::Other(format!("chunk not found: {chunk_id}")))?;
 
         let blob_data = read_blob_from_pack(
             self.storage.as_ref(),

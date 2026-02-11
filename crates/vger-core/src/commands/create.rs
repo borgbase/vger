@@ -10,9 +10,9 @@ use crate::archive::item::{ChunkRef, Item, ItemType};
 use crate::archive::{ArchiveMeta, ArchiveStats};
 use crate::chunker;
 use crate::compress::Compression;
-use crate::config::{BorgConfig, ChunkerConfig};
+use crate::config::{VgerConfig, ChunkerConfig};
 use crate::crypto::chunk_id::ChunkId;
-use crate::error::{BorgError, Result};
+use crate::error::{VgerError, Result};
 use crate::repo::format::{pack_object, ObjectType};
 use crate::repo::manifest::ArchiveEntry;
 use crate::repo::pack::PackType;
@@ -28,9 +28,9 @@ fn items_chunker_config() -> ChunkerConfig {
     }
 }
 
-/// Run `borg-rs create`.
+/// Run `vger create`.
 pub fn run(
-    config: &BorgConfig,
+    config: &VgerConfig,
     archive_name: &str,
     passphrase: Option<&str>,
     source_dirs: &[String],
@@ -41,7 +41,7 @@ pub fn run(
 
     // Check archive name is unique
     if repo.manifest.find_archive(archive_name).is_some() {
-        return Err(BorgError::ArchiveAlreadyExists(archive_name.into()));
+        return Err(VgerError::ArchiveAlreadyExists(archive_name.into()));
     }
 
     // Acquire lock
@@ -56,12 +56,12 @@ pub fn run(
     for pat in &config.exclude_patterns {
         glob_builder.add(
             globset::Glob::new(pat)
-                .map_err(|e| BorgError::Config(format!("invalid exclude pattern '{pat}': {e}")))?,
+                .map_err(|e| VgerError::Config(format!("invalid exclude pattern '{pat}': {e}")))?,
         );
     }
     let excludes = glob_builder
         .build()
-        .map_err(|e| BorgError::Config(format!("glob build: {e}")))?;
+        .map_err(|e| VgerError::Config(format!("glob build: {e}")))?;
 
     // Walk source directories
     let dirs = if source_dirs.is_empty() {
@@ -73,14 +73,14 @@ pub fn run(
     for source_dir in dirs {
         let source_path = Path::new(source_dir);
         if !source_path.exists() {
-            return Err(BorgError::Other(format!(
+            return Err(VgerError::Other(format!(
                 "source directory does not exist: {source_dir}"
             )));
         }
 
         for entry in WalkDir::new(source_path).follow_links(false).sort_by_file_name() {
             let entry =
-                entry.map_err(|e| BorgError::Other(format!("walkdir error: {e}")))?;
+                entry.map_err(|e| VgerError::Other(format!("walkdir error: {e}")))?;
 
             let rel_path = entry
                 .path()
@@ -100,7 +100,7 @@ pub fn run(
             }
 
             let metadata = entry.metadata()
-                .map_err(|e| BorgError::Other(format!("stat error for {}: {e}", entry.path().display())))?;
+                .map_err(|e| VgerError::Other(format!("stat error for {}: {e}", entry.path().display())))?;
 
             let file_type = metadata.file_type();
 
@@ -108,7 +108,7 @@ pub fn run(
                 (ItemType::Directory, None)
             } else if file_type.is_symlink() {
                 let target = std::fs::read_link(entry.path())
-                    .map_err(|e| BorgError::Other(format!("readlink: {e}")))?;
+                    .map_err(|e| VgerError::Other(format!("readlink: {e}")))?;
                 (ItemType::Symlink, Some(target.to_string_lossy().to_string()))
             } else if file_type.is_file() {
                 (ItemType::RegularFile, None)
@@ -139,7 +139,7 @@ pub fn run(
             // For regular files, chunk and store the content
             if entry_type == ItemType::RegularFile && metadata.len() > 0 {
                 let file_data = std::fs::read(entry.path())
-                    .map_err(|e| BorgError::Io(e))?;
+                    .map_err(|e| VgerError::Io(e))?;
 
                 let chunk_ranges = chunker::chunk_data(&file_data, &repo.config.chunker_params);
 

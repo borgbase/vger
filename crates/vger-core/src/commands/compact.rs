@@ -2,7 +2,7 @@ use std::collections::HashSet;
 
 use tracing::{info, warn};
 
-use crate::config::BorgConfig;
+use crate::config::VgerConfig;
 use crate::crypto::pack_id::PackId;
 use crate::error::Result;
 use crate::repo::lock;
@@ -34,7 +34,7 @@ struct PackAnalysis {
 }
 
 pub fn run(
-    config: &BorgConfig,
+    config: &VgerConfig,
     passphrase: Option<&str>,
     threshold: f64,
     max_repack_size: Option<u64>,

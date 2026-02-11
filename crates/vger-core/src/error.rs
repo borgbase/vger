@@ -1,9 +1,9 @@
 use thiserror::Error;
 
-pub type Result<T> = std::result::Result<T, BorgError>;
+pub type Result<T> = std::result::Result<T, VgerError>;
 
 #[derive(Debug, Error)]
-pub enum BorgError {
+pub enum VgerError {
     #[error("storage I/O error: {0}")]
     Storage(#[from] opendal::Error),
 

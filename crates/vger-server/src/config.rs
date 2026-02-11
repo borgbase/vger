@@ -65,7 +65,7 @@ fn default_listen() -> String {
 }
 
 fn default_data_dir() -> String {
-    "/var/lib/borg-rs".to_string()
+    "/var/lib/vger".to_string()
 }
 
 fn default_log_format() -> String {

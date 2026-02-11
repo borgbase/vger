@@ -1,6 +1,6 @@
 use crate::crypto::aes_gcm::Aes256GcmEngine;
 use crate::crypto::{CryptoEngine, PlaintextEngine};
-use crate::error::BorgError;
+use crate::error::VgerError;
 
 // --- PlaintextEngine tests ---
 
@@ -73,7 +73,7 @@ fn wrong_aad_fails_decrypt() {
     let encrypted = engine.encrypt(data, b"correct_aad").unwrap();
     let result = engine.decrypt(&encrypted, b"wrong_aad");
     assert!(result.is_err());
-    assert!(matches!(result.unwrap_err(), BorgError::DecryptionFailed));
+    assert!(matches!(result.unwrap_err(), VgerError::DecryptionFailed));
 }
 
 #[test]
@@ -87,7 +87,7 @@ fn corrupted_ciphertext_fails_decrypt() {
     }
     let result = engine.decrypt(&encrypted, b"aad");
     assert!(result.is_err());
-    assert!(matches!(result.unwrap_err(), BorgError::DecryptionFailed));
+    assert!(matches!(result.unwrap_err(), VgerError::DecryptionFailed));
 }
 
 #[test]
@@ -97,7 +97,7 @@ fn truncated_ciphertext_fails_decrypt() {
     let short_data = vec![0u8; 20];
     let result = engine.decrypt(&short_data, b"aad");
     assert!(result.is_err());
-    assert!(matches!(result.unwrap_err(), BorgError::DecryptionFailed));
+    assert!(matches!(result.unwrap_err(), VgerError::DecryptionFailed));
 }
 
 #[test]

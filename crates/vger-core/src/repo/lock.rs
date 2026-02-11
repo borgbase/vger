@@ -38,7 +38,7 @@ pub fn acquire_lock(storage: &dyn StorageBackend) -> Result<LockGuard> {
     let uuid = format!("{:032x}", rand::random::<u128>());
     let key = format!("locks/{uuid}.json");
     let data = serde_json::to_vec(&entry)
-        .map_err(|e| crate::error::BorgError::Other(format!("lock serialize: {e}")))?;
+        .map_err(|e| crate::error::VgerError::Other(format!("lock serialize: {e}")))?;
 
     storage.put(&key, &data)?;
 

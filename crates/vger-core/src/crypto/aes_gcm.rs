@@ -3,7 +3,7 @@ use aes_gcm::{Aes256Gcm, Nonce};
 use rand::RngCore;
 
 use super::CryptoEngine;
-use crate::error::{BorgError, Result};
+use crate::error::{VgerError, Result};
 
 /// AES-256-GCM authenticated encryption engine.
 pub struct Aes256GcmEngine {
@@ -36,7 +36,7 @@ impl CryptoEngine for Aes256GcmEngine {
         let ciphertext = self
             .cipher
             .encrypt(nonce, payload)
-            .map_err(|e| BorgError::Other(format!("AES-GCM encrypt: {e}")))?;
+            .map_err(|e| VgerError::Other(format!("AES-GCM encrypt: {e}")))?;
 
         // Wire format: [12-byte nonce][ciphertext with appended 16-byte tag]
         let mut out = Vec::with_capacity(12 + ciphertext.len());
@@ -47,7 +47,7 @@ impl CryptoEngine for Aes256GcmEngine {
 
     fn decrypt(&self, data: &[u8], aad: &[u8]) -> Result<Vec<u8>> {
         if data.len() < 12 + 16 {
-            return Err(BorgError::DecryptionFailed);
+            return Err(VgerError::DecryptionFailed);
         }
         let (nonce_bytes, ciphertext) = data.split_at(12);
         let nonce = Nonce::from_slice(nonce_bytes);
@@ -58,7 +58,7 @@ impl CryptoEngine for Aes256GcmEngine {
         };
         self.cipher
             .decrypt(nonce, payload)
-            .map_err(|_| BorgError::DecryptionFailed)
+            .map_err(|_| VgerError::DecryptionFailed)
     }
 
     fn chunk_id_key(&self) -> &[u8; 32] {

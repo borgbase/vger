@@ -1,7 +1,7 @@
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct BorgConfig {
+pub struct VgerConfig {
     pub repository: RepositoryConfig,
     #[serde(default)]
     pub encryption: EncryptionConfig,

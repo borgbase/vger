@@ -1,5 +1,5 @@
-# borg-rs example configuration
-# Copy this file to borg-rs.yaml and adjust to your needs.
+# vger example configuration
+# Copy this file to vger.yaml and adjust to your needs.
 
 # Repository location and backend
 repository:
@@ -24,7 +24,7 @@ encryption:
   # Mode: "aes256gcm" or "none" (default: "aes256gcm")
   mode: aes256gcm
 
-  # Passphrase (optional — if omitted, borg-rs will prompt interactively)
+  # Passphrase (optional — if omitted, vger will prompt interactively)
   # passphrase: my-secret-passphrase
 
   # Shell command that outputs the passphrase on stdout (optional)
@@ -59,7 +59,7 @@ compression:
   # Zstd compression level, 1-22 (default: 3, only used when algorithm is "zstd")
   zstd_level: 3
 
-# Retention policy for `borg-rs prune`
+# Retention policy for `vger prune`
 # At least one keep_* option must be set for prune to run.
 # Archives matching multiple rules are kept (rules are additive).
 retention:

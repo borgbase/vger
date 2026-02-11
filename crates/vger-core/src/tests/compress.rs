@@ -1,5 +1,5 @@
 use crate::compress::{compress, decompress, Compression};
-use crate::error::BorgError;
+use crate::error::VgerError;
 
 #[test]
 fn roundtrip_none() {
@@ -38,7 +38,7 @@ fn decompress_empty_data_fails() {
     let result = decompress(b"");
     assert!(result.is_err());
     match result.unwrap_err() {
-        BorgError::Decompression(msg) => assert_eq!(msg, "empty data"),
+        VgerError::Decompression(msg) => assert_eq!(msg, "empty data"),
         other => panic!("expected Decompression error, got: {other}"),
     }
 }
@@ -48,7 +48,7 @@ fn decompress_unknown_tag_fails() {
     let result = decompress(&[0xFF, 0x00, 0x01]);
     assert!(result.is_err());
     match result.unwrap_err() {
-        BorgError::UnknownCompressionTag(0xFF) => {}
+        VgerError::UnknownCompressionTag(0xFF) => {}
         other => panic!("expected UnknownCompressionTag(0xFF), got: {other}"),
     }
 }

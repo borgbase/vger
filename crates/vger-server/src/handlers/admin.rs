@@ -5,7 +5,7 @@ use axum::response::{IntoResponse, Response};
 use crate::error::ServerError;
 use crate::state::AppState;
 
-const PACK_MAGIC: &[u8; 8] = b"BORGPACK";
+const PACK_MAGIC: &[u8; 8] = b"VGERPACK";
 
 #[derive(serde::Deserialize, Default)]
 pub struct RepoQuery {

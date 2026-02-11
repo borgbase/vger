@@ -37,8 +37,8 @@ for target in "${TARGETS_ZIGBUILD[@]}"; do
     echo "==> Building $target (zigbuild)..."
     cargo zigbuild --release --target "$target"
 
-    archive="borg-rs-${VERSION}-${target}.tar.gz"
-    tar -czf "$DIST_DIR/$archive" -C "target/$target/release" borg-rs
+    archive="vger-${VERSION}-${target}.tar.gz"
+    tar -czf "$DIST_DIR/$archive" -C "target/$target/release" vger
     echo "    Created $DIST_DIR/$archive"
 done
 
@@ -46,8 +46,8 @@ done
 echo "==> Building $TARGET_NATIVE (native)..."
 cargo build --release --target "$TARGET_NATIVE"
 
-archive="borg-rs-${VERSION}-${TARGET_NATIVE}.tar.gz"
-tar -czf "$DIST_DIR/$archive" -C "target/$TARGET_NATIVE/release" borg-rs
+archive="vger-${VERSION}-${TARGET_NATIVE}.tar.gz"
+tar -czf "$DIST_DIR/$archive" -C "target/$TARGET_NATIVE/release" vger
 echo "    Created $DIST_DIR/$archive"
 
 # Generate checksums
@@ -66,4 +66,4 @@ echo ""
 echo "Done. Next steps:"
 echo "  git tag -a $VERSION -m \"Release $VERSION\""
 echo "  git push origin main --follow-tags"
-echo "  gh release create $VERSION --title \"borg-rs $VERSION\" --notes \"Initial release\" $DIST_DIR/*"
+echo "  gh release create $VERSION --title \"vger $VERSION\" --notes \"Initial release\" $DIST_DIR/*"

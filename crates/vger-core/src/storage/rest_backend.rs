@@ -1,9 +1,9 @@
 use std::io::Read;
 
-use crate::error::{BorgError, Result};
+use crate::error::{VgerError, Result};
 use crate::storage::StorageBackend;
 
-/// HTTP REST backend for remote repository access via borg-rs-server.
+/// HTTP REST backend for remote repository access via vger-server.
 pub struct RestBackend {
     /// Base URL, e.g. "https://backup.example.com/myrepo"
     base_url: String,
@@ -47,9 +47,9 @@ impl RestBackend {
         let req = self.apply_auth(self.agent.post(&url));
         let resp = req
             .send_json(ureq::json!(keys))
-            .map_err(|e| BorgError::Other(format!("REST batch-delete: {e}")))?;
+            .map_err(|e| VgerError::Other(format!("REST batch-delete: {e}")))?;
         if resp.status() >= 400 {
-            return Err(BorgError::Other(format!(
+            return Err(VgerError::Other(format!(
                 "REST batch-delete failed: HTTP {}",
                 resp.status()
             )));
@@ -63,10 +63,10 @@ impl RestBackend {
         let req = self.apply_auth(self.agent.get(&url));
         let resp = req
             .call()
-            .map_err(|e| BorgError::Other(format!("REST stats: {e}")))?;
+            .map_err(|e| VgerError::Other(format!("REST stats: {e}")))?;
         let val: serde_json::Value = resp
             .into_json()
-            .map_err(|e| BorgError::Other(format!("REST stats parse: {e}")))?;
+            .map_err(|e| VgerError::Other(format!("REST stats parse: {e}")))?;
         Ok(val)
     }
 
@@ -76,9 +76,9 @@ impl RestBackend {
         let req = self.apply_auth(self.agent.post(&url));
         let resp = req
             .send_json(info.clone())
-            .map_err(|e| BorgError::Other(format!("REST lock acquire: {e}")))?;
+            .map_err(|e| VgerError::Other(format!("REST lock acquire: {e}")))?;
         if resp.status() >= 400 {
-            return Err(BorgError::Other(format!(
+            return Err(VgerError::Other(format!(
                 "REST lock acquire failed: HTTP {}",
                 resp.status()
             )));
@@ -92,9 +92,9 @@ impl RestBackend {
         let req = self.apply_auth(self.agent.delete(&url));
         let resp = req
             .call()
-            .map_err(|e| BorgError::Other(format!("REST lock release: {e}")))?;
+            .map_err(|e| VgerError::Other(format!("REST lock release: {e}")))?;
         if resp.status() >= 400 {
-            return Err(BorgError::Other(format!(
+            return Err(VgerError::Other(format!(
                 "REST lock release failed: HTTP {}",
                 resp.status()
             )));
@@ -108,16 +108,16 @@ impl RestBackend {
         let req = self.apply_auth(self.agent.post(&url));
         let resp = req
             .send_json(plan.clone())
-            .map_err(|e| BorgError::Other(format!("REST repack: {e}")))?;
+            .map_err(|e| VgerError::Other(format!("REST repack: {e}")))?;
         if resp.status() >= 400 {
-            return Err(BorgError::Other(format!(
+            return Err(VgerError::Other(format!(
                 "REST repack failed: HTTP {}",
                 resp.status()
             )));
         }
         let val: serde_json::Value = resp
             .into_json()
-            .map_err(|e| BorgError::Other(format!("REST repack parse: {e}")))?;
+            .map_err(|e| VgerError::Other(format!("REST repack parse: {e}")))?;
         Ok(val)
     }
 }
@@ -131,11 +131,11 @@ impl StorageBackend for RestBackend {
                 let mut buf = Vec::new();
                 resp.into_reader()
                     .read_to_end(&mut buf)
-                    .map_err(|e| BorgError::Io(e))?;
+                    .map_err(|e| VgerError::Io(e))?;
                 Ok(Some(buf))
             }
             Err(ureq::Error::Status(404, _)) => Ok(None),
-            Err(e) => Err(BorgError::Other(format!("REST GET {key}: {e}"))),
+            Err(e) => Err(VgerError::Other(format!("REST GET {key}: {e}"))),
         }
     }
 
@@ -143,7 +143,7 @@ impl StorageBackend for RestBackend {
         let url = self.url(key);
         let req = self.apply_auth(self.agent.put(&url));
         req.send_bytes(data)
-            .map_err(|e| BorgError::Other(format!("REST PUT {key}: {e}")))?;
+            .map_err(|e| VgerError::Other(format!("REST PUT {key}: {e}")))?;
         Ok(())
     }
 
@@ -153,7 +153,7 @@ impl StorageBackend for RestBackend {
         match req.call() {
             Ok(_) => Ok(()),
             Err(ureq::Error::Status(404, _)) => Ok(()),
-            Err(e) => Err(BorgError::Other(format!("REST DELETE {key}: {e}"))),
+            Err(e) => Err(VgerError::Other(format!("REST DELETE {key}: {e}"))),
         }
     }
 
@@ -163,7 +163,7 @@ impl StorageBackend for RestBackend {
         match req.call() {
             Ok(_) => Ok(true),
             Err(ureq::Error::Status(404, _)) => Ok(false),
-            Err(e) => Err(BorgError::Other(format!("REST HEAD {key}: {e}"))),
+            Err(e) => Err(VgerError::Other(format!("REST HEAD {key}: {e}"))),
         }
     }
 
@@ -173,10 +173,10 @@ impl StorageBackend for RestBackend {
         let req = self.apply_auth(self.agent.get(&url));
         let resp = req
             .call()
-            .map_err(|e| BorgError::Other(format!("REST LIST {prefix}: {e}")))?;
+            .map_err(|e| VgerError::Other(format!("REST LIST {prefix}: {e}")))?;
         let keys: Vec<String> = resp
             .into_json()
-            .map_err(|e| BorgError::Other(format!("REST LIST parse: {e}")))?;
+            .map_err(|e| VgerError::Other(format!("REST LIST parse: {e}")))?;
         Ok(keys)
     }
 
@@ -191,11 +191,11 @@ impl StorageBackend for RestBackend {
                 let mut buf = Vec::new();
                 resp.into_reader()
                     .read_to_end(&mut buf)
-                    .map_err(|e| BorgError::Io(e))?;
+                    .map_err(|e| VgerError::Io(e))?;
                 Ok(Some(buf))
             }
             Err(ureq::Error::Status(404, _)) => Ok(None),
-            Err(e) => Err(BorgError::Other(format!("REST GET_RANGE {key}: {e}"))),
+            Err(e) => Err(VgerError::Other(format!("REST GET_RANGE {key}: {e}"))),
         }
     }
 
@@ -204,7 +204,7 @@ impl StorageBackend for RestBackend {
         let url = format!("{}?mkdir", self.url(key));
         let req = self.apply_auth(self.agent.post(&url));
         req.call()
-            .map_err(|e| BorgError::Other(format!("REST MKDIR {key}: {e}")))?;
+            .map_err(|e| VgerError::Other(format!("REST MKDIR {key}: {e}")))?;
         Ok(())
     }
 }

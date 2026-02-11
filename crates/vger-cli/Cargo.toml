@@ -1,14 +1,14 @@
 [package]
-name = "borg-cli"
+name = "vger-cli"
 version = "0.1.0"
 edition = "2021"
 
 [[bin]]
-name = "borg-rs"
+name = "vger"
 path = "src/main.rs"
 
 [dependencies]
-borg-core = { path = "../borg-core" }
+vger-core = { path = "../vger-core" }
 clap = { version = "4", features = ["derive"] }
 serde = { version = "1", features = ["derive"] }
 serde_yaml = "0.9"

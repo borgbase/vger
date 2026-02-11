@@ -1,13 +1,13 @@
-# CLAUDE.md — borg-rs
+# CLAUDE.md — vger
 
 ## What this project is
 
-A Rust re-implementation of BorgBackup's core features. YAML config inspired by Borgmatic. Storage abstracted via Apache OpenDAL. **Not compatible with existing Borg repositories** — uses its own on-disk format.
+A fast, encrypted, deduplicated backup tool written in Rust. YAML config inspired by Borgmatic. Storage abstracted via Apache OpenDAL. Uses its own on-disk format.
 
 ## Build & test
 
 ```bash
-cargo build --release        # binary at target/release/borg-rs
+cargo build --release        # binary at target/release/vger
 cargo check                  # fast type-check
 cargo test                   # run unit + integration tests
 ```
@@ -19,10 +19,10 @@ Minimum Rust version: 1.88 (some deps require it). Tested on macOS (aarch64).
 ```
 Cargo.toml                              # workspace root
 crates/
-  borg-core/                            # library crate — all backup logic
+  vger-core/                            # library crate — all backup logic
     src/
       lib.rs                            # module re-exports
-      error.rs                          # BorgError enum (thiserror)
+      error.rs                          # VgerError enum (thiserror)
       config.rs                         # YAML config structs (serde)
       storage/
         mod.rs                          # StorageBackend trait (get/put/delete/exists/list/get_range/create_dir)
@@ -47,16 +47,16 @@ crates/
         item.rs                         # Item, ItemType, ChunkRef
       commands/
         mod.rs
-        init.rs                         # borg-rs init
-        create.rs                       # borg-rs create (walk + chunk + dedup + compress + encrypt)
-        list.rs                         # borg-rs list (archives or archive contents)
-        extract.rs                      # borg-rs extract (restore files)
-        delete.rs                       # borg-rs delete (remove archive, decrement refcounts)
-        prune.rs                        # borg-rs prune (retention policy)
-        check.rs                        # borg-rs check (integrity verification)
-        compact.rs                      # borg-rs compact (repack packs to reclaim space)
-  borg-cli/                             # binary crate — thin CLI
-    src/main.rs                         # clap CLI, passphrase handling, dispatches to borg-core commands
+        init.rs                         # vger init
+        create.rs                       # vger create (walk + chunk + dedup + compress + encrypt)
+        list.rs                         # vger list (archives or archive contents)
+        extract.rs                      # vger extract (restore files)
+        delete.rs                       # vger delete (remove archive, decrement refcounts)
+        prune.rs                        # vger prune (retention policy)
+        check.rs                        # vger check (integrity verification)
+        compact.rs                      # vger compact (repack packs to reclaim space)
+  vger-cli/                             # binary crate — thin CLI
+    src/main.rs                         # clap CLI, passphrase handling, dispatches to vger-core commands
 ```
 
 ## Architecture overview

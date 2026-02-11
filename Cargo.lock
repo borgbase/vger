@@ -252,73 +252,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "borg-cli"
-version = "0.1.0"
-dependencies = [
- "borg-core",
- "chrono",
- "clap",
- "comfy-table",
- "hex",
- "hostname",
- "indicatif",
- "rpassword",
- "serde",
- "serde_yaml",
- "tracing-subscriber",
-]
-
-[[package]]
-name = "borg-core"
-version = "0.1.0"
-dependencies = [
- "aes-gcm",
- "argon2",
- "blake2",
- "chrono",
- "fastcdc",
- "filetime",
- "globset",
- "hex",
- "hostname",
- "lz4_flex",
- "nix",
- "opendal",
- "rand 0.8.5",
- "rmp-serde",
- "serde",
- "serde_json",
- "tempfile",
- "thiserror",
- "tracing",
- "ureq",
- "walkdir",
- "whoami",
- "xattr",
- "zstd",
-]
-
-[[package]]
-name = "borg-server"
-version = "0.1.0"
-dependencies = [
- "axum",
- "chrono",
- "clap",
- "hex",
- "serde",
- "serde_json",
- "subtle",
- "sysinfo",
- "tokio",
- "toml",
- "tower",
- "tower-http",
- "tracing",
- "tracing-subscriber",
-]
-
-[[package]]
 name = "bstr"
 version = "1.12.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2631,6 +2564,73 @@ name = "version_check"
 version = "0.9.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "0b928f33d975fc6ad9f86c8f283853ad26bdd5b10b7f1542aa2fa15e2289105a"
+
+[[package]]
+name = "vger-cli"
+version = "0.1.0"
+dependencies = [
+ "chrono",
+ "clap",
+ "comfy-table",
+ "hex",
+ "hostname",
+ "indicatif",
+ "rpassword",
+ "serde",
+ "serde_yaml",
+ "tracing-subscriber",
+ "vger-core",
+]
+
+[[package]]
+name = "vger-core"
+version = "0.1.0"
+dependencies = [
+ "aes-gcm",
+ "argon2",
+ "blake2",
+ "chrono",
+ "fastcdc",
+ "filetime",
+ "globset",
+ "hex",
+ "hostname",
+ "lz4_flex",
+ "nix",
+ "opendal",
+ "rand 0.8.5",
+ "rmp-serde",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror",
+ "tracing",
+ "ureq",
+ "walkdir",
+ "whoami",
+ "xattr",
+ "zstd",
+]
+
+[[package]]
+name = "vger-server"
+version = "0.1.0"
+dependencies = [
+ "axum",
+ "chrono",
+ "clap",
+ "hex",
+ "serde",
+ "serde_json",
+ "subtle",
+ "sysinfo",
+ "tokio",
+ "toml",
+ "tower",
+ "tower-http",
+ "tracing",
+ "tracing-subscriber",
+]
 
 [[package]]
 name = "walkdir"

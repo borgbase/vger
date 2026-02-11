@@ -1,6 +1,6 @@
 use crate::crypto::aes_gcm::Aes256GcmEngine;
 use crate::crypto::PlaintextEngine;
-use crate::error::BorgError;
+use crate::error::VgerError;
 use crate::repo::format::{pack_object, unpack_object, ObjectType};
 
 #[test]
@@ -50,7 +50,7 @@ fn empty_data_fails() {
     let result = unpack_object(b"", &engine);
     assert!(result.is_err());
     match result.unwrap_err() {
-        BorgError::InvalidFormat(msg) => assert_eq!(msg, "empty object"),
+        VgerError::InvalidFormat(msg) => assert_eq!(msg, "empty object"),
         other => panic!("expected InvalidFormat, got: {other}"),
     }
 }
@@ -60,7 +60,7 @@ fn unknown_type_tag_fails() {
     let engine = PlaintextEngine::new(&[0xAA; 32]);
     let result = unpack_object(&[0xFF, 0x01, 0x02], &engine);
     assert!(result.is_err());
-    assert!(matches!(result.unwrap_err(), BorgError::UnknownObjectType(0xFF)));
+    assert!(matches!(result.unwrap_err(), VgerError::UnknownObjectType(0xFF)));
 }
 
 #[test]

@@ -1,7 +1,7 @@
 use crate::archive::item::Item;
 use crate::archive::ArchiveMeta;
-use crate::config::BorgConfig;
-use crate::error::{BorgError, Result};
+use crate::config::VgerConfig;
+use crate::error::{VgerError, Result};
 use crate::repo::format::unpack_object;
 use crate::repo::manifest::ArchiveEntry;
 use crate::repo::Repository;
@@ -15,8 +15,8 @@ pub enum ListResult {
     Items(Vec<Item>),
 }
 
-/// Run `borg-rs list`.
-pub fn run(config: &BorgConfig, passphrase: Option<&str>, archive_name: Option<&str>) -> Result<ListResult> {
+/// Run `vger list`.
+pub fn run(config: &VgerConfig, passphrase: Option<&str>, archive_name: Option<&str>) -> Result<ListResult> {
     let backend = storage::backend_from_config(&config.repository)?;
     let repo = Repository::open(backend, passphrase)?;
 
@@ -38,13 +38,13 @@ pub fn load_archive_meta(repo: &Repository, archive_name: &str) -> Result<Archiv
     let entry = repo
         .manifest
         .find_archive(archive_name)
-        .ok_or_else(|| BorgError::ArchiveNotFound(archive_name.into()))?;
+        .ok_or_else(|| VgerError::ArchiveNotFound(archive_name.into()))?;
 
     let archive_id_hex = hex::encode(&entry.id);
     let meta_data = repo
         .storage
         .get(&format!("archives/{archive_id_hex}"))?
-        .ok_or_else(|| BorgError::ArchiveNotFound(archive_name.into()))?;
+        .ok_or_else(|| VgerError::ArchiveNotFound(archive_name.into()))?;
 
     let (_obj_type, meta_bytes) = unpack_object(&meta_data, repo.crypto.as_ref())?;
     Ok(rmp_serde::from_slice(&meta_bytes)?)

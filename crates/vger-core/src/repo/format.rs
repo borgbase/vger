@@ -1,5 +1,5 @@
 use crate::crypto::CryptoEngine;
-use crate::error::{BorgError, Result};
+use crate::error::{VgerError, Result};
 
 /// Object type tags for the repo envelope format.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -22,7 +22,7 @@ impl ObjectType {
             3 => Ok(Self::ChunkData),
             4 => Ok(Self::ChunkIndex),
             5 => Ok(Self::PackHeader),
-            _ => Err(BorgError::UnknownObjectType(v)),
+            _ => Err(VgerError::UnknownObjectType(v)),
         }
     }
 }
@@ -55,7 +55,7 @@ pub fn unpack_object(
     crypto: &dyn CryptoEngine,
 ) -> Result<(ObjectType, Vec<u8>)> {
     if data.is_empty() {
-        return Err(BorgError::InvalidFormat("empty object".into()));
+        return Err(VgerError::InvalidFormat("empty object".into()));
     }
     let tag = data[0];
     let obj_type = ObjectType::from_u8(tag)?;

@@ -4,7 +4,7 @@ use argon2::Argon2;
 use rand::RngCore;
 use serde::{Deserialize, Serialize};
 
-use crate::error::{BorgError, Result};
+use crate::error::{VgerError, Result};
 
 /// The master key material — never stored in plaintext on disk.
 pub struct MasterKey {
@@ -78,13 +78,13 @@ impl MasterKey {
 
         // Encrypt with AES-256-GCM
         let cipher = Aes256Gcm::new_from_slice(&wrapping_key)
-            .map_err(|e| BorgError::KeyDerivation(format!("cipher init: {e}")))?;
+            .map_err(|e| VgerError::KeyDerivation(format!("cipher init: {e}")))?;
         let mut nonce_bytes = [0u8; 12];
         rng.fill_bytes(&mut nonce_bytes);
         let nonce = Nonce::from_slice(&nonce_bytes);
         let ciphertext = cipher
             .encrypt(nonce, plaintext.as_ref())
-            .map_err(|e| BorgError::KeyDerivation(format!("encrypt: {e}")))?;
+            .map_err(|e| VgerError::KeyDerivation(format!("encrypt: {e}")))?;
 
         Ok(EncryptedKey {
             kdf,
@@ -98,19 +98,19 @@ impl MasterKey {
         let wrapping_key = derive_key_from_passphrase(passphrase, &encrypted.kdf)?;
 
         let cipher = Aes256Gcm::new_from_slice(&wrapping_key)
-            .map_err(|_| BorgError::DecryptionFailed)?;
+            .map_err(|_| VgerError::DecryptionFailed)?;
         let nonce = Nonce::from_slice(&encrypted.nonce);
         let plaintext = cipher
             .decrypt(nonce, encrypted.encrypted_payload.as_ref())
-            .map_err(|_| BorgError::DecryptionFailed)?;
+            .map_err(|_| VgerError::DecryptionFailed)?;
 
         let payload: MasterKeyPayload = rmp_serde::from_slice(&plaintext)
-            .map_err(|_| BorgError::DecryptionFailed)?;
+            .map_err(|_| VgerError::DecryptionFailed)?;
 
         let mut encryption_key = [0u8; 32];
         let mut chunk_id_key = [0u8; 32];
         if payload.encryption_key.len() != 32 || payload.chunk_id_key.len() != 32 {
-            return Err(BorgError::DecryptionFailed);
+            return Err(VgerError::DecryptionFailed);
         }
         encryption_key.copy_from_slice(&payload.encryption_key);
         chunk_id_key.copy_from_slice(&payload.chunk_id_key);
@@ -125,12 +125,12 @@ impl MasterKey {
 /// Derive a 32-byte key from a passphrase using Argon2id.
 fn derive_key_from_passphrase(passphrase: &str, kdf: &KdfParams) -> Result<[u8; 32]> {
     let params = argon2::Params::new(kdf.memory_cost, kdf.time_cost, kdf.parallelism, Some(32))
-        .map_err(|e| BorgError::KeyDerivation(format!("argon2 params: {e}")))?;
+        .map_err(|e| VgerError::KeyDerivation(format!("argon2 params: {e}")))?;
     let argon2 = Argon2::new(argon2::Algorithm::Argon2id, argon2::Version::V0x13, params);
 
     let mut output = [0u8; 32];
     argon2
         .hash_password_into(passphrase.as_bytes(), &kdf.salt, &mut output)
-        .map_err(|e| BorgError::KeyDerivation(format!("argon2 hash: {e}")))?;
+        .map_err(|e| VgerError::KeyDerivation(format!("argon2 hash: {e}")))?;
     Ok(output)
 }

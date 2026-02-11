@@ -1,6 +1,6 @@
 use opendal::{BlockingOperator, Operator};
 
-use crate::error::{BorgError, Result};
+use crate::error::{VgerError, Result};
 use crate::storage::StorageBackend;
 
 pub struct OpendalBackend {
@@ -12,7 +12,7 @@ impl OpendalBackend {
     pub fn local(root: &str) -> Result<Self> {
         let builder = opendal::services::Fs::default().root(root);
         let op = Operator::new(builder)
-            .map_err(|e| BorgError::Other(format!("opendal fs init: {e}")))?
+            .map_err(|e| VgerError::Other(format!("opendal fs init: {e}")))?
             .finish()
             .blocking();
         Ok(Self { op })
@@ -28,7 +28,7 @@ impl OpendalBackend {
             builder = builder.endpoint(ep);
         }
         let op = Operator::new(builder)
-            .map_err(|e| BorgError::Other(format!("opendal s3 init: {e}")))?
+            .map_err(|e| VgerError::Other(format!("opendal s3 init: {e}")))?
             .finish()
             .blocking();
         Ok(Self { op })
@@ -40,31 +40,31 @@ impl StorageBackend for OpendalBackend {
         match self.op.read(key) {
             Ok(buf) => Ok(Some(buf.to_vec())),
             Err(e) if e.kind() == opendal::ErrorKind::NotFound => Ok(None),
-            Err(e) => Err(BorgError::Storage(e)),
+            Err(e) => Err(VgerError::Storage(e)),
         }
     }
 
     fn put(&self, key: &str, data: &[u8]) -> Result<()> {
         self.op
             .write(key, data.to_vec())
-            .map_err(BorgError::Storage)
+            .map_err(VgerError::Storage)
     }
 
     fn delete(&self, key: &str) -> Result<()> {
-        self.op.delete(key).map_err(BorgError::Storage)
+        self.op.delete(key).map_err(VgerError::Storage)
     }
 
     fn exists(&self, key: &str) -> Result<bool> {
         match self.op.stat(key) {
             Ok(_) => Ok(true),
             Err(e) if e.kind() == opendal::ErrorKind::NotFound => Ok(false),
-            Err(e) => Err(BorgError::Storage(e)),
+            Err(e) => Err(VgerError::Storage(e)),
         }
     }
 
     fn list(&self, prefix: &str) -> Result<Vec<String>> {
         let mut keys = Vec::new();
-        let entries = self.op.list(prefix).map_err(BorgError::Storage)?;
+        let entries = self.op.list(prefix).map_err(VgerError::Storage)?;
         for entry in entries {
             let path = entry.path().to_string();
             // Skip directory markers
@@ -79,7 +79,7 @@ impl StorageBackend for OpendalBackend {
         match self.op.read_with(key).range(offset..offset + length).call() {
             Ok(buf) => Ok(Some(buf.to_vec())),
             Err(e) if e.kind() == opendal::ErrorKind::NotFound => Ok(None),
-            Err(e) => Err(BorgError::Storage(e)),
+            Err(e) => Err(VgerError::Storage(e)),
         }
     }
 
@@ -89,6 +89,6 @@ impl StorageBackend for OpendalBackend {
         } else {
             format!("{key}/")
         };
-        self.op.create_dir(&dir_key).map_err(BorgError::Storage)
+        self.op.create_dir(&dir_key).map_err(VgerError::Storage)
     }
 }

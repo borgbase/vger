@@ -1,4 +1,4 @@
-use crate::config::BorgConfig;
+use crate::config::VgerConfig;
 use crate::error::Result;
 use crate::repo::lock;
 use crate::repo::Repository;
@@ -13,7 +13,7 @@ pub struct DeleteStats {
 }
 
 pub fn run(
-    config: &BorgConfig,
+    config: &VgerConfig,
     passphrase: Option<&str>,
     archive_name: &str,
     dry_run: bool,
@@ -26,7 +26,7 @@ pub fn run(
     let entry = repo
         .manifest
         .find_archive(archive_name)
-        .ok_or_else(|| crate::error::BorgError::ArchiveNotFound(archive_name.into()))?;
+        .ok_or_else(|| crate::error::VgerError::ArchiveNotFound(archive_name.into()))?;
     let archive_id_hex = hex::encode(&entry.id);
 
     // Load archive metadata and items to find all chunk refs

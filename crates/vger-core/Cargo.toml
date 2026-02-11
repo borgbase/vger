@@ -1,5 +1,5 @@
 [package]
-name = "borg-core"
+name = "vger-core"
 version = "0.1.0"
 edition = "2021"
 

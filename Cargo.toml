@@ -1,3 +1,3 @@
 [workspace]
-members = ["crates/borg-core", "crates/borg-cli", "crates/borg-server"]
+members = ["crates/vger-core", "crates/vger-cli", "crates/vger-server"]
 resolver = "2"

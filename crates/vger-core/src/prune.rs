@@ -3,7 +3,7 @@ use std::collections::{HashMap, HashSet};
 use chrono::{DateTime, Datelike, IsoWeek, Timelike, Utc};
 
 use crate::config::RetentionConfig;
-use crate::error::{BorgError, Result};
+use crate::error::{VgerError, Result};
 use crate::repo::manifest::ArchiveEntry;
 
 #[derive(Debug, Clone)]
@@ -24,7 +24,7 @@ pub struct PruneEntry {
 pub fn parse_duration(s: &str) -> Result<chrono::Duration> {
     let s = s.trim();
     if s.is_empty() {
-        return Err(BorgError::Config("empty duration string".into()));
+        return Err(VgerError::Config("empty duration string".into()));
     }
 
     // Try pure numeric → days
@@ -35,11 +35,11 @@ pub fn parse_duration(s: &str) -> Result<chrono::Duration> {
     // Split into numeric part and suffix
     let (num_str, suffix) = s.split_at(
         s.find(|c: char| !c.is_ascii_digit())
-            .ok_or_else(|| BorgError::Config(format!("invalid duration: '{s}'")))?,
+            .ok_or_else(|| VgerError::Config(format!("invalid duration: '{s}'")))?,
     );
     let n: i64 = num_str
         .parse()
-        .map_err(|_| BorgError::Config(format!("invalid duration number: '{num_str}'")))?;
+        .map_err(|_| VgerError::Config(format!("invalid duration number: '{num_str}'")))?;
 
     match suffix {
         "h" | "H" => Ok(chrono::Duration::hours(n)),
@@ -47,7 +47,7 @@ pub fn parse_duration(s: &str) -> Result<chrono::Duration> {
         "w" | "W" => Ok(chrono::Duration::weeks(n)),
         "m" | "M" => Ok(chrono::Duration::days(n * 30)),
         "y" | "Y" => Ok(chrono::Duration::days(n * 365)),
-        _ => Err(BorgError::Config(format!(
+        _ => Err(VgerError::Config(format!(
             "unknown duration suffix: '{suffix}'"
         ))),
     }
@@ -195,7 +195,7 @@ pub fn apply_policy(
     // Safety check: refuse if all archives would be pruned
     let prune_count = archives.len() - kept.len();
     if prune_count == archives.len() {
-        return Err(BorgError::Other(
+        return Err(VgerError::Other(
             "refusing to prune: policy would remove ALL archives".into(),
         ));
     }
