@@ -9,3 +9,8 @@ pub mod index;
 pub mod prune;
 pub mod repo;
 pub mod storage;
+
+#[cfg(test)]
+mod testutil;
+#[cfg(test)]
+mod tests;

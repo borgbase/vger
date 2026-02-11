@@ -45,3 +45,6 @@ thiserror = "2"
 
 # Logging
 tracing = "0.1"
+
+[dev-dependencies]
+tempfile = "3"
