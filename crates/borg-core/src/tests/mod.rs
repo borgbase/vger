@@ -1,5 +1,6 @@
 mod chunk_id;
 mod chunker;
+mod compact;
 mod compress;
 mod crypto;
 mod format;

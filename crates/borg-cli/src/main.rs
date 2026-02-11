@@ -89,6 +89,21 @@ enum Commands {
         #[arg(long)]
         verify_data: bool,
     },
+
+    /// Free repository space by compacting pack files
+    Compact {
+        /// Minimum percentage of unused space to trigger repack (default: 10)
+        #[arg(long, default_value = "10")]
+        threshold: f64,
+
+        /// Maximum total bytes to repack (e.g. 500M, 2G)
+        #[arg(long)]
+        max_repack_size: Option<String>,
+
+        /// Only show what would be compacted, don't actually do it
+        #[arg(short = 'n', long)]
+        dry_run: bool,
+    },
 }
 
 fn main() {
@@ -138,6 +153,11 @@ fn main() {
         Commands::Delete { archive, dry_run } => run_delete(&config, archive, dry_run),
         Commands::Prune { dry_run, list } => run_prune(&config, dry_run, list),
         Commands::Check { verify_data } => run_check(&config, verify_data),
+        Commands::Compact {
+            threshold,
+            max_repack_size,
+            dry_run,
+        } => run_compact(&config, threshold, max_repack_size, dry_run),
     };
 
     if let Err(e) = result {
@@ -409,6 +429,62 @@ fn run_check(
     }
 
     Ok(())
+}
+
+fn run_compact(
+    config: &BorgConfig,
+    threshold: f64,
+    max_repack_size: Option<String>,
+    dry_run: bool,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let passphrase = get_passphrase(config)?;
+
+    let max_bytes = max_repack_size
+        .map(|s| parse_size(&s))
+        .transpose()?;
+
+    let stats = commands::compact::run(config, passphrase.as_deref(), threshold, max_bytes, dry_run)?;
+
+    if dry_run {
+        println!(
+            "Dry run: {} packs total, {} would be repacked, {} would be deleted (empty)",
+            stats.packs_total, stats.packs_repacked, stats.packs_deleted_empty,
+        );
+        println!(
+            "  {} live blobs, {} dead blobs, {} would be freed",
+            stats.blobs_live,
+            stats.blobs_dead,
+            format_bytes(stats.space_freed),
+        );
+    } else {
+        println!(
+            "Compaction complete: {} packs repacked, {} empty packs deleted, {} freed",
+            stats.packs_repacked,
+            stats.packs_deleted_empty,
+            format_bytes(stats.space_freed),
+        );
+    }
+
+    Ok(())
+}
+
+/// Parse a human-readable size string like "500M", "2G", "1024K" into bytes.
+fn parse_size(s: &str) -> Result<u64, Box<dyn std::error::Error>> {
+    let s = s.trim();
+    if s.is_empty() {
+        return Err("empty size string".into());
+    }
+
+    let (num_str, multiplier) = match s.as_bytes().last() {
+        Some(b'K' | b'k') => (&s[..s.len() - 1], 1024u64),
+        Some(b'M' | b'm') => (&s[..s.len() - 1], 1024 * 1024),
+        Some(b'G' | b'g') => (&s[..s.len() - 1], 1024 * 1024 * 1024),
+        Some(b'T' | b't') => (&s[..s.len() - 1], 1024 * 1024 * 1024 * 1024),
+        _ => (s, 1u64),
+    };
+
+    let num: f64 = num_str.parse().map_err(|_| format!("invalid size: '{s}'"))?;
+    Ok((num * multiplier as f64) as u64)
 }
 
 fn format_bytes(bytes: u64) -> String {

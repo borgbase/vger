@@ -120,7 +120,7 @@ target = clamp(min_pack_size * sqrt(num_data_packs / 100), min_pack_size, max_pa
 | GC/compaction | Need `compact` to reclaim space | Simple file deletion |
 | Write speed | Faster (batched writes) | Slower (many small writes) |
 
-**Note:** The `compact` command is not yet implemented. When archives are deleted or pruned, orphaned blobs remain in their pack files until a future `compact` reclaims the space.
+The `compact` command reclaims space from orphaned blobs left behind by `delete` and `prune`. See the [Compact Command](#compact-command-implemented) section below.
 
 ### rustic/restic Pack File Format (for reference)
 
@@ -131,6 +131,40 @@ target = clamp(min_pack_size * sqrt(num_data_packs / 100), min_pack_size, max_pa
 Header entry format (per blob):
 - Uncompressed: `[type: 1B][length: 4B][id: 32B]` = 37 bytes
 - Compressed:   `[type: 1B][length: 4B][uncompressed_len: 4B][id: 32B]` = 41 bytes
+
+---
+
+## Compact Command (Implemented)
+
+After `delete` or `prune`, chunk refcounts are decremented and entries with refcount 0 are removed from the `ChunkIndex` — but the encrypted blob data remains in pack files. The `compact` command rewrites packs to reclaim this wasted space.
+
+### Algorithm
+
+**Phase 1 — Analysis (read-only):**
+1. Enumerate all pack files across 256 shard dirs (`packs/00/` through `packs/ff/`)
+2. Read each pack's trailing header to get `Vec<PackHeaderEntry>`
+3. Classify each blob as live (exists in `ChunkIndex` at matching pack+offset) or dead
+4. Compute `unused_ratio = dead_bytes / total_bytes` per pack
+5. Filter packs where `unused_ratio >= threshold` (default 10%)
+
+**Phase 2 — Repack:**
+For each candidate pack (most wasteful first, respecting `--max-repack-size` cap):
+1. If all blobs are dead → delete the pack file directly
+2. Otherwise: read live blobs as encrypted passthrough (no decrypt/re-encrypt cycle)
+3. Write into a new pack via a standalone `PackWriter`, flush to storage
+4. Update `ChunkIndex` entries to point to the new pack_id/offset
+5. `save_state()` — persist index before deleting old pack (crash safety)
+6. Delete old pack file
+
+### Crash Safety
+
+The index never points to a deleted pack. Sequence: write new pack → save index → delete old pack. A crash between steps leaves an orphan old pack (harmless, cleaned up on next compact).
+
+### CLI
+
+```
+borg-rs compact [--threshold 10] [--max-repack-size 2G] [-n/--dry-run]
+```
 
 ---
 
@@ -172,12 +206,12 @@ Header entry format (per blob):
 | **prune command** | Apply retention policies, remove expired archives |
 | **check command** | Structural integrity + optional `--verify-data` for full content verification |
 | **Type-safe PackId** | Newtype for pack file identifiers with `storage_key()` |
+| **compact command** | Rewrite packs to reclaim space from orphaned blobs after delete/prune |
 
 ### Planned / Not Yet Implemented
 
 | Feature | Description | Priority |
 |---------|-------------|----------|
-| **compact command** | Rewrite packs to reclaim space from orphaned blobs after delete/prune | High |
 | **Parallel pipeline** | `rayon` for compress/encrypt | High |
 | **File-level cache** | inode/mtime skip for unchanged files (incremental speedup) | High |
 | **Type-safe IDs** | Newtypes for `ArchiveId`, `ManifestId` | Medium |

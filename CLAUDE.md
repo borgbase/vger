@@ -54,6 +54,7 @@ crates/
         delete.rs                       # borg-rs delete (remove archive, decrement refcounts)
         prune.rs                        # borg-rs prune (retention policy)
         check.rs                        # borg-rs check (integrity verification)
+        compact.rs                      # borg-rs compact (repack packs to reclaim space)
   borg-cli/                             # binary crate — thin CLI
     src/main.rs                         # clap CLI, passphrase handling, dispatches to borg-core commands
 ```
@@ -97,7 +98,7 @@ The type tag byte is used as AAD (authenticated additional data) in AES-GCM.
 - `StorageBackend` trait (storage/mod.rs) — get/put/delete/exists/list/get_range/create_dir
 - `CryptoEngine` trait (crypto/mod.rs) — encrypt/decrypt/chunk_id_key
 - `ChunkId` (crypto/chunk_id.rs) — 32-byte keyed BLAKE2b-MAC for content-addressed dedup
-- `PackId` (crypto/pack_id.rs) — 32-byte unkeyed BLAKE2b-256, has `storage_key()` → `packs/<shard>/<hex>`
+- `PackId` (crypto/pack_id.rs) — 32-byte unkeyed BLAKE2b-256, has `storage_key()` → `packs/<shard>/<hex>`, `from_hex()`, `from_storage_key()`
 - `PackWriter` (repo/pack.rs) — buffers encrypted blobs and flushes them as pack files
 - `PackType` (repo/pack.rs) — `Data` (file content) or `Tree` (item-stream metadata)
 - `Repository` (repo/mod.rs) — central orchestrator, owns storage + crypto + manifest + index + pack writers
@@ -129,7 +130,7 @@ The type tag byte is used as AAD (authenticated additional data) in AES-GCM.
 
 ## What's not implemented yet
 
-- `compact` / `mount` commands
+- `mount` command
 - File-level cache (inode/mtime skip for unchanged files)
 - Async I/O
 - SSH RPC protocol (use OpenDAL SFTP instead)

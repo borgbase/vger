@@ -17,6 +17,7 @@ This is **not compatible** with existing Borg repositories — it uses a fresh o
 | `borg-rs delete` | Delete a specific archive |
 | `borg-rs prune` | Prune archives according to retention policy |
 | `borg-rs check` | Verify repository integrity (`--verify-data` for full content verification) |
+| `borg-rs compact` | Free space by repacking pack files after delete/prune |
 
 ### Core capabilities
 
@@ -27,7 +28,7 @@ This is **not compatible** with existing Borg repositories — it uses a fresh o
 
 ### What is not (yet) implemented
 
-Mount (FUSE), compact, repair, hardlinks, special files (devices, FIFOs), and file-level caching for incremental speedup. These are candidates for future versions.
+Mount (FUSE), repair, hardlinks, special files (devices, FIFOs), and file-level caching for incremental speedup. These are candidates for future versions.
 
 ## Quick start
 
@@ -93,6 +94,10 @@ borg-rs --config borg-rs.yaml check
 
 # Full data verification (reads and verifies every chunk)
 borg-rs --config borg-rs.yaml check --verify-data
+
+# Reclaim space from deleted/pruned archives (dry-run first)
+borg-rs --config borg-rs.yaml compact --dry-run
+borg-rs --config borg-rs.yaml compact
 ```
 
 ## Configuration reference

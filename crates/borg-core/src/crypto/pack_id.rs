@@ -31,6 +31,26 @@ impl PackId {
     pub fn storage_key(&self) -> String {
         format!("packs/{}/{}", self.shard_prefix(), self.to_hex())
     }
+
+    /// Parse a PackId from a 64-character hex string.
+    pub fn from_hex(hex_str: &str) -> std::result::Result<Self, String> {
+        let bytes = hex::decode(hex_str).map_err(|e| format!("invalid hex: {e}"))?;
+        if bytes.len() != 32 {
+            return Err(format!("expected 32 bytes, got {}", bytes.len()));
+        }
+        let mut arr = [0u8; 32];
+        arr.copy_from_slice(&bytes);
+        Ok(PackId(arr))
+    }
+
+    /// Parse a PackId from a storage key path like `packs/ab/<hex>`.
+    pub fn from_storage_key(key: &str) -> std::result::Result<Self, String> {
+        let hex_str = key
+            .rsplit('/')
+            .next()
+            .ok_or_else(|| "empty storage key".to_string())?;
+        Self::from_hex(hex_str)
+    }
 }
 
 impl fmt::Debug for PackId {

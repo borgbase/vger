@@ -1,4 +1,5 @@
 pub mod check;
+pub mod compact;
 pub mod create;
 pub mod delete;
 pub mod extract;
