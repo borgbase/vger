@@ -1,0 +1,21 @@
+[package]
+name = "borg-cli"
+version = "0.1.0"
+edition = "2021"
+
+[[bin]]
+name = "borg-rs"
+path = "src/main.rs"
+
+[dependencies]
+borg-core = { path = "../borg-core" }
+clap = { version = "4", features = ["derive"] }
+serde = { version = "1", features = ["derive"] }
+serde_yaml = "0.9"
+rpassword = "7"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+indicatif = "0.17"
+comfy-table = "7"
+chrono = "0.4"
+hostname = "0.4"
+hex = "0.4"

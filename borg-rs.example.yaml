@@ -1,0 +1,79 @@
+# borg-rs example configuration
+# Copy this file to borg-rs.yaml and adjust to your needs.
+
+# Repository location and backend
+repository:
+  # Path to the repository (required)
+  path: /backups/myrepo
+
+  # Storage backend: "local" or "s3" (default: "local")
+  backend: local
+
+  # S3 backend settings (only used when backend is "s3")
+  # s3_bucket: my-backup-bucket
+  # s3_region: us-east-1
+  # s3_endpoint: https://s3.amazonaws.com  # custom endpoint for S3-compatible stores
+
+  # SFTP settings (not yet implemented)
+  # sftp_host: backup.example.com
+  # sftp_user: backupuser
+  # sftp_port: 22
+
+# Encryption settings
+encryption:
+  # Mode: "aes256gcm" or "none" (default: "aes256gcm")
+  mode: aes256gcm
+
+  # Passphrase (optional — if omitted, borg-rs will prompt interactively)
+  # passphrase: my-secret-passphrase
+
+  # Shell command that outputs the passphrase on stdout (optional)
+  # passcommand: "cat /path/to/passphrase-file"
+
+# Directories to back up
+source_directories:
+  - /home/user/documents
+  - /home/user/photos
+
+# Glob patterns to exclude from backups
+exclude_patterns:
+  - "*.tmp"
+  - "*.cache"
+  - ".DS_Store"
+  - "node_modules"
+
+# Archive name format (default: "{hostname}-{now:%Y-%m-%dT%H:%M:%S}")
+archive_name_format: "{hostname}-{now:%Y-%m-%dT%H:%M:%S}"
+
+# Content-defined chunking parameters (FastCDC)
+chunker:
+  min_size: 524288    # 512 KiB (default)
+  avg_size: 2097152   # 2 MiB (default)
+  max_size: 8388608   # 8 MiB (default)
+
+# Compression settings
+compression:
+  # Algorithm: "lz4", "zstd", or "none" (default: "lz4")
+  algorithm: lz4
+
+  # Zstd compression level, 1-22 (default: 3, only used when algorithm is "zstd")
+  zstd_level: 3
+
+# Retention policy for `borg-rs prune`
+# At least one keep_* option must be set for prune to run.
+# Archives matching multiple rules are kept (rules are additive).
+retention:
+  # Keep all archives created within this duration
+  # Supported suffixes: h (hours), d (days), w (weeks), m (months ~30d), y (years ~365d)
+  # A plain number is treated as days.
+  keep_within: "2d"
+
+  # Keep the N most recent archives
+  keep_last: 5
+
+  # Keep N archives per time bucket (newest in each bucket is kept)
+  keep_hourly: 24
+  keep_daily: 7
+  keep_weekly: 4
+  keep_monthly: 6
+  keep_yearly: 2

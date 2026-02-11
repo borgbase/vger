@@ -1,0 +1,47 @@
+[package]
+name = "borg-core"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+# Serialization
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+rmp-serde = "1"
+
+# Crypto
+aes-gcm = "0.10"
+blake2 = "0.10"
+argon2 = "0.5"
+rand = "0.8"
+hex = "0.4"
+
+# Compression
+lz4_flex = "0.11"
+zstd = "0.13"
+
+# Chunking
+fastcdc = "3"
+
+# Storage
+opendal = { version = "0.51", features = ["services-fs", "services-s3"] }
+
+# Filesystem
+walkdir = "2"
+globset = "0.4"
+filetime = "0.2"
+
+# Time
+chrono = { version = "0.4", features = ["serde"] }
+
+# OS
+nix = { version = "0.29", features = ["fs", "user"] }
+xattr = "1"
+hostname = "0.4"
+whoami = "1"
+
+# Error handling
+thiserror = "2"
+
+# Logging
+tracing = "0.1"

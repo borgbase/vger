@@ -1,0 +1,63 @@
+use thiserror::Error;
+
+pub type Result<T> = std::result::Result<T, BorgError>;
+
+#[derive(Debug, Error)]
+pub enum BorgError {
+    #[error("storage I/O error: {0}")]
+    Storage(#[from] opendal::Error),
+
+    #[error("repository not found at '{0}'")]
+    RepoNotFound(String),
+
+    #[error("repository already exists at '{0}'")]
+    RepoAlreadyExists(String),
+
+    #[error("decryption failed: wrong passphrase or corrupted data")]
+    DecryptionFailed,
+
+    #[error("key derivation error: {0}")]
+    KeyDerivation(String),
+
+    #[error("archive not found: '{0}'")]
+    ArchiveNotFound(String),
+
+    #[error("archive already exists: '{0}'")]
+    ArchiveAlreadyExists(String),
+
+    #[error("invalid repository format: {0}")]
+    InvalidFormat(String),
+
+    #[error("unknown object type tag: {0}")]
+    UnknownObjectType(u8),
+
+    #[error("unknown compression tag: {0}")]
+    UnknownCompressionTag(u8),
+
+    #[error("unsupported repository version: {0}")]
+    UnsupportedVersion(u32),
+
+    #[error("serialization error: {0}")]
+    Serialization(#[from] rmp_serde::encode::Error),
+
+    #[error("deserialization error: {0}")]
+    Deserialization(#[from] rmp_serde::decode::Error),
+
+    #[error("configuration error: {0}")]
+    Config(String),
+
+    #[error("unsupported backend: '{0}'")]
+    UnsupportedBackend(String),
+
+    #[error("I/O error: {0}")]
+    Io(#[from] std::io::Error),
+
+    #[error("repository is locked by another process (lock: {0})")]
+    Locked(String),
+
+    #[error("decompression error: {0}")]
+    Decompression(String),
+
+    #[error("{0}")]
+    Other(String),
+}
