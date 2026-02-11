@@ -1,4 +1,6 @@
 pub mod opendal_backend;
+#[cfg(feature = "backend-rest")]
+pub mod rest_backend;
 
 use crate::config::RepositoryConfig;
 use crate::error::{BorgError, Result};
@@ -42,6 +44,15 @@ pub fn backend_from_config(cfg: &RepositoryConfig) -> Result<Box<dyn StorageBack
                 bucket, region, &cfg.path, cfg.s3_endpoint.as_deref(),
             )?))
         }
+        #[cfg(feature = "backend-rest")]
+        "rest" => {
+            let token = cfg.rest_token.as_deref();
+            Ok(Box::new(rest_backend::RestBackend::new(&cfg.path, token)?))
+        }
+        #[cfg(not(feature = "backend-rest"))]
+        "rest" => Err(BorgError::UnsupportedBackend(
+            "rest (compile with feature 'backend-rest')".into(),
+        )),
         other => Err(BorgError::UnsupportedBackend(other.into())),
     }
 }

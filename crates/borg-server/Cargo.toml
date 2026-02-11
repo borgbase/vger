@@ -1,0 +1,39 @@
+[package]
+name = "borg-server"
+version = "0.1.0"
+edition = "2021"
+
+[[bin]]
+name = "borg-rs-server"
+path = "src/main.rs"
+
+[dependencies]
+# Web framework
+axum = "0.8"
+tokio = { version = "1", features = ["full"] }
+tower = "0.5"
+tower-http = { version = "0.6", features = ["trace"] }
+
+# Serialization
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+toml = "0.8"
+
+# CLI
+clap = { version = "4", features = ["derive"] }
+
+# Logging
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
+
+# Time
+chrono = { version = "0.4", features = ["serde"] }
+
+# Crypto (constant-time compare for auth token)
+subtle = "2"
+
+# System info
+sysinfo = "0.32"
+
+# Hex encoding
+hex = "0.4"

@@ -56,6 +56,10 @@ pub struct RepositoryConfig {
     pub sftp_host: Option<String>,
     pub sftp_user: Option<String>,
     pub sftp_port: Option<u16>,
+    /// Bearer token for REST backend authentication.
+    pub rest_token: Option<String>,
+    /// Command to retrieve the REST token (stdout is used as the token).
+    pub rest_token_command: Option<String>,
     #[serde(default = "default_min_pack_size")]
     pub min_pack_size: u32,
     #[serde(default = "default_max_pack_size")]

@@ -24,7 +24,23 @@ This is **not compatible** with existing Borg repositories — it uses a fresh o
 - **Deduplication** — Content-defined chunking (FastCDC) splits files into variable-size chunks. Identical chunks are stored only once, even across archives.
 - **Compression** — LZ4 (fast, default) or Zstandard (better ratio).
 - **Encryption** — AES-256-GCM authenticated encryption with Argon2id key derivation. Plaintext mode also available.
-- **Storage backends** — Abstracted via [Apache OpenDAL](https://opendal.apache.org/). Supports local filesystem and S3-compatible storage out of the box. SFTP can be added by enabling the opendal feature.
+- **Storage backends** — Abstracted via [Apache OpenDAL](https://opendal.apache.org/). Supports local filesystem, S3-compatible storage, and a dedicated REST server out of the box.
+- **REST server** — Purpose-built backup server (`borg-rs-server`) with append-only enforcement, per-repo quotas, lock management with auto-expiry, backup freshness monitoring, server-side compaction, and structural integrity checks. See [Server Mode](#server-mode) below.
+
+### Why a dedicated REST server instead of plain S3?
+
+Dumb storage backends (S3, WebDAV, SFTP) work well for basic backups, but they can't enforce policy or do server-side work. borg-rs-server adds capabilities that are impossible with object storage alone:
+
+| Capability | S3 / dumb storage | borg-rs-server |
+|------------|-------------------|----------------|
+| **Append-only mode** | Not enforceable — a compromised client with S3 credentials can delete anything | Server rejects DELETE and pack overwrites. Even a fully compromised client cannot destroy backup history. |
+| **Server-side compaction** | Client must download all live blobs and re-upload — potentially GBs over the network | Server repacks locally on disk. Client sends a small JSON plan, server does the I/O. |
+| **Quota enforcement** | Requires separate S3 bucket policies or IAM tricks per repo | Built-in per-repo byte quota, checked on every PUT |
+| **Backup freshness monitoring** | Requires external monitoring to poll and parse repo metadata | Server tracks `last_backup_at` automatically on every manifest write |
+| **Lock auto-expiry** | Advisory lock files stay forever if a client crashes | Server-managed locks with configurable TTL, background cleanup of stale locks |
+| **Structural health checks** | Client must download data to verify structure | Server checks pack magic bytes, shard naming, required files — no encryption key needed |
+
+All data remains **client-side encrypted**. The server never has the encryption key and cannot read backup contents. It is opaque storage that understands repository structure just enough to enforce policy and optimize I/O.
 
 ### What is not (yet) implemented
 
@@ -100,18 +116,88 @@ borg-rs --config borg-rs.yaml compact --dry-run
 borg-rs --config borg-rs.yaml compact
 ```
 
+## Server mode
+
+borg-rs includes a dedicated backup server for secure, policy-enforced remote backups. TLS is handled by a reverse proxy (nginx, caddy, etc.).
+
+### Build the server
+
+```bash
+cargo build --release -p borg-server
+# Binary at target/release/borg-rs-server
+```
+
+### Build the client with REST support
+
+```bash
+cargo build --release -p borg-cli --features borg-core/backend-rest
+```
+
+### Server configuration
+
+Create `borg-server.toml`:
+
+```toml
+[server]
+listen = "127.0.0.1:8484"
+data_dir = "/var/lib/borg-rs"
+token = "some-secret-token"
+append_only = false              # true = reject all deletes
+log_format = "pretty"            # "json" for structured logging (systemd, etc.)
+
+# Optional limits
+# quota_bytes = 5368709120       # 5 GiB per-repo quota. 0 = unlimited.
+# lock_ttl_seconds = 3600        # auto-expire locks after 1 hour (default)
+```
+
+### Start the server
+
+```bash
+borg-rs-server --config borg-server.toml
+```
+
+### Client configuration (REST backend)
+
+```yaml
+repository:
+  path: "https://backup.example.com/myrepo"
+  backend: "rest"
+  rest_token: "some-secret-token"
+  # rest_token_command: "pass show borg-token"  # alternative: shell command
+
+encryption:
+  mode: "aes256gcm"
+
+source_directories:
+  - "/home/user/documents"
+```
+
+All standard commands (`init`, `create`, `list`, `extract`, `delete`, `prune`, `check`, `compact`) work transparently over REST — no changes to the CLI workflow.
+
+### Health check
+
+```bash
+# No auth required
+curl http://localhost:8484/health
+```
+
+Returns server status, uptime, disk free space, and repo count.
+
 ## Configuration reference
 
 ```yaml
 repository:
-  path: "/backup/repo"           # Local path or S3 prefix
-  backend: "local"               # "local" or "s3"
+  path: "/backup/repo"           # Local path, S3 prefix, or REST URL
+  backend: "local"               # "local", "s3", or "rest"
   # min_pack_size: 33554432      # Pack size floor (default 32 MiB)
   # max_pack_size: 536870912     # Pack size ceiling (default 512 MiB)
   # S3-specific options:
   # s3_bucket: "my-backups"
   # s3_region: "us-east-1"
   # s3_endpoint: "http://localhost:9000"  # For MinIO etc.
+  # REST-specific options:
+  # rest_token: "secret"                  # Bearer token for REST server
+  # rest_token_command: "pass show borg"  # Alternative: shell command for token
 
 encryption:
   mode: "aes256gcm"              # "aes256gcm" or "none"
@@ -154,7 +240,7 @@ archive_name_format: "{hostname}-{now:%Y-%m-%dT%H:%M:%S}"
 | Encryption | AES-CTR+HMAC / AES-OCB / ChaCha20 | AES-256-GCM |
 | Key derivation | PBKDF2 or Argon2id | Argon2id only |
 | Serialization | msgpack | msgpack |
-| Storage | Custom borgstore + SSH RPC | OpenDAL (local, S3, extensible) |
+| Storage | Custom borgstore + SSH RPC | OpenDAL (local, S3) + REST server with append-only/quotas |
 | Repo compatibility | Borg v1/v2/v3 formats | Own format (not compatible) |
 
 ### Repository layout
