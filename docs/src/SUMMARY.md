@@ -1,13 +1,23 @@
 # Summary
 
-- [Home](index.md)
+[Home](index.md)
+
+# Getting Started
+
+- [Installing](install.md)
 - [Quick Start](quickstart.md)
-- [Configuration Reference](configuration.md)
+
+# Usage
+
+- [Initialize and Set Up a Repository](init-setup.md)
+- [Storage Backends](backends.md)
+- [Make a Backup](backup.md)
+- [Restore a Backup](restore.md)
+- [Maintenance](maintenance.md)
+
+# Reference
+
+- [Configuration](configuration.md)
+- [Command Reference](commands.md)
 - [Server Mode](server-mode.md)
 - [Architecture](architecture.md)
-- [Workflows](workflows/index.md)
-  - [Installing](workflows/install.md)
-  - [Initialize and Set Up a Repository](workflows/init-setup.md)
-  - [Make a Backup](workflows/backup.md)
-  - [Restore a Backup](workflows/restore.md)
-  - [Maintenance](workflows/maintenance.md)

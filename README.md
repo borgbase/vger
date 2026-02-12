@@ -1,5 +1,9 @@
 # V'Ger Backup
 
+<p align="center">
+  <img src="docs/src/images/vger-color-rounded.webp" alt="V'Ger Backup Logo" width="350">
+</p>
+
 A fast, encrypted, deduplicated backup tool written in Rust.
 
 Inspired by BorgBackup, Borgmatic, restic, and rustic. V'Ger uses its own on-disk format and is not compatible with Borg or Restic repositories.
@@ -12,6 +16,8 @@ Inspired by BorgBackup, Borgmatic, restic, and rustic. V'Ger uses its own on-dis
 - Storage backends via Apache OpenDAL (local filesystem, S3-compatible storage, SFTP)
 - Dedicated REST server (`vger-server`) for append-only enforcement, quotas, lock TTLs, and server-side compaction
 - Built-in web interface (webDAV) to browse snapshots and restore files
+- Rate limiting for CPU, disk I/O, and network bandwidth
+- Hooks for monitoring, database backups, and custom scripts
 - Basic GUI (work in progress)
 
 ## Quick start

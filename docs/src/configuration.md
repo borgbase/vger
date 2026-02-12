@@ -1,28 +1,178 @@
-# Configuration Reference
+# Configuration
 
-## Repositories
+V'Ger is driven by a YAML configuration file. Generate a starter config with:
+
+```bash
+vger config
+```
+
+## Config file locations
+
+V'Ger automatically finds config files in this order:
+
+1. `--config <path>` flag
+2. `VGER_CONFIG` environment variable
+3. `./vger.yaml` (project)
+4. `$XDG_CONFIG_HOME/vger/config.yaml` or `~/.config/vger/config.yaml` (user)
+5. `/etc/vger/config.yaml` (system)
+
+You can also set `VGER_PASSPHRASE` to supply the passphrase non-interactively.
+
+## Minimal example
+
+A complete but minimal working config. Encryption defaults to AES-256-GCM, so you only need repositories and sources:
 
 ```yaml
 repositories:
-  - url: "/backup/repo"             # Local path, file://, s3://, sftp://, or https://
-    label: "main"                    # Short name for --repo selection
-    # min_pack_size: 33554432        # Pack size floor (default 32 MiB)
-    # max_pack_size: 536870912       # Pack size ceiling (default 512 MiB)
-    # S3-specific options (s3:// URLs):
-    # region: "us-east-1"
-    # access_key_id: "AKIA..."
-    # secret_access_key: "..."
-    # REST-specific options (https:// URLs):
-    # rest_token: "secret"           # Bearer token for REST server
+  - url: "/backup/repo"
+
+sources:
+  - "/home/user/documents"
 ```
+
+## Repositories
+
+**Local:**
+
+```yaml
+repositories:
+  - url: "/backups/repo"
+    label: "local"
+```
+
+**S3:**
+
+```yaml
+repositories:
+  - url: "s3://my-bucket/vger"
+    label: "s3"
+    region: "us-east-1"
+```
+
+Each entry accepts an optional `label` for CLI targeting (`vger --repo local list`) and optional pack size tuning (`min_pack_size`, `max_pack_size`). See [Storage Backends](backends.md) for all backend-specific options.
+
+## Sources
+
+Sources can be a simple list of paths (auto-labeled from directory name) or rich entries with per-source options.
+
+**Simple form:**
+
+```yaml
+sources:
+  - "/home/user/documents"
+  - "/home/user/photos"
+```
+
+**Rich form (single path):**
+
+```yaml
+sources:
+  - path: "/home/user/documents"
+    label: "docs"
+    exclude: ["*.tmp", ".cache/**"]
+    # exclude_if_present: [".nobackup", "CACHEDIR.TAG"]
+    # one_file_system: true
+    # git_ignore: false
+    repos: ["main"]                  # Only back up to this repo (default: all)
+    retention:
+      keep_daily: 7
+    hooks:
+      before: "echo starting docs backup"
+```
+
+**Rich form (multiple paths):**
+
+Use `paths` (plural) to group several directories into a single source. An explicit `label` is required:
+
+```yaml
+sources:
+  - paths:
+      - "/home/user/documents"
+      - "/home/user/notes"
+    label: "writing"
+    exclude: ["*.tmp"]
+```
+
+These directories are backed up together as one snapshot. You cannot use both `path` and `paths` on the same entry.
 
 ## Encryption
 
+Encryption is enabled by default (AES-256-GCM with Argon2id key derivation). You only need an `encryption` section to supply a passcommand or to disable encryption:
+
 ```yaml
 encryption:
-  mode: "aes256gcm"                  # "aes256gcm" or "none"
+  # mode: "aes256gcm"                # Default — can be omitted
+  # mode: "none"                     # Disable encryption
   # passphrase: "inline-secret"      # Not recommended for production
   # passcommand: "pass show borg"    # Shell command that prints the passphrase
+```
+
+## Compression
+
+```yaml
+compression:
+  algorithm: "lz4"                   # "lz4", "zstd", or "none"
+  zstd_level: 3                      # Only used with zstd
+```
+
+## Chunker
+
+```yaml
+chunker:                             # Optional, defaults shown
+  min_size: 524288                   # 512 KiB
+  avg_size: 2097152                  # 2 MiB
+  max_size: 8388608                  # 8 MiB
+```
+
+## Exclude Patterns
+
+```yaml
+exclude_patterns:                    # Global gitignore-style patterns (merged with per-source)
+  - "*.tmp"
+  - ".cache/**"
+exclude_if_present:                  # Skip dirs containing any marker file
+  - ".nobackup"
+  - "CACHEDIR.TAG"
+one_file_system: true                # Do not cross filesystem/mount boundaries (default true)
+git_ignore: false                    # Respect .gitignore files (default false)
+```
+
+## Retention
+
+```yaml
+retention:                           # Global retention policy (can be overridden per-source)
+  keep_last: 10
+  keep_daily: 7
+  keep_weekly: 4
+  keep_monthly: 6
+  keep_yearly: 2
+  keep_within: "2d"                  # Keep everything within this period (e.g. "2d", "48h", "1w")
+```
+
+## Limits
+
+```yaml
+limits:                              # Optional backup resource limits
+  cpu:
+    max_threads: 0                   # 0 = default rayon behavior
+    nice: 0                          # Unix niceness target (-20..19), 0 = unchanged
+  io:
+    read_mib_per_sec: 0              # Source file reads during backup
+    write_mib_per_sec: 0             # Local repository writes during backup
+  network:
+    read_mib_per_sec: 0              # Remote backend reads during backup
+    write_mib_per_sec: 0             # Remote backend writes during backup
+```
+
+## Hooks
+
+```yaml
+hooks:                               # Global hooks: run for every command
+  before: "echo starting"
+  after: "echo done"
+  # before_backup: "echo backup starting"  # Command-specific hooks
+  # failed: "notify-send 'vger failed'"
+  # finally: "cleanup.sh"
 ```
 
 ## Environment Variable Expansion
@@ -46,103 +196,6 @@ Notes:
 - Variable names must match `[A-Za-z_][A-Za-z0-9_]*`.
 - Malformed placeholders fail config loading.
 - No escape syntax is supported for literal `${...}`.
-
-## Sources
-
-Sources can be a simple list of paths (auto-labeled from directory name) or rich entries with per-source options.
-
-**Simple form:**
-
-```yaml
-sources:
-  - "/home/user/documents"
-  - "/home/user/photos"
-```
-
-**Rich form:**
-
-```yaml
-sources:
-  - path: "/home/user/documents"
-    label: "docs"
-    exclude: ["*.tmp", ".cache/**"]
-    # exclude_if_present: [".nobackup", "CACHEDIR.TAG"]
-    # one_file_system: true
-    # git_ignore: false
-    repos: ["main"]                  # Only back up to this repo (default: all)
-    retention:
-      keep_daily: 7
-    hooks:
-      before: "echo starting docs backup"
-```
-
-## Exclude Patterns
-
-```yaml
-exclude_patterns:                    # Global gitignore-style patterns (merged with per-source)
-  - "*.tmp"
-  - ".cache/**"
-exclude_if_present:                  # Skip dirs containing any marker file
-  - ".nobackup"
-  - "CACHEDIR.TAG"
-one_file_system: true                # Do not cross filesystem/mount boundaries (default true)
-git_ignore: false                    # Respect .gitignore files (default false)
-```
-
-## Chunker
-
-```yaml
-chunker:                             # Optional, defaults shown
-  min_size: 524288                   # 512 KiB
-  avg_size: 2097152                  # 2 MiB
-  max_size: 8388608                  # 8 MiB
-```
-
-## Compression
-
-```yaml
-compression:
-  algorithm: "lz4"                   # "lz4", "zstd", or "none"
-  zstd_level: 3                      # Only used with zstd
-```
-
-## Limits
-
-```yaml
-limits:                              # Optional backup resource limits
-  cpu:
-    max_threads: 0                   # 0 = default rayon behavior
-    nice: 0                          # Unix niceness target (-20..19), 0 = unchanged
-  io:
-    read_mib_per_sec: 0              # Source file reads during backup
-    write_mib_per_sec: 0             # Local repository writes during backup
-  network:
-    read_mib_per_sec: 0              # Remote backend reads during backup
-    write_mib_per_sec: 0             # Remote backend writes during backup
-```
-
-## Retention
-
-```yaml
-retention:                           # Global retention policy (can be overridden per-source)
-  keep_last: 10
-  keep_daily: 7
-  keep_weekly: 4
-  keep_monthly: 6
-  keep_yearly: 2
-  keep_within: "2d"                  # Keep everything within this period (e.g. "2d", "48h", "1w")
-```
-
-## Hooks
-
-```yaml
-hooks:                               # Global hooks: run for every command
-  before: "echo starting"
-  after: "echo done"
-  # before_backup: "echo backup starting"  # Command-specific hooks
-  # failed: "notify-send 'vger failed'"
-  # finally: "cleanup.sh"
-```
 
 ## Multiple sources
 

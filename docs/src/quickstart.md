@@ -1,71 +1,71 @@
 # Quick Start
 
-## Build
+## Install
+
+Download a pre-built binary from the [releases page](https://github.com/borgbase/vger/releases), or build from source:
 
 ```bash
 cargo build --release
 ```
 
-The binary is at `target/release/vger`.
+The binary is at `target/release/vger`. See [Installing](install.md) for more details.
 
 ## Create a config file
 
-```bash
-# Generate a starter config in the current directory
-vger config
+Generate a starter configuration in the current directory:
 
-# Or write it to a specific path
+```bash
+vger config
+```
+
+Or write it to a specific path:
+
+```bash
 vger config --dest ~/.config/vger/config.yaml
 ```
 
-Edit the generated `vger.yaml` to set your repository path, source directories, and encryption mode.
+Edit the generated `vger.yaml` to set your repository path and source directories. Encryption is enabled by default. See [Configuration](configuration.md) for a full reference.
 
-V'Ger automatically finds config files in this order:
+## Initialize and back up
 
-1. `--config <path>` flag
-2. `VGER_CONFIG` environment variable
-3. `./vger.yaml` (project)
-4. `$XDG_CONFIG_HOME/vger/config.yaml` or `~/.config/vger/config.yaml` (user)
-5. `/etc/vger/config.yaml` (system)
-
-You can also set `VGER_PASSPHRASE` to supply the passphrase non-interactively.
-
-## Run
+Initialize the repository (prompts for passphrase if encrypted):
 
 ```bash
-# Initialize the repository (prompts for passphrase if encrypted)
 vger init
+```
 
-# Create a backup
+Create a backup of all configured sources:
+
+```bash
 vger backup
+```
 
-# List all snapshots
+## Inspect snapshots
+
+List all snapshots:
+
+```bash
 vger list
+```
 
-# Show repository statistics
+Show repository statistics:
+
+```bash
 vger info
+```
 
-# List files inside a snapshot (use the hex ID from `vger list`)
+List files inside a snapshot (use the hex ID from `vger list`):
+
+```bash
 vger list --snapshot a1b2c3d4
+```
 
-# Restore to a directory
+## Restore
+
+Restore files from a snapshot to a directory:
+
+```bash
 vger extract --snapshot a1b2c3d4 --dest /tmp/restored
 ```
 
-For backup options, snapshot browsing, and maintenance tasks, see the [workflow guides](workflows/index.md).
-
-## Available commands
-
-| Command | Description |
-|---------|-------------|
-| `vger config` | Generate a starter configuration file |
-| `vger init` | Initialize a new backup repository |
-| `vger backup` | Back up files to a new snapshot |
-| `vger list` | List snapshots, or files within a snapshot |
-| `vger extract` | Restore files from a snapshot |
-| `vger delete` | Delete a specific snapshot |
-| `vger prune` | Prune snapshots according to retention policy |
-| `vger check` | Verify repository integrity (`--verify-data` for full content verification) |
-| `vger info` | Show repository statistics (snapshot counts and size totals) |
-| `vger compact` | Free space by repacking pack files after delete/prune |
-| `vger mount` | Browse snapshots via a local WebDAV server |
+For backup options, snapshot browsing, and maintenance tasks, see the [workflow guides](backup.md).

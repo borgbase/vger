@@ -39,6 +39,6 @@ vger compact
 
 ## Related pages
 
-- [Quick Start](../quickstart.md)
-- [Server Mode](../server-mode.md) (server-side compaction)
-- [Architecture](../architecture.md) (compact algorithm details)
+- [Quick Start](quickstart.md)
+- [Server Mode](server-mode.md) (server-side compaction)
+- [Architecture](architecture.md) (compact algorithm details)

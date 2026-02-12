@@ -47,5 +47,5 @@ vger mount --address 127.0.0.1:9090
 
 ## Related pages
 
-- [Quick Start](../quickstart.md)
+- [Quick Start](quickstart.md)
 - [Make a Backup](backup.md)
