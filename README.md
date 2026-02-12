@@ -1,10 +1,19 @@
-# V'Ger
+# V'Ger Backup
 
 A fast, encrypted, deduplicated backup tool written in Rust. Named after [V'Ger](https://memory-alpha.fandom.com/wiki/V%27Ger) from *Star Trek: The Motion Picture* — a probe that assimilated everything it encountered and returned as something far more powerful.
 
-Inspired by [BorgBackup](https://www.borgbackup.org/), [Borgmatic](https://torsion.org/borgmatic/), [restic](https://restic.net/), and [rustic](https://rustic.cli.rs/). Uses its own on-disk format — **not compatible** with Borg repositories.
+Inspired by [BorgBackup](https://www.borgbackup.org/), [Borgmatic](https://torsion.org/borgmatic/), [restic](https://restic.net/), and [rustic](https://rustic.cli.rs/). Uses its own on-disk format — **not compatible** with Borg or Restic repositories.
 
 ## Features
+
+### Core capabilities
+
+- **Deduplication** — Content-defined chunking (FastCDC) splits files into variable-size chunks. Identical chunks are stored only once, even across snapshots.
+- **Compression** — LZ4 (fast, default) or Zstandard (better ratio).
+- **Encryption** — AES-256-GCM authenticated encryption with Argon2id key derivation. Plaintext mode also available.
+- **Storage backends** — Abstracted via [Apache OpenDAL](https://opendal.apache.org/). Supports local filesystem, S3-compatible storage, SFTP and a dedicated REST server out of the box.
+- **REST server** — Purpose-built backup server (`vger-server`) with append-only enforcement, per-repo quotas, lock management with auto-expiry, backup freshness monitoring, server-side compaction, and structural integrity checks. See [Server Mode](#server-mode) below.
+
 
 ### Available commands
 
@@ -21,13 +30,6 @@ Inspired by [BorgBackup](https://www.borgbackup.org/), [Borgmatic](https://torsi
 | `vger compact` | Free space by repacking pack files after delete/prune |
 | `vger mount` | Browse snapshots via a local WebDAV server |
 
-### Core capabilities
-
-- **Deduplication** — Content-defined chunking (FastCDC) splits files into variable-size chunks. Identical chunks are stored only once, even across snapshots.
-- **Compression** — LZ4 (fast, default) or Zstandard (better ratio).
-- **Encryption** — AES-256-GCM authenticated encryption with Argon2id key derivation. Plaintext mode also available.
-- **Storage backends** — Abstracted via [Apache OpenDAL](https://opendal.apache.org/). Supports local filesystem, S3-compatible storage, and a dedicated REST server out of the box.
-- **REST server** — Purpose-built backup server (`vger-server`) with append-only enforcement, per-repo quotas, lock management with auto-expiry, backup freshness monitoring, server-side compaction, and structural integrity checks. See [Server Mode](#server-mode) below.
 
 ### Why a dedicated REST server instead of plain S3?
 
