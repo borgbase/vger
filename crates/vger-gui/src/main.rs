@@ -518,10 +518,7 @@ fn format_bytes(bytes: u64) -> String {
     }
 }
 
-fn format_info_stats(
-    repo_name: &str,
-    stats: &vger_core::commands::info::InfoStats,
-) -> String {
+fn format_info_stats(repo_name: &str, stats: &vger_core::commands::info::InfoStats) -> String {
     let encryption = format!("{:?}", stats.encryption);
     let last_snapshot = stats
         .last_snapshot_time
@@ -721,7 +718,11 @@ fn send_combo_data(ui_tx: &Sender<UiEvent>, repos: &[ResolvedRepo]) {
     let _ = ui_tx.send(UiEvent::SourcesText(format_sources_text(repos)));
 }
 
-fn log_backup_report(ui_tx: &Sender<UiEvent>, repo_name: &str, report: &operations::BackupRunReport) {
+fn log_backup_report(
+    ui_tx: &Sender<UiEvent>,
+    repo_name: &str,
+    report: &operations::BackupRunReport,
+) {
     if report.created.is_empty() {
         send_log(ui_tx, format!("[{repo_name}] no snapshots created"));
         return;
@@ -841,10 +842,7 @@ fn run_worker(
                 let repo = match config::select_repo(&runtime.repos, &repo_selector) {
                     Some(r) => r,
                     None => {
-                        send_log(
-                            &ui_tx,
-                            format!("No repository matching '{repo_selector}'."),
-                        );
+                        send_log(&ui_tx, format!("No repository matching '{repo_selector}'."));
                         continue;
                     }
                 };
@@ -924,8 +922,7 @@ fn run_worker(
                         }
                     };
 
-                    if repo.config.encryption.mode
-                        != vger_core::config::EncryptionModeConfig::None
+                    if repo.config.encryption.mode != vger_core::config::EncryptionModeConfig::None
                         && passphrase.is_none()
                     {
                         send_log(
@@ -971,10 +968,7 @@ fn run_worker(
                 let repo = match config::select_repo(&runtime.repos, &repo_selector) {
                     Some(r) => r,
                     None => {
-                        send_log(
-                            &ui_tx,
-                            format!("No repository matching '{repo_selector}'."),
-                        );
+                        send_log(&ui_tx, format!("No repository matching '{repo_selector}'."));
                         continue;
                     }
                 };

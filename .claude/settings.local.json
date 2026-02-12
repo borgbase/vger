@@ -1,0 +1,14 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(cargo:*)",
+      "Bash(rustup update:*)",
+      "Bash(rustc:*)",
+      "Bash(/Users/manu/Workspace/borg-rs/target/debug/vger:*)",
+      "Bash(echo:*)",
+      "Bash(./scripts/build-release.sh:*)",
+      "Bash(./target/release/vger delete:*)",
+      "Bash(./target/release/vger:*)"
+    ]
+  }
+}
