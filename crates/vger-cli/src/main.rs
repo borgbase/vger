@@ -38,7 +38,7 @@ struct Cli {
     verbose: u8,
 
     #[command(subcommand)]
-    command: Commands,
+    command: Option<Commands>,
 }
 
 #[derive(Subcommand)]
@@ -207,7 +207,7 @@ fn main() {
         .init();
 
     // Handle `config` subcommand early — no config file needed
-    if let Commands::Config { dest } = &cli.command {
+    if let Some(Commands::Config { dest }) = &cli.command {
         if let Err(e) = run_config_generate(dest) {
             eprintln!("Error: {e}");
             std::process::exit(1);
@@ -272,20 +272,30 @@ fn main() {
 
         let has_hooks = !repo.global_hooks.is_empty() || !repo.repo_hooks.is_empty();
 
+        let cmd_name = match &cli.command {
+            Some(cmd) => command_name(cmd),
+            None => "run",
+        };
+
+        let run_action = || -> Result<(), Box<dyn std::error::Error>> {
+            match &cli.command {
+                Some(cmd) => dispatch_command(cmd, cfg, label, &repo.sources),
+                None => run_default_actions(cfg, label, &repo.sources),
+            }
+        };
+
         let result = if has_hooks {
             let mut ctx = HookContext {
-                command: command_name(&cli.command).to_string(),
+                command: cmd_name.to_string(),
                 repository: cfg.repository.url.clone(),
                 label: repo.label.clone(),
                 error: None,
                 source_label: None,
                 source_path: None,
             };
-            hooks::run_with_hooks(&repo.global_hooks, &repo.repo_hooks, &mut ctx, || {
-                dispatch_command(&cli.command, cfg, label, &repo.sources)
-            })
+            hooks::run_with_hooks(&repo.global_hooks, &repo.repo_hooks, &mut ctx, run_action)
         } else {
-            dispatch_command(&cli.command, cfg, label, &repo.sources)
+            run_action()
         };
 
         if let Err(e) = result {
@@ -302,6 +312,112 @@ fn main() {
 
     if had_error {
         std::process::exit(1);
+    }
+}
+
+enum StepResult {
+    Ok,
+    Failed(String),
+    Skipped(&'static str),
+}
+
+fn run_default_actions(
+    cfg: &VgerConfig,
+    label: Option<&str>,
+    sources: &[SourceEntry],
+) -> Result<(), Box<dyn std::error::Error>> {
+    let start = std::time::Instant::now();
+    let mut steps: Vec<(&str, StepResult)> = Vec::new();
+
+    // 1. Backup
+    eprintln!("==> Starting backup");
+    let backup_ok = match run_backup(cfg, label, None, None, vec![], sources, &[]) {
+        Ok(()) => {
+            steps.push(("backup", StepResult::Ok));
+            true
+        }
+        Err(e) => {
+            eprintln!("Error: {e}");
+            steps.push(("backup", StepResult::Failed(e.to_string())));
+            false
+        }
+    };
+
+    // 2. Prune — skip if no retention rules configured
+    let has_retention = cfg.retention.has_any_rule()
+        || sources
+            .iter()
+            .any(|s| s.retention.as_ref().is_some_and(|r| r.has_any_rule()));
+
+    if !has_retention {
+        steps.push(("prune", StepResult::Skipped("no retention rules")));
+    } else if !backup_ok {
+        steps.push(("prune", StepResult::Skipped("backup failed")));
+    } else {
+        eprintln!("==> Starting prune");
+        match run_prune(cfg, label, false, false, sources, &[]) {
+            Ok(()) => steps.push(("prune", StepResult::Ok)),
+            Err(e) => {
+                eprintln!("Error: {e}");
+                steps.push(("prune", StepResult::Failed(e.to_string())));
+            }
+        }
+    }
+
+    // 3. Compact
+    if !backup_ok {
+        steps.push(("compact", StepResult::Skipped("backup failed")));
+    } else {
+        eprintln!("==> Starting compact");
+        match run_compact(cfg, label, 10.0, None, false) {
+            Ok(()) => steps.push(("compact", StepResult::Ok)),
+            Err(e) => {
+                eprintln!("Error: {e}");
+                steps.push(("compact", StepResult::Failed(e.to_string())));
+            }
+        }
+    }
+
+    // 4. Check (metadata-only)
+    eprintln!("==> Starting check");
+    match run_check(cfg, label, false) {
+        Ok(()) => steps.push(("check", StepResult::Ok)),
+        Err(e) => {
+            eprintln!("Error: {e}");
+            steps.push(("check", StepResult::Failed(e.to_string())));
+        }
+    }
+
+    // Print summary
+    let elapsed = start.elapsed();
+    let mut had_failure = false;
+
+    eprintln!();
+    eprintln!("=== Summary ===");
+    for (name, result) in &steps {
+        match result {
+            StepResult::Ok => eprintln!("  {name:<12} ok"),
+            StepResult::Failed(e) => {
+                had_failure = true;
+                eprintln!("  {name:<12} FAILED: {e}");
+            }
+            StepResult::Skipped(reason) => eprintln!("  {name:<12} skipped ({reason})"),
+        }
+    }
+
+    let secs = elapsed.as_secs();
+    let mins = secs / 60;
+    let secs = secs % 60;
+    if mins > 0 {
+        eprintln!("  Duration:    {mins}m {secs:02}s");
+    } else {
+        eprintln!("  Duration:    {secs}s");
+    }
+
+    if had_failure {
+        Err("one or more steps failed".into())
+    } else {
+        Ok(())
     }
 }
 
@@ -809,7 +925,7 @@ fn run_check(
     );
 
     if !result.errors.is_empty() {
-        std::process::exit(1);
+        return Err(format!("check found {} error(s)", result.errors.len()).into());
     }
 
     Ok(())
