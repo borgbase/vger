@@ -3070,6 +3070,7 @@ dependencies = [
  "nix",
  "opendal",
  "rand 0.8.5",
+ "rayon",
  "rmp-serde",
  "serde",
  "serde_json",

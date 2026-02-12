@@ -1,9 +1,11 @@
+use std::collections::HashMap;
 use std::os::unix::fs::MetadataExt;
 use std::path::Path;
 
 use chrono::Utc;
 use ignore::{gitignore::Gitignore, WalkBuilder};
 use rand::RngCore;
+use rayon::prelude::*;
 use tracing::info;
 
 use super::util::with_repo_lock;
@@ -58,6 +60,34 @@ fn build_explicit_excludes(source: &Path, patterns: &[String]) -> Result<Gitigno
 
 fn should_skip_for_device(one_file_system: bool, source_dev: u64, entry_dev: u64) -> bool {
     one_file_system && source_dev != entry_dev
+}
+
+struct TransformJob {
+    chunk_id: ChunkId,
+    data: Vec<u8>,
+}
+
+struct PreparedChunk {
+    chunk_id: ChunkId,
+    uncompressed_size: u32,
+    packed: Vec<u8>,
+}
+
+enum FileChunkAction {
+    Existing {
+        chunk_id: ChunkId,
+        size: u32,
+        csize: u32,
+    },
+    NewPrimary {
+        chunk_id: ChunkId,
+        size: u32,
+        job_idx: usize,
+    },
+    NewDuplicate {
+        chunk_id: ChunkId,
+        size: u32,
+    },
 }
 
 /// Run `vger backup` for one or more source directories.
@@ -269,25 +299,143 @@ pub fn run(config: &VgerConfig, req: BackupRequest<'_>) -> Result<SnapshotStats>
                 // For regular files, chunk and store the content
                 if entry_type == ItemType::RegularFile && metadata.len() > 0 {
                     let file_data = std::fs::read(entry.path()).map_err(VgerError::Io)?;
-
                     let chunk_ranges = chunker::chunk_data(&file_data, &repo.config.chunker_params);
+                    let chunk_id_key = *repo.crypto.chunk_id_key();
+
+                    let mut actions = Vec::with_capacity(chunk_ranges.len());
+                    let mut transform_jobs: Vec<TransformJob> =
+                        Vec::with_capacity(chunk_ranges.len());
+                    let mut pending_new: HashMap<ChunkId, usize> = HashMap::new();
 
                     for (offset, length) in chunk_ranges {
                         let chunk_data = &file_data[offset..offset + length];
-                        let (chunk_id, csize, is_new) =
-                            repo.store_chunk(chunk_data, compression, PackType::Data)?;
+                        let chunk_id = ChunkId::compute(&chunk_id_key, chunk_data);
+                        let size = length as u32;
 
-                        stats.original_size += length as u64;
-                        stats.compressed_size += csize as u64;
-                        if is_new {
-                            stats.deduplicated_size += csize as u64;
+                        if let Some(csize) = repo.bump_ref_if_exists(&chunk_id) {
+                            actions.push(FileChunkAction::Existing {
+                                chunk_id,
+                                size,
+                                csize,
+                            });
+                            continue;
                         }
 
-                        item.chunks.push(ChunkRef {
-                            id: chunk_id,
-                            size: length as u32,
-                            csize,
+                        if pending_new.contains_key(&chunk_id) {
+                            actions.push(FileChunkAction::NewDuplicate { chunk_id, size });
+                            continue;
+                        }
+
+                        let job_idx = transform_jobs.len();
+                        pending_new.insert(chunk_id, job_idx);
+                        transform_jobs.push(TransformJob {
+                            chunk_id,
+                            data: chunk_data.to_vec(),
                         });
+                        actions.push(FileChunkAction::NewPrimary {
+                            chunk_id,
+                            size,
+                            job_idx,
+                        });
+                    }
+
+                    let mut prepared_chunks: Vec<Option<PreparedChunk>> = if transform_jobs
+                        .is_empty()
+                    {
+                        Vec::new()
+                    } else {
+                        let prepared_results: Vec<Result<PreparedChunk>> = {
+                            let crypto = repo.crypto.as_ref();
+                            transform_jobs
+                                .par_iter()
+                                .map(|job| {
+                                    let compressed =
+                                        crate::compress::compress(compression, &job.data)?;
+                                    let packed =
+                                        pack_object(ObjectType::ChunkData, &compressed, crypto)?;
+                                    Ok(PreparedChunk {
+                                        chunk_id: job.chunk_id,
+                                        uncompressed_size: job.data.len() as u32,
+                                        packed,
+                                    })
+                                })
+                                .collect()
+                        };
+
+                        prepared_results
+                            .into_iter()
+                            .collect::<Result<Vec<_>>>()?
+                            .into_iter()
+                            .map(Some)
+                            .collect()
+                    };
+
+                    for action in actions {
+                        match action {
+                            FileChunkAction::Existing {
+                                chunk_id,
+                                size,
+                                csize,
+                            } => {
+                                stats.original_size += size as u64;
+                                stats.compressed_size += csize as u64;
+                                item.chunks.push(ChunkRef {
+                                    id: chunk_id,
+                                    size,
+                                    csize,
+                                });
+                            }
+                            FileChunkAction::NewPrimary {
+                                chunk_id,
+                                size,
+                                job_idx,
+                            } => {
+                                let prepared = prepared_chunks
+                                    .get_mut(job_idx)
+                                    .and_then(Option::take)
+                                    .ok_or_else(|| {
+                                        VgerError::Other(format!(
+                                            "missing prepared chunk at index {job_idx}"
+                                        ))
+                                    })?;
+                                if prepared.chunk_id != chunk_id {
+                                    return Err(VgerError::Other(format!(
+                                        "prepared chunk mismatch at index {job_idx}"
+                                    )));
+                                }
+                                let csize = repo.commit_prepacked_chunk(
+                                    chunk_id,
+                                    prepared.packed,
+                                    prepared.uncompressed_size,
+                                    PackType::Data,
+                                )?;
+
+                                stats.original_size += size as u64;
+                                stats.compressed_size += csize as u64;
+                                stats.deduplicated_size += csize as u64;
+                                item.chunks.push(ChunkRef {
+                                    id: chunk_id,
+                                    size,
+                                    csize,
+                                });
+                            }
+                            FileChunkAction::NewDuplicate { chunk_id, size } => {
+                                let csize =
+                                    repo.bump_ref_if_exists(&chunk_id).ok_or_else(|| {
+                                        VgerError::Other(format!(
+                                            "dedup invariant violated for chunk {chunk_id}"
+                                        ))
+                                    })?;
+
+                                stats.original_size += size as u64;
+                                stats.compressed_size += csize as u64;
+                                item.chunks.push(ChunkRef {
+                                    id: chunk_id,
+                                    size,
+                                    csize,
+                                });
+                            }
+                        }
                     }
 
                     stats.nfiles += 1;

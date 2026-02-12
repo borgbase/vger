@@ -264,47 +264,46 @@ impl Repository {
         Ok(())
     }
 
-    /// Store a chunk in the repository. Returns (chunk_id, stored_size, was_new).
-    /// If the chunk already exists (dedup), just increments the refcount.
-    pub fn store_chunk(
-        &mut self,
-        data: &[u8],
-        compression: compress::Compression,
-        pack_type: PackType,
-    ) -> Result<(ChunkId, u32, bool)> {
-        let chunk_id = ChunkId::compute(self.crypto.chunk_id_key(), data);
-
+    /// Increment refcount if this chunk already exists in committed or pending state.
+    /// Returns stored size when found.
+    pub fn bump_ref_if_exists(&mut self, chunk_id: &ChunkId) -> Option<u32> {
         // Dedup check against committed index
-        if self.chunk_index.contains(&chunk_id) {
-            let stored_size = self.chunk_index.get(&chunk_id).unwrap().stored_size;
-            self.chunk_index.increment_refcount(&chunk_id);
-            return Ok((chunk_id, stored_size, false));
+        if self.chunk_index.contains(chunk_id) {
+            let stored_size = self.chunk_index.get(chunk_id).unwrap().stored_size;
+            self.chunk_index.increment_refcount(chunk_id);
+            return Some(stored_size);
         }
 
         // Dedup check against pending blobs in both pack writers
-        if self.data_pack_writer.contains_pending(&chunk_id) {
+        if self.data_pack_writer.contains_pending(chunk_id) {
             let stored_size = self
                 .data_pack_writer
-                .get_pending_stored_size(&chunk_id)
+                .get_pending_stored_size(chunk_id)
                 .unwrap();
-            self.data_pack_writer.increment_pending(&chunk_id);
-            return Ok((chunk_id, stored_size, false));
+            self.data_pack_writer.increment_pending(chunk_id);
+            return Some(stored_size);
         }
-        if self.tree_pack_writer.contains_pending(&chunk_id) {
+        if self.tree_pack_writer.contains_pending(chunk_id) {
             let stored_size = self
                 .tree_pack_writer
-                .get_pending_stored_size(&chunk_id)
+                .get_pending_stored_size(chunk_id)
                 .unwrap();
-            self.tree_pack_writer.increment_pending(&chunk_id);
-            return Ok((chunk_id, stored_size, false));
+            self.tree_pack_writer.increment_pending(chunk_id);
+            return Some(stored_size);
         }
 
-        // Compress
-        let compressed = compress::compress(compression, data)?;
-        let uncompressed_size = data.len() as u32;
+        None
+    }
 
-        // Encrypt and wrap in repo object envelope
-        let packed = pack_object(ObjectType::ChunkData, &compressed, self.crypto.as_ref())?;
+    /// Commit a pre-compressed and pre-encrypted chunk to the selected pack writer.
+    /// Returns the stored size in bytes.
+    pub fn commit_prepacked_chunk(
+        &mut self,
+        chunk_id: ChunkId,
+        packed: Vec<u8>,
+        uncompressed_size: u32,
+        pack_type: PackType,
+    ) -> Result<u32> {
         let stored_size = packed.len() as u32;
 
         // Add to the appropriate pack writer
@@ -341,6 +340,32 @@ impl Repository {
                 }
             }
         }
+
+        Ok(stored_size)
+    }
+
+    /// Store a chunk in the repository. Returns (chunk_id, stored_size, was_new).
+    /// If the chunk already exists (dedup), just increments the refcount.
+    pub fn store_chunk(
+        &mut self,
+        data: &[u8],
+        compression: compress::Compression,
+        pack_type: PackType,
+    ) -> Result<(ChunkId, u32, bool)> {
+        let chunk_id = ChunkId::compute(self.crypto.chunk_id_key(), data);
+
+        if let Some(stored_size) = self.bump_ref_if_exists(&chunk_id) {
+            return Ok((chunk_id, stored_size, false));
+        }
+
+        // Compress
+        let compressed = compress::compress(compression, data)?;
+        let uncompressed_size = data.len() as u32;
+
+        // Encrypt and wrap in repo object envelope
+        let packed = pack_object(ObjectType::ChunkData, &compressed, self.crypto.as_ref())?;
+        let stored_size =
+            self.commit_prepacked_chunk(chunk_id, packed, uncompressed_size, pack_type)?;
 
         Ok((chunk_id, stored_size, true))
     }

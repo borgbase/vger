@@ -8,6 +8,7 @@ use vger_core::config::{
 use vger_core::repo::manifest::SnapshotEntry;
 use vger_core::repo::pack::PackType;
 use vger_core::repo::{EncryptionMode, Repository};
+use vger_core::snapshot::item::ItemType;
 use vger_core::storage::opendal_backend::OpendalBackend;
 
 fn init_local_repo(dir: &std::path::Path) -> Repository {
@@ -203,4 +204,82 @@ fn backup_git_ignore_respected_when_enabled() {
 
     assert_eq!(stats_without_gitignore.nfiles, 3);
     assert_eq!(stats_with_gitignore.nfiles, 2);
+}
+
+#[test]
+fn backup_deduplicates_identical_files_and_extracts_correctly() {
+    let tmp = tempfile::tempdir().unwrap();
+    let repo_dir = tmp.path().join("repo");
+    let source_dir = tmp.path().join("source");
+    std::fs::create_dir_all(&repo_dir).unwrap();
+    std::fs::create_dir_all(&source_dir).unwrap();
+
+    let payload: Vec<u8> = (0u32..512 * 1024).map(|i| (i % 251) as u8).collect();
+    std::fs::write(source_dir.join("a.bin"), &payload).unwrap();
+    std::fs::write(source_dir.join("b.bin"), &payload).unwrap();
+
+    let mut config = make_test_config(&repo_dir);
+    config.chunker = ChunkerConfig {
+        min_size: 8 * 1024,
+        avg_size: 16 * 1024,
+        max_size: 64 * 1024,
+    };
+
+    commands::init::run(&config, None).unwrap();
+
+    let source_paths = vec![source_dir.to_string_lossy().to_string()];
+    let exclude_if_present: Vec<String> = Vec::new();
+    let exclude_patterns: Vec<String> = Vec::new();
+    let stats = commands::backup::run(
+        &config,
+        commands::backup::BackupRequest {
+            snapshot_name: "snap-dedup",
+            passphrase: None,
+            source_paths: &source_paths,
+            source_label: "source",
+            exclude_patterns: &exclude_patterns,
+            exclude_if_present: &exclude_if_present,
+            one_file_system: true,
+            git_ignore: false,
+            compression: Compression::None,
+            label: "",
+        },
+    )
+    .unwrap();
+
+    assert_eq!(stats.nfiles, 2);
+    assert!(stats.deduplicated_size > 0);
+    assert!(stats.deduplicated_size < stats.compressed_size);
+
+    let repo = open_local_repo(&repo_dir);
+    let items = commands::list::load_snapshot_items(&repo, "snap-dedup").unwrap();
+    let file_items: Vec<_> = items
+        .iter()
+        .filter(|item| item.entry_type == ItemType::RegularFile)
+        .collect();
+    assert_eq!(file_items.len(), 2);
+
+    let first_ids: Vec<_> = file_items[0].chunks.iter().map(|c| c.id).collect();
+    let second_ids: Vec<_> = file_items[1].chunks.iter().map(|c| c.id).collect();
+    assert!(!first_ids.is_empty());
+    assert_eq!(first_ids, second_ids);
+
+    for chunk_id in first_ids {
+        let entry = repo.chunk_index.get(&chunk_id).unwrap();
+        assert_eq!(entry.refcount, 2);
+    }
+
+    let restore_dir = tmp.path().join("restore");
+    let extract_stats = commands::extract::run(
+        &config,
+        None,
+        "snap-dedup",
+        restore_dir.to_str().unwrap(),
+        None,
+    )
+    .unwrap();
+    assert_eq!(extract_stats.files, 2);
+
+    assert_eq!(std::fs::read(restore_dir.join("a.bin")).unwrap(), payload);
+    assert_eq!(std::fs::read(restore_dir.join("b.bin")).unwrap(), payload);
 }
