@@ -356,7 +356,7 @@ pub struct RepositoryEntry {
 impl RepositoryEntry {
     fn to_repo_config(&self) -> RepositoryConfig {
         RepositoryConfig {
-            url: self.url.clone(),
+            url: expand_tilde(&self.url),
             region: self.region.clone(),
             access_key_id: self.access_key_id.clone(),
             secret_access_key: self.secret_access_key.clone(),
@@ -394,6 +394,16 @@ struct ConfigDocument {
 #[cfg(test)]
 type RawConfig = ConfigDocument;
 
+/// Expand a leading `~` or `~/` to the user's home directory.
+fn expand_tilde(path: &str) -> String {
+    if path == "~" || path.starts_with("~/") {
+        if let Some(home) = dirs::home_dir() {
+            return home.join(&path[2..]).to_string_lossy().to_string();
+        }
+    }
+    path.to_string()
+}
+
 /// Derive a label from a path by taking the last component (basename).
 pub fn label_from_path(path: &str) -> String {
     Path::new(path)
@@ -408,7 +418,7 @@ fn normalize_source(input: SourceInput) -> SourceEntry {
         SourceInput::Simple(path) => {
             let label = label_from_path(&path);
             SourceEntry {
-                path,
+                path: expand_tilde(&path),
                 label,
                 exclude: Vec::new(),
                 hooks: SourceHooksConfig::default(),
@@ -426,7 +436,7 @@ fn normalize_source(input: SourceInput) -> SourceEntry {
         } => {
             let label = label.unwrap_or_else(|| label_from_path(&path));
             SourceEntry {
-                path,
+                path: expand_tilde(&path),
                 label,
                 exclude,
                 hooks,
@@ -1510,5 +1520,45 @@ repositories:
 
         let repos = load_and_resolve(&path).unwrap();
         assert!(repos[0].sources.is_empty());
+    }
+
+    #[test]
+    fn test_tilde_expanded_in_repo_url_and_sources() {
+        let yaml = r#"
+repositories:
+  - url: ~/backups/repo
+sources:
+  - ~/documents
+  - path: ~/photos
+    label: pics
+"#;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.yaml");
+        fs::write(&path, yaml).unwrap();
+
+        let repos = load_and_resolve(&path).unwrap();
+        let home = dirs::home_dir().unwrap().to_string_lossy().to_string();
+
+        // Repository URL should be expanded
+        assert!(
+            repos[0].config.repository.url.starts_with(&home),
+            "repo url not expanded: {}",
+            repos[0].config.repository.url
+        );
+        assert!(repos[0].config.repository.url.ends_with("/backups/repo"));
+
+        // Simple source path should be expanded
+        assert!(
+            repos[0].sources[0].path.starts_with(&home),
+            "source path not expanded: {}",
+            repos[0].sources[0].path
+        );
+
+        // Rich source path should be expanded
+        assert!(
+            repos[0].sources[1].path.starts_with(&home),
+            "rich source path not expanded: {}",
+            repos[0].sources[1].path
+        );
     }
 }
