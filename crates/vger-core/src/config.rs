@@ -1,6 +1,7 @@
 use std::collections::HashMap;
 use std::fmt;
 use std::path::{Path, PathBuf};
+use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
 
@@ -23,6 +24,8 @@ pub struct VgerConfig {
     pub compression: CompressionConfig,
     #[serde(default)]
     pub retention: RetentionConfig,
+    #[serde(default)]
+    pub schedule: ScheduleConfig,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -48,6 +51,38 @@ impl RetentionConfig {
             || self.keep_weekly.is_some()
             || self.keep_monthly.is_some()
             || self.keep_yearly.is_some()
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ScheduleConfig {
+    #[serde(default)]
+    pub enabled: bool,
+    #[serde(default = "default_schedule_every")]
+    pub every: String,
+    #[serde(default)]
+    pub on_startup: bool,
+    #[serde(default)]
+    pub jitter_seconds: u64,
+    #[serde(default = "default_passphrase_prompt_timeout_seconds")]
+    pub passphrase_prompt_timeout_seconds: u64,
+}
+
+impl Default for ScheduleConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            every: default_schedule_every(),
+            on_startup: false,
+            jitter_seconds: 0,
+            passphrase_prompt_timeout_seconds: default_passphrase_prompt_timeout_seconds(),
+        }
+    }
+}
+
+impl ScheduleConfig {
+    pub fn every_duration(&self) -> crate::error::Result<Duration> {
+        parse_human_duration(&self.every)
     }
 }
 
@@ -357,6 +392,58 @@ fn default_one_file_system() -> bool {
     true
 }
 
+fn default_schedule_every() -> String {
+    "24h".to_string()
+}
+
+fn default_passphrase_prompt_timeout_seconds() -> u64 {
+    300
+}
+
+/// Parse a simple duration string like "30m", "4h", or "2d".
+pub fn parse_human_duration(raw: &str) -> crate::error::Result<Duration> {
+    let input = raw.trim();
+    if input.is_empty() {
+        return Err(crate::error::VgerError::Config(
+            "duration must not be empty".into(),
+        ));
+    }
+
+    let (num_part, unit) = match input.chars().last() {
+        Some(c) if c.is_ascii_alphabetic() => (&input[..input.len() - 1], Some(c)),
+        Some(_) => (input, None),
+        None => {
+            return Err(crate::error::VgerError::Config(
+                "duration must not be empty".into(),
+            ));
+        }
+    };
+
+    let value: u64 = num_part
+        .parse()
+        .map_err(|_| crate::error::VgerError::Config(format!("invalid duration value: '{raw}'")))?;
+
+    let secs = match unit {
+        Some('m') | Some('M') => value.saturating_mul(60),
+        Some('h') | Some('H') => value.saturating_mul(60 * 60),
+        Some('d') | Some('D') => value.saturating_mul(60 * 60 * 24),
+        Some(other) => {
+            return Err(crate::error::VgerError::Config(format!(
+                "unsupported duration suffix '{other}' in '{raw}' (use m/h/d)"
+            )));
+        }
+        None => value.saturating_mul(60 * 60 * 24),
+    };
+
+    if secs == 0 {
+        return Err(crate::error::VgerError::Config(
+            "duration must be greater than zero".into(),
+        ));
+    }
+
+    Ok(Duration::from_secs(secs))
+}
+
 /// Retry configuration for remote storage backends (S3, SFTP, REST).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RetryConfig {
@@ -451,6 +538,8 @@ struct ConfigDocument {
     compression: CompressionConfig,
     #[serde(default)]
     retention: RetentionConfig,
+    #[serde(default)]
+    schedule: ScheduleConfig,
     /// Global hooks — apply to all repositories.
     #[serde(default)]
     hooks: HooksConfig,
@@ -740,6 +829,7 @@ fn resolve_document(raw: ConfigDocument) -> crate::error::Result<Vec<ResolvedRep
                     chunker: raw.chunker.clone(),
                     compression: entry.compression.unwrap_or_else(|| raw.compression.clone()),
                     retention: entry.retention.unwrap_or_else(|| raw.retention.clone()),
+                    schedule: raw.schedule.clone(),
                 },
                 global_hooks: raw.hooks.clone(),
                 repo_hooks,
@@ -914,6 +1004,13 @@ sources:
 #   keep_daily: 7
 #   keep_weekly: 4
 #   keep_monthly: 6
+#
+# schedule:
+#   enabled: false
+#   every: "24h"
+#   on_startup: false
+#   jitter_seconds: 0
+#   passphrase_prompt_timeout_seconds: 300
 
 # Sources support simple paths (above) or rich entries:
 #
@@ -1339,6 +1436,7 @@ repositories:
                 chunker: ChunkerConfig::default(),
                 compression: CompressionConfig::default(),
                 retention: RetentionConfig::default(),
+                schedule: ScheduleConfig::default(),
             },
             global_hooks: HooksConfig::default(),
             repo_hooks: HooksConfig::default(),
@@ -2014,5 +2112,30 @@ sources:
         let err = load_and_resolve(&path).unwrap_err();
         let msg = err.to_string();
         assert!(msg.contains("must not be empty"), "unexpected: {msg}");
+    }
+
+    #[test]
+    fn test_parse_human_duration_units() {
+        assert_eq!(parse_human_duration("30m").unwrap().as_secs(), 30 * 60);
+        assert_eq!(parse_human_duration("4h").unwrap().as_secs(), 4 * 60 * 60);
+        assert_eq!(
+            parse_human_duration("2d").unwrap().as_secs(),
+            2 * 24 * 60 * 60
+        );
+    }
+
+    #[test]
+    fn test_parse_human_duration_plain_number_is_days() {
+        assert_eq!(
+            parse_human_duration("3").unwrap().as_secs(),
+            3 * 24 * 60 * 60
+        );
+    }
+
+    #[test]
+    fn test_parse_human_duration_rejects_invalid_values() {
+        assert!(parse_human_duration("").is_err());
+        assert!(parse_human_duration("0h").is_err());
+        assert!(parse_human_duration("5w").is_err());
     }
 }

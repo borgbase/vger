@@ -1,0 +1,147 @@
+use rand::RngCore;
+
+use crate::commands;
+use crate::compress::Compression;
+use crate::config::{ResolvedRepo, SourceEntry, VgerConfig};
+use crate::error::{Result, VgerError};
+use crate::repo::manifest::SnapshotEntry;
+use crate::snapshot::item::Item;
+
+#[derive(Debug, Clone)]
+pub struct BackupSourceResult {
+    pub source_label: String,
+    pub snapshot_name: String,
+    pub source_paths: Vec<String>,
+    pub stats: crate::snapshot::SnapshotStats,
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct BackupRunReport {
+    pub created: Vec<BackupSourceResult>,
+}
+
+#[derive(Debug, Clone)]
+pub struct RepoBackupRunReport {
+    pub repo_label: Option<String>,
+    pub repository_url: String,
+    pub report: BackupRunReport,
+}
+
+#[derive(Debug, Clone)]
+pub struct ExtractRequest {
+    pub snapshot_name: String,
+    pub destination: String,
+    pub pattern: Option<String>,
+}
+
+fn generate_snapshot_name() -> String {
+    let mut buf = [0u8; 4];
+    rand::thread_rng().fill_bytes(&mut buf);
+    hex::encode(buf)
+}
+
+pub fn run_backup_for_repo(
+    config: &VgerConfig,
+    sources: &[SourceEntry],
+    passphrase: Option<&str>,
+    user_label: Option<&str>,
+) -> Result<BackupRunReport> {
+    if sources.is_empty() {
+        return Err(VgerError::Config(
+            "no sources configured for this repository".into(),
+        ));
+    }
+
+    let compression =
+        Compression::from_algorithm(config.compression.algorithm, config.compression.zstd_level);
+
+    let mut report = BackupRunReport::default();
+    let label = user_label.unwrap_or("");
+
+    for source in sources {
+        let snapshot_name = generate_snapshot_name();
+        let stats = commands::backup::run(
+            config,
+            commands::backup::BackupRequest {
+                snapshot_name: &snapshot_name,
+                passphrase,
+                source_paths: &source.paths,
+                source_label: &source.label,
+                exclude_patterns: &source.exclude,
+                exclude_if_present: &source.exclude_if_present,
+                one_file_system: source.one_file_system,
+                git_ignore: source.git_ignore,
+                compression,
+                label,
+            },
+        )?;
+
+        report.created.push(BackupSourceResult {
+            source_label: source.label.clone(),
+            snapshot_name,
+            source_paths: source.paths.clone(),
+            stats,
+        });
+    }
+
+    Ok(report)
+}
+
+pub fn run_backup_for_all_repos(
+    repos: &[ResolvedRepo],
+    passphrase_lookup: &mut dyn FnMut(&ResolvedRepo) -> Result<Option<String>>,
+    user_label: Option<&str>,
+) -> Result<Vec<RepoBackupRunReport>> {
+    let mut reports = Vec::with_capacity(repos.len());
+    for repo in repos {
+        let passphrase = passphrase_lookup(repo)?;
+        let report = run_backup_for_repo(
+            &repo.config,
+            &repo.sources,
+            passphrase.as_deref(),
+            user_label,
+        )?;
+        reports.push(RepoBackupRunReport {
+            repo_label: repo.label.clone(),
+            repository_url: repo.config.repository.url.clone(),
+            report,
+        });
+    }
+    Ok(reports)
+}
+
+pub fn list_snapshots(config: &VgerConfig, passphrase: Option<&str>) -> Result<Vec<SnapshotEntry>> {
+    match commands::list::run(config, passphrase, None)? {
+        commands::list::ListResult::Snapshots(entries) => Ok(entries),
+        commands::list::ListResult::Items(_) => Err(VgerError::Other(
+            "unexpected list result: expected snapshots".into(),
+        )),
+    }
+}
+
+pub fn list_snapshot_items(
+    config: &VgerConfig,
+    passphrase: Option<&str>,
+    snapshot_name: &str,
+) -> Result<Vec<Item>> {
+    match commands::list::run(config, passphrase, Some(snapshot_name))? {
+        commands::list::ListResult::Items(items) => Ok(items),
+        commands::list::ListResult::Snapshots(_) => Err(VgerError::Other(
+            "unexpected list result: expected snapshot items".into(),
+        )),
+    }
+}
+
+pub fn extract_snapshot(
+    config: &VgerConfig,
+    passphrase: Option<&str>,
+    req: &ExtractRequest,
+) -> Result<commands::extract::ExtractStats> {
+    commands::extract::run(
+        config,
+        passphrase,
+        &req.snapshot_name,
+        &req.destination,
+        req.pattern.as_deref(),
+    )
+}

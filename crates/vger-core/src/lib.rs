@@ -1,3 +1,4 @@
+pub mod app;
 pub mod chunker;
 pub mod commands;
 pub mod compress;

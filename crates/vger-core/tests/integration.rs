@@ -3,7 +3,7 @@ use vger_core::commands;
 use vger_core::compress::Compression;
 use vger_core::config::{
     ChunkerConfig, CompressionConfig, EncryptionConfig, EncryptionModeConfig, RepositoryConfig,
-    RetentionConfig, RetryConfig, VgerConfig,
+    RetentionConfig, RetryConfig, ScheduleConfig, VgerConfig,
 };
 use vger_core::repo::manifest::SnapshotEntry;
 use vger_core::repo::pack::PackType;
@@ -54,6 +54,7 @@ fn make_test_config(repo_dir: &std::path::Path) -> VgerConfig {
         chunker: ChunkerConfig::default(),
         compression: CompressionConfig::default(),
         retention: RetentionConfig::default(),
+        schedule: ScheduleConfig::default(),
     }
 }
 

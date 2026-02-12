@@ -1,3 +1,8 @@
 [workspace]
-members = ["crates/vger-core", "crates/vger-cli", "crates/vger-server"]
+members = [
+    "crates/vger-core",
+    "crates/vger-cli",
+    "crates/vger-server",
+    "crates/vger-gui",
+]
 resolver = "2"

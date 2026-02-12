@@ -1,0 +1,35 @@
+use std::path::Path;
+
+use crate::config::{self, ConfigSource, ResolvedRepo, ScheduleConfig};
+use crate::error::{Result, VgerError};
+
+pub mod operations;
+pub mod passphrase;
+pub mod scheduler;
+
+#[derive(Debug, Clone)]
+pub struct RuntimeConfig {
+    pub source: ConfigSource,
+    pub repos: Vec<ResolvedRepo>,
+}
+
+impl RuntimeConfig {
+    pub fn schedule(&self) -> ScheduleConfig {
+        self.repos
+            .first()
+            .map(|r| r.config.schedule.clone())
+            .unwrap_or_default()
+    }
+}
+
+pub fn load_runtime_config(config_path: Option<&str>) -> Result<RuntimeConfig> {
+    let source = config::resolve_config_path(config_path).ok_or_else(|| {
+        VgerError::Config("no configuration file found in default search paths".into())
+    })?;
+    let repos = config::load_and_resolve(source.path())?;
+    Ok(RuntimeConfig { source, repos })
+}
+
+pub fn load_runtime_config_from_path(path: &Path) -> Result<Vec<ResolvedRepo>> {
+    config::load_and_resolve(path)
+}

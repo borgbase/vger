@@ -178,3 +178,13 @@ retention:
   keep_weekly: 4
   keep_monthly: 6
   keep_yearly: 2
+
+# Optional desktop scheduler settings (used by vger-gui).
+# The GUI reads this as source-of-truth and auto-reloads on config edits.
+#
+# schedule:
+#   enabled: false
+#   every: "24h"                      # supports m, h, d (e.g. 30m, 6h, 2d)
+#   on_startup: false
+#   jitter_seconds: 0
+#   passphrase_prompt_timeout_seconds: 300
