@@ -19,16 +19,8 @@ static ASYNC_RUNTIME: LazyLock<tokio::runtime::Runtime> = LazyLock::new(|| {
         .expect("failed to create tokio runtime for blocking layer")
 });
 
-/// Internal default multipart chunk size for S3 uploads (32 MiB).
-pub const S3_UPLOAD_CHUNK_SIZE_BYTES: usize = 32 * 1024 * 1024;
-/// Internal default multipart concurrency for S3 uploads.
-pub const S3_UPLOAD_CONCURRENCY: usize = 4;
-
 pub struct OpendalBackend {
     op: BlockingOperator,
-    async_op: Option<Operator>,
-    write_chunk_size: Option<usize>,
-    write_concurrency: Option<usize>,
 }
 
 impl OpendalBackend {
@@ -37,25 +29,17 @@ impl OpendalBackend {
     pub fn from_operator(op: Operator) -> Self {
         Self {
             op: op.blocking(),
-            async_op: None,
-            write_chunk_size: None,
-            write_concurrency: None,
         }
     }
 
     /// Create a backend from an async-only operator (S3, SFTP).
     /// Adds a `BlockingLayer` to bridge async → blocking.
+    ///
+    /// All write tuning (multipart chunking, concurrency, throttling,
+    /// connection limits) should be applied as layers on the `Operator`
+    /// *before* calling this method. OpenDAL picks sensible multipart
+    /// defaults for S3 internally.
     pub fn from_async_operator(op: Operator) -> Result<Self> {
-        Self::from_async_operator_tuned(op, None, None)
-    }
-
-    /// Create a backend from an async-only operator with optional write tuning.
-    pub fn from_async_operator_tuned(
-        op: Operator,
-        write_chunk_size: Option<usize>,
-        write_concurrency: Option<usize>,
-    ) -> Result<Self> {
-        let async_op = op.clone();
         let _guard = ASYNC_RUNTIME.enter();
         let op = op.layer(
             BlockingLayer::create()
@@ -63,9 +47,6 @@ impl OpendalBackend {
         );
         Ok(Self {
             op: op.blocking(),
-            async_op: Some(async_op),
-            write_chunk_size,
-            write_concurrency,
         })
     }
 
@@ -118,18 +99,14 @@ impl OpendalBackend {
         access_key_id: Option<&str>,
         secret_access_key: Option<&str>,
     ) -> Result<Self> {
-        Self::from_async_operator_tuned(
-            Self::s3_operator(
-                bucket,
-                region,
-                root,
-                endpoint,
-                access_key_id,
-                secret_access_key,
-            )?,
-            Some(S3_UPLOAD_CHUNK_SIZE_BYTES),
-            Some(S3_UPLOAD_CONCURRENCY),
-        )
+        Self::from_async_operator(Self::s3_operator(
+            bucket,
+            region,
+            root,
+            endpoint,
+            access_key_id,
+            secret_access_key,
+        )?)
     }
 
     /// Build an `Operator` for SFTP (without blocking conversion).
@@ -180,26 +157,6 @@ impl StorageBackend for OpendalBackend {
     }
 
     fn put(&self, key: &str, data: &[u8]) -> Result<()> {
-        // For async-backed operators (S3/SFTP), use the async operator to apply
-        // multipart tuning where configured.
-        if self.write_chunk_size.is_some() || self.write_concurrency.is_some() {
-            if let Some(async_op) = self.async_op.as_ref() {
-                // Avoid nested runtime block_on in async contexts.
-                if tokio::runtime::Handle::try_current().is_err() {
-                    let mut write = async_op.write_with(key, data.to_vec());
-                    if let Some(chunk_size) = self.write_chunk_size {
-                        write = write.chunk(chunk_size);
-                    }
-                    if let Some(concurrency) = self.write_concurrency {
-                        write = write.concurrent(concurrency);
-                    }
-                    return ASYNC_RUNTIME
-                        .block_on(async { write.await })
-                        .map_err(VgerError::from);
-                }
-            }
-        }
-
         self.op.write(key, data.to_vec()).map_err(VgerError::from)
     }
 
@@ -246,23 +203,6 @@ impl StorageBackend for OpendalBackend {
     }
 
     fn put_owned(&self, key: &str, data: Vec<u8>) -> Result<()> {
-        if self.write_chunk_size.is_some() || self.write_concurrency.is_some() {
-            if let Some(async_op) = self.async_op.as_ref() {
-                if tokio::runtime::Handle::try_current().is_err() {
-                    let mut write = async_op.write_with(key, data);
-                    if let Some(chunk_size) = self.write_chunk_size {
-                        write = write.chunk(chunk_size);
-                    }
-                    if let Some(concurrency) = self.write_concurrency {
-                        write = write.concurrent(concurrency);
-                    }
-                    return ASYNC_RUNTIME
-                        .block_on(async { write.await })
-                        .map_err(VgerError::from);
-                }
-            }
-        }
-
         self.op.write(key, data).map_err(VgerError::from)
     }
 }

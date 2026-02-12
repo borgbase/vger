@@ -277,11 +277,7 @@ pub fn backend_from_config(
             let op = apply_retry(op, &cfg.retry);
             let op = apply_throttle(op, throttle_bytes_per_sec);
             Ok(Box::new(
-                opendal_backend::OpendalBackend::from_async_operator_tuned(
-                    op,
-                    Some(opendal_backend::S3_UPLOAD_CHUNK_SIZE_BYTES),
-                    Some(opendal_backend::S3_UPLOAD_CONCURRENCY),
-                )?,
+                opendal_backend::OpendalBackend::from_async_operator(op)?,
             ))
         }
         #[cfg(feature = "backend-sftp")]
