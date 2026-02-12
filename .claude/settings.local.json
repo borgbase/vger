@@ -10,7 +10,8 @@
       "Bash(./target/release/vger delete:*)",
       "Bash(./target/release/vger:*)",
       "Bash(test:*)",
-      "Bash(make docs-build:*)"
+      "Bash(make docs-build:*)",
+      "Bash(mdbook build:*)"
     ]
   }
 }

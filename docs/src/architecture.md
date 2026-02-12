@@ -4,11 +4,11 @@ Technical reference for vger's cryptographic, chunking, compression, and storage
 
 ---
 
-## Encryption
+## Cryptography
+
+### Encryption
 
 AES-256-GCM with 12-byte random nonces.
-
-Wire format: `[1B type_tag][12B nonce][ciphertext + 16B GCM tag]`
 
 Rationale:
 - NIST-standardized authenticated encryption
@@ -16,7 +16,7 @@ Rationale:
 - 32-byte symmetric keys (simpler key management than split-key schemes)
 - The 1-byte type tag is passed as AAD (authenticated additional data), binding the ciphertext to its intended object type
 
-## Key Derivation
+### Key Derivation
 
 Argon2id for passphrase-to-key derivation.
 
@@ -24,7 +24,7 @@ Rationale:
 - Modern memory-hard KDF recommended by OWASP and IETF
 - Resists both GPU and ASIC brute-force attacks
 
-## Hashing / Chunk IDs
+### Hashing / Chunk IDs
 
 Keyed BLAKE2b-256 MAC using a `chunk_id_key` derived from the master key.
 
@@ -33,7 +33,11 @@ Rationale:
 - BLAKE2b is faster than SHA-256 in software
 - Trade-off: keyed IDs prevent dedup across different encryption keys (acceptable for vger's single-key-per-repo model)
 
-## Chunking
+---
+
+## Content Processing
+
+### Chunking
 
 FastCDC (content-defined chunking) via the `fastcdc` v3 crate.
 
@@ -43,7 +47,7 @@ Rationale:
 - Newer algorithm, benchmarks faster than Rabin fingerprinting
 - Good deduplication ratio with configurable chunk boundaries
 
-## Compression
+### Compression
 
 Per-chunk compression with a 1-byte tag prefix. Supported algorithms: LZ4, ZSTD, and None.
 
@@ -52,14 +56,53 @@ Rationale:
 - LZ4 for speed-sensitive workloads, ZSTD for better compression ratios
 - No repository-wide format version lock-in for compression choice
 
+### Deduplication
+
+Content-addressed deduplication using keyed `ChunkId` values (BLAKE2b-256 MAC). Identical data produces the same `ChunkId`, so the second copy is never stored — only its refcount is incremented.
+
+**Two-level dedup check** (in `Repository::bump_ref_if_exists`):
+1. **Committed index** — the persisted `ChunkIndex` loaded at repo open
+2. **Pending pack writers** — blobs buffered in the current data and tree `PackWriter` instances that haven't been flushed yet
+
+This two-level check prevents duplicates both across backups (via the committed index) and within a single backup run (via the pending writers). Refcounts are tracked at every level so that `delete` and `compact` can determine when a blob is truly orphaned.
+
 ---
 
-## Repository Layout
+## Serialization
+
+All persistent data structures use **msgpack** via `rmp_serde`. Structs serialize as **positional arrays** (not named-field maps) for compactness. This means field order matters — adding or removing fields requires careful versioning, and `#[serde(skip_serializing_if)]` must not be used on `Item` fields (it would break positional deserialization of existing data).
+
+### RepoObj Envelope
+
+Every encrypted object stored in the repository is wrapped in a `RepoObj` envelope (`repo/format.rs`):
+
+```text
+[1-byte type_tag][12-byte nonce][ciphertext + 16-byte GCM tag]
+```
+
+The type tag identifies the object kind via the `ObjectType` enum:
+
+| Tag | ObjectType | Used for |
+|-----|------------|----------|
+| 0 | Config | Repository configuration (stored unencrypted) |
+| 1 | Manifest | Snapshot list |
+| 2 | SnapshotMeta | Per-snapshot metadata |
+| 3 | ChunkData | Compressed file/item-stream chunks |
+| 4 | ChunkIndex | Chunk-to-pack mapping |
+| 5 | PackHeader | Trailing header inside pack files |
+
+The type tag byte is passed as AAD (authenticated additional data) to AES-GCM. This binds each ciphertext to its intended object type, preventing an attacker from substituting one object type for another (e.g., swapping a manifest for a snapshot).
+
+---
+
+## Repository Format
+
+### On-Disk Layout
 
 ```text
 <repo>/
-|- config                    # Repository metadata (unencrypted)
-|- keys/repokey              # Encrypted master key
+|- config                    # Repository metadata (unencrypted msgpack)
+|- keys/repokey              # Encrypted master key (Argon2id-wrapped)
 |- manifest                  # Encrypted snapshot list
 |- index                     # Encrypted chunk index
 |- snapshots/<id>            # Encrypted snapshot metadata
@@ -67,13 +110,71 @@ Rationale:
 `- locks/                    # Advisory lock files
 ```
 
----
+### Key Data Structures
 
-## Pack Files
+**ChunkIndex** — `HashMap<ChunkId, ChunkIndexEntry>`, stored encrypted at the `index` key. The central lookup table for deduplication, restore, and compaction.
+
+| Field | Type | Description |
+|-------|------|-------------|
+| refcount | u32 | Number of snapshots referencing this chunk |
+| stored_size | u32 | Size in bytes as stored (compressed + encrypted) |
+| pack_id | PackId | Which pack file contains this chunk |
+| pack_offset | u64 | Byte offset within the pack file |
+
+**Manifest** — the encrypted snapshot list stored at the `manifest` key.
+
+| Field | Type | Description |
+|-------|------|-------------|
+| version | u32 | Format version (currently 1) |
+| timestamp | DateTime | Last modification time |
+| snapshots | Vec\<SnapshotEntry\> | One entry per snapshot |
+
+Each `SnapshotEntry` contains: `name`, `id` (32-byte random), `time`, `source_label`, `label`, `source_paths`.
+
+**SnapshotMeta** — per-snapshot metadata stored at `snapshots/<id>`.
+
+| Field | Type | Description |
+|-------|------|-------------|
+| name | String | User-provided snapshot name |
+| hostname | String | Machine that created the backup |
+| username | String | User that ran the backup |
+| time / time_end | DateTime | Backup start and end timestamps |
+| chunker_params | ChunkerConfig | CDC parameters used for this snapshot |
+| item_ptrs | Vec\<ChunkId\> | Chunk IDs containing the serialized item stream |
+| stats | SnapshotStats | File count, original/compressed/deduplicated sizes |
+| source_label | String | Config label for the source |
+| source_paths | Vec\<String\> | Directories that were backed up |
+| label | String | User-provided annotation |
+
+**Item** — a single filesystem entry within a snapshot's item stream.
+
+| Field | Type | Description |
+|-------|------|-------------|
+| path | String | Relative path within the backup |
+| entry_type | ItemType | `RegularFile`, `Directory`, or `Symlink` |
+| mode | u32 | Unix permission bits |
+| uid / gid | u32 | Owner and group IDs |
+| user / group | Option\<String\> | Owner and group names |
+| mtime | i64 | Modification time (nanoseconds since epoch) |
+| atime / ctime | Option\<i64\> | Access and change times |
+| size | u64 | Original file size |
+| chunks | Vec\<ChunkRef\> | Content chunks (regular files only) |
+| link_target | Option\<String\> | Symlink target |
+| xattrs | Option\<HashMap\> | Extended attributes |
+
+**ChunkRef** — reference to a stored chunk, used in `Item.chunks`:
+
+| Field | Type | Description |
+|-------|------|-------------|
+| id | ChunkId | Content-addressed chunk identifier |
+| size | u32 | Uncompressed (original) size |
+| csize | u32 | Stored size (compressed + encrypted) |
+
+### Pack Files
 
 Chunks are grouped into **pack files** (~32 MiB) instead of being stored as individual files. This reduces file count by 1000x+, critical for cloud storage costs (fewer PUT/GET ops) and filesystem performance (fewer inodes).
 
-### Pack File Format
+#### Pack File Format
 
 ```text
 [8B magic "VGERPACK\0"][1B version=1]
@@ -91,13 +192,13 @@ Chunks are grouped into **pack files** (~32 MiB) instead of being stored as indi
 - Header is encrypted as `pack_object(ObjectType::PackHeader, msgpack(Vec<PackHeaderEntry>))`
 - Pack ID = unkeyed BLAKE2b-256 of entire pack contents, stored at `packs/<shard>/<hex_pack_id>`
 
-### Data Packs vs Tree Packs
+#### Data Packs vs Tree Packs
 
 Two separate `PackWriter` instances:
 - **Data packs** — file content chunks. Dynamic target size.
 - **Tree packs** — item-stream metadata. Fixed at `min(min_pack_size, 4 MiB)` since metadata is small and read frequently.
 
-### Dynamic Pack Sizing
+#### Dynamic Pack Sizing
 
 Pack sizes grow with repository size. Config exposes floor and ceiling:
 
@@ -122,26 +223,87 @@ target = clamp(min_pack_size * sqrt(num_data_packs / 100), min_pack_size, max_pa
 
 `num_data_packs` is computed at `open()` by counting distinct `pack_id` values in the ChunkIndex (zero extra I/O).
 
-### Pack Files vs Individual Files
+---
 
-| Aspect | Pack files | Individual files |
-|--------|-----------|------------------|
-| File count | Very low (1 file per ~32 MiB) | Very high (1 file per chunk) |
-| S3/cloud cost | Fewer PUT/GET ops, much cheaper | Many small PUTs, expensive at scale |
-| Local FS perf | Efficient, fewer inodes | Can hit inode limits, slow listings |
-| Random access | Range read from pack | Direct file read, simpler |
-| GC/compaction | Need `compact` to reclaim space | Simple file deletion |
-| Write speed | Faster (batched writes) | Slower (many small writes) |
+## Data Flow
 
-The `compact` command reclaims space from orphaned blobs left behind by `delete` and `prune`. See the [Compact Command](#compact-command) section below.
+### Backup Pipeline
+
+```text
+walk sources (walkdir + exclude filters)
+  → for each file: FastCDC content-defined chunking
+    → for each chunk: compute ChunkId (keyed BLAKE2b-256)
+      → dedup check (committed index + pending pack writers)
+        → [new chunk] compress (LZ4/ZSTD) → encrypt (AES-256-GCM) → buffer into PackWriter
+        → [dedup hit] increment refcount, skip storage
+      → when PackWriter reaches target size → flush pack to packs/<shard>/<id>
+  → serialize Item to msgpack → append to item stream buffer
+    → when buffer reaches ~128 KiB → chunk as tree pack
+→ flush remaining packs
+→ build SnapshotMeta (with item_ptrs referencing tree pack chunks)
+→ store SnapshotMeta at snapshots/<id>
+→ update Manifest
+→ save_state() (flush packs → persist manifest + index)
+```
+
+### Restore Pipeline
+
+```text
+open repository → load Manifest → find snapshot by name
+  → load SnapshotMeta from snapshots/<id>
+    → read item_ptrs chunks (tree packs) → deserialize Vec<Item>
+      → sort: directories first, then symlinks, then files
+        → for each directory: create dir, set permissions
+        → for each symlink: create symlink
+        → for each file:
+          → for each ChunkRef: read blob from pack → decrypt → decompress
+          → write concatenated content to disk
+          → restore permissions and mtime
+```
+
+### Item Stream
+
+Snapshot metadata (the list of files, directories, and symlinks) is **not** stored as a single monolithic blob. Instead:
+
+1. Items are serialized one-by-one as msgpack and appended to an in-memory buffer
+2. When the buffer reaches ~128 KiB, it is chunked and stored as a **tree pack** chunk (with a finer CDC config: 32 KiB min / 128 KiB avg / 512 KiB max)
+3. The resulting `ChunkId` values are collected into `item_ptrs` in the `SnapshotMeta`
+
+This design means the item stream benefits from deduplication — if most files are unchanged between backups, the item-stream chunks are mostly identical and deduplicated away. It also avoids a memory spike from materializing all items at once.
 
 ---
 
-## Compact Command
+## Operations
+
+### Locking
+
+Client-side advisory locks prevent concurrent mutating operations on the same repository.
+
+- Lock files are stored at `locks/<timestamp>-<uuid>.json`
+- Each lock contains: hostname, PID, and acquisition timestamp
+- **Oldest-key-wins**: after writing its lock, a client lists all locks — if its key isn't lexicographically first, it deletes its own lock and returns an error
+- **Stale cleanup**: locks older than 6 hours are automatically removed before each acquisition attempt
+- **Commands that lock**: `backup`, `delete`, `prune`, `compact`
+- **Read-only commands** (no lock): `list`, `extract`, `check`, `info`
+
+When using a vger server, server-managed locks with TTL replace client-side advisory locks (see [Server Architecture](#server-architecture)).
+
+### Refcount Lifecycle
+
+Chunk refcounts track how many snapshots reference each chunk, driving the dedup → delete → compact lifecycle:
+
+1. **Backup** — `store_chunk()` adds a new entry with refcount=1, or increments an existing entry's refcount on dedup hit
+2. **Delete / Prune** — `ChunkIndex::decrement()` decreases the refcount; entries reaching 0 are removed from the index
+3. **Orphaned blobs** — after delete/prune, the encrypted blob data remains in pack files (the index no longer points to it, but the bytes are still on disk)
+4. **Compact** — rewrites packs to reclaim space from orphaned blobs
+
+This design means `delete` is fast (just index updates), while space reclamation is deferred to `compact`.
+
+### Compact
 
 After `delete` or `prune`, chunk refcounts are decremented and entries with refcount 0 are removed from the `ChunkIndex` — but the encrypted blob data remains in pack files. The `compact` command rewrites packs to reclaim this wasted space.
 
-### Algorithm
+#### Algorithm
 
 **Phase 1 — Analysis (read-only):**
 1. Enumerate all pack files across 256 shard dirs (`packs/00/` through `packs/ff/`)
@@ -159,14 +321,38 @@ For each candidate pack (most wasteful first, respecting `--max-repack-size` cap
 5. `save_state()` — persist index before deleting old pack (crash safety)
 6. Delete old pack file
 
-### Crash Safety
+#### Crash Safety
 
 The index never points to a deleted pack. Sequence: write new pack → save index → delete old pack. A crash between steps leaves an orphan old pack (harmless, cleaned up on next compact).
 
-### CLI
+#### CLI
 
 ```text
 vger compact [--threshold 10] [--max-repack-size 2G] [-n/--dry-run]
+```
+
+---
+
+## Parallel Pipeline
+
+During backup, the compress+encrypt phase runs in parallel using `rayon`:
+
+1. For each file, all chunks are classified as existing (dedup hit) or new
+2. New chunks are collected into a batch of `TransformJob` structs
+3. The batch is processed via `rayon::par_iter` — each job compresses and encrypts independently
+4. Results are inserted sequentially into the `PackWriter` (maintaining offset ordering)
+
+This pattern keeps the critical section (pack writer insertion + index updates) single-threaded while parallelizing the CPU-heavy work.
+
+**Configuration:**
+
+```yaml
+limits:
+  cpu:
+    max_threads: 4              # rayon thread pool size (0 = rayon default, all cores)
+    nice: 10                    # Unix nice value for the backup process
+  io:
+    read_mib_per_sec: 100       # disk read rate limit (0 = unlimited)
 ```
 
 ---
@@ -366,10 +552,6 @@ repositories:
 |---------|-------------|----------|
 | **File-level cache** | inode/mtime skip for unchanged files (incremental speedup) | High |
 | **Type-safe IDs** | Newtypes for `SnapshotId`, `ManifestId` | Medium |
-| **Hot/cold tiering** | Separate backends by access frequency | Medium |
 | **Snapshot filtering** | By host, tag, path, date ranges | Medium |
-| **FUSE mount** | Read-only mount of repository | Medium |
 | **Async I/O** | Non-blocking storage operations | Medium |
-| **Rate limiting** | Tower middleware for requests/sec and bytes/sec on the server | Medium |
-| **Warm-up commands** | Prepare cold storage before access | Low |
 | **Metrics** | Prometheus/OpenTelemetry | Low |
