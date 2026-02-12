@@ -97,7 +97,6 @@ enum Commands {
     /// Delete a specific snapshot
     Delete {
         /// Snapshot name to delete
-        #[arg(long)]
         snapshot: String,
 
         /// Only show what would be deleted, don't actually delete
