@@ -296,6 +296,7 @@ pub fn run(config: &VgerConfig, req: BackupRequest<'_>) -> Result<SnapshotStats>
             time: time_start,
             source_label: source_label.to_string(),
             label: label.to_string(),
+            source_paths: source_paths.to_vec(),
         });
 
         // Save manifest and index

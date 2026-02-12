@@ -66,6 +66,7 @@ fn manifest_survives_reopen() {
             time: Utc::now(),
             source_label: String::new(),
             label: String::new(),
+            source_paths: Vec::new(),
         });
         repo.save_state().unwrap();
     }

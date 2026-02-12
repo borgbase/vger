@@ -22,6 +22,9 @@ pub struct SnapshotEntry {
     /// User-provided annotation for this snapshot.
     #[serde(default)]
     pub label: String,
+    /// Actual source paths that were backed up.
+    #[serde(default)]
+    pub source_paths: Vec<String>,
 }
 
 impl Manifest {

@@ -9,6 +9,7 @@ fn make_entry(name: &str) -> SnapshotEntry {
         time: Utc::now(),
         source_label: String::new(),
         label: String::new(),
+        source_paths: Vec::new(),
     }
 }
 

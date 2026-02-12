@@ -758,18 +758,24 @@ fn run_list(
             table.set_header(vec!["ID", "Source", "Label", "Date"]);
 
             for entry in &snapshots {
+                let source_col = if !entry.source_paths.is_empty() {
+                    entry.source_paths.join("\n")
+                } else if !entry.source_label.is_empty() {
+                    entry.source_label.clone()
+                } else {
+                    "-".to_string()
+                };
+                let label_col = if !entry.label.is_empty() {
+                    entry.label.clone()
+                } else if !entry.source_label.is_empty() {
+                    entry.source_label.clone()
+                } else {
+                    "-".to_string()
+                };
                 table.add_row(vec![
                     entry.name.clone(),
-                    if entry.source_label.is_empty() {
-                        "-".to_string()
-                    } else {
-                        entry.source_label.clone()
-                    },
-                    if entry.label.is_empty() {
-                        "-".to_string()
-                    } else {
-                        entry.label.clone()
-                    },
+                    source_col,
+                    label_col,
                     entry.time.format("%Y-%m-%d %H:%M:%S").to_string(),
                 ]);
             }

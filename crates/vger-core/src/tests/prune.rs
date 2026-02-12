@@ -45,6 +45,7 @@ fn make_snapshots(count: usize) -> Vec<SnapshotEntry> {
             time: now - Duration::hours(i as i64),
             source_label: String::new(),
             label: String::new(),
+            source_paths: Vec::new(),
         })
         .collect()
 }
