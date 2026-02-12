@@ -32,22 +32,22 @@ done
 rm -rf "$DIST_DIR"
 mkdir -p "$DIST_DIR"
 
-# Build Linux targets with zigbuild
+# Build Linux targets with zigbuild (CLI + server only, GUI needs native GTK)
 for target in "${TARGETS_ZIGBUILD[@]}"; do
     echo "==> Building $target (zigbuild)..."
-    cargo zigbuild --release --target "$target"
+    cargo zigbuild --release --target "$target" -p vger-cli -p vger-server
 
     archive="vger-${VERSION}-${target}.tar.gz"
     tar -czf "$DIST_DIR/$archive" -C "target/$target/release" vger vger-server
     echo "    Created $DIST_DIR/$archive"
 done
 
-# Build native macOS target
+# Build native macOS target (includes GUI)
 echo "==> Building $TARGET_NATIVE (native)..."
 cargo build --release --target "$TARGET_NATIVE"
 
 archive="vger-${VERSION}-${TARGET_NATIVE}.tar.gz"
-tar -czf "$DIST_DIR/$archive" -C "target/$TARGET_NATIVE/release" vger vger-server
+tar -czf "$DIST_DIR/$archive" -C "target/$TARGET_NATIVE/release" vger vger-server vger-gui
 echo "    Created $DIST_DIR/$archive"
 
 # Generate checksums
