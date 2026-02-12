@@ -20,11 +20,11 @@ vger list --source docs
 vger list --snapshot a1b2c3d4
 ```
 
-## Extract to a directory
+## Restore to a directory
 
 ```bash
 # Restore all files from a snapshot
-vger extract --snapshot a1b2c3d4 --dest /tmp/restored
+vger restore --snapshot a1b2c3d4 --dest /tmp/restored
 ```
 
 ## Browse via WebDAV (mount)

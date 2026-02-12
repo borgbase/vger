@@ -65,7 +65,7 @@ vger list --snapshot a1b2c3d4
 Restore files from a snapshot to a directory:
 
 ```bash
-vger extract --snapshot a1b2c3d4 --dest /tmp/restored
+vger restore --snapshot a1b2c3d4 --dest /tmp/restored
 ```
 
 For backup options, snapshot browsing, and maintenance tasks, see the [workflow guides](backup.md).

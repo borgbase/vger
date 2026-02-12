@@ -6,7 +6,7 @@
 | `vger init` | Initialize a new backup repository |
 | `vger backup` | Back up files to a new snapshot |
 | `vger list` | List snapshots, or files within a snapshot |
-| `vger extract` | Restore files from a snapshot |
+| `vger restore` | Restore files from a snapshot |
 | `vger delete` | Delete a specific snapshot |
 | `vger prune` | Prune snapshots according to retention policy |
 | `vger check` | Verify repository integrity (`--verify-data` for full content verification) |

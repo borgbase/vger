@@ -188,7 +188,7 @@ const HOOK_PREFIXES: &[&str] = &["before", "after", "failed", "finally"];
 
 /// Valid command suffixes for command-specific hooks.
 const HOOK_COMMANDS: &[&str] = &[
-    "backup", "prune", "compact", "check", "delete", "extract", "info", "init", "list", "run",
+    "backup", "prune", "compact", "check", "delete", "restore", "info", "init", "list", "run",
 ];
 
 /// Hook configuration: flat map of hook keys to lists of shell commands.

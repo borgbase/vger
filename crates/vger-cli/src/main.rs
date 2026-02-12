@@ -216,9 +216,9 @@ enum Commands {
         last: Option<usize>,
     },
 
-    /// Extract files from a snapshot
-    Extract {
-        /// Snapshot to extract from
+    /// Restore files from a snapshot
+    Restore {
+        /// Snapshot to restore from
         #[arg(long)]
         snapshot: String,
 
@@ -226,7 +226,7 @@ enum Commands {
         #[arg(long, default_value = ".")]
         dest: String,
 
-        /// Only extract paths matching this glob pattern
+        /// Only restore paths matching this glob pattern
         #[arg(long)]
         pattern: Option<String>,
     },
@@ -313,7 +313,7 @@ fn command_name(cmd: &Commands) -> &'static str {
         Commands::Init => "init",
         Commands::Backup { .. } => "backup",
         Commands::List { .. } => "list",
-        Commands::Extract { .. } => "extract",
+        Commands::Restore { .. } => "restore",
         Commands::Delete { .. } => "delete",
         Commands::Prune { .. } => "prune",
         Commands::Check { .. } => "check",
@@ -638,7 +638,7 @@ fn dispatch_command(
             source,
             last,
         } => run_list(cfg, label, snapshot.clone(), source, *last),
-        Commands::Extract {
+        Commands::Restore {
             snapshot,
             dest,
             pattern,
@@ -1011,7 +1011,7 @@ fn run_extract(
     })?;
 
     println!(
-        "Extracted: {} files, {} dirs, {} symlinks ({})",
+        "Restored: {} files, {} dirs, {} symlinks ({})",
         stats.files,
         stats.dirs,
         stats.symlinks,
