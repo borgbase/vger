@@ -11,6 +11,12 @@
 #   S3:     s3://bucket/prefix  or  s3://endpoint:port/bucket/prefix
 #   SFTP:   sftp://user@host/path  (compile with feature 'backend-sftp')
 #   REST:   https://backup.example.com/repo  (compile with feature 'backend-rest')
+#
+# Environment expansion (applies before YAML parsing):
+#   ${VAR}                -> requires VAR to be set
+#   ${VAR:-default}       -> uses default when VAR is unset or empty
+# Example:
+#   - url: ${VGER_REPO_URL:-/backups/myrepo}
 repositories:
   - url: /backups/myrepo
     label: main
@@ -37,7 +43,7 @@ repositories:
   # REST server (vger-server):
   # - url: https://backup.example.com/myrepo
   #   label: server
-  #   rest_token: "secret-token-here"
+  #   rest_token: "${VGER_REST_TOKEN}"
 
   # Per-repo hooks — run only for this repository:
   # - url: /mnt/nas/repo
@@ -69,6 +75,8 @@ encryption:
 
   # Shell command that outputs the passphrase on stdout (optional)
   # passcommand: "cat /path/to/passphrase-file"
+  # Or via environment:
+  # passphrase: "${VGER_PASSPHRASE}"
 
 # Sources to back up.
 # Each source produces its own snapshot per repository.

@@ -661,6 +661,139 @@ pub fn expand_tilde(path: &str) -> String {
     path.to_string()
 }
 
+/// Expand `${VAR}` and `${VAR:-default}` placeholders in raw config text.
+fn expand_env_placeholders(input: &str, path: &Path) -> crate::error::Result<String> {
+    let mut out = String::with_capacity(input.len());
+    let mut cursor = 0usize;
+
+    while let Some(offset) = input[cursor..].find("${") {
+        let start = cursor + offset;
+        out.push_str(&input[cursor..start]);
+
+        let token_start = start + 2;
+        let Some(token_end_rel) = input[token_start..].find('}') else {
+            return Err(config_expand_error(
+                path,
+                input,
+                start,
+                "unterminated environment placeholder",
+            ));
+        };
+        let token_end = token_start + token_end_rel;
+        let token = &input[token_start..token_end];
+        let replacement = resolve_env_token(token, path, input, start)?;
+        out.push_str(&replacement);
+        cursor = token_end + 1;
+    }
+
+    out.push_str(&input[cursor..]);
+    Ok(out)
+}
+
+fn resolve_env_token(
+    token: &str,
+    path: &Path,
+    input: &str,
+    start: usize,
+) -> crate::error::Result<String> {
+    if token.is_empty() {
+        return Err(config_expand_error(
+            path,
+            input,
+            start,
+            "empty environment placeholder",
+        ));
+    }
+
+    if let Some(split_at) = token.find(":-") {
+        let name = &token[..split_at];
+        let default = &token[split_at + 2..];
+        if !is_valid_env_var_name(name) {
+            return Err(config_expand_error(
+                path,
+                input,
+                start,
+                format!("invalid environment variable name '{name}'"),
+            ));
+        }
+
+        return match std::env::var(name) {
+            Ok(value) if !value.is_empty() => Ok(value),
+            Ok(_) => Ok(default.to_string()),
+            Err(std::env::VarError::NotPresent) => Ok(default.to_string()),
+            Err(std::env::VarError::NotUnicode(_)) => Err(config_expand_error(
+                path,
+                input,
+                start,
+                format!("environment variable '{name}' is not valid UTF-8"),
+            )),
+        };
+    }
+
+    if !is_valid_env_var_name(token) {
+        return Err(config_expand_error(
+            path,
+            input,
+            start,
+            format!("invalid environment placeholder '{token}'"),
+        ));
+    }
+
+    match std::env::var(token) {
+        Ok(value) => Ok(value),
+        Err(std::env::VarError::NotPresent) => Err(config_expand_error(
+            path,
+            input,
+            start,
+            format!("environment variable '{token}' is not set"),
+        )),
+        Err(std::env::VarError::NotUnicode(_)) => Err(config_expand_error(
+            path,
+            input,
+            start,
+            format!("environment variable '{token}' is not valid UTF-8"),
+        )),
+    }
+}
+
+fn is_valid_env_var_name(name: &str) -> bool {
+    let mut chars = name.chars();
+    let Some(first) = chars.next() else {
+        return false;
+    };
+    if !(first == '_' || first.is_ascii_alphabetic()) {
+        return false;
+    }
+    chars.all(|c| c == '_' || c.is_ascii_alphanumeric())
+}
+
+fn config_expand_error(
+    path: &Path,
+    input: &str,
+    start: usize,
+    message: impl fmt::Display,
+) -> crate::error::VgerError {
+    let (line, column) = byte_offset_to_line_col(input, start);
+    crate::error::VgerError::Config(format!(
+        "invalid config '{}': {message} at line {line}, column {column}",
+        path.display()
+    ))
+}
+
+fn byte_offset_to_line_col(input: &str, byte_offset: usize) -> (usize, usize) {
+    let mut line = 1usize;
+    let mut column = 1usize;
+    for ch in input[..byte_offset].chars() {
+        if ch == '\n' {
+            line += 1;
+            column = 1;
+        } else {
+            column += 1;
+        }
+    }
+    (line, column)
+}
+
 /// Derive a label from a path by taking the last component (basename).
 pub fn label_from_path(path: &str) -> String {
     Path::new(path)
@@ -814,7 +947,8 @@ pub fn load_and_resolve(path: &Path) -> crate::error::Result<Vec<ResolvedRepo>> 
     let contents = std::fs::read_to_string(path).map_err(|e| {
         crate::error::VgerError::Config(format!("cannot read '{}': {e}", path.display()))
     })?;
-    let raw: ConfigDocument = serde_yaml::from_str(&contents).map_err(|e| {
+    let expanded = expand_env_placeholders(&contents, path)?;
+    let raw: ConfigDocument = serde_yaml::from_str(&expanded).map_err(|e| {
         crate::error::VgerError::Config(format!("invalid config '{}': {e}", path.display()))
     })?;
 
@@ -1285,6 +1419,12 @@ mod tests {
         fn set(key: &'static str, val: &str) -> Self {
             let prev = std::env::var(key).ok();
             std::env::set_var(key, val);
+            Self { key, prev }
+        }
+
+        fn unset(key: &'static str) -> Self {
+            let prev = std::env::var(key).ok();
+            std::env::remove_var(key);
             Self { key, prev }
         }
     }
@@ -2133,6 +2273,152 @@ sources:
             repos[0].sources[1].paths[0].starts_with(&home),
             "rich source path not expanded: {}",
             repos[0].sources[1].paths[0]
+        );
+    }
+
+    #[test]
+    fn test_env_expand_bare_var_in_config() {
+        let _lock = GLOBAL_STATE.lock().unwrap();
+        let _repo_guard = EnvGuard::set("VGER_TEST_REPO_URL", "/tmp/vger-env-repo");
+
+        let yaml = r#"
+repositories:
+  - url: ${VGER_TEST_REPO_URL}
+sources:
+  - /home/user
+"#;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.yaml");
+        fs::write(&path, yaml).unwrap();
+
+        let repos = load_and_resolve(&path).unwrap();
+        assert_eq!(repos[0].config.repository.url, "/tmp/vger-env-repo");
+    }
+
+    #[test]
+    fn test_env_expand_default_used_when_unset() {
+        let _lock = GLOBAL_STATE.lock().unwrap();
+        let _repo_guard = EnvGuard::unset("VGER_TEST_REPO_URL");
+
+        let yaml = r#"
+repositories:
+  - url: ${VGER_TEST_REPO_URL:-/tmp/vger-default-repo}
+sources:
+  - /home/user
+"#;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.yaml");
+        fs::write(&path, yaml).unwrap();
+
+        let repos = load_and_resolve(&path).unwrap();
+        assert_eq!(repos[0].config.repository.url, "/tmp/vger-default-repo");
+    }
+
+    #[test]
+    fn test_env_expand_default_used_when_empty() {
+        let _lock = GLOBAL_STATE.lock().unwrap();
+        let _repo_guard = EnvGuard::set("VGER_TEST_REPO_URL", "");
+
+        let yaml = r#"
+repositories:
+  - url: ${VGER_TEST_REPO_URL:-/tmp/vger-default-repo}
+sources:
+  - /home/user
+"#;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.yaml");
+        fs::write(&path, yaml).unwrap();
+
+        let repos = load_and_resolve(&path).unwrap();
+        assert_eq!(repos[0].config.repository.url, "/tmp/vger-default-repo");
+    }
+
+    #[test]
+    fn test_env_expand_default_not_used_when_non_empty() {
+        let _lock = GLOBAL_STATE.lock().unwrap();
+        let _repo_guard = EnvGuard::set("VGER_TEST_REPO_URL", "/tmp/vger-non-empty-repo");
+
+        let yaml = r#"
+repositories:
+  - url: ${VGER_TEST_REPO_URL:-/tmp/vger-default-repo}
+sources:
+  - /home/user
+"#;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.yaml");
+        fs::write(&path, yaml).unwrap();
+
+        let repos = load_and_resolve(&path).unwrap();
+        assert_eq!(repos[0].config.repository.url, "/tmp/vger-non-empty-repo");
+    }
+
+    #[test]
+    fn test_env_expand_bare_var_missing_is_error() {
+        let _lock = GLOBAL_STATE.lock().unwrap();
+        let _repo_guard = EnvGuard::unset("VGER_TEST_REPO_URL");
+
+        let yaml = r#"
+repositories:
+  - url: ${VGER_TEST_REPO_URL}
+sources:
+  - /home/user
+"#;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.yaml");
+        fs::write(&path, yaml).unwrap();
+
+        let err = load_and_resolve(&path).unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("VGER_TEST_REPO_URL"), "unexpected: {msg}");
+        assert!(msg.contains("line"), "unexpected: {msg}");
+        assert!(msg.contains("column"), "unexpected: {msg}");
+    }
+
+    #[test]
+    fn test_env_expand_bare_var_can_be_empty() {
+        let _lock = GLOBAL_STATE.lock().unwrap();
+        let _guard = EnvGuard::set("VGER_TEST_EMPTY", "");
+
+        let expanded =
+            expand_env_placeholders("repo=${VGER_TEST_EMPTY}", Path::new("test-config.yaml"))
+                .unwrap();
+        assert_eq!(expanded, "repo=");
+    }
+
+    #[test]
+    fn test_env_expand_rejects_unterminated_placeholder() {
+        let err =
+            expand_env_placeholders("repo=${VGER_TEST", Path::new("test-config.yaml")).unwrap_err();
+        assert!(
+            err.to_string().contains("unterminated"),
+            "unexpected: {err}"
+        );
+    }
+
+    #[test]
+    fn test_env_expand_rejects_empty_placeholder() {
+        let err = expand_env_placeholders("repo=${}", Path::new("test-config.yaml")).unwrap_err();
+        assert!(err.to_string().contains("empty"), "unexpected: {err}");
+    }
+
+    #[test]
+    fn test_env_expand_rejects_invalid_variable_name() {
+        let err =
+            expand_env_placeholders("repo=${1BAD}", Path::new("test-config.yaml")).unwrap_err();
+        assert!(
+            err.to_string().contains("invalid environment"),
+            "unexpected: {err}"
+        );
+    }
+
+    #[test]
+    fn test_env_expand_rejects_invalid_placeholder_syntax() {
+        let err =
+            expand_env_placeholders("repo=${VGER_TEST-default}", Path::new("test-config.yaml"))
+                .unwrap_err();
+        assert!(
+            err.to_string().contains("invalid environment placeholder"),
+            "unexpected: {err}"
         );
     }
 

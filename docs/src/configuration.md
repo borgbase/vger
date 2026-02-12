@@ -25,6 +25,28 @@ encryption:
   # passcommand: "pass show borg"    # Shell command that prints the passphrase
 ```
 
+## Environment Variable Expansion
+
+Config files support environment variable placeholders in values:
+
+```yaml
+repositories:
+  - url: "${VGER_REPO_URL:-/backup/repo}"
+    # rest_token: "${VGER_REST_TOKEN}"
+```
+
+Supported syntax:
+
+- `${VAR}`: requires `VAR` to be set (hard error if missing)
+- `${VAR:-default}`: uses `default` when `VAR` is unset or empty
+
+Notes:
+
+- Expansion runs on raw config text before YAML parsing.
+- Variable names must match `[A-Za-z_][A-Za-z0-9_]*`.
+- Malformed placeholders fail config loading.
+- No escape syntax is supported for literal `${...}`.
+
 ## Sources
 
 Sources can be a simple list of paths (auto-labeled from directory name) or rich entries with per-source options.
