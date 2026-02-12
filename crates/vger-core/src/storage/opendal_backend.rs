@@ -19,7 +19,14 @@ impl OpendalBackend {
     }
 
     /// Create a backend backed by AWS S3 (or S3-compatible like MinIO).
-    pub fn s3(bucket: &str, region: &str, root: &str, endpoint: Option<&str>) -> Result<Self> {
+    pub fn s3(
+        bucket: &str,
+        region: &str,
+        root: &str,
+        endpoint: Option<&str>,
+        access_key_id: Option<&str>,
+        secret_access_key: Option<&str>,
+    ) -> Result<Self> {
         let mut builder = opendal::services::S3::default()
             .bucket(bucket)
             .region(region)
@@ -27,8 +34,41 @@ impl OpendalBackend {
         if let Some(ep) = endpoint {
             builder = builder.endpoint(ep);
         }
+        if let Some(key_id) = access_key_id {
+            builder = builder.access_key_id(key_id);
+        }
+        if let Some(secret) = secret_access_key {
+            builder = builder.secret_access_key(secret);
+        }
         let op = Operator::new(builder)
             .map_err(|e| VgerError::Other(format!("opendal s3 init: {e}")))?
+            .finish()
+            .blocking();
+        Ok(Self { op })
+    }
+
+    /// Create a backend backed by SFTP.
+    #[cfg(feature = "backend-sftp")]
+    pub fn sftp(
+        host: &str,
+        user: Option<&str>,
+        port: Option<u16>,
+        root: &str,
+        key: Option<&str>,
+    ) -> Result<Self> {
+        let port = port.unwrap_or(22);
+        let endpoint = format!("ssh://{host}:{port}");
+        let mut builder = opendal::services::Sftp::default()
+            .endpoint(&endpoint)
+            .root(root);
+        if let Some(u) = user {
+            builder = builder.user(u);
+        }
+        if let Some(k) = key {
+            builder = builder.key(k);
+        }
+        let op = Operator::new(builder)
+            .map_err(|e| VgerError::Other(format!("opendal sftp init: {e}")))?
             .finish()
             .blocking();
         Ok(Self { op })

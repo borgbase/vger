@@ -3,12 +3,16 @@ use std::process::Command;
 use crate::config::HooksConfig;
 use crate::error::{Result, VgerError};
 
+use crate::config::SourceHooksConfig;
+
 /// Context passed to hook commands via environment variables and variable substitution.
 pub struct HookContext {
     pub command: String,
     pub repository: String,
     pub label: Option<String>,
     pub error: Option<String>,
+    pub source_label: Option<String>,
+    pub source_path: Option<String>,
 }
 
 /// Run the full hook lifecycle around an action:
@@ -107,6 +111,12 @@ fn execute_hook_command(cmd: &str, ctx: &HookContext) -> Result<()> {
     if let Some(ref error) = ctx.error {
         child.env("VGER_ERROR", error);
     }
+    if let Some(ref source_label) = ctx.source_label {
+        child.env("VGER_SOURCE_LABEL", source_label);
+    }
+    if let Some(ref source_path) = ctx.source_path {
+        child.env("VGER_SOURCE_PATH", source_path);
+    }
 
     let output = child
         .output()
@@ -138,7 +148,53 @@ fn substitute_variables(cmd: &str, ctx: &HookContext) -> String {
         "{error}",
         ctx.error.as_deref().unwrap_or(""),
     );
+    result = result.replace(
+        "{source_label}",
+        ctx.source_label.as_deref().unwrap_or(""),
+    );
+    result = result.replace(
+        "{source_path}",
+        ctx.source_path.as_deref().unwrap_or(""),
+    );
     result
+}
+
+/// Run source-level hooks (before/after/failed/finally) around an action.
+pub fn run_source_hooks<F, T>(
+    hooks: &SourceHooksConfig,
+    ctx: &mut HookContext,
+    action: F,
+) -> std::result::Result<T, Box<dyn std::error::Error>>
+where
+    F: FnOnce() -> std::result::Result<T, Box<dyn std::error::Error>>,
+{
+    // 1. Run before hooks
+    let before_result = run_hook_list(&hooks.before, ctx);
+
+    let action_result = if let Err(e) = before_result {
+        ctx.error = Some(e.to_string());
+        Err(e.into())
+    } else {
+        action()
+    };
+
+    // 2. After or Failed hooks
+    match &action_result {
+        Ok(_) => {
+            log_hook_errors(run_hook_list(&hooks.after, ctx));
+        }
+        Err(e) => {
+            if ctx.error.is_none() {
+                ctx.error = Some(e.to_string());
+            }
+            log_hook_errors(run_hook_list(&hooks.failed, ctx));
+        }
+    }
+
+    // 3. Finally hooks
+    log_hook_errors(run_hook_list(&hooks.finally, ctx));
+
+    action_result
 }
 
 fn log_hook_errors(result: Result<()>) {
@@ -157,6 +213,8 @@ mod tests {
             repository: "/tmp/repo".to_string(),
             label: Some("test".to_string()),
             error: None,
+            source_label: None,
+            source_path: None,
         }
     }
 
@@ -178,12 +236,14 @@ mod tests {
             repository: "/mnt/nas".into(),
             label: Some("nas".into()),
             error: Some("disk full".into()),
+            source_label: Some("docs".into()),
+            source_path: Some("/home/user/docs".into()),
         };
         let result = substitute_variables(
-            "echo {command} {repository} {label} {error}",
+            "echo {command} {repository} {label} {error} {source_label} {source_path}",
             &ctx,
         );
-        assert_eq!(result, "echo backup /mnt/nas nas disk full");
+        assert_eq!(result, "echo backup /mnt/nas nas disk full docs /home/user/docs");
     }
 
     #[test]
@@ -193,6 +253,8 @@ mod tests {
             repository: "/tmp/repo".into(),
             label: None,
             error: None,
+            source_label: None,
+            source_path: None,
         };
         let result = substitute_variables("cmd={command} label={label} err={error}", &ctx);
         assert_eq!(result, "cmd=backup label= err=");

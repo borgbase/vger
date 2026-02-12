@@ -10,15 +10,11 @@ pub struct VgerConfig {
     #[serde(default)]
     pub encryption: EncryptionConfig,
     #[serde(default)]
-    pub source_directories: Vec<String>,
-    #[serde(default)]
     pub exclude_patterns: Vec<String>,
     #[serde(default)]
     pub chunker: ChunkerConfig,
     #[serde(default)]
     pub compression: CompressionConfig,
-    #[serde(default = "default_snapshot_format")]
-    pub snapshot_name_format: String,
     #[serde(default)]
     pub retention: RetentionConfig,
 }
@@ -97,6 +93,80 @@ impl HooksConfig {
     pub fn is_empty(&self) -> bool {
         self.hooks.is_empty()
     }
+}
+
+/// Source-level hooks — simpler than `HooksConfig`, only bare prefixes.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct SourceHooksConfig {
+    #[serde(default, deserialize_with = "deserialize_string_or_vec")]
+    pub before: Vec<String>,
+    #[serde(default, deserialize_with = "deserialize_string_or_vec")]
+    pub after: Vec<String>,
+    #[serde(default, deserialize_with = "deserialize_string_or_vec")]
+    pub failed: Vec<String>,
+    #[serde(default, deserialize_with = "deserialize_string_or_vec")]
+    pub finally: Vec<String>,
+}
+
+/// Deserialize a YAML field that can be either a single string or a list of strings.
+fn deserialize_string_or_vec<'de, D>(deserializer: D) -> Result<Vec<String>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    use serde::de;
+
+    struct StringOrVec;
+
+    impl<'de> de::Visitor<'de> for StringOrVec {
+        type Value = Vec<String>;
+
+        fn expecting(&self, f: &mut fmt::Formatter) -> fmt::Result {
+            f.write_str("a string or a list of strings")
+        }
+
+        fn visit_str<E: de::Error>(self, v: &str) -> Result<Vec<String>, E> {
+            Ok(vec![v.to_string()])
+        }
+
+        fn visit_seq<A: de::SeqAccess<'de>>(self, mut seq: A) -> Result<Vec<String>, A::Error> {
+            let mut v = Vec::new();
+            while let Some(s) = seq.next_element()? {
+                v.push(s);
+            }
+            Ok(v)
+        }
+    }
+
+    deserializer.deserialize_any(StringOrVec)
+}
+
+/// YAML input for a source entry — either a plain path or a rich object.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(untagged)]
+pub enum SourceInput {
+    Simple(String),
+    Rich {
+        path: String,
+        label: Option<String>,
+        #[serde(default)]
+        exclude: Vec<String>,
+        #[serde(default)]
+        hooks: SourceHooksConfig,
+        retention: Option<RetentionConfig>,
+        #[serde(default)]
+        repos: Vec<String>,
+    },
+}
+
+/// Canonical resolved source entry.
+#[derive(Debug, Clone)]
+pub struct SourceEntry {
+    pub path: String,
+    pub label: String,
+    pub exclude: Vec<String>,
+    pub hooks: SourceHooksConfig,
+    pub retention: Option<RetentionConfig>,
+    pub repos: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -208,10 +278,6 @@ fn default_max_pack_size() -> u32 {
     512 * 1024 * 1024 // 512 MiB
 }
 
-fn default_snapshot_format() -> String {
-    "{hostname}-{now:%Y-%m-%dT%H:%M:%S}".to_string()
-}
-
 /// A single entry in the `repositories:` list.
 /// Contains all `RepositoryConfig` fields plus optional per-repo overrides.
 #[derive(Debug, Clone, Deserialize)]
@@ -234,7 +300,6 @@ pub struct RepositoryEntry {
     pub encryption: Option<EncryptionConfig>,
     pub compression: Option<CompressionConfig>,
     pub retention: Option<RetentionConfig>,
-    pub source_directories: Option<Vec<String>>,
 
     /// Per-repo hooks (optional).
     #[serde(default)]
@@ -264,20 +329,61 @@ struct RawConfig {
     #[serde(default)]
     encryption: EncryptionConfig,
     #[serde(default)]
-    source_directories: Vec<String>,
+    sources: Vec<SourceInput>,
     #[serde(default)]
     exclude_patterns: Vec<String>,
     #[serde(default)]
     chunker: ChunkerConfig,
     #[serde(default)]
     compression: CompressionConfig,
-    #[serde(default = "default_snapshot_format")]
-    snapshot_name_format: String,
     #[serde(default)]
     retention: RetentionConfig,
     /// Global hooks — apply to all repositories.
     #[serde(default)]
     hooks: HooksConfig,
+}
+
+/// Derive a label from a path by taking the last component (basename).
+pub fn label_from_path(path: &str) -> String {
+    Path::new(path)
+        .file_name()
+        .map(|n| n.to_string_lossy().to_string())
+        .unwrap_or_else(|| path.to_string())
+}
+
+/// Normalize a `SourceInput` into a `SourceEntry`.
+fn normalize_source(input: SourceInput) -> SourceEntry {
+    match input {
+        SourceInput::Simple(path) => {
+            let label = label_from_path(&path);
+            SourceEntry {
+                path,
+                label,
+                exclude: Vec::new(),
+                hooks: SourceHooksConfig::default(),
+                retention: None,
+                repos: Vec::new(),
+            }
+        }
+        SourceInput::Rich {
+            path,
+            label,
+            exclude,
+            hooks,
+            retention,
+            repos,
+        } => {
+            let label = label.unwrap_or_else(|| label_from_path(&path));
+            SourceEntry {
+                path,
+                label,
+                exclude,
+                hooks,
+                retention,
+                repos,
+            }
+        }
+    }
 }
 
 /// A fully resolved repository with its merged config.
@@ -287,6 +393,7 @@ pub struct ResolvedRepo {
     pub config: VgerConfig,
     pub global_hooks: HooksConfig,
     pub repo_hooks: HooksConfig,
+    pub sources: Vec<SourceEntry>,
 }
 
 /// Load and resolve a config file into one `ResolvedRepo` per repository entry.
@@ -308,7 +415,7 @@ fn resolve_raw_config(raw: RawConfig) -> crate::error::Result<Vec<ResolvedRepo>>
         ));
     }
 
-    // Check for duplicate labels
+    // Check for duplicate repo labels
     let mut seen = std::collections::HashSet::new();
     for label in raw.repositories.iter().filter_map(|e| e.label.as_deref()) {
         if !seen.insert(label) {
@@ -328,34 +435,92 @@ fn resolve_raw_config(raw: RawConfig) -> crate::error::Result<Vec<ResolvedRepo>>
         }
     }
 
+    // Normalize sources
+    let all_sources: Vec<SourceEntry> = raw
+        .sources
+        .into_iter()
+        .map(normalize_source)
+        .collect();
+
+    // Check for duplicate source labels
+    let mut source_labels = std::collections::HashSet::new();
+    for src in &all_sources {
+        if !source_labels.insert(&src.label) {
+            return Err(crate::error::VgerError::Config(format!(
+                "duplicate source label: '{}'",
+                src.label
+            )));
+        }
+    }
+
+    // Validate that source `repos` references exist
+    let repo_labels: std::collections::HashSet<&str> = raw
+        .repositories
+        .iter()
+        .filter_map(|e| e.label.as_deref())
+        .collect();
+    for src in &all_sources {
+        for repo_ref in &src.repos {
+            if !repo_labels.contains(repo_ref.as_str()) {
+                return Err(crate::error::VgerError::Config(format!(
+                    "source '{}' references unknown repository '{repo_ref}'",
+                    src.label
+                )));
+            }
+        }
+    }
+
     let repos = raw
         .repositories
         .into_iter()
         .map(|entry| {
-            let label = entry.label.clone();
+            let entry_label = entry.label.clone();
             let repo_hooks = entry.hooks.clone().unwrap_or_default();
+
+            // Filter sources for this repo: include sources whose `repos` is empty
+            // (meaning all repos) or whose `repos` list contains this repo's label.
+            let sources_for_repo: Vec<SourceEntry> = all_sources
+                .iter()
+                .filter(|src| {
+                    src.repos.is_empty()
+                        || entry_label
+                            .as_deref()
+                            .is_some_and(|l| src.repos.iter().any(|r| r == l))
+                })
+                .map(|src| {
+                    // Merge exclude patterns: global + per-source
+                    let mut merged_exclude = raw.exclude_patterns.clone();
+                    merged_exclude.extend(src.exclude.clone());
+                    SourceEntry {
+                        path: src.path.clone(),
+                        label: src.label.clone(),
+                        exclude: merged_exclude,
+                        hooks: src.hooks.clone(),
+                        retention: src.retention.clone(),
+                        repos: src.repos.clone(),
+                    }
+                })
+                .collect();
+
             ResolvedRepo {
-                label,
+                label: entry_label,
                 config: VgerConfig {
                     repository: entry.to_repo_config(),
                     encryption: entry
                         .encryption
                         .unwrap_or_else(|| raw.encryption.clone()),
-                    source_directories: entry
-                        .source_directories
-                        .unwrap_or_else(|| raw.source_directories.clone()),
                     exclude_patterns: raw.exclude_patterns.clone(),
                     chunker: raw.chunker.clone(),
                     compression: entry
                         .compression
                         .unwrap_or_else(|| raw.compression.clone()),
-                    snapshot_name_format: raw.snapshot_name_format.clone(),
                     retention: entry
                         .retention
                         .unwrap_or_else(|| raw.retention.clone()),
                 },
                 global_hooks: raw.hooks.clone(),
                 repo_hooks,
+                sources: sources_for_repo,
             }
         })
         .collect();
@@ -478,7 +643,7 @@ encryption:
   # passphrase: secret
   # passcommand: "pass show vger"
 
-source_directories:
+sources:
   - /home/user/documents
 
 # exclude_patterns:
@@ -490,9 +655,23 @@ source_directories:
 #   keep_weekly: 4
 #   keep_monthly: 6
 
+# Sources support simple paths (above) or rich entries:
+#
+# sources:
+#   - path: /home/user/documents
+#     label: docs
+#     exclude:
+#       - "*.tmp"
+#     repos:
+#       - main
+#     retention:
+#       keep_daily: 14
+#     hooks:
+#       before: "echo backing up docs"
+#
 # Multiple repositories: add more entries to 'repositories:'.
 # Top-level settings serve as defaults; per-repo entries can override
-# encryption, compression, retention, and source_directories.
+# encryption, compression, and retention.
 #
 # URL formats:
 #   Local:  /backups/repo  or  file:///backups/repo
@@ -592,6 +771,9 @@ mod tests {
         let repos = resolve_raw_config(raw).unwrap();
         assert_eq!(repos.len(), 1);
         assert_eq!(repos[0].config.repository.url, "/path/to/repo");
+        assert_eq!(repos[0].sources.len(), 1);
+        assert_eq!(repos[0].sources[0].path, "/home/user/documents");
+        assert_eq!(repos[0].sources[0].label, "documents");
     }
 
     #[test]
@@ -633,7 +815,7 @@ repositories:
     label: main
 encryption:
   mode: none
-source_directories:
+sources:
   - /home/user
 "#;
         let dir = tempfile::tempdir().unwrap();
@@ -645,7 +827,9 @@ source_directories:
         assert_eq!(repos[0].label.as_deref(), Some("main"));
         assert_eq!(repos[0].config.repository.url, "/tmp/repo");
         assert_eq!(repos[0].config.encryption.mode, "none");
-        assert_eq!(repos[0].config.source_directories, vec!["/home/user"]);
+        assert_eq!(repos[0].sources.len(), 1);
+        assert_eq!(repos[0].sources[0].path, "/home/user");
+        assert_eq!(repos[0].sources[0].label, "user");
     }
 
     #[test]
@@ -653,7 +837,7 @@ source_directories:
         let yaml = r#"
 encryption:
   mode: aes256gcm
-source_directories:
+sources:
   - /home/user
 compression:
   algorithm: lz4
@@ -679,10 +863,12 @@ repositories:
         assert_eq!(repos[0].config.encryption.mode, "aes256gcm");
         assert_eq!(repos[0].config.compression.algorithm, "lz4");
         assert_eq!(repos[0].config.retention.keep_daily, Some(7));
-        assert_eq!(repos[0].config.source_directories, vec!["/home/user"]);
+        assert_eq!(repos[0].sources.len(), 1);
+        assert_eq!(repos[0].sources[0].path, "/home/user");
 
         assert_eq!(repos[1].label.as_deref(), Some("remote"));
         assert_eq!(repos[1].config.repository.url, "/backups/remote");
+        assert_eq!(repos[1].sources.len(), 1);
     }
 
     #[test]
@@ -690,7 +876,7 @@ repositories:
         let yaml = r#"
 encryption:
   mode: aes256gcm
-source_directories:
+sources:
   - /home/user
 compression:
   algorithm: lz4
@@ -709,8 +895,6 @@ repositories:
       algorithm: zstd
     retention:
       keep_daily: 30
-    source_directories:
-      - /home/user/important
 "#;
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("config.yaml");
@@ -723,7 +907,8 @@ repositories:
         let local = &repos[0];
         assert_eq!(local.config.compression.algorithm, "lz4");
         assert_eq!(local.config.retention.keep_daily, Some(7));
-        assert_eq!(local.config.source_directories, vec!["/home/user"]);
+        assert_eq!(local.sources.len(), 1);
+        assert_eq!(local.sources[0].path, "/home/user");
 
         // Second repo uses overrides
         let remote = &repos[1];
@@ -733,7 +918,7 @@ repositories:
             remote.config.encryption.passcommand.as_deref(),
             Some("pass show vger-remote")
         );
-        assert_eq!(remote.config.source_directories, vec!["/home/user/important"]);
+        assert_eq!(remote.sources.len(), 1);
     }
 
     #[test]
@@ -861,15 +1046,14 @@ repositories:
                     max_pack_size: default_max_pack_size(),
                 },
                 encryption: EncryptionConfig::default(),
-                source_directories: vec![],
                 exclude_patterns: vec![],
                 chunker: ChunkerConfig::default(),
                 compression: CompressionConfig::default(),
-                snapshot_name_format: default_snapshot_format(),
                 retention: RetentionConfig::default(),
             },
             global_hooks: HooksConfig::default(),
             repo_hooks: HooksConfig::default(),
+            sources: vec![],
         }
     }
 
@@ -970,5 +1154,209 @@ repositories:
         let err = load_and_resolve(&path).unwrap_err();
         let msg = err.to_string();
         assert!(msg.contains("invalid hook key"), "unexpected error: {msg}");
+    }
+
+    // --- Sources tests ---
+
+    #[test]
+    fn test_sources_simple() {
+        let yaml = r#"
+repositories:
+  - url: /tmp/repo
+sources:
+  - /home/user/documents
+  - /home/user/photos
+"#;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.yaml");
+        fs::write(&path, yaml).unwrap();
+
+        let repos = load_and_resolve(&path).unwrap();
+        assert_eq!(repos[0].sources.len(), 2);
+        assert_eq!(repos[0].sources[0].path, "/home/user/documents");
+        assert_eq!(repos[0].sources[0].label, "documents");
+        assert_eq!(repos[0].sources[1].path, "/home/user/photos");
+        assert_eq!(repos[0].sources[1].label, "photos");
+    }
+
+    #[test]
+    fn test_sources_rich() {
+        let yaml = r#"
+repositories:
+  - url: /tmp/repo
+    label: main
+sources:
+  - path: /home/user/documents
+    label: docs
+    exclude:
+      - "*.tmp"
+    retention:
+      keep_daily: 14
+"#;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.yaml");
+        fs::write(&path, yaml).unwrap();
+
+        let repos = load_and_resolve(&path).unwrap();
+        assert_eq!(repos[0].sources.len(), 1);
+        let src = &repos[0].sources[0];
+        assert_eq!(src.path, "/home/user/documents");
+        assert_eq!(src.label, "docs");
+        assert_eq!(src.exclude, vec!["*.tmp"]);
+        assert_eq!(src.retention.as_ref().unwrap().keep_daily, Some(14));
+    }
+
+    #[test]
+    fn test_sources_mixed_simple_and_rich() {
+        let yaml = r#"
+repositories:
+  - url: /tmp/repo
+sources:
+  - /home/user/photos
+  - path: /home/user/documents
+    label: docs
+"#;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.yaml");
+        fs::write(&path, yaml).unwrap();
+
+        let repos = load_and_resolve(&path).unwrap();
+        assert_eq!(repos[0].sources.len(), 2);
+        assert_eq!(repos[0].sources[0].label, "photos");
+        assert_eq!(repos[0].sources[1].label, "docs");
+    }
+
+    #[test]
+    fn test_sources_repo_targeting() {
+        let yaml = r#"
+repositories:
+  - url: /backups/local
+    label: local
+  - url: /backups/remote
+    label: remote
+
+sources:
+  - path: /home/user/documents
+    label: docs
+    repos:
+      - local
+  - path: /home/user/photos
+    label: photos
+"#;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.yaml");
+        fs::write(&path, yaml).unwrap();
+
+        let repos = load_and_resolve(&path).unwrap();
+
+        // local repo should have both (docs targets local, photos targets all)
+        let local = &repos[0];
+        assert_eq!(local.sources.len(), 2);
+
+        // remote repo should only have photos (docs targets local only)
+        let remote = &repos[1];
+        assert_eq!(remote.sources.len(), 1);
+        assert_eq!(remote.sources[0].label, "photos");
+    }
+
+    #[test]
+    fn test_sources_exclude_merge() {
+        let yaml = r#"
+repositories:
+  - url: /tmp/repo
+exclude_patterns:
+  - "*.cache"
+sources:
+  - path: /home/user/documents
+    exclude:
+      - "*.tmp"
+"#;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.yaml");
+        fs::write(&path, yaml).unwrap();
+
+        let repos = load_and_resolve(&path).unwrap();
+        let src = &repos[0].sources[0];
+        // Global + per-source excludes should be merged
+        assert_eq!(src.exclude, vec!["*.cache", "*.tmp"]);
+    }
+
+    #[test]
+    fn test_sources_reject_duplicate_labels() {
+        let yaml = r#"
+repositories:
+  - url: /tmp/repo
+sources:
+  - path: /a
+    label: same
+  - path: /b
+    label: same
+"#;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.yaml");
+        fs::write(&path, yaml).unwrap();
+
+        let err = load_and_resolve(&path).unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("duplicate source label"), "unexpected: {msg}");
+    }
+
+    #[test]
+    fn test_sources_reject_unknown_repo_ref() {
+        let yaml = r#"
+repositories:
+  - url: /tmp/repo
+    label: main
+sources:
+  - path: /home/user
+    repos:
+      - nonexistent
+"#;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.yaml");
+        fs::write(&path, yaml).unwrap();
+
+        let err = load_and_resolve(&path).unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("unknown repository"), "unexpected: {msg}");
+    }
+
+    #[test]
+    fn test_sources_hooks_string_and_list() {
+        let yaml = r#"
+repositories:
+  - url: /tmp/repo
+sources:
+  - path: /home/user
+    hooks:
+      before: "echo single"
+      after:
+        - "echo first"
+        - "echo second"
+"#;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.yaml");
+        fs::write(&path, yaml).unwrap();
+
+        let repos = load_and_resolve(&path).unwrap();
+        let hooks = &repos[0].sources[0].hooks;
+        assert_eq!(hooks.before, vec!["echo single"]);
+        assert_eq!(hooks.after, vec!["echo first", "echo second"]);
+        assert!(hooks.failed.is_empty());
+        assert!(hooks.finally.is_empty());
+    }
+
+    #[test]
+    fn test_empty_sources_allowed() {
+        let yaml = r#"
+repositories:
+  - url: /tmp/repo
+"#;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.yaml");
+        fs::write(&path, yaml).unwrap();
+
+        let repos = load_and_resolve(&path).unwrap();
+        assert!(repos[0].sources.is_empty());
     }
 }

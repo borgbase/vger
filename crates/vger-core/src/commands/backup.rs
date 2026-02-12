@@ -28,12 +28,14 @@ fn items_chunker_config() -> ChunkerConfig {
     }
 }
 
-/// Run `vger backup`.
+/// Run `vger backup` for a single source directory.
 pub fn run(
     config: &VgerConfig,
     snapshot_name: &str,
     passphrase: Option<&str>,
-    source_dirs: &[String],
+    source_path: &str,
+    source_label: &str,
+    exclude_patterns: &[String],
     compression: Compression,
 ) -> Result<SnapshotStats> {
     let backend = storage::backend_from_config(&config.repository)?;
@@ -53,7 +55,7 @@ pub fn run(
 
     // Build exclude patterns
     let mut glob_builder = globset::GlobSetBuilder::new();
-    for pat in &config.exclude_patterns {
+    for pat in exclude_patterns {
         glob_builder.add(
             globset::Glob::new(pat)
                 .map_err(|e| VgerError::Config(format!("invalid exclude pattern '{pat}': {e}")))?,
@@ -63,109 +65,101 @@ pub fn run(
         .build()
         .map_err(|e| VgerError::Config(format!("glob build: {e}")))?;
 
-    // Walk source directories
-    let dirs = if source_dirs.is_empty() {
-        &config.source_directories
-    } else {
-        source_dirs
-    };
+    // Walk source directory
+    let source = Path::new(source_path);
+    if !source.exists() {
+        return Err(VgerError::Other(format!(
+            "source directory does not exist: {source_path}"
+        )));
+    }
 
-    for source_dir in dirs {
-        let source_path = Path::new(source_dir);
-        if !source_path.exists() {
-            return Err(VgerError::Other(format!(
-                "source directory does not exist: {source_dir}"
-            )));
+    for entry in WalkDir::new(source).follow_links(false).sort_by_file_name() {
+        let entry =
+            entry.map_err(|e| VgerError::Other(format!("walkdir error: {e}")))?;
+
+        let rel_path = entry
+            .path()
+            .strip_prefix(source)
+            .unwrap_or(entry.path())
+            .to_string_lossy()
+            .to_string();
+
+        // Skip root directory itself
+        if rel_path.is_empty() {
+            continue;
         }
 
-        for entry in WalkDir::new(source_path).follow_links(false).sort_by_file_name() {
-            let entry =
-                entry.map_err(|e| VgerError::Other(format!("walkdir error: {e}")))?;
+        // Apply exclude patterns
+        if excludes.is_match(&rel_path) {
+            continue;
+        }
 
-            let rel_path = entry
-                .path()
-                .strip_prefix(source_path)
-                .unwrap_or(entry.path())
-                .to_string_lossy()
-                .to_string();
+        let metadata = entry.metadata()
+            .map_err(|e| VgerError::Other(format!("stat error for {}: {e}", entry.path().display())))?;
 
-            // Skip root directory itself
-            if rel_path.is_empty() {
-                continue;
-            }
+        let file_type = metadata.file_type();
 
-            // Apply exclude patterns
-            if excludes.is_match(&rel_path) {
-                continue;
-            }
+        let (entry_type, link_target) = if file_type.is_dir() {
+            (ItemType::Directory, None)
+        } else if file_type.is_symlink() {
+            let target = std::fs::read_link(entry.path())
+                .map_err(|e| VgerError::Other(format!("readlink: {e}")))?;
+            (ItemType::Symlink, Some(target.to_string_lossy().to_string()))
+        } else if file_type.is_file() {
+            (ItemType::RegularFile, None)
+        } else {
+            // Skip special files (block devices, FIFOs, etc.)
+            continue;
+        };
 
-            let metadata = entry.metadata()
-                .map_err(|e| VgerError::Other(format!("stat error for {}: {e}", entry.path().display())))?;
+        let mtime_ns = metadata.mtime() * 1_000_000_000 + metadata.mtime_nsec();
 
-            let file_type = metadata.file_type();
+        let mut item = Item {
+            path: rel_path,
+            entry_type,
+            mode: metadata.mode(),
+            uid: metadata.uid(),
+            gid: metadata.gid(),
+            user: None,
+            group: None,
+            mtime: mtime_ns,
+            atime: None,
+            ctime: None,
+            size: metadata.len(),
+            chunks: Vec::new(),
+            link_target,
+            xattrs: None,
+        };
 
-            let (entry_type, link_target) = if file_type.is_dir() {
-                (ItemType::Directory, None)
-            } else if file_type.is_symlink() {
-                let target = std::fs::read_link(entry.path())
-                    .map_err(|e| VgerError::Other(format!("readlink: {e}")))?;
-                (ItemType::Symlink, Some(target.to_string_lossy().to_string()))
-            } else if file_type.is_file() {
-                (ItemType::RegularFile, None)
-            } else {
-                // Skip special files (block devices, FIFOs, etc.)
-                continue;
-            };
+        // For regular files, chunk and store the content
+        if entry_type == ItemType::RegularFile && metadata.len() > 0 {
+            let file_data = std::fs::read(entry.path())
+                .map_err(|e| VgerError::Io(e))?;
 
-            let mtime_ns = metadata.mtime() * 1_000_000_000 + metadata.mtime_nsec();
+            let chunk_ranges = chunker::chunk_data(&file_data, &repo.config.chunker_params);
 
-            let mut item = Item {
-                path: rel_path,
-                entry_type,
-                mode: metadata.mode(),
-                uid: metadata.uid(),
-                gid: metadata.gid(),
-                user: None,
-                group: None,
-                mtime: mtime_ns,
-                atime: None,
-                ctime: None,
-                size: metadata.len(),
-                chunks: Vec::new(),
-                link_target,
-                xattrs: None,
-            };
+            for (offset, length) in chunk_ranges {
+                let chunk_data = &file_data[offset..offset + length];
+                let (chunk_id, csize, is_new) =
+                    repo.store_chunk(chunk_data, compression, PackType::Data)?;
 
-            // For regular files, chunk and store the content
-            if entry_type == ItemType::RegularFile && metadata.len() > 0 {
-                let file_data = std::fs::read(entry.path())
-                    .map_err(|e| VgerError::Io(e))?;
-
-                let chunk_ranges = chunker::chunk_data(&file_data, &repo.config.chunker_params);
-
-                for (offset, length) in chunk_ranges {
-                    let chunk_data = &file_data[offset..offset + length];
-                    let (chunk_id, csize, is_new) =
-                        repo.store_chunk(chunk_data, compression, PackType::Data)?;
-
-                    stats.original_size += length as u64;
-                    stats.compressed_size += csize as u64;
-                    if is_new {
-                        stats.deduplicated_size += csize as u64;
-                    }
-
-                    item.chunks.push(ChunkRef {
-                        id: chunk_id,
-                        size: length as u32,
-                        csize,
-                    });
+                stats.original_size += length as u64;
+                stats.compressed_size += csize as u64;
+                if is_new {
+                    stats.deduplicated_size += csize as u64;
                 }
 
-                stats.nfiles += 1;
+                item.chunks.push(ChunkRef {
+                    id: chunk_id,
+                    size: length as u32,
+                    csize,
+                });
             }
 
-            all_items.push(item);
+            stats.nfiles += 1;
         }
+
+        all_items.push(item);
     }
 
     // Serialize all items into a msgpack byte stream
@@ -200,6 +194,8 @@ pub fn run(
         comment: String::new(),
         item_ptrs,
         stats: stats.clone(),
+        source_label: source_label.to_string(),
+        source_paths: vec![source_path.to_string()],
     };
 
     // Generate snapshot ID and store
@@ -218,6 +214,7 @@ pub fn run(
         name: snapshot_name.to_string(),
         id: snapshot_id,
         time: time_start,
+        source_label: source_label.to_string(),
     });
 
     // Save manifest and index

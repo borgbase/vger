@@ -1,4 +1,4 @@
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 
 use chrono::{DateTime, Datelike, IsoWeek, Timelike, Utc};
 
@@ -218,4 +218,59 @@ pub fn apply_policy(
         .collect();
 
     Ok(entries)
+}
+
+/// Apply retention policies per source label.
+///
+/// Snapshots are grouped by `source_label`. Each group uses either a
+/// source-specific retention policy (from `source_retentions`) or the
+/// `default_retention` if none is defined. Snapshots with an empty
+/// source_label are grouped under "".
+pub fn apply_policy_by_label(
+    snapshots: &[SnapshotEntry],
+    default_retention: &RetentionConfig,
+    source_retentions: &HashMap<String, RetentionConfig>,
+    now: DateTime<Utc>,
+) -> Result<Vec<PruneEntry>> {
+    // Group snapshots by source_label (preserving original indices)
+    let mut groups: BTreeMap<&str, Vec<usize>> = BTreeMap::new();
+    for (i, entry) in snapshots.iter().enumerate() {
+        groups
+            .entry(entry.source_label.as_str())
+            .or_default()
+            .push(i);
+    }
+
+    let mut all_entries: Vec<PruneEntry> = Vec::new();
+
+    for (label, indices) in &groups {
+        let group_snapshots: Vec<SnapshotEntry> =
+            indices.iter().map(|&i| snapshots[i].clone()).collect();
+
+        let policy = source_retentions
+            .get(*label)
+            .unwrap_or(default_retention);
+
+        if !policy.has_any_rule() {
+            // No retention rules for this group — keep all
+            for entry in &group_snapshots {
+                all_entries.push(PruneEntry {
+                    snapshot_name: entry.name.clone(),
+                    snapshot_time: entry.time,
+                    decision: PruneDecision::Keep {
+                        reasons: vec!["no policy".into()],
+                    },
+                });
+            }
+            continue;
+        }
+
+        let group_entries = apply_policy(&group_snapshots, policy, now)?;
+        all_entries.extend(group_entries);
+    }
+
+    // Sort newest-first across all groups
+    all_entries.sort_by(|a, b| b.snapshot_time.cmp(&a.snapshot_time));
+
+    Ok(all_entries)
 }

@@ -8,7 +8,7 @@ name = "vger"
 path = "src/main.rs"
 
 [dependencies]
-vger-core = { path = "../vger-core" }
+vger-core = { path = "../vger-core", features = ["mount"] }
 clap = { version = "4", features = ["derive"] }
 serde = { version = "1", features = ["derive"] }
 serde_yaml = "0.9"
@@ -20,3 +20,4 @@ comfy-table = "7"
 chrono = "0.4"
 hostname = "0.4"
 hex = "0.4"
+rand = "0.8"

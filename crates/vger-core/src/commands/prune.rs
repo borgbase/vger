@@ -1,8 +1,10 @@
+use std::collections::HashMap;
+
 use chrono::Utc;
 
-use crate::config::VgerConfig;
+use crate::config::{RetentionConfig, SourceEntry, VgerConfig};
 use crate::error::{VgerError, Result};
-use crate::prune::{apply_policy, PruneDecision};
+use crate::prune::{apply_policy, apply_policy_by_label, PruneDecision};
 use crate::repo::lock;
 use crate::repo::Repository;
 use crate::storage;
@@ -28,19 +30,39 @@ pub fn run(
     passphrase: Option<&str>,
     dry_run: bool,
     list: bool,
+    sources: &[SourceEntry],
 ) -> Result<(PruneStats, Vec<PruneListEntry>)> {
-    if !config.retention.has_any_rule() {
-        return Err(VgerError::Config(
-            "no retention rules configured — set at least one keep_* option in the retention section".into(),
-        ));
-    }
-
     let backend = storage::backend_from_config(&config.repository)?;
     let mut repo = Repository::open(backend, passphrase)?;
     let lock_guard = lock::acquire_lock(repo.storage.as_ref())?;
 
     let now = Utc::now();
-    let decisions = apply_policy(&repo.manifest.snapshots, &config.retention, now)?;
+
+    // Build per-source retention map
+    let source_retentions: HashMap<String, RetentionConfig> = sources
+        .iter()
+        .filter_map(|s| s.retention.as_ref().map(|r| (s.label.clone(), r.clone())))
+        .collect();
+
+    let has_sources = !sources.is_empty();
+
+    let decisions = if has_sources {
+        // Label-aware: group by source_label and apply per-source retention
+        if !config.retention.has_any_rule() && source_retentions.values().all(|r| !r.has_any_rule()) {
+            return Err(VgerError::Config(
+                "no retention rules configured — set at least one keep_* option in the retention section or per-source".into(),
+            ));
+        }
+        apply_policy_by_label(&repo.manifest.snapshots, &config.retention, &source_retentions, now)?
+    } else {
+        // No sources — fall back to flat policy
+        if !config.retention.has_any_rule() {
+            return Err(VgerError::Config(
+                "no retention rules configured — set at least one keep_* option in the retention section".into(),
+            ));
+        }
+        apply_policy(&repo.manifest.snapshots, &config.retention, now)?
+    };
 
     // Build list output
     let mut list_entries = Vec::new();

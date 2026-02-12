@@ -53,6 +53,7 @@ fn manifest_survives_reopen() {
             name: "test-snapshot".to_string(),
             id: vec![0x42; 32],
             time: Utc::now(),
+            source_label: String::new(),
         });
         repo.save_state().unwrap();
     }

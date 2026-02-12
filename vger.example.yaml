@@ -3,8 +3,7 @@
 
 # Repositories to back up to.
 # Top-level settings (encryption, compression, etc.) serve as defaults.
-# Each repository entry can override: encryption, compression, retention,
-# and source_directories.
+# Each repository entry can override: encryption, compression, and retention.
 # Select a single repo at runtime with: vger --repo <label-or-url>
 #
 # URL formats:
@@ -59,8 +58,6 @@ repositories:
   #     algorithm: zstd              # override: better ratio for remote
   #   retention:
   #     keep_daily: 30               # override: keep more on remote
-  #   source_directories:            # override: subset for remote
-  #     - /home/user/documents
 
 # Encryption settings
 encryption:
@@ -73,20 +70,43 @@ encryption:
   # Shell command that outputs the passphrase on stdout (optional)
   # passcommand: "cat /path/to/passphrase-file"
 
-# Directories to back up
-source_directories:
+# Sources to back up.
+# Each source produces its own snapshot per repository.
+# Simple form — just a path (label derived from basename):
+sources:
   - /home/user/documents
   - /home/user/photos
 
-# Glob patterns to exclude from backups
+# Rich form — with label, per-source excludes, hooks, retention, and repo targeting:
+#
+# sources:
+#   - path: /home/user/documents
+#     label: docs
+#     exclude:
+#       - "*.tmp"
+#       - ".git/**"
+#     hooks:
+#       before: "echo backing up docs"
+#       after:
+#         - "notify-send 'docs backup complete'"
+#     retention:
+#       keep_daily: 14
+#       keep_weekly: 8
+#     repos:               # only back up to these repos (empty = all)
+#       - main
+#
+#   - path: /home/user/photos
+#     label: photos
+#     retention:
+#       keep_daily: 7
+#       keep_monthly: 12
+
+# Glob patterns to exclude from all backups (merged with per-source excludes)
 exclude_patterns:
   - "*.tmp"
   - "*.cache"
   - ".DS_Store"
   - "node_modules"
-
-# Snapshot name format (default: "{hostname}-{now:%Y-%m-%dT%H:%M:%S}")
-snapshot_name_format: "{hostname}-{now:%Y-%m-%dT%H:%M:%S}"
 
 # Content-defined chunking parameters (FastCDC)
 chunker:
@@ -104,6 +124,7 @@ compression:
 
 # Hooks — shell commands to run before/after vger commands.
 # Global hooks apply to all repositories. Per-repo hooks go in the repo entry.
+# Source-level hooks go in the source entry (simpler: before/after/failed/finally only).
 #
 # Hook types:
 #   before / before_<cmd>   — runs before the command (failure aborts)
@@ -111,8 +132,9 @@ compression:
 #   failed / failed_<cmd>   — runs after failure only
 #   finally / finally_<cmd> — runs always, regardless of outcome
 #
-# Variables: {repository}, {command}, {label}, {error}
-# Env vars:  VGER_REPOSITORY, VGER_COMMAND, VGER_LABEL, VGER_ERROR
+# Variables: {repository}, {command}, {label}, {error}, {source_label}, {source_path}
+# Env vars:  VGER_REPOSITORY, VGER_COMMAND, VGER_LABEL, VGER_ERROR,
+#            VGER_SOURCE_LABEL, VGER_SOURCE_PATH
 #
 # hooks:
 #   before_backup:
@@ -125,6 +147,7 @@ compression:
 # Retention policy for `vger prune`
 # At least one keep_* option must be set for prune to run.
 # Snapshots matching multiple rules are kept (rules are additive).
+# Per-source retention overrides this default (set in the source entry).
 retention:
   # Keep all snapshots created within this duration
   # Supported suffixes: h (hours), d (days), w (weeks), m (months ~30d), y (years ~365d)

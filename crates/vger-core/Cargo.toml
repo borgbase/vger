@@ -26,6 +26,7 @@ fastcdc = "3"
 
 # Storage
 opendal = { version = "0.51", features = ["services-fs", "services-s3"] }
+url = "2"
 
 # Filesystem
 walkdir = "2"
@@ -51,9 +52,20 @@ tracing = "0.1"
 # HTTP client (REST backend)
 ureq = { version = "2", features = ["json"], optional = true }
 
+# Mount (WebDAV server)
+dav-server = { version = "0.10", optional = true }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "signal", "net"], optional = true }
+hyper = { version = "1", features = ["server", "http1"], optional = true }
+hyper-util = { version = "0.1", features = ["tokio"], optional = true }
+lru = { version = "0.12", optional = true }
+bytes = { version = "1", optional = true }
+futures-util = { version = "0.3", optional = true }
+
 [features]
 default = []
 backend-rest = ["ureq"]
+backend-sftp = ["opendal/services-sftp"]
+mount = ["dav-server", "tokio", "hyper", "hyper-util", "lru", "bytes", "futures-util"]
 
 [dev-dependencies]
 tempfile = "3"

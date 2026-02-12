@@ -7,6 +7,7 @@ fn make_entry(name: &str) -> SnapshotEntry {
         name: name.to_string(),
         id: vec![0u8; 32],
         time: Utc::now(),
+        source_label: String::new(),
     }
 }
 

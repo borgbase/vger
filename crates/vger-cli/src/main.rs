@@ -1,10 +1,11 @@
 use clap::{Parser, Subcommand};
 use comfy_table::{Table, presets::UTF8_FULL_CONDENSED};
+use rand::RngCore;
 
 use vger_core::commands;
 use vger_core::compress::Compression;
 use vger_core::config::{
-    self, ResolvedRepo, VgerConfig,
+    self, ResolvedRepo, SourceEntry, VgerConfig,
 };
 use vger_core::hooks::{self, HookContext};
 
@@ -45,7 +46,7 @@ enum Commands {
 
     /// Back up files to a new snapshot
     Backup {
-        /// Snapshot name
+        /// Snapshot name override (only valid with a single source)
         #[arg(long)]
         snapshot: Option<String>,
 
@@ -53,7 +54,7 @@ enum Commands {
         #[arg(long)]
         compression: Option<String>,
 
-        /// Paths to back up (overrides config source_directories)
+        /// Ad-hoc paths to back up (creates one snapshot per path)
         paths: Vec<String>,
     },
 
@@ -115,6 +116,21 @@ enum Commands {
         dest: String,
     },
 
+    /// Browse snapshots via a local WebDAV server
+    Mount {
+        /// Serve a single snapshot (omit for all snapshots)
+        #[arg(long)]
+        snapshot: Option<String>,
+
+        /// Listen address (default: 127.0.0.1:8080)
+        #[arg(long, default_value = "127.0.0.1:8080")]
+        address: String,
+
+        /// LRU chunk cache size in entries (default: 256)
+        #[arg(long, default_value = "256")]
+        cache_size: usize,
+    },
+
     /// Free repository space by compacting pack files
     Compact {
         /// Minimum percentage of unused space to trigger repack (default: 10)
@@ -140,9 +156,17 @@ fn command_name(cmd: &Commands) -> &'static str {
         Commands::Delete { .. } => "delete",
         Commands::Prune { .. } => "prune",
         Commands::Check { .. } => "check",
+        Commands::Mount { .. } => "mount",
         Commands::Compact { .. } => "compact",
         Commands::Config { .. } => "config",
     }
+}
+
+/// Generate an 8-character hex snapshot name (4 random bytes).
+fn generate_snapshot_name() -> String {
+    let mut buf = [0u8; 4];
+    rand::thread_rng().fill_bytes(&mut buf);
+    hex::encode(buf)
 }
 
 fn main() {
@@ -203,7 +227,7 @@ fn main() {
                 eprintln!("Available repositories:");
                 for r in &all_repos {
                     let label = r.label.as_deref().unwrap_or("-");
-                    eprintln!("  {label:12} {}", r.config.repository.path);
+                    eprintln!("  {label:12} {}", r.config.repository.url);
                 }
                 std::process::exit(1);
             }
@@ -220,7 +244,7 @@ fn main() {
             let name = repo
                 .label
                 .as_deref()
-                .unwrap_or(&repo.config.repository.path);
+                .unwrap_or(&repo.config.repository.url);
             eprintln!("--- Repository: {name} ---");
         }
 
@@ -232,18 +256,20 @@ fn main() {
         let result = if has_hooks {
             let mut ctx = HookContext {
                 command: command_name(&cli.command).to_string(),
-                repository: cfg.repository.path.clone(),
+                repository: cfg.repository.url.clone(),
                 label: repo.label.clone(),
                 error: None,
+                source_label: None,
+                source_path: None,
             };
             hooks::run_with_hooks(
                 &repo.global_hooks,
                 &repo.repo_hooks,
                 &mut ctx,
-                || dispatch_command(&cli.command, cfg, label),
+                || dispatch_command(&cli.command, cfg, label, &repo.sources),
             )
         } else {
-            dispatch_command(&cli.command, cfg, label)
+            dispatch_command(&cli.command, cfg, label, &repo.sources)
         };
 
         if let Err(e) = result {
@@ -286,6 +312,7 @@ fn dispatch_command(
     command: &Commands,
     cfg: &VgerConfig,
     label: Option<&str>,
+    sources: &[SourceEntry],
 ) -> Result<(), Box<dyn std::error::Error>> {
     match command {
         Commands::Init => run_init(cfg, label),
@@ -293,7 +320,7 @@ fn dispatch_command(
             snapshot,
             compression,
             paths,
-        } => run_backup(cfg, label, snapshot.clone(), compression.clone(), paths.clone()),
+        } => run_backup(cfg, label, snapshot.clone(), compression.clone(), paths.clone(), sources),
         Commands::List { snapshot } => run_list(cfg, label, snapshot.clone()),
         Commands::Extract {
             snapshot,
@@ -301,8 +328,13 @@ fn dispatch_command(
             pattern,
         } => run_extract(cfg, label, snapshot.clone(), dest.clone(), pattern.clone()),
         Commands::Delete { snapshot, dry_run } => run_delete(cfg, label, snapshot.clone(), *dry_run),
-        Commands::Prune { dry_run, list } => run_prune(cfg, label, *dry_run, *list),
+        Commands::Prune { dry_run, list } => run_prune(cfg, label, *dry_run, *list, sources),
         Commands::Check { verify_data } => run_check(cfg, label, *verify_data),
+        Commands::Mount {
+            snapshot,
+            address,
+            cache_size,
+        } => run_mount(cfg, label, snapshot.clone(), address.clone(), *cache_size),
         Commands::Compact {
             threshold,
             max_repack_size,
@@ -382,7 +414,7 @@ fn run_init(config: &VgerConfig, label: Option<&str>) -> Result<(), Box<dyn std:
     };
 
     commands::init::run(config, passphrase.as_deref())?;
-    println!("Repository initialized at: {}", config.repository.path);
+    println!("Repository initialized at: {}", config.repository.url);
     Ok(())
 }
 
@@ -392,17 +424,9 @@ fn run_backup(
     snapshot_name: Option<String>,
     compression_override: Option<String>,
     paths: Vec<String>,
+    sources: &[SourceEntry],
 ) -> Result<(), Box<dyn std::error::Error>> {
     let passphrase = get_passphrase(config, label)?;
-
-    // Determine snapshot name
-    let name = snapshot_name.unwrap_or_else(|| {
-        let hostname = hostname::get()
-            .map(|h: std::ffi::OsString| h.to_string_lossy().to_string())
-            .unwrap_or_else(|_| "unknown".into());
-        let now = chrono::Utc::now().format("%Y-%m-%dT%H:%M:%S");
-        format!("{hostname}-{now}")
-    });
 
     // Determine compression
     let compression = if let Some(ref algo) = compression_override {
@@ -411,16 +435,99 @@ fn run_backup(
         Compression::from_config(&config.compression.algorithm, config.compression.zstd_level)?
     };
 
-    let stats = commands::backup::run(config, &name, passphrase.as_deref(), &paths, compression)?;
+    if !paths.is_empty() {
+        // Ad-hoc paths mode: each path gets its own snapshot
+        if snapshot_name.is_some() && paths.len() > 1 {
+            return Err("--snapshot cannot be used with multiple ad-hoc paths".into());
+        }
 
-    println!("Snapshot created: {name}");
-    println!(
-        "  Files: {}, Original: {}, Compressed: {}, Deduplicated: {}",
-        stats.nfiles,
-        format_bytes(stats.original_size),
-        format_bytes(stats.compressed_size),
-        format_bytes(stats.deduplicated_size),
-    );
+        for path in &paths {
+            let source_label = config::label_from_path(path);
+            let name = snapshot_name
+                .clone()
+                .unwrap_or_else(generate_snapshot_name);
+
+            let stats = commands::backup::run(
+                config,
+                &name,
+                passphrase.as_deref(),
+                path,
+                &source_label,
+                &config.exclude_patterns,
+                compression,
+            )?;
+
+            println!("Snapshot created: {name}");
+            println!(
+                "  Source: {path} (label: {source_label})",
+            );
+            println!(
+                "  Files: {}, Original: {}, Compressed: {}, Deduplicated: {}",
+                stats.nfiles,
+                format_bytes(stats.original_size),
+                format_bytes(stats.compressed_size),
+                format_bytes(stats.deduplicated_size),
+            );
+        }
+    } else if sources.is_empty() {
+        return Err("no sources configured and no paths specified".into());
+    } else {
+        // Config sources mode: each source gets its own snapshot
+        if snapshot_name.is_some() && sources.len() > 1 {
+            return Err("--snapshot cannot be used with multiple sources".into());
+        }
+
+        for source in sources {
+            let name = snapshot_name
+                .clone()
+                .unwrap_or_else(generate_snapshot_name);
+
+            let has_source_hooks = !source.hooks.before.is_empty()
+                || !source.hooks.after.is_empty()
+                || !source.hooks.failed.is_empty()
+                || !source.hooks.finally.is_empty();
+
+            let backup_action = || -> Result<(), Box<dyn std::error::Error>> {
+                let stats = commands::backup::run(
+                    config,
+                    &name,
+                    passphrase.as_deref(),
+                    &source.path,
+                    &source.label,
+                    &source.exclude,
+                    compression,
+                )?;
+
+                println!("Snapshot created: {name}");
+                println!(
+                    "  Source: {} (label: {})",
+                    source.path, source.label,
+                );
+                println!(
+                    "  Files: {}, Original: {}, Compressed: {}, Deduplicated: {}",
+                    stats.nfiles,
+                    format_bytes(stats.original_size),
+                    format_bytes(stats.compressed_size),
+                    format_bytes(stats.deduplicated_size),
+                );
+                Ok(())
+            };
+
+            if has_source_hooks {
+                let mut ctx = HookContext {
+                    command: "backup".to_string(),
+                    repository: config.repository.url.clone(),
+                    label: label.map(|s| s.to_string()),
+                    error: None,
+                    source_label: Some(source.label.clone()),
+                    source_path: Some(source.path.clone()),
+                };
+                hooks::run_source_hooks(&source.hooks, &mut ctx, backup_action)?;
+            } else {
+                backup_action()?;
+            }
+        }
+    }
 
     Ok(())
 }
@@ -443,13 +550,17 @@ fn run_list(
 
             let mut table = Table::new();
             table.load_preset(UTF8_FULL_CONDENSED);
-            table.set_header(vec!["Name", "Date", "ID"]);
+            table.set_header(vec!["ID", "Label", "Date"]);
 
             for entry in &snapshots {
                 table.add_row(vec![
                     entry.name.clone(),
+                    if entry.source_label.is_empty() {
+                        "-".to_string()
+                    } else {
+                        entry.source_label.clone()
+                    },
                     entry.time.format("%Y-%m-%d %H:%M:%S").to_string(),
-                    hex::encode(&entry.id)[..16].to_string(),
                 ]);
             }
             println!("{table}");
@@ -534,11 +645,12 @@ fn run_prune(
     label: Option<&str>,
     dry_run: bool,
     list: bool,
+    sources: &[SourceEntry],
 ) -> Result<(), Box<dyn std::error::Error>> {
     let passphrase = get_passphrase(config, label)?;
 
     let (stats, list_entries) =
-        commands::prune::run(config, passphrase.as_deref(), dry_run, list)?;
+        commands::prune::run(config, passphrase.as_deref(), dry_run, list, sources)?;
 
     if list || dry_run {
         for entry in &list_entries {
@@ -603,6 +715,26 @@ fn run_check(
     if !result.errors.is_empty() {
         std::process::exit(1);
     }
+
+    Ok(())
+}
+
+fn run_mount(
+    config: &VgerConfig,
+    label: Option<&str>,
+    snapshot_name: Option<String>,
+    address: String,
+    cache_size: usize,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let passphrase = get_passphrase(config, label)?;
+
+    commands::mount::run(
+        config,
+        passphrase.as_deref(),
+        snapshot_name.as_deref(),
+        &address,
+        cache_size,
+    )?;
 
     Ok(())
 }

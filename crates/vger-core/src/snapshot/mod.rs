@@ -21,6 +21,12 @@ pub struct SnapshotMeta {
     pub item_ptrs: Vec<ChunkId>,
     #[serde(default)]
     pub stats: SnapshotStats,
+    /// Label of the source that produced this snapshot.
+    #[serde(default)]
+    pub source_label: String,
+    /// Source directories that were backed up.
+    #[serde(default)]
+    pub source_paths: Vec<String>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]

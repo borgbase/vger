@@ -16,6 +16,9 @@ pub struct SnapshotEntry {
     pub name: String,
     pub id: Vec<u8>, // 32 bytes, stored as vec for serde compat
     pub time: DateTime<Utc>,
+    /// Label of the source that produced this snapshot.
+    #[serde(default)]
+    pub source_label: String,
 }
 
 impl Manifest {
