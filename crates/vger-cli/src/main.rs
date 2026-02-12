@@ -2,7 +2,11 @@ use std::io::{IsTerminal, Write};
 use std::time::{Duration, Instant};
 
 use clap::{Parser, Subcommand};
-use comfy_table::{presets::UTF8_FULL_CONDENSED, Table};
+use comfy_table::{
+    modifiers::UTF8_ROUND_CORNERS,
+    presets::{ASCII_FULL_CONDENSED, UTF8_FULL_CONDENSED},
+    Attribute, Cell, Color, Table,
+};
 use rand::RngCore;
 
 use vger_core::commands;
@@ -142,6 +146,65 @@ fn truncate_with_ellipsis(input: &str, max_cols: usize) -> String {
         .rev()
         .collect();
     format!("...{tail}")
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct CliTableTheme {
+    use_unicode: bool,
+    use_color: bool,
+}
+
+impl CliTableTheme {
+    fn detect() -> Self {
+        let is_tty = std::io::stdout().is_terminal();
+        let no_color = std::env::var_os("NO_COLOR").is_some();
+        resolve_table_theme(is_tty, no_color)
+    }
+
+    fn new_data_table(self, headers: &[&str]) -> Table {
+        let mut table = Table::new();
+        if self.use_unicode {
+            table.load_preset(UTF8_FULL_CONDENSED);
+            table.apply_modifier(UTF8_ROUND_CORNERS);
+        } else {
+            table.load_preset(ASCII_FULL_CONDENSED);
+        }
+
+        let header_cells: Vec<Cell> = headers.iter().map(|h| self.header_cell(h)).collect();
+        table.set_header(header_cells);
+        table
+    }
+
+    fn new_kv_table(self) -> Table {
+        self.new_data_table(&["Field", "Value"])
+    }
+
+    fn header_cell(self, text: &str) -> Cell {
+        let mut cell = Cell::new(text);
+        if self.use_color {
+            cell = cell.fg(Color::Cyan).add_attribute(Attribute::Bold);
+        }
+        cell
+    }
+
+    fn key_cell(self, text: &str) -> Cell {
+        let mut cell = Cell::new(text);
+        if self.use_color {
+            cell = cell.fg(Color::Green).add_attribute(Attribute::Bold);
+        }
+        cell
+    }
+}
+
+fn resolve_table_theme(is_tty: bool, no_color: bool) -> CliTableTheme {
+    CliTableTheme {
+        use_unicode: is_tty,
+        use_color: is_tty && !no_color,
+    }
+}
+
+fn add_kv_row(table: &mut Table, theme: CliTableTheme, field: &str, value: impl ToString) {
+    table.add_row(vec![theme.key_cell(field), Cell::new(value.to_string())]);
 }
 
 #[derive(Parser)]
@@ -946,9 +1009,8 @@ fn run_list(
                 return Ok(());
             }
 
-            let mut table = Table::new();
-            table.load_preset(UTF8_FULL_CONDENSED);
-            table.set_header(vec!["ID", "Source", "Label", "Date"]);
+            let theme = CliTableTheme::detect();
+            let mut table = theme.new_data_table(&["ID", "Source", "Label", "Date"]);
 
             for entry in &snapshots {
                 let source_col = if !entry.source_paths.is_empty() {
@@ -966,10 +1028,10 @@ fn run_list(
                     "-".to_string()
                 };
                 table.add_row(vec![
-                    entry.name.clone(),
-                    source_col,
-                    label_col,
-                    entry.time.format("%Y-%m-%d %H:%M:%S").to_string(),
+                    Cell::new(entry.name.clone()),
+                    Cell::new(source_col),
+                    Cell::new(label_col),
+                    Cell::new(entry.time.format("%Y-%m-%d %H:%M:%S").to_string()),
                 ]);
             }
             println!("{table}");
@@ -1142,57 +1204,72 @@ fn run_info(config: &VgerConfig, label: Option<&str>) -> Result<(), Box<dyn std:
             .map_err(|e| -> Box<dyn std::error::Error> { Box::new(e) })
     })?;
 
-    let mut table = Table::new();
-    table.load_preset(UTF8_FULL_CONDENSED);
-    table.set_header(vec!["Field", "Value"]);
+    let theme = CliTableTheme::detect();
+    let mut table = theme.new_kv_table();
 
     let repo_name = label.unwrap_or(&config.repository.url);
-    table.add_row(vec!["Repository".to_string(), repo_name.to_string()]);
-    table.add_row(vec!["URL".to_string(), config.repository.url.clone()]);
+    add_kv_row(&mut table, theme, "Repository", repo_name);
+    add_kv_row(&mut table, theme, "URL", config.repository.url.clone());
 
     let encryption = stats.encryption.as_str();
-    table.add_row(vec!["Encryption".to_string(), encryption.to_string()]);
-    table.add_row(vec![
-        "Created".to_string(),
+    add_kv_row(&mut table, theme, "Encryption", encryption.to_string());
+    add_kv_row(
+        &mut table,
+        theme,
+        "Created",
         stats
             .repo_created
             .format("%Y-%m-%d %H:%M:%S UTC")
             .to_string(),
-    ]);
-    table.add_row(vec![
-        "Snapshots".to_string(),
+    );
+    add_kv_row(
+        &mut table,
+        theme,
+        "Snapshots",
         stats.snapshot_count.to_string(),
-    ]);
+    );
 
     let last_snapshot = stats
         .last_snapshot_time
         .map(|t| t.format("%Y-%m-%d %H:%M:%S UTC").to_string())
         .unwrap_or_else(|| "-".to_string());
-    table.add_row(vec!["Last snapshot".to_string(), last_snapshot]);
-    table.add_row(vec![
-        "Raw size (logical sum)".to_string(),
+    add_kv_row(&mut table, theme, "Last snapshot", last_snapshot);
+    add_kv_row(
+        &mut table,
+        theme,
+        "Raw size (logical sum)",
         format_size_with_bytes(stats.raw_size),
-    ]);
-    table.add_row(vec![
-        "Compressed size (logical sum)".to_string(),
+    );
+    add_kv_row(
+        &mut table,
+        theme,
+        "Compressed size (logical sum)",
         format_size_with_bytes(stats.compressed_size),
-    ]);
-    table.add_row(vec![
-        "Deduplicated size (logical sum)".to_string(),
+    );
+    add_kv_row(
+        &mut table,
+        theme,
+        "Deduplicated size (logical sum)",
         format_size_with_bytes(stats.deduplicated_size),
-    ]);
-    table.add_row(vec![
-        "Unique stored size (live)".to_string(),
+    );
+    add_kv_row(
+        &mut table,
+        theme,
+        "Unique stored size (live)",
         format_size_with_bytes(stats.unique_stored_size),
-    ]);
-    table.add_row(vec![
-        "Referenced stored size (live)".to_string(),
+    );
+    add_kv_row(
+        &mut table,
+        theme,
+        "Referenced stored size (live)",
         format_size_with_bytes(stats.referenced_stored_size),
-    ]);
-    table.add_row(vec![
-        "Unique chunks".to_string(),
+    );
+    add_kv_row(
+        &mut table,
+        theme,
+        "Unique chunks",
         stats.unique_chunks.to_string(),
-    ]);
+    );
 
     println!("{table}");
     Ok(())
@@ -1301,7 +1378,9 @@ fn format_size_with_bytes(bytes: u64) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::truncate_with_ellipsis;
+    use comfy_table::{presets::ASCII_FULL_CONDENSED, TableComponent};
+
+    use super::{resolve_table_theme, truncate_with_ellipsis};
 
     #[test]
     fn truncate_with_ellipsis_keeps_tail_when_needed() {
@@ -1323,5 +1402,41 @@ mod tests {
         assert_eq!(truncate_with_ellipsis("abcdef", 1), ".");
         assert_eq!(truncate_with_ellipsis("abcdef", 2), "..");
         assert_eq!(truncate_with_ellipsis("abcdef", 3), "...");
+    }
+
+    #[test]
+    fn resolve_table_theme_enables_unicode_and_color_for_tty() {
+        let theme = resolve_table_theme(true, false);
+        assert!(theme.use_unicode);
+        assert!(theme.use_color);
+    }
+
+    #[test]
+    fn resolve_table_theme_disables_color_when_no_color_is_set() {
+        let theme = resolve_table_theme(true, true);
+        assert!(theme.use_unicode);
+        assert!(!theme.use_color);
+    }
+
+    #[test]
+    fn resolve_table_theme_uses_plain_style_when_not_tty() {
+        let theme = resolve_table_theme(false, false);
+        assert!(!theme.use_unicode);
+        assert!(!theme.use_color);
+    }
+
+    #[test]
+    fn non_tty_data_table_uses_ascii_preset() {
+        let theme = resolve_table_theme(false, false);
+        let mut table = theme.new_data_table(&["A", "B"]);
+        assert_eq!(table.current_style_as_preset(), ASCII_FULL_CONDENSED);
+    }
+
+    #[test]
+    fn tty_data_table_uses_round_corners() {
+        let theme = resolve_table_theme(true, false);
+        let mut table = theme.new_data_table(&["A", "B"]);
+        assert_eq!(table.style(TableComponent::TopLeftCorner), Some('╭'));
+        assert_eq!(table.style(TableComponent::TopRightCorner), Some('╮'));
     }
 }

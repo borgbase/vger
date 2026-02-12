@@ -27,9 +27,7 @@ impl OpendalBackend {
     /// Create a backend from a pre-configured `Operator` (e.g. with layers applied).
     /// Use this for services with native blocking support (e.g. local Fs).
     pub fn from_operator(op: Operator) -> Self {
-        Self {
-            op: op.blocking(),
-        }
+        Self { op: op.blocking() }
     }
 
     /// Create a backend from an async-only operator (S3, SFTP).
@@ -45,9 +43,7 @@ impl OpendalBackend {
             BlockingLayer::create()
                 .map_err(|e| VgerError::Other(format!("failed to create blocking layer: {e}")))?,
         );
-        Ok(Self {
-            op: op.blocking(),
-        })
+        Ok(Self { op: op.blocking() })
     }
 
     /// Build an `Operator` for local filesystem (without blocking conversion).
