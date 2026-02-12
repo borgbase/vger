@@ -38,8 +38,8 @@ enum Commands {
     /// Initialize a new repository
     Init,
 
-    /// Create a new backup archive
-    Create {
+    /// Back up files to a new archive
+    Backup {
         /// Archive name
         #[arg(long)]
         archive: Option<String>,
@@ -177,11 +177,11 @@ fn main() {
 
     let result = match cli.command {
         Commands::Init => run_init(&config),
-        Commands::Create {
+        Commands::Backup {
             archive,
             compression,
             paths,
-        } => run_create(&config, archive, compression, paths),
+        } => run_backup(&config, archive, compression, paths),
         Commands::List { archive } => run_list(&config, archive),
         Commands::Extract {
             archive,
@@ -292,7 +292,7 @@ fn run_init(config: &VgerConfig) -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
-fn run_create(
+fn run_backup(
     config: &VgerConfig,
     archive_name: Option<String>,
     compression_override: Option<String>,
@@ -316,7 +316,7 @@ fn run_create(
         Compression::from_config(&config.compression.algorithm, config.compression.zstd_level)?
     };
 
-    let stats = commands::create::run(config, &name, passphrase.as_deref(), &paths, compression)?;
+    let stats = commands::backup::run(config, &name, passphrase.as_deref(), &paths, compression)?;
 
     println!("Archive created: {name}");
     println!(

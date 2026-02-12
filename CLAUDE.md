@@ -48,7 +48,7 @@ crates/
       commands/
         mod.rs
         init.rs                         # vger init
-        create.rs                       # vger create (walk + chunk + dedup + compress + encrypt)
+        backup.rs                       # vger backup (walk + chunk + dedup + compress + encrypt)
         list.rs                         # vger list (archives or archive contents)
         extract.rs                      # vger extract (restore files)
         delete.rs                       # vger delete (remove archive, decrement refcounts)
@@ -61,7 +61,7 @@ crates/
 
 ## Architecture overview
 
-### Data flow (create)
+### Data flow (backup)
 
 1. Walk source dirs (walkdir) → apply exclude patterns (globset)
 2. For each file: read → FastCDC chunk → for each chunk:

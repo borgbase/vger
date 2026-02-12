@@ -28,7 +28,7 @@ fn items_chunker_config() -> ChunkerConfig {
     }
 }
 
-/// Run `vger create`.
+/// Run `vger backup`.
 pub fn run(
     config: &VgerConfig,
     archive_name: &str,

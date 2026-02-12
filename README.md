@@ -12,7 +12,7 @@ Inspired by [BorgBackup](https://www.borgbackup.org/), [Borgmatic](https://torsi
 |---------|-------------|
 | `vger config` | Generate a starter configuration file |
 | `vger init` | Initialize a new backup repository |
-| `vger create` | Create a new backup archive |
+| `vger backup` | Back up files to a new archive |
 | `vger list` | List archives, or files within an archive |
 | `vger extract` | Restore files from an archive |
 | `vger delete` | Delete a specific archive |
@@ -86,7 +86,7 @@ You can also set `VGER_PASSPHRASE` to supply the passphrase non-interactively (u
 vger init
 
 # Create a backup
-vger create --archive daily-2025-01-15
+vger backup --archive daily-2025-01-15
 
 # List all archives
 vger list
@@ -170,7 +170,7 @@ source_directories:
   - "/home/user/documents"
 ```
 
-All standard commands (`init`, `create`, `list`, `extract`, `delete`, `prune`, `check`, `compact`) work transparently over REST — no changes to the CLI workflow.
+All standard commands (`init`, `backup`, `list`, `extract`, `delete`, `prune`, `check`, `compact`) work transparently over REST — no changes to the CLI workflow.
 
 ### Health check
 
