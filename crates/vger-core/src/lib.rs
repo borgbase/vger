@@ -7,6 +7,7 @@ pub mod crypto;
 pub mod error;
 pub mod hooks;
 pub mod index;
+pub mod limits;
 pub mod prune;
 pub mod repo;
 pub mod snapshot;

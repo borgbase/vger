@@ -26,6 +26,8 @@ pub struct VgerConfig {
     pub retention: RetentionConfig,
     #[serde(default)]
     pub schedule: ScheduleConfig,
+    #[serde(default)]
+    pub limits: ResourceLimitsConfig,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -66,6 +68,101 @@ pub struct ScheduleConfig {
     pub jitter_seconds: u64,
     #[serde(default = "default_passphrase_prompt_timeout_seconds")]
     pub passphrase_prompt_timeout_seconds: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ResourceLimitsConfig {
+    #[serde(default)]
+    pub cpu: CpuLimitsConfig,
+    #[serde(default)]
+    pub io: IoLimitsConfig,
+    #[serde(default)]
+    pub network: NetworkLimitsConfig,
+}
+
+impl Default for ResourceLimitsConfig {
+    fn default() -> Self {
+        Self {
+            cpu: CpuLimitsConfig::default(),
+            io: IoLimitsConfig::default(),
+            network: NetworkLimitsConfig::default(),
+        }
+    }
+}
+
+impl ResourceLimitsConfig {
+    pub fn validate(&self) -> crate::error::Result<()> {
+        self.cpu.validate()
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CpuLimitsConfig {
+    /// Max CPU worker threads for backup transforms (0 = default rayon behavior).
+    #[serde(default)]
+    pub max_threads: usize,
+    /// Unix process niceness target (-20..19). 0 = unchanged.
+    #[serde(default)]
+    pub nice: i32,
+}
+
+impl Default for CpuLimitsConfig {
+    fn default() -> Self {
+        Self {
+            max_threads: 0,
+            nice: 0,
+        }
+    }
+}
+
+impl CpuLimitsConfig {
+    fn validate(&self) -> crate::error::Result<()> {
+        if !(-20..=19).contains(&self.nice) {
+            return Err(crate::error::VgerError::Config(format!(
+                "limits.cpu.nice must be in [-20, 19], got {}",
+                self.nice
+            )));
+        }
+        Ok(())
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct IoLimitsConfig {
+    /// Source-file read limit in MiB/s (0 = unlimited).
+    #[serde(default)]
+    pub read_mib_per_sec: u64,
+    /// Local repository write limit in MiB/s (0 = unlimited).
+    #[serde(default)]
+    pub write_mib_per_sec: u64,
+}
+
+impl Default for IoLimitsConfig {
+    fn default() -> Self {
+        Self {
+            read_mib_per_sec: 0,
+            write_mib_per_sec: 0,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct NetworkLimitsConfig {
+    /// Remote backend read limit in MiB/s (0 = unlimited).
+    #[serde(default)]
+    pub read_mib_per_sec: u64,
+    /// Remote backend write limit in MiB/s (0 = unlimited).
+    #[serde(default)]
+    pub write_mib_per_sec: u64,
+}
+
+impl Default for NetworkLimitsConfig {
+    fn default() -> Self {
+        Self {
+            read_mib_per_sec: 0,
+            write_mib_per_sec: 0,
+        }
+    }
 }
 
 impl Default for ScheduleConfig {
@@ -494,6 +591,9 @@ pub struct RepositoryEntry {
     /// Retry settings for remote backends.
     pub retry: Option<RetryConfig>,
 
+    /// Per-repository resource limits (full override of top-level `limits`).
+    pub limits: Option<ResourceLimitsConfig>,
+
     /// Per-repo hooks (optional).
     #[serde(default)]
     pub hooks: Option<HooksConfig>,
@@ -540,6 +640,8 @@ struct ConfigDocument {
     retention: RetentionConfig,
     #[serde(default)]
     schedule: ScheduleConfig,
+    #[serde(default)]
+    limits: ResourceLimitsConfig,
     /// Global hooks — apply to all repositories.
     #[serde(default)]
     hooks: HooksConfig,
@@ -738,11 +840,15 @@ fn resolve_document(raw: ConfigDocument) -> crate::error::Result<Vec<ResolvedRep
 
     // Validate global hooks
     raw.hooks.validate()?;
+    raw.limits.validate()?;
 
     // Validate per-repo hooks
     for entry in &raw.repositories {
         if let Some(ref h) = entry.hooks {
             h.validate()?;
+        }
+        if let Some(ref limits) = entry.limits {
+            limits.validate()?;
         }
     }
 
@@ -830,6 +936,7 @@ fn resolve_document(raw: ConfigDocument) -> crate::error::Result<Vec<ResolvedRep
                     compression: entry.compression.unwrap_or_else(|| raw.compression.clone()),
                     retention: entry.retention.unwrap_or_else(|| raw.retention.clone()),
                     schedule: raw.schedule.clone(),
+                    limits: entry.limits.unwrap_or_else(|| raw.limits.clone()),
                 },
                 global_hooks: raw.hooks.clone(),
                 repo_hooks,
@@ -1011,6 +1118,20 @@ sources:
 #   on_startup: false
 #   jitter_seconds: 0
 #   passphrase_prompt_timeout_seconds: 300
+#
+# # Optional resource limits for backup.
+# # All values are MiB/s unless noted; 0 means unlimited/no change.
+# #
+# # limits:
+# #   cpu:
+# #     max_threads: 0
+# #     nice: 0
+# #   io:
+# #     read_mib_per_sec: 0
+# #     write_mib_per_sec: 0
+# #   network:
+# #     read_mib_per_sec: 0
+# #     write_mib_per_sec: 0
 
 # Sources support simple paths (above) or rich entries:
 #
@@ -1028,7 +1149,7 @@ sources:
 #
 # Multiple repositories: add more entries to 'repositories:'.
 # Top-level settings serve as defaults; per-repo entries can override
-# encryption, compression, and retention.
+# encryption, compression, retention, and limits.
 #
 # URL formats:
 #   Local:  /backups/repo  or  file:///backups/repo
@@ -1294,6 +1415,77 @@ repositories:
     }
 
     #[test]
+    fn test_limits_inherit_and_repo_override() {
+        let yaml = r#"
+limits:
+  cpu:
+    max_threads: 4
+    nice: 5
+  io:
+    read_mib_per_sec: 100
+    write_mib_per_sec: 50
+  network:
+    read_mib_per_sec: 80
+    write_mib_per_sec: 40
+
+repositories:
+  - url: /backups/local
+    label: local
+  - url: /backups/remote
+    label: remote
+    limits:
+      cpu:
+        max_threads: 2
+sources:
+  - /home/user
+"#;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.yaml");
+        fs::write(&path, yaml).unwrap();
+
+        let repos = load_and_resolve(&path).unwrap();
+        assert_eq!(repos.len(), 2);
+
+        let local = &repos[0].config.limits;
+        assert_eq!(local.cpu.max_threads, 4);
+        assert_eq!(local.cpu.nice, 5);
+        assert_eq!(local.io.read_mib_per_sec, 100);
+        assert_eq!(local.io.write_mib_per_sec, 50);
+        assert_eq!(local.network.read_mib_per_sec, 80);
+        assert_eq!(local.network.write_mib_per_sec, 40);
+
+        let remote = &repos[1].config.limits;
+        assert_eq!(remote.cpu.max_threads, 2);
+        assert_eq!(remote.cpu.nice, 0);
+        assert_eq!(remote.io.read_mib_per_sec, 0);
+        assert_eq!(remote.io.write_mib_per_sec, 0);
+        assert_eq!(remote.network.read_mib_per_sec, 0);
+        assert_eq!(remote.network.write_mib_per_sec, 0);
+    }
+
+    #[test]
+    fn test_limits_invalid_nice_rejected() {
+        let yaml = r#"
+limits:
+  cpu:
+    nice: 25
+repositories:
+  - url: /backups/local
+sources:
+  - /home/user
+"#;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.yaml");
+        fs::write(&path, yaml).unwrap();
+
+        let err = load_and_resolve(&path).unwrap_err();
+        assert!(
+            err.to_string().contains("limits.cpu.nice"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
     fn test_multi_repo_pack_size_defaults() {
         let yaml = r#"
 repositories:
@@ -1437,6 +1629,7 @@ repositories:
                 compression: CompressionConfig::default(),
                 retention: RetentionConfig::default(),
                 schedule: ScheduleConfig::default(),
+                limits: ResourceLimitsConfig::default(),
             },
             global_hooks: HooksConfig::default(),
             repo_hooks: HooksConfig::default(),

@@ -3,7 +3,7 @@
 
 # Repositories to back up to.
 # Top-level settings (encryption, compression, etc.) serve as defaults.
-# Each repository entry can override: encryption, compression, and retention.
+# Each repository entry can override: encryption, compression, retention, and limits.
 # Select a single repo at runtime with: vger --repo <label-or-url>
 #
 # URL formats:
@@ -136,6 +136,25 @@ compression:
 
   # Zstd compression level, 1-22 (default: 3, only used when algorithm is "zstd")
   zstd_level: 3
+
+# Optional backup resource limits.
+# All values are MiB/s unless noted; 0 means unlimited/no change.
+#
+# limits:
+#   cpu:
+#     # Cap backup transform workers (compression/encryption); 0 = default rayon behavior.
+#     max_threads: 0
+#     # Process niceness target on Unix (-20..19). 0 = leave unchanged.
+#     nice: 0
+#   io:
+#     # Throttle source file reads during backup.
+#     read_mib_per_sec: 0
+#     # Throttle local repository writes (for local/file:// repositories).
+#     write_mib_per_sec: 0
+#   network:
+#     # Throttle remote backend reads/writes (s3/sftp/rest repositories).
+#     read_mib_per_sec: 0
+#     write_mib_per_sec: 0
 
 # Hooks — shell commands to run before/after vger commands.
 # Global hooks apply to all repositories. Per-repo hooks go in the repo entry.

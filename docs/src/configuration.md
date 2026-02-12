@@ -56,6 +56,17 @@ compression:
   algorithm: "lz4"                 # "lz4", "zstd", or "none"
   zstd_level: 3                     # Only used with zstd
 
+limits:                             # Optional backup resource limits
+  cpu:
+    max_threads: 0                  # 0 = default rayon behavior
+    nice: 0                         # Unix niceness target (-20..19), 0 = unchanged
+  io:
+    read_mib_per_sec: 0             # Source file reads during backup
+    write_mib_per_sec: 0            # Local repository writes during backup
+  network:
+    read_mib_per_sec: 0             # Remote backend reads during backup
+    write_mib_per_sec: 0            # Remote backend writes during backup
+
 retention:                          # Global retention policy (can be overridden per-source)
   keep_last: 10
   keep_daily: 7
@@ -74,7 +85,7 @@ hooks:                              # Global hooks: run for every command
 
 ## Multiple repositories
 
-Add more entries to `repositories:` to back up to multiple destinations. Top-level settings serve as defaults; each entry can override `encryption`, `compression`, and `retention`.
+Add more entries to `repositories:` to back up to multiple destinations. Top-level settings serve as defaults; each entry can override `encryption`, `compression`, `retention`, and `limits`.
 
 ```yaml
 repositories:
@@ -90,7 +101,14 @@ repositories:
       algorithm: "zstd"           # Better ratio for remote
     retention:
       keep_daily: 30               # Keep more on remote
+    limits:
+      cpu:
+        max_threads: 2
+      network:
+        write_mib_per_sec: 25
 ```
+
+When `limits` is set on a repository entry, it replaces top-level `limits` for that repository.
 
 By default, commands operate on all repositories. Use `--repo` / `-R` to target a single one:
 

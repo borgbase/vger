@@ -6,7 +6,7 @@ use chrono::Utc;
 use ignore::{gitignore::Gitignore, WalkBuilder};
 use rand::RngCore;
 use rayon::prelude::*;
-use tracing::info;
+use tracing::{info, warn};
 
 use super::util::with_repo_lock;
 use crate::chunker;
@@ -14,6 +14,7 @@ use crate::compress::Compression;
 use crate::config::{ChunkerConfig, VgerConfig};
 use crate::crypto::chunk_id::ChunkId;
 use crate::error::{Result, VgerError};
+use crate::limits::{self, ByteRateLimiter};
 use crate::repo::format::{pack_object, ObjectType};
 use crate::repo::manifest::SnapshotEntry;
 use crate::repo::pack::PackType;
@@ -137,6 +138,18 @@ pub fn run(config: &VgerConfig, req: BackupRequest<'_>) -> Result<SnapshotStats>
     run_with_progress(config, req, None)
 }
 
+fn build_transform_pool(max_threads: usize) -> Result<Option<rayon::ThreadPool>> {
+    if max_threads == 0 {
+        return Ok(None);
+    }
+
+    rayon::ThreadPoolBuilder::new()
+        .num_threads(max_threads)
+        .build()
+        .map(Some)
+        .map_err(|e| VgerError::Other(format!("failed to create rayon thread pool: {e}")))
+}
+
 pub fn run_with_progress(
     config: &VgerConfig,
     req: BackupRequest<'_>,
@@ -159,7 +172,22 @@ pub fn run_with_progress(
 
     let multi_path = source_paths.len() > 1;
 
+    let _nice_guard = match limits::NiceGuard::apply(config.limits.cpu.nice) {
+        Ok(guard) => guard,
+        Err(e) => {
+            warn!(
+                "could not apply limits.cpu.nice={}: {e}",
+                config.limits.cpu.nice
+            );
+            None
+        }
+    };
+    let read_limiter = ByteRateLimiter::from_mib_per_sec(config.limits.io.read_mib_per_sec);
+    let transform_pool = build_transform_pool(config.limits.cpu.max_threads)?;
+
     let backend = storage::backend_from_config(&config.repository)?;
+    let backend =
+        limits::wrap_backup_storage_backend(backend, &config.repository.url, &config.limits)?;
     let mut repo = Repository::open(backend, passphrase)?;
 
     with_repo_lock(&mut repo, |repo| {
@@ -349,7 +377,8 @@ pub fn run_with_progress(
                         },
                     );
 
-                    let file_data = std::fs::read(entry.path()).map_err(VgerError::Io)?;
+                    let file_data =
+                        limits::read_file_with_limiter(entry.path(), read_limiter.as_deref())?;
                     let chunk_ranges = chunker::chunk_data(&file_data, &repo.config.chunker_params);
                     let chunk_id_key = *repo.crypto.chunk_id_key();
 
@@ -397,20 +426,45 @@ pub fn run_with_progress(
                     } else {
                         let prepared_results: Vec<Result<PreparedChunk>> = {
                             let crypto = repo.crypto.as_ref();
-                            transform_jobs
-                                .par_iter()
-                                .map(|job| {
-                                    let compressed =
-                                        crate::compress::compress(compression, &job.data)?;
-                                    let packed =
-                                        pack_object(ObjectType::ChunkData, &compressed, crypto)?;
-                                    Ok(PreparedChunk {
-                                        chunk_id: job.chunk_id,
-                                        uncompressed_size: job.data.len() as u32,
-                                        packed,
-                                    })
+                            if let Some(pool) = transform_pool.as_ref() {
+                                pool.install(|| {
+                                    transform_jobs
+                                        .par_iter()
+                                        .map(|job| {
+                                            let compressed =
+                                                crate::compress::compress(compression, &job.data)?;
+                                            let packed = pack_object(
+                                                ObjectType::ChunkData,
+                                                &compressed,
+                                                crypto,
+                                            )?;
+                                            Ok(PreparedChunk {
+                                                chunk_id: job.chunk_id,
+                                                uncompressed_size: job.data.len() as u32,
+                                                packed,
+                                            })
+                                        })
+                                        .collect()
                                 })
-                                .collect()
+                            } else {
+                                transform_jobs
+                                    .par_iter()
+                                    .map(|job| {
+                                        let compressed =
+                                            crate::compress::compress(compression, &job.data)?;
+                                        let packed = pack_object(
+                                            ObjectType::ChunkData,
+                                            &compressed,
+                                            crypto,
+                                        )?;
+                                        Ok(PreparedChunk {
+                                            chunk_id: job.chunk_id,
+                                            uncompressed_size: job.data.len() as u32,
+                                            packed,
+                                        })
+                                    })
+                                    .collect()
+                            }
                         };
 
                         prepared_results
