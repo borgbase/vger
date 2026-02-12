@@ -138,18 +138,29 @@ fn execute_hook_command(cmd: &str, ctx: &HookContext) -> Result<()> {
 }
 
 fn substitute_variables(cmd: &str, ctx: &HookContext) -> String {
-    let mut result = cmd.replace("{command}", &ctx.command);
-    result = result.replace("{repository}", &ctx.repository);
-    result = result.replace("{label}", ctx.label.as_deref().unwrap_or(""));
-    result = result.replace("{error}", ctx.error.as_deref().unwrap_or(""));
-    result = result.replace("{source_label}", ctx.source_label.as_deref().unwrap_or(""));
+    let mut result = cmd.replace("{command}", &shell_escape(&ctx.command));
+    result = result.replace("{repository}", &shell_escape(&ctx.repository));
+    result = result.replace("{label}", &shell_escape(ctx.label.as_deref().unwrap_or("")));
+    result = result.replace("{error}", &shell_escape(ctx.error.as_deref().unwrap_or("")));
+    result = result.replace(
+        "{source_label}",
+        &shell_escape(ctx.source_label.as_deref().unwrap_or("")),
+    );
     let source_path_str = ctx
         .source_paths
         .as_ref()
         .map(|ps| ps.join(":"))
         .unwrap_or_default();
-    result = result.replace("{source_path}", &source_path_str);
+    result = result.replace("{source_path}", &shell_escape(&source_path_str));
     result
+}
+
+fn shell_escape(input: &str) -> String {
+    if input.is_empty() {
+        return "''".to_string();
+    }
+    let escaped = input.replace('\'', "'\"'\"'");
+    format!("'{escaped}'")
 }
 
 /// Run source-level hooks (before/after/failed/finally) around an action.
@@ -238,7 +249,7 @@ mod tests {
         );
         assert_eq!(
             result,
-            "echo backup /mnt/nas nas disk full docs /home/user/docs"
+            "echo 'backup' '/mnt/nas' 'nas' 'disk full' 'docs' '/home/user/docs'"
         );
     }
 
@@ -253,7 +264,7 @@ mod tests {
             source_paths: Some(vec!["/home/user/docs".into(), "/home/user/photos".into()]),
         };
         let result = substitute_variables("paths={source_path}", &ctx);
-        assert_eq!(result, "paths=/home/user/docs:/home/user/photos");
+        assert_eq!(result, "paths='/home/user/docs:/home/user/photos'");
     }
 
     #[test]
@@ -267,7 +278,7 @@ mod tests {
             source_paths: None,
         };
         let result = substitute_variables("cmd={command} label={label} err={error}", &ctx);
-        assert_eq!(result, "cmd=backup label= err=");
+        assert_eq!(result, "cmd='backup' label='' err=''");
     }
 
     #[test]

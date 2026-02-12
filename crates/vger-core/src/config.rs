@@ -1686,10 +1686,7 @@ sources:
         let repos = load_and_resolve(&path).unwrap();
         assert_eq!(repos[0].sources.len(), 1);
         let src = &repos[0].sources[0];
-        assert_eq!(
-            src.paths,
-            vec!["/home/user/documents", "/home/user/photos"]
-        );
+        assert_eq!(src.paths, vec!["/home/user/documents", "/home/user/photos"]);
         assert_eq!(src.label, "multi");
     }
 
@@ -1837,9 +1834,6 @@ sources:
 
         let err = load_and_resolve(&path).unwrap_err();
         let msg = err.to_string();
-        assert!(
-            msg.contains("must not be empty"),
-            "unexpected: {msg}"
-        );
+        assert!(msg.contains("must not be empty"), "unexpected: {msg}");
     }
 }

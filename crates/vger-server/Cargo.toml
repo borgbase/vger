@@ -31,6 +31,7 @@ chrono = { version = "0.4", features = ["serde"] }
 
 # Crypto (constant-time compare for auth token)
 subtle = "2"
+blake2 = "0.10"
 
 # System info
 sysinfo = "0.32"

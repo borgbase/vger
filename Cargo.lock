@@ -3074,6 +3074,7 @@ name = "vger-server"
 version = "0.2.0"
 dependencies = [
  "axum",
+ "blake2",
  "chrono",
  "clap",
  "hex",

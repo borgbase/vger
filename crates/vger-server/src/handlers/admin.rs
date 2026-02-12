@@ -1,11 +1,15 @@
 use axum::extract::{Path, Query, State};
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
+use blake2::digest::{Update, VariableOutput};
+use blake2::Blake2bVar;
 
 use crate::error::ServerError;
 use crate::state::AppState;
 
 const PACK_MAGIC: &[u8; 8] = b"VGERPACK";
+const MAX_REPACK_OPS: usize = 10_000;
+const MAX_KEEP_BLOBS_PER_OP: usize = 200_000;
 
 #[derive(serde::Deserialize, Default)]
 pub struct RepoQuery {
@@ -215,19 +219,17 @@ async fn repack(
     repo: &str,
     body: axum::body::Bytes,
 ) -> Result<Response, ServerError> {
+    let plan: RepackPlan = serde_json::from_slice(&body)
+        .map_err(|e| ServerError::BadRequest(format!("invalid repack plan: {e}")))?;
+    validate_repack_plan(&plan)?;
+
     if state.inner.config.append_only {
-        // Check if any operations have delete_after: true
-        let plan: RepackPlan = serde_json::from_slice(&body)
-            .map_err(|e| ServerError::BadRequest(format!("invalid repack plan: {e}")))?;
         if plan.operations.iter().any(|op| op.delete_after) {
             return Err(ServerError::Forbidden(
                 "append-only: repack with delete not allowed".into(),
             ));
         }
     }
-
-    let plan: RepackPlan = serde_json::from_slice(&body)
-        .map_err(|e| ServerError::BadRequest(format!("invalid repack plan: {e}")))?;
 
     let repo_name = repo.to_string();
     let state_clone = state.clone();
@@ -321,9 +323,26 @@ fn execute_repack(state: &AppState, repo: &str, plan: &RepackPlan) -> Result<Rep
         // Read live blobs from source pack
         let mut source = std::fs::File::open(&source_path)
             .map_err(|e| format!("open {}: {e}", op.source_pack))?;
+        let source_len = source
+            .metadata()
+            .map_err(|e| format!("stat {}: {e}", op.source_pack))?
+            .len();
 
         let mut blobs: Vec<Vec<u8>> = Vec::with_capacity(op.keep_blobs.len());
         for blob_ref in &op.keep_blobs {
+            if blob_ref.length == 0 {
+                return Err("repack blob length must be > 0".to_string());
+            }
+            let end = blob_ref
+                .offset
+                .checked_add(blob_ref.length)
+                .ok_or_else(|| "repack blob range overflow".to_string())?;
+            if end > source_len {
+                return Err(format!(
+                    "repack blob range out of bounds: offset={} length={} file_size={source_len}",
+                    blob_ref.offset, blob_ref.length
+                ));
+            }
             source
                 .seek(SeekFrom::Start(blob_ref.offset))
                 .map_err(|e| format!("seek: {e}"))?;
@@ -386,21 +405,65 @@ fn execute_repack(state: &AppState, repo: &str, plan: &RepackPlan) -> Result<Rep
 }
 
 fn blake2b_256_hex(data: &[u8]) -> String {
-    // The server doesn't need to match the exact PackId algorithm.
-    // The client records whatever pack ID the server returns.
-    // We use SipHash-based approach for a deterministic 256-bit content hash.
-    use std::collections::hash_map::DefaultHasher;
-    use std::hash::{Hash, Hasher};
+    let mut hasher = Blake2bVar::new(32).expect("valid output size");
+    hasher.update(data);
+    let mut out = [0u8; 32];
+    hasher
+        .finalize_variable(&mut out)
+        .expect("valid output buffer length");
+    hex::encode(out)
+}
 
-    let mut result = [0u8; 32];
-    for i in 0..4 {
-        let mut hasher = DefaultHasher::new();
-        data.hash(&mut hasher);
-        (i as u64).hash(&mut hasher);
-        let h = hasher.finish().to_le_bytes();
-        result[i * 8..(i + 1) * 8].copy_from_slice(&h);
+fn validate_repack_plan(plan: &RepackPlan) -> Result<(), ServerError> {
+    if plan.operations.len() > MAX_REPACK_OPS {
+        return Err(ServerError::BadRequest(format!(
+            "too many repack operations: {} (max {MAX_REPACK_OPS})",
+            plan.operations.len()
+        )));
     }
-    hex::encode(result)
+    for (idx, op) in plan.operations.iter().enumerate() {
+        if !is_valid_pack_key(&op.source_pack) {
+            return Err(ServerError::BadRequest(format!(
+                "invalid source_pack at operation {idx}: {}",
+                op.source_pack
+            )));
+        }
+        if op.keep_blobs.len() > MAX_KEEP_BLOBS_PER_OP {
+            return Err(ServerError::BadRequest(format!(
+                "too many keep_blobs at operation {idx}: {} (max {MAX_KEEP_BLOBS_PER_OP})",
+                op.keep_blobs.len()
+            )));
+        }
+        for (blob_idx, blob) in op.keep_blobs.iter().enumerate() {
+            if blob.length == 0 {
+                return Err(ServerError::BadRequest(format!(
+                    "blob length must be > 0 at operation {idx} blob {blob_idx}"
+                )));
+            }
+            if blob.length > u32::MAX as u64 {
+                return Err(ServerError::BadRequest(format!(
+                    "blob length exceeds pack format max at operation {idx} blob {blob_idx}"
+                )));
+            }
+            if blob.offset.checked_add(blob.length).is_none() {
+                return Err(ServerError::BadRequest(format!(
+                    "blob range overflow at operation {idx} blob {blob_idx}"
+                )));
+            }
+        }
+    }
+    Ok(())
+}
+
+fn is_valid_pack_key(key: &str) -> bool {
+    let parts: Vec<&str> = key.trim_matches('/').split('/').collect();
+    if parts.len() != 3 || parts[0] != "packs" {
+        return false;
+    }
+    parts[1].len() == 2
+        && parts[1].chars().all(|c| c.is_ascii_hexdigit())
+        && parts[2].len() == 64
+        && parts[2].chars().all(|c| c.is_ascii_hexdigit())
 }
 
 fn check_structure(repo_dir: &std::path::Path) -> serde_json::Value {

@@ -238,8 +238,16 @@ async fn handle_range_read(
     let end: u64 = parts[1]
         .parse()
         .map_err(|_| ServerError::BadRequest("invalid range end".into()))?;
+    if end < start {
+        return Err(ServerError::BadRequest(
+            "invalid Range header: end before start".into(),
+        ));
+    }
 
-    let length = end - start + 1;
+    let length = end
+        .checked_sub(start)
+        .and_then(|d| d.checked_add(1))
+        .ok_or_else(|| ServerError::BadRequest("invalid Range header".into()))?;
     let file_path = file_path.to_path_buf();
 
     let data = tokio::task::spawn_blocking(move || {
@@ -253,7 +261,13 @@ async fn handle_range_read(
             ));
         }
         f.seek(SeekFrom::Start(start))?;
-        let to_read = length.min(file_len - start) as usize;
+        let to_read_u64 = length.min(file_len - start);
+        let to_read: usize = to_read_u64.try_into().map_err(|_| {
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "requested range too large",
+            )
+        })?;
         let mut buf = vec![0u8; to_read];
         f.read_exact(&mut buf)?;
         Ok::<_, std::io::Error>((buf, file_len))

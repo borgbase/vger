@@ -1,5 +1,5 @@
 use std::os::unix::fs::PermissionsExt;
-use std::path::Path;
+use std::path::{Component, Path, PathBuf};
 
 use tracing::info;
 
@@ -35,6 +35,9 @@ pub fn run(
 
     let dest_path = Path::new(dest);
     std::fs::create_dir_all(dest_path)?;
+    let dest_root = dest_path
+        .canonicalize()
+        .map_err(|e| VgerError::Other(format!("invalid destination '{}': {e}", dest)))?;
 
     let mut stats = ExtractStats::default();
 
@@ -59,11 +62,14 @@ pub fn run(
             }
         }
 
-        let target = dest_path.join(&item.path);
+        let rel = sanitize_item_path(&item.path)?;
+        let target = dest_root.join(&rel);
 
         match item.entry_type {
             ItemType::Directory => {
+                ensure_path_within_root(&target, &dest_root)?;
                 std::fs::create_dir_all(&target)?;
+                ensure_path_within_root(&target, &dest_root)?;
                 // Set permissions (ignore errors on directories for now, re-set after)
                 let _ =
                     std::fs::set_permissions(&target, std::fs::Permissions::from_mode(item.mode));
@@ -71,6 +77,7 @@ pub fn run(
             }
             ItemType::Symlink => {
                 if let Some(ref link_target) = item.link_target {
+                    ensure_parent_exists_within_root(&target, &dest_root)?;
                     // Remove existing if present
                     let _ = std::fs::remove_file(&target);
                     std::os::unix::fs::symlink(link_target, &target)?;
@@ -79,9 +86,7 @@ pub fn run(
             }
             ItemType::RegularFile => {
                 // Ensure parent directory exists
-                if let Some(parent) = target.parent() {
-                    std::fs::create_dir_all(parent)?;
-                }
+                ensure_parent_exists_within_root(&target, &dest_root)?;
 
                 let mut file = std::fs::File::create(&target)?;
                 let mut total_bytes: u64 = 0;
@@ -122,4 +127,63 @@ pub struct ExtractStats {
     pub dirs: u64,
     pub symlinks: u64,
     pub total_bytes: u64,
+}
+
+fn sanitize_item_path(raw: &str) -> Result<PathBuf> {
+    let path = Path::new(raw);
+    if path.is_absolute() {
+        return Err(VgerError::InvalidFormat(format!(
+            "refusing to extract absolute path: {raw}"
+        )));
+    }
+    let mut out = PathBuf::new();
+    for component in path.components() {
+        match component {
+            Component::Normal(part) => out.push(part),
+            Component::CurDir => {}
+            Component::ParentDir | Component::RootDir | Component::Prefix(_) => {
+                return Err(VgerError::InvalidFormat(format!(
+                    "refusing to extract unsafe path: {raw}"
+                )));
+            }
+        }
+    }
+    if out.as_os_str().is_empty() {
+        return Err(VgerError::InvalidFormat(format!(
+            "refusing to extract empty path: {raw}"
+        )));
+    }
+    Ok(out)
+}
+
+fn ensure_parent_exists_within_root(target: &Path, root: &Path) -> Result<()> {
+    if let Some(parent) = target.parent() {
+        ensure_path_within_root(parent, root)?;
+        std::fs::create_dir_all(parent)?;
+        ensure_path_within_root(parent, root)?;
+    }
+    Ok(())
+}
+
+fn ensure_path_within_root(path: &Path, root: &Path) -> Result<()> {
+    let mut cursor = Some(path);
+    while let Some(candidate) = cursor {
+        if candidate.exists() {
+            let canonical = candidate
+                .canonicalize()
+                .map_err(|e| VgerError::Other(format!("path check failed: {e}")))?;
+            if !canonical.starts_with(root) {
+                return Err(VgerError::InvalidFormat(format!(
+                    "refusing to extract outside destination: {}",
+                    path.display()
+                )));
+            }
+            return Ok(());
+        }
+        cursor = candidate.parent();
+    }
+    Err(VgerError::InvalidFormat(format!(
+        "invalid extraction target path: {}",
+        path.display()
+    )))
 }

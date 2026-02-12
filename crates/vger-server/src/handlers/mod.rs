@@ -68,6 +68,11 @@ async fn auth_middleware(
     if provided.as_bytes().ct_eq(expected).into() {
         next.run(req).await
     } else {
-        (StatusCode::UNAUTHORIZED, "invalid or missing token").into_response()
+        (
+            StatusCode::UNAUTHORIZED,
+            [("Connection", "close"), ("WWW-Authenticate", "Bearer")],
+            "invalid or missing token",
+        )
+            .into_response()
     }
 }

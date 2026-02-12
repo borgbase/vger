@@ -6,6 +6,7 @@ use vger_core::commands;
 use vger_core::compress::Compression;
 use vger_core::config::{self, EncryptionModeConfig, ResolvedRepo, SourceEntry, VgerConfig};
 use vger_core::hooks::{self, HookContext};
+use vger_core::storage::{parse_repo_url, ParsedUrl};
 
 #[derive(Parser)]
 #[command(
@@ -268,6 +269,7 @@ fn main() {
 
         let label = repo.label.as_deref();
         let cfg = &repo.config;
+        warn_if_untrusted_rest(cfg, label);
 
         let has_hooks = !repo.global_hooks.is_empty() || !repo.repo_hooks.is_empty();
 
@@ -311,6 +313,27 @@ fn main() {
 
     if had_error {
         std::process::exit(1);
+    }
+}
+
+fn warn_if_untrusted_rest(config: &VgerConfig, label: Option<&str>) {
+    let Ok(parsed) = parse_repo_url(&config.repository.url) else {
+        return;
+    };
+    let ParsedUrl::Rest { url } = parsed else {
+        return;
+    };
+
+    let repo_name = label.unwrap_or(&config.repository.url);
+    if config.encryption.mode == EncryptionModeConfig::None {
+        eprintln!(
+            "Warning: repository '{repo_name}' uses REST with plaintext mode (encryption.mode=none)."
+        );
+    }
+    if url.starts_with("http://") {
+        eprintln!(
+            "Warning: repository '{repo_name}' uses non-HTTPS REST URL '{url}'. Transport is not TLS-protected."
+        );
     }
 }
 

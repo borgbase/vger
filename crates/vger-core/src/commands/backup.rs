@@ -133,12 +133,7 @@ pub fn run(config: &VgerConfig, req: BackupRequest<'_>) -> Result<SnapshotStats>
                 let item_bytes = rmp_serde::to_vec(&dir_item)?;
                 item_stream.extend_from_slice(&item_bytes);
                 if item_stream.len() >= items_config.avg_size as usize {
-                    flush_item_stream_chunk(
-                        repo,
-                        &mut item_stream,
-                        &mut item_ptrs,
-                        compression,
-                    )?;
+                    flush_item_stream_chunk(repo, &mut item_stream, &mut item_ptrs, compression)?;
                 }
                 Some(base)
             } else {
@@ -216,8 +211,7 @@ pub fn run(config: &VgerConfig, req: BackupRequest<'_>) -> Result<SnapshotStats>
                 if entry_type == ItemType::RegularFile && metadata.len() > 0 {
                     let file_data = std::fs::read(entry.path()).map_err(VgerError::Io)?;
 
-                    let chunk_ranges =
-                        chunker::chunk_data(&file_data, &repo.config.chunker_params);
+                    let chunk_ranges = chunker::chunk_data(&file_data, &repo.config.chunker_params);
 
                     for (offset, length) in chunk_ranges {
                         let chunk_data = &file_data[offset..offset + length];
@@ -244,12 +238,7 @@ pub fn run(config: &VgerConfig, req: BackupRequest<'_>) -> Result<SnapshotStats>
                 let item_bytes = rmp_serde::to_vec(&item)?;
                 item_stream.extend_from_slice(&item_bytes);
                 if item_stream.len() >= items_config.avg_size as usize {
-                    flush_item_stream_chunk(
-                        repo,
-                        &mut item_stream,
-                        &mut item_ptrs,
-                        compression,
-                    )?;
+                    flush_item_stream_chunk(repo, &mut item_stream, &mut item_ptrs, compression)?;
                 }
             }
         }
