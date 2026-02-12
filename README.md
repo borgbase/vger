@@ -157,11 +157,11 @@ vger-server --config vger-server.toml
 ### Client configuration (REST backend)
 
 ```yaml
-repository:
-  path: "https://backup.example.com/myrepo"
-  backend: "rest"
-  rest_token: "some-secret-token"
-  # rest_token_command: "pass show borg-token"  # alternative: shell command
+repositories:
+  - path: "https://backup.example.com/myrepo"
+    backend: "rest"
+    rest_token: "some-secret-token"
+    # rest_token_command: "pass show borg-token"  # alternative: shell command
 
 encryption:
   mode: "aes256gcm"
@@ -184,18 +184,19 @@ Returns server status, uptime, disk free space, and repo count.
 ## Configuration reference
 
 ```yaml
-repository:
-  path: "/backup/repo"           # Local path, S3 prefix, or REST URL
-  backend: "local"               # "local", "s3", or "rest"
-  # min_pack_size: 33554432      # Pack size floor (default 32 MiB)
-  # max_pack_size: 536870912     # Pack size ceiling (default 512 MiB)
-  # S3-specific options:
-  # s3_bucket: "my-backups"
-  # s3_region: "us-east-1"
-  # s3_endpoint: "http://localhost:9000"  # For MinIO etc.
-  # REST-specific options:
-  # rest_token: "secret"                  # Bearer token for REST server
-  # rest_token_command: "pass show borg"  # Alternative: shell command for token
+repositories:
+  - path: "/backup/repo"           # Local path, S3 prefix, or REST URL
+    label: "main"                  # Short name for --repo selection
+    # backend: "local"             # "local", "s3", or "rest" (default: "local")
+    # min_pack_size: 33554432      # Pack size floor (default 32 MiB)
+    # max_pack_size: 536870912     # Pack size ceiling (default 512 MiB)
+    # S3-specific options:
+    # s3_bucket: "my-backups"
+    # s3_region: "us-east-1"
+    # s3_endpoint: "http://localhost:9000"  # For MinIO etc.
+    # REST-specific options:
+    # rest_token: "secret"                  # Bearer token for REST server
+    # rest_token_command: "pass show borg"  # Alternative: shell command for token
 
 encryption:
   mode: "aes256gcm"              # "aes256gcm" or "none"
@@ -219,6 +220,34 @@ compression:
   zstd_level: 3                  # Only used with zstd
 
 archive_name_format: "{hostname}-{now:%Y-%m-%dT%H:%M:%S}"
+```
+
+### Multiple repositories
+
+Add more entries to `repositories:` to back up to multiple destinations. Top-level settings serve as defaults; each entry can override `encryption`, `compression`, `retention`, and `source_directories`.
+
+```yaml
+repositories:
+  - path: "/backups/local"
+    label: "local"
+
+  - path: "s3://bucket/remote"
+    label: "remote"
+    backend: "s3"
+    s3_bucket: "my-bucket"
+    encryption:
+      passcommand: "pass show vger-remote"
+    compression:
+      algorithm: "zstd"          # Better ratio for remote
+    retention:
+      keep_daily: 30             # Keep more on remote
+```
+
+By default, commands operate on **all** repositories. Use `--repo` / `-R` to target a single one:
+
+```bash
+vger --repo local list
+vger -R /backups/local list
 ```
 
 ## Design

@@ -90,9 +90,10 @@ Two separate `PackWriter` instances:
 Pack sizes grow with repository size. Config exposes floor and ceiling:
 
 ```yaml
-repository:
-  min_pack_size: 33554432     # 32 MiB (floor, default)
-  max_pack_size: 536870912    # 512 MiB (ceiling, default)
+repositories:
+  - path: /backups/repo
+    min_pack_size: 33554432     # 32 MiB (floor, default)
+    max_pack_size: 536870912    # 512 MiB (ceiling, default)
 ```
 
 Data pack sizing formula:
@@ -334,11 +335,11 @@ log_format = "json"              # "json" or "pretty"
 
 Client config:
 ```yaml
-repository:
-  path: https://backup.example.com/myrepo
-  backend: rest
-  rest_token: "secret-token-here"
-  # rest_token_command: "pass show vger-token"
+repositories:
+  - path: https://backup.example.com/myrepo
+    backend: rest
+    rest_token: "secret-token-here"
+    # rest_token_command: "pass show vger-token"
 ```
 
 ---

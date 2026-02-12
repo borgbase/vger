@@ -164,6 +164,154 @@ fn default_archive_format() -> String {
     "{hostname}-{now:%Y-%m-%dT%H:%M:%S}".to_string()
 }
 
+/// A single entry in the `repositories:` list.
+/// Contains all `RepositoryConfig` fields plus optional per-repo overrides.
+#[derive(Debug, Clone, Deserialize)]
+pub struct RepositoryEntry {
+    // Required repository fields
+    pub path: String,
+    #[serde(default = "default_backend")]
+    pub backend: String,
+    pub s3_bucket: Option<String>,
+    pub s3_region: Option<String>,
+    pub s3_endpoint: Option<String>,
+    pub sftp_host: Option<String>,
+    pub sftp_user: Option<String>,
+    pub sftp_port: Option<u16>,
+    pub rest_token: Option<String>,
+    pub rest_token_command: Option<String>,
+    pub min_pack_size: Option<u32>,
+    pub max_pack_size: Option<u32>,
+
+    /// Optional label for `--repo` selection.
+    pub label: Option<String>,
+
+    // Per-repo overrides (None = use top-level defaults)
+    pub encryption: Option<EncryptionConfig>,
+    pub compression: Option<CompressionConfig>,
+    pub retention: Option<RetentionConfig>,
+    pub source_directories: Option<Vec<String>>,
+}
+
+impl RepositoryEntry {
+    fn to_repo_config(&self) -> RepositoryConfig {
+        RepositoryConfig {
+            path: self.path.clone(),
+            backend: self.backend.clone(),
+            s3_bucket: self.s3_bucket.clone(),
+            s3_region: self.s3_region.clone(),
+            s3_endpoint: self.s3_endpoint.clone(),
+            sftp_host: self.sftp_host.clone(),
+            sftp_user: self.sftp_user.clone(),
+            sftp_port: self.sftp_port,
+            rest_token: self.rest_token.clone(),
+            rest_token_command: self.rest_token_command.clone(),
+            min_pack_size: self.min_pack_size.unwrap_or_else(default_min_pack_size),
+            max_pack_size: self.max_pack_size.unwrap_or_else(default_max_pack_size),
+        }
+    }
+}
+
+/// Intermediate deserialization struct for the YAML config file.
+#[derive(Debug, Deserialize)]
+struct RawConfig {
+    repositories: Vec<RepositoryEntry>,
+    #[serde(default)]
+    encryption: EncryptionConfig,
+    #[serde(default)]
+    source_directories: Vec<String>,
+    #[serde(default)]
+    exclude_patterns: Vec<String>,
+    #[serde(default)]
+    chunker: ChunkerConfig,
+    #[serde(default)]
+    compression: CompressionConfig,
+    #[serde(default = "default_archive_format")]
+    archive_name_format: String,
+    #[serde(default)]
+    retention: RetentionConfig,
+}
+
+/// A fully resolved repository with its merged config.
+#[derive(Debug, Clone)]
+pub struct ResolvedRepo {
+    pub label: Option<String>,
+    pub config: VgerConfig,
+}
+
+/// Load and resolve a config file into one `ResolvedRepo` per repository entry.
+pub fn load_and_resolve(path: &Path) -> crate::error::Result<Vec<ResolvedRepo>> {
+    let contents = std::fs::read_to_string(path).map_err(|e| {
+        crate::error::VgerError::Config(format!("cannot read '{}': {e}", path.display()))
+    })?;
+    let raw: RawConfig = serde_yaml::from_str(&contents).map_err(|e| {
+        crate::error::VgerError::Config(format!("invalid config '{}': {e}", path.display()))
+    })?;
+
+    resolve_raw_config(raw)
+}
+
+fn resolve_raw_config(raw: RawConfig) -> crate::error::Result<Vec<ResolvedRepo>> {
+    if raw.repositories.is_empty() {
+        return Err(crate::error::VgerError::Config(
+            "'repositories:' must not be empty".into(),
+        ));
+    }
+
+    // Check for duplicate labels
+    let mut seen = std::collections::HashSet::new();
+    for label in raw.repositories.iter().filter_map(|e| e.label.as_deref()) {
+        if !seen.insert(label) {
+            return Err(crate::error::VgerError::Config(format!(
+                "duplicate repository label: '{label}'"
+            )));
+        }
+    }
+
+    let repos = raw
+        .repositories
+        .into_iter()
+        .map(|entry| {
+            let label = entry.label.clone();
+            ResolvedRepo {
+                label,
+                config: VgerConfig {
+                    repository: entry.to_repo_config(),
+                    encryption: entry
+                        .encryption
+                        .unwrap_or_else(|| raw.encryption.clone()),
+                    source_directories: entry
+                        .source_directories
+                        .unwrap_or_else(|| raw.source_directories.clone()),
+                    exclude_patterns: raw.exclude_patterns.clone(),
+                    chunker: raw.chunker.clone(),
+                    compression: entry
+                        .compression
+                        .unwrap_or_else(|| raw.compression.clone()),
+                    archive_name_format: raw.archive_name_format.clone(),
+                    retention: entry
+                        .retention
+                        .unwrap_or_else(|| raw.retention.clone()),
+                },
+            }
+        })
+        .collect();
+
+    Ok(repos)
+}
+
+/// Select a repository by label or path from a list of resolved repos.
+pub fn select_repo<'a>(repos: &'a [ResolvedRepo], selector: &str) -> Option<&'a ResolvedRepo> {
+    // Try label match first
+    repos
+        .iter()
+        .find(|r| r.label.as_deref() == Some(selector))
+        .or_else(|| {
+            // Fall back to path match
+            repos.iter().find(|r| r.config.repository.path == selector)
+        })
+}
+
 // --- Config resolution ---
 
 /// Tracks where the config file was found.
@@ -247,15 +395,10 @@ pub fn resolve_config_path(cli_config: Option<&str>) -> Option<ConfigSource> {
     None
 }
 
-/// Load and parse a config file.
+/// Load and parse a config file. Returns the first repository's config.
 pub fn load_config(path: &Path) -> crate::error::Result<VgerConfig> {
-    let contents = std::fs::read_to_string(path).map_err(|e| {
-        crate::error::VgerError::Config(format!("cannot read '{}': {e}", path.display()))
-    })?;
-    let config: VgerConfig = serde_yaml::from_str(&contents).map_err(|e| {
-        crate::error::VgerError::Config(format!("invalid config '{}': {e}", path.display()))
-    })?;
-    Ok(config)
+    let repos = load_and_resolve(path)?;
+    Ok(repos.into_iter().next().unwrap().config)
 }
 
 /// Returns a minimal YAML config template suitable for bootstrapping.
@@ -263,9 +406,10 @@ pub fn minimal_config_template() -> &'static str {
     r#"# vger configuration file
 # See https://github.com/your-org/vger for full documentation.
 
-repository:
-  path: /path/to/repo
-  backend: local
+repositories:
+  - path: /path/to/repo
+    label: main
+    # backend: local              # "local", "s3", or "rest" (default: "local")
 
 encryption:
   mode: aes256gcm
@@ -283,6 +427,19 @@ source_directories:
 #   keep_daily: 7
 #   keep_weekly: 4
 #   keep_monthly: 6
+
+# Multiple repositories: add more entries to 'repositories:'.
+# Top-level settings serve as defaults; per-repo entries can override
+# encryption, compression, retention, and source_directories.
+#
+#  - path: s3://bucket/remote
+#    label: remote
+#    backend: s3
+#    s3_bucket: my-bucket
+#    compression:
+#      algorithm: zstd
+#    retention:
+#      keep_daily: 30
 "#
 }
 
@@ -331,7 +488,7 @@ mod tests {
         let _lock = GLOBAL_STATE.lock().unwrap();
         let dir = tempfile::tempdir().unwrap();
         let config_path = dir.path().join("vger.yaml");
-        fs::write(&config_path, "repository:\n  path: /tmp/repo\n").unwrap();
+        fs::write(&config_path, "repositories:\n  - path: /tmp/repo\n").unwrap();
 
         let original = std::env::current_dir().unwrap();
         std::env::set_current_dir(dir.path()).unwrap();
@@ -362,8 +519,12 @@ mod tests {
     #[test]
     fn test_minimal_template_is_valid_yaml() {
         let template = minimal_config_template();
-        let parsed: Result<VgerConfig, _> = serde_yaml::from_str(template);
+        let parsed: Result<RawConfig, _> = serde_yaml::from_str(template);
         assert!(parsed.is_ok(), "template should parse as valid YAML: {:?}", parsed.err());
+        let raw = parsed.unwrap();
+        let repos = resolve_raw_config(raw).unwrap();
+        assert_eq!(repos.len(), 1);
+        assert_eq!(repos[0].config.repository.path, "/path/to/repo");
     }
 
     #[test]
@@ -392,6 +553,269 @@ mod tests {
                 Some(v) => std::env::set_var(self.key, v),
                 None => std::env::remove_var(self.key),
             }
+        }
+    }
+
+    // --- Multi-repo tests ---
+
+    #[test]
+    fn test_single_repo() {
+        let yaml = r#"
+repositories:
+  - path: /tmp/repo
+    label: main
+encryption:
+  mode: none
+source_directories:
+  - /home/user
+"#;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.yaml");
+        fs::write(&path, yaml).unwrap();
+
+        let repos = load_and_resolve(&path).unwrap();
+        assert_eq!(repos.len(), 1);
+        assert_eq!(repos[0].label.as_deref(), Some("main"));
+        assert_eq!(repos[0].config.repository.path, "/tmp/repo");
+        assert_eq!(repos[0].config.encryption.mode, "none");
+        assert_eq!(repos[0].config.source_directories, vec!["/home/user"]);
+    }
+
+    #[test]
+    fn test_multi_repo_basic() {
+        let yaml = r#"
+encryption:
+  mode: aes256gcm
+source_directories:
+  - /home/user
+compression:
+  algorithm: lz4
+retention:
+  keep_daily: 7
+
+repositories:
+  - path: /backups/local
+    label: local
+  - path: /backups/remote
+    label: remote
+"#;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.yaml");
+        fs::write(&path, yaml).unwrap();
+
+        let repos = load_and_resolve(&path).unwrap();
+        assert_eq!(repos.len(), 2);
+
+        assert_eq!(repos[0].label.as_deref(), Some("local"));
+        assert_eq!(repos[0].config.repository.path, "/backups/local");
+        // Inherits top-level defaults
+        assert_eq!(repos[0].config.encryption.mode, "aes256gcm");
+        assert_eq!(repos[0].config.compression.algorithm, "lz4");
+        assert_eq!(repos[0].config.retention.keep_daily, Some(7));
+        assert_eq!(repos[0].config.source_directories, vec!["/home/user"]);
+
+        assert_eq!(repos[1].label.as_deref(), Some("remote"));
+        assert_eq!(repos[1].config.repository.path, "/backups/remote");
+    }
+
+    #[test]
+    fn test_multi_repo_overrides() {
+        let yaml = r#"
+encryption:
+  mode: aes256gcm
+source_directories:
+  - /home/user
+compression:
+  algorithm: lz4
+retention:
+  keep_daily: 7
+
+repositories:
+  - path: /backups/local
+    label: local
+  - path: /backups/remote
+    label: remote
+    encryption:
+      mode: aes256gcm
+      passcommand: "pass show vger-remote"
+    compression:
+      algorithm: zstd
+    retention:
+      keep_daily: 30
+    source_directories:
+      - /home/user/important
+"#;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.yaml");
+        fs::write(&path, yaml).unwrap();
+
+        let repos = load_and_resolve(&path).unwrap();
+        assert_eq!(repos.len(), 2);
+
+        // First repo uses defaults
+        let local = &repos[0];
+        assert_eq!(local.config.compression.algorithm, "lz4");
+        assert_eq!(local.config.retention.keep_daily, Some(7));
+        assert_eq!(local.config.source_directories, vec!["/home/user"]);
+
+        // Second repo uses overrides
+        let remote = &repos[1];
+        assert_eq!(remote.config.compression.algorithm, "zstd");
+        assert_eq!(remote.config.retention.keep_daily, Some(30));
+        assert_eq!(
+            remote.config.encryption.passcommand.as_deref(),
+            Some("pass show vger-remote")
+        );
+        assert_eq!(remote.config.source_directories, vec!["/home/user/important"]);
+    }
+
+    #[test]
+    fn test_multi_repo_pack_size_defaults() {
+        let yaml = r#"
+repositories:
+  - path: /backups/a
+    min_pack_size: 1048576
+  - path: /backups/b
+"#;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.yaml");
+        fs::write(&path, yaml).unwrap();
+
+        let repos = load_and_resolve(&path).unwrap();
+        assert_eq!(repos[0].config.repository.min_pack_size, 1048576);
+        assert_eq!(repos[1].config.repository.min_pack_size, default_min_pack_size());
+        assert_eq!(repos[1].config.repository.max_pack_size, default_max_pack_size());
+    }
+
+    #[test]
+    fn test_reject_missing_repositories() {
+        let yaml = r#"
+encryption:
+  mode: none
+"#;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.yaml");
+        fs::write(&path, yaml).unwrap();
+
+        let err = load_and_resolve(&path).unwrap_err();
+        assert!(err.to_string().contains("missing field"));
+    }
+
+    #[test]
+    fn test_reject_empty_repositories() {
+        let yaml = r#"
+repositories: []
+"#;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.yaml");
+        fs::write(&path, yaml).unwrap();
+
+        let err = load_and_resolve(&path).unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("must not be empty"), "unexpected error: {msg}");
+    }
+
+    #[test]
+    fn test_reject_duplicate_labels() {
+        let yaml = r#"
+repositories:
+  - path: /backups/a
+    label: same
+  - path: /backups/b
+    label: same
+"#;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.yaml");
+        fs::write(&path, yaml).unwrap();
+
+        let err = load_and_resolve(&path).unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("duplicate repository label"), "unexpected error: {msg}");
+    }
+
+    #[test]
+    fn test_select_repo_by_label() {
+        let repos = vec![
+            ResolvedRepo {
+                label: Some("local".into()),
+                config: make_test_config("/backups/local"),
+            },
+            ResolvedRepo {
+                label: Some("remote".into()),
+                config: make_test_config("/backups/remote"),
+            },
+        ];
+
+        let found = select_repo(&repos, "remote").unwrap();
+        assert_eq!(found.config.repository.path, "/backups/remote");
+    }
+
+    #[test]
+    fn test_select_repo_by_path() {
+        let repos = vec![
+            ResolvedRepo {
+                label: Some("local".into()),
+                config: make_test_config("/backups/local"),
+            },
+            ResolvedRepo {
+                label: None,
+                config: make_test_config("/backups/unlabeled"),
+            },
+        ];
+
+        let found = select_repo(&repos, "/backups/unlabeled").unwrap();
+        assert!(found.label.is_none());
+        assert_eq!(found.config.repository.path, "/backups/unlabeled");
+    }
+
+    #[test]
+    fn test_select_repo_no_match() {
+        let repos = vec![ResolvedRepo {
+            label: Some("local".into()),
+            config: make_test_config("/backups/local"),
+        }];
+
+        assert!(select_repo(&repos, "nonexistent").is_none());
+    }
+
+    #[test]
+    fn test_load_config_returns_first_repo() {
+        let yaml = r#"
+repositories:
+  - path: /tmp/first
+  - path: /tmp/second
+"#;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.yaml");
+        fs::write(&path, yaml).unwrap();
+
+        let config = load_config(&path).unwrap();
+        assert_eq!(config.repository.path, "/tmp/first");
+    }
+
+    fn make_test_config(path: &str) -> VgerConfig {
+        VgerConfig {
+            repository: RepositoryConfig {
+                path: path.to_string(),
+                backend: "local".to_string(),
+                s3_bucket: None,
+                s3_region: None,
+                s3_endpoint: None,
+                sftp_host: None,
+                sftp_user: None,
+                sftp_port: None,
+                rest_token: None,
+                rest_token_command: None,
+                min_pack_size: default_min_pack_size(),
+                max_pack_size: default_max_pack_size(),
+            },
+            encryption: EncryptionConfig::default(),
+            source_directories: vec![],
+            exclude_patterns: vec![],
+            chunker: ChunkerConfig::default(),
+            compression: CompressionConfig::default(),
+            archive_name_format: default_archive_format(),
+            retention: RetentionConfig::default(),
         }
     }
 }

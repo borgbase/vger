@@ -1,23 +1,41 @@
 # vger example configuration
 # Copy this file to vger.yaml and adjust to your needs.
 
-# Repository location and backend
-repository:
-  # Path to the repository (required)
-  path: /backups/myrepo
+# Repositories to back up to.
+# Top-level settings (encryption, compression, etc.) serve as defaults.
+# Each repository entry can override: encryption, compression, retention,
+# and source_directories.
+# Select a single repo at runtime with: vger --repo <label-or-path>
+repositories:
+  - path: /backups/myrepo
+    label: main
 
-  # Storage backend: "local" or "s3" (default: "local")
-  backend: local
+    # Storage backend: "local", "s3", or "rest" (default: "local")
+    # backend: local
 
-  # S3 backend settings (only used when backend is "s3")
-  # s3_bucket: my-backup-bucket
-  # s3_region: us-east-1
-  # s3_endpoint: https://s3.amazonaws.com  # custom endpoint for S3-compatible stores
+    # S3 backend settings (only used when backend is "s3")
+    # s3_bucket: my-backup-bucket
+    # s3_region: us-east-1
+    # s3_endpoint: https://s3.amazonaws.com  # custom endpoint for S3-compatible stores
 
-  # SFTP settings (not yet implemented)
-  # sftp_host: backup.example.com
-  # sftp_user: backupuser
-  # sftp_port: 22
+    # SFTP settings (not yet implemented)
+    # sftp_host: backup.example.com
+    # sftp_user: backupuser
+    # sftp_port: 22
+
+  # Additional repositories — uncomment to add a second destination:
+  # - path: s3://bucket/remote
+  #   label: remote
+  #   backend: s3
+  #   s3_bucket: my-bucket
+  #   encryption:
+  #     passcommand: "pass show vger-remote"
+  #   compression:
+  #     algorithm: zstd              # override: better ratio for remote
+  #   retention:
+  #     keep_daily: 30               # override: keep more on remote
+  #   source_directories:            # override: subset for remote
+  #     - /home/user/documents
 
 # Encryption settings
 encryption:

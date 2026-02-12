@@ -4,7 +4,7 @@ use comfy_table::{Table, presets::UTF8_FULL_CONDENSED};
 use vger_core::commands;
 use vger_core::compress::Compression;
 use vger_core::config::{
-    self, VgerConfig,
+    self, ResolvedRepo, VgerConfig,
 };
 
 #[derive(Parser)]
@@ -24,6 +24,10 @@ struct Cli {
     /// Path to configuration file (overrides VGER_CONFIG and default search)
     #[arg(short, long)]
     config: Option<String>,
+
+    /// Select repository by label or path (operates on all repos if omitted)
+    #[arg(short = 'R', long = "repo", global = true)]
+    repo: Option<String>,
 
     /// Verbosity level (-v, -vv, -vvv)
     #[arg(short, long, action = clap::ArgAction::Count)]
@@ -167,40 +171,87 @@ fn main() {
 
     tracing::info!("Using config: {source}");
 
-    let config = match config::load_config(source.path()) {
-        Ok(c) => c,
+    let all_repos = match config::load_and_resolve(source.path()) {
+        Ok(r) => r,
         Err(e) => {
             eprintln!("Error: {e}");
             std::process::exit(1);
         }
     };
 
-    let result = match cli.command {
-        Commands::Init => run_init(&config),
-        Commands::Backup {
-            archive,
-            compression,
-            paths,
-        } => run_backup(&config, archive, compression, paths),
-        Commands::List { archive } => run_list(&config, archive),
-        Commands::Extract {
-            archive,
-            dest,
-            pattern,
-        } => run_extract(&config, archive, dest, pattern),
-        Commands::Delete { archive, dry_run } => run_delete(&config, archive, dry_run),
-        Commands::Prune { dry_run, list } => run_prune(&config, dry_run, list),
-        Commands::Check { verify_data } => run_check(&config, verify_data),
-        Commands::Compact {
-            threshold,
-            max_repack_size,
-            dry_run,
-        } => run_compact(&config, threshold, max_repack_size, dry_run),
-        Commands::Config { .. } => unreachable!(),
+    // Filter by --repo if provided
+    let repos: Vec<&ResolvedRepo> = if let Some(ref selector) = cli.repo {
+        match config::select_repo(&all_repos, selector) {
+            Some(r) => vec![r],
+            None => {
+                eprintln!("Error: no repository matching '{selector}'");
+                eprintln!("Available repositories:");
+                for r in &all_repos {
+                    let label = r.label.as_deref().unwrap_or("-");
+                    eprintln!("  {label:12} {}", r.config.repository.path);
+                }
+                std::process::exit(1);
+            }
+        }
+    } else {
+        all_repos.iter().collect()
     };
 
-    if let Err(e) = result {
-        eprintln!("Error: {e}");
+    let multi = repos.len() > 1;
+    let mut had_error = false;
+
+    for repo in &repos {
+        if multi {
+            let name = repo
+                .label
+                .as_deref()
+                .unwrap_or(&repo.config.repository.path);
+            eprintln!("--- Repository: {name} ---");
+        }
+
+        let label = repo.label.as_deref();
+        let cfg = &repo.config;
+
+        let result = match cli.command {
+            Commands::Init => run_init(cfg, label),
+            Commands::Backup {
+                ref archive,
+                ref compression,
+                ref paths,
+            } => run_backup(cfg, label, archive.clone(), compression.clone(), paths.clone()),
+            Commands::List { ref archive } => run_list(cfg, label, archive.clone()),
+            Commands::Extract {
+                ref archive,
+                ref dest,
+                ref pattern,
+            } => run_extract(cfg, label, archive.clone(), dest.clone(), pattern.clone()),
+            Commands::Delete {
+                ref archive,
+                dry_run,
+            } => run_delete(cfg, label, archive.clone(), dry_run),
+            Commands::Prune { dry_run, list } => run_prune(cfg, label, dry_run, list),
+            Commands::Check { verify_data } => run_check(cfg, label, verify_data),
+            Commands::Compact {
+                threshold,
+                ref max_repack_size,
+                dry_run,
+            } => run_compact(cfg, label, threshold, max_repack_size.clone(), dry_run),
+            Commands::Config { .. } => unreachable!(),
+        };
+
+        if let Err(e) = result {
+            eprintln!("Error: {e}");
+            had_error = true;
+            if multi {
+                // Continue to next repo
+                continue;
+            } else {
+                std::process::exit(1);
+            }
+        }
+    }
+
+    if had_error {
         std::process::exit(1);
     }
 }
@@ -224,7 +275,7 @@ fn run_config_generate(dest: &str) -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
-fn get_passphrase(config: &VgerConfig) -> Result<Option<String>, Box<dyn std::error::Error>> {
+fn get_passphrase(config: &VgerConfig, label: Option<&str>) -> Result<Option<String>, Box<dyn std::error::Error>> {
     if config.encryption.mode == "none" {
         return Ok(None);
     }
@@ -255,29 +306,35 @@ fn get_passphrase(config: &VgerConfig) -> Result<Option<String>, Box<dyn std::er
     }
 
     // Interactive prompt
-    let pass = rpassword::prompt_password("Enter passphrase: ")?;
+    let prompt = match label {
+        Some(l) => format!("Enter passphrase for '{l}': "),
+        None => "Enter passphrase: ".to_string(),
+    };
+    let pass = rpassword::prompt_password(prompt)?;
     Ok(Some(pass))
 }
 
-fn run_init(config: &VgerConfig) -> Result<(), Box<dyn std::error::Error>> {
+fn run_init(config: &VgerConfig, label: Option<&str>) -> Result<(), Box<dyn std::error::Error>> {
     let passphrase = if config.encryption.mode != "none" {
         // Try config passphrase/passcommand first, then env var, then interactive
-        if let Some(p) = get_passphrase(config)? {
+        if let Some(p) = get_passphrase(config, label)? {
             Some(p)
         } else if let Ok(p) = std::env::var("VGER_PASSPHRASE") {
             if !p.is_empty() {
                 Some(p)
             } else {
-                let p1 = rpassword::prompt_password("Enter new passphrase: ")?;
-                let p2 = rpassword::prompt_password("Confirm passphrase: ")?;
+                let suffix = label.map(|l| format!(" for '{l}'")).unwrap_or_default();
+                let p1 = rpassword::prompt_password(format!("Enter new passphrase{suffix}: "))?;
+                let p2 = rpassword::prompt_password(format!("Confirm passphrase{suffix}: "))?;
                 if p1 != p2 {
                     return Err("passphrases do not match".into());
                 }
                 Some(p1)
             }
         } else {
-            let p1 = rpassword::prompt_password("Enter new passphrase: ")?;
-            let p2 = rpassword::prompt_password("Confirm passphrase: ")?;
+            let suffix = label.map(|l| format!(" for '{l}'")).unwrap_or_default();
+            let p1 = rpassword::prompt_password(format!("Enter new passphrase{suffix}: "))?;
+            let p2 = rpassword::prompt_password(format!("Confirm passphrase{suffix}: "))?;
             if p1 != p2 {
                 return Err("passphrases do not match".into());
             }
@@ -294,11 +351,12 @@ fn run_init(config: &VgerConfig) -> Result<(), Box<dyn std::error::Error>> {
 
 fn run_backup(
     config: &VgerConfig,
+    label: Option<&str>,
     archive_name: Option<String>,
     compression_override: Option<String>,
     paths: Vec<String>,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let passphrase = get_passphrase(config)?;
+    let passphrase = get_passphrase(config, label)?;
 
     // Determine archive name
     let name = archive_name.unwrap_or_else(|| {
@@ -332,9 +390,10 @@ fn run_backup(
 
 fn run_list(
     config: &VgerConfig,
+    label: Option<&str>,
     archive_name: Option<String>,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let passphrase = get_passphrase(config)?;
+    let passphrase = get_passphrase(config, label)?;
 
     let result = commands::list::run(config, passphrase.as_deref(), archive_name.as_deref())?;
 
@@ -378,11 +437,12 @@ fn run_list(
 
 fn run_extract(
     config: &VgerConfig,
+    label: Option<&str>,
     archive_name: String,
     dest: String,
     pattern: Option<String>,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let passphrase = get_passphrase(config)?;
+    let passphrase = get_passphrase(config, label)?;
 
     let stats = commands::extract::run(
         config,
@@ -405,10 +465,11 @@ fn run_extract(
 
 fn run_delete(
     config: &VgerConfig,
+    label: Option<&str>,
     archive_name: String,
     dry_run: bool,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let passphrase = get_passphrase(config)?;
+    let passphrase = get_passphrase(config, label)?;
 
     let stats = commands::delete::run(config, passphrase.as_deref(), &archive_name, dry_run)?;
 
@@ -433,10 +494,11 @@ fn run_delete(
 
 fn run_prune(
     config: &VgerConfig,
+    label: Option<&str>,
     dry_run: bool,
     list: bool,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let passphrase = get_passphrase(config)?;
+    let passphrase = get_passphrase(config, label)?;
 
     let (stats, list_entries) =
         commands::prune::run(config, passphrase.as_deref(), dry_run, list)?;
@@ -477,9 +539,10 @@ fn run_prune(
 
 fn run_check(
     config: &VgerConfig,
+    label: Option<&str>,
     verify_data: bool,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let passphrase = get_passphrase(config)?;
+    let passphrase = get_passphrase(config, label)?;
 
     let result = commands::check::run(config, passphrase.as_deref(), verify_data)?;
 
@@ -509,11 +572,12 @@ fn run_check(
 
 fn run_compact(
     config: &VgerConfig,
+    label: Option<&str>,
     threshold: f64,
     max_repack_size: Option<String>,
     dry_run: bool,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let passphrase = get_passphrase(config)?;
+    let passphrase = get_passphrase(config, label)?;
 
     let max_bytes = max_repack_size
         .map(|s| parse_size(&s))
