@@ -63,7 +63,7 @@ Chunks are grouped into **pack files** (~32 MiB) instead of being stored as indi
 
 ### vger Pack File Format
 
-```
+```text
 [8B magic "VGERPACK\0"][1B version=1]
 [4B blob_0_len LE][blob_0_data]
 [4B blob_1_len LE][blob_1_data]
@@ -97,7 +97,7 @@ repositories:
 ```
 
 Data pack sizing formula:
-```
+```text
 target = clamp(min_pack_size * sqrt(num_data_packs / 100), min_pack_size, max_pack_size)
 ```
 
@@ -125,7 +125,7 @@ The `compact` command reclaims space from orphaned blobs left behind by `delete`
 
 ### rustic/restic Pack File Format (for reference)
 
-```
+```text
 [blob1_encrypted][blob2_encrypted]...[blobN_encrypted][header_encrypted][header_length: u32 LE]
 ```
 
@@ -163,7 +163,7 @@ The index never points to a deleted pack. Sequence: write new pack → save inde
 
 ### CLI
 
-```
+```text
 vger compact [--threshold 10] [--max-repack-size 2G] [-n/--dry-run]
 ```
 
@@ -175,7 +175,7 @@ vger compact [--threshold 10] [--max-repack-size 2G] [-n/--dry-run]
 
 vger includes a dedicated backup server (`vger-server`) for features that dumb storage (S3/WebDAV) cannot provide. The server stores data on its local filesystem, and TLS is handled by a reverse proxy. All data remains client-side encrypted — the server is opaque storage that understands repo structure but never has the encryption key.
 
-```
+```text
 vger CLI (client)        reverse proxy (TLS)     vger-server
        │                       │                       │
        │──── HTTPS ───────────►│──── HTTP ────────────►│

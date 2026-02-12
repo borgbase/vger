@@ -1,0 +1,8 @@
+[book]
+authors = ["vger contributors"]
+language = "en"
+src = "src"
+title = "V'Ger Backup Documentation"
+
+[build]
+build-dir = "book"
