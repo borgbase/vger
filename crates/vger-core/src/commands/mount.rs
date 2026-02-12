@@ -678,6 +678,7 @@ pub fn run(
     snapshot_name: Option<&str>,
     address: &str,
     cache_size: usize,
+    source_filter: &[String],
 ) -> Result<()> {
     let backend = storage::backend_from_config(&config.repository)?;
     let repo = Repository::open(backend, passphrase)?;
@@ -690,7 +691,16 @@ pub fn run(
         build_vfs_tree(&items)
     } else {
         let mut root_children = HashMap::new();
-        for entry in &repo.manifest.snapshots {
+        let entries: Vec<_> = if source_filter.is_empty() {
+            repo.manifest.snapshots.iter().collect()
+        } else {
+            repo.manifest
+                .snapshots
+                .iter()
+                .filter(|e| source_filter.contains(&e.source_label))
+                .collect()
+        };
+        for entry in &entries {
             let items = list_cmd::load_snapshot_items(&repo, &entry.name)?;
             eprintln!(
                 "Loaded {} items from snapshot '{}'",

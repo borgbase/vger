@@ -31,12 +31,25 @@ pub fn run(
     dry_run: bool,
     list: bool,
     sources: &[SourceEntry],
+    source_filter: &[String],
 ) -> Result<(PruneStats, Vec<PruneListEntry>)> {
     let backend = storage::backend_from_config(&config.repository)?;
     let mut repo = Repository::open(backend, passphrase)?;
     let lock_guard = lock::acquire_lock(repo.storage.as_ref())?;
 
     let now = Utc::now();
+
+    // When --source is given, restrict to matching snapshots only
+    let target_snapshots = if source_filter.is_empty() {
+        repo.manifest.snapshots.clone()
+    } else {
+        repo.manifest
+            .snapshots
+            .iter()
+            .filter(|e| source_filter.contains(&e.source_label))
+            .cloned()
+            .collect()
+    };
 
     // Build per-source retention map
     let source_retentions: HashMap<String, RetentionConfig> = sources
@@ -53,7 +66,7 @@ pub fn run(
                 "no retention rules configured — set at least one keep_* option in the retention section or per-source".into(),
             ));
         }
-        apply_policy_by_label(&repo.manifest.snapshots, &config.retention, &source_retentions, now)?
+        apply_policy_by_label(&target_snapshots, &config.retention, &source_retentions, now)?
     } else {
         // No sources — fall back to flat policy
         if !config.retention.has_any_rule() {
@@ -61,7 +74,7 @@ pub fn run(
                 "no retention rules configured — set at least one keep_* option in the retention section".into(),
             ));
         }
-        apply_policy(&repo.manifest.snapshots, &config.retention, now)?
+        apply_policy(&target_snapshots, &config.retention, now)?
     };
 
     // Build list output

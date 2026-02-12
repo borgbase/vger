@@ -37,6 +37,7 @@ pub fn run(
     source_label: &str,
     exclude_patterns: &[String],
     compression: Compression,
+    label: &str,
 ) -> Result<SnapshotStats> {
     let backend = storage::backend_from_config(&config.repository)?;
     let mut repo = Repository::open(backend, passphrase)?;
@@ -196,6 +197,7 @@ pub fn run(
         stats: stats.clone(),
         source_label: source_label.to_string(),
         source_paths: vec![source_path.to_string()],
+        label: label.to_string(),
     };
 
     // Generate snapshot ID and store
@@ -215,6 +217,7 @@ pub fn run(
         id: snapshot_id,
         time: time_start,
         source_label: source_label.to_string(),
+        label: label.to_string(),
     });
 
     // Save manifest and index

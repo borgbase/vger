@@ -19,6 +19,7 @@ Inspired by [BorgBackup](https://www.borgbackup.org/), [Borgmatic](https://torsi
 | `vger prune` | Prune snapshots according to retention policy |
 | `vger check` | Verify repository integrity (`--verify-data` for full content verification) |
 | `vger compact` | Free space by repacking pack files after delete/prune |
+| `vger mount` | Browse snapshots via a local WebDAV server |
 
 ### Core capabilities
 
@@ -45,7 +46,7 @@ All data remains **client-side encrypted**. The server never has the encryption 
 
 ### What is not (yet) implemented
 
-Mount (FUSE), repair, hardlinks, special files (devices, FIFOs), and file-level caching for incremental speedup.
+Repair, hardlinks, special files (devices, FIFOs), and file-level caching for incremental speedup.
 
 ## Quick start
 
@@ -85,20 +86,35 @@ You can also set `VGER_PASSPHRASE` to supply the passphrase non-interactively (u
 # Initialize the repository (prompts for passphrase if encrypted)
 vger init
 
-# Create a backup
-vger backup --snapshot daily-2025-01-15
+# Create a backup (auto-generated 8-char hex ID)
+vger backup
+
+# Create a backup with a label annotation
+vger backup --label before-upgrade
+
+# Back up only one configured source
+vger backup --source docs
 
 # List all snapshots
 vger list
 
-# List files inside a snapshot
-vger list --snapshot daily-2025-01-15
+# List the 5 most recent snapshots
+vger list --last 5
+
+# List snapshots for a specific source
+vger list --source docs
+
+# List files inside a snapshot (use the hex ID from `vger list`)
+vger list --snapshot a1b2c3d4
+
+# Browse snapshots via a local WebDAV server
+vger mount
 
 # Restore to a directory
-vger extract --snapshot daily-2025-01-15 --dest /tmp/restored
+vger extract --snapshot a1b2c3d4 --dest /tmp/restored
 
 # Delete a specific snapshot
-vger delete --snapshot daily-2025-01-15
+vger delete --snapshot a1b2c3d4
 
 # Prune old snapshots per retention policy
 vger prune
@@ -112,6 +128,24 @@ vger check --verify-data
 # Reclaim space from deleted/pruned snapshots (dry-run first)
 vger compact --dry-run
 vger compact
+```
+
+### Mount
+
+Browse snapshot contents via a local WebDAV server — open the URL in a file manager or web browser.
+
+```bash
+# Serve all snapshots (default: http://127.0.0.1:8080)
+vger mount
+
+# Serve a single snapshot
+vger mount --snapshot a1b2c3d4
+
+# Only snapshots from a specific source
+vger mount --source docs
+
+# Custom listen address
+vger mount --address 127.0.0.1:9090
 ```
 
 ## Server mode
@@ -165,7 +199,7 @@ repositories:
 encryption:
   mode: "aes256gcm"
 
-source_directories:
+sources:
   - "/home/user/documents"
 ```
 
@@ -200,10 +234,23 @@ encryption:
   # passphrase: "inline-secret"  # Not recommended for production
   # passcommand: "pass show borg"  # Shell command that prints the passphrase
 
-source_directories:
+# Simple form — list of paths (auto-labeled from directory name)
+sources:
   - "/home/user/documents"
+  - "/home/user/photos"
 
-exclude_patterns:                # Glob patterns
+# Rich form — per-source options
+sources:
+  - path: "/home/user/documents"
+    label: "docs"
+    exclude: ["*.tmp", ".cache/**"]
+    repos: ["main"]               # Only back up to this repo (default: all)
+    retention:
+      keep_daily: 7
+    hooks:
+      before: "echo starting docs backup"
+
+exclude_patterns:                # Global exclude patterns (merged with per-source)
   - "*.tmp"
   - ".cache/**"
 
@@ -216,22 +263,34 @@ compression:
   algorithm: "lz4"               # "lz4", "zstd", or "none"
   zstd_level: 3                  # Only used with zstd
 
-snapshot_name_format: "{hostname}-{now:%Y-%m-%dT%H:%M:%S}"
+retention:                       # Global retention policy (can be overridden per-source)
+  keep_last: 10
+  keep_daily: 7
+  keep_weekly: 4
+  keep_monthly: 6
+  keep_yearly: 2
+  keep_within: "2d"              # Keep everything within this period (e.g. "2d", "48h", "1w")
+
+hooks:                           # Global hooks — run for every command
+  before: "echo starting"
+  after: "echo done"
+  # before_backup: "echo backup starting"  # Command-specific hooks
+  # failed: "notify-send 'vger failed'"
+  # finally: "cleanup.sh"
 ```
 
 ### Multiple repositories
 
-Add more entries to `repositories:` to back up to multiple destinations. Top-level settings serve as defaults; each entry can override `encryption`, `compression`, `retention`, and `source_directories`.
+Add more entries to `repositories:` to back up to multiple destinations. Top-level settings serve as defaults; each entry can override `encryption`, `compression`, and `retention`.
 
 ```yaml
 repositories:
-  - path: "/backups/local"
+  - url: "/backups/local"
     label: "local"
 
-  - path: "s3://bucket/remote"
+  - url: "s3://bucket/remote"
     label: "remote"
-    backend: "s3"
-    s3_bucket: "my-bucket"
+    region: "us-east-1"
     encryption:
       passcommand: "pass show vger-remote"
     compression:

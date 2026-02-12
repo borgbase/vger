@@ -46,13 +46,17 @@ enum Commands {
 
     /// Back up files to a new snapshot
     Backup {
-        /// Snapshot name override (only valid with a single source)
-        #[arg(long)]
-        snapshot: Option<String>,
+        /// User-provided annotation for the snapshot
+        #[arg(short = 'l', long)]
+        label: Option<String>,
 
         /// Compression algorithm override (lz4, zstd, none)
         #[arg(long)]
         compression: Option<String>,
+
+        /// Filter which configured sources to back up (by label)
+        #[arg(short = 'S', long = "source")]
+        source: Vec<String>,
 
         /// Ad-hoc paths to back up (creates one snapshot per path)
         paths: Vec<String>,
@@ -63,6 +67,14 @@ enum Commands {
         /// Show contents of a specific snapshot
         #[arg(long)]
         snapshot: Option<String>,
+
+        /// Filter displayed snapshots by source label
+        #[arg(short = 'S', long = "source")]
+        source: Vec<String>,
+
+        /// Show only the N most recent snapshots
+        #[arg(long)]
+        last: Option<usize>,
     },
 
     /// Extract files from a snapshot
@@ -100,6 +112,10 @@ enum Commands {
         /// Show detailed list of kept/pruned snapshots with reasons
         #[arg(long)]
         list: bool,
+
+        /// Apply retention only to snapshots matching these source labels
+        #[arg(short = 'S', long = "source")]
+        source: Vec<String>,
     },
 
     /// Verify repository integrity
@@ -121,6 +137,10 @@ enum Commands {
         /// Serve a single snapshot (omit for all snapshots)
         #[arg(long)]
         snapshot: Option<String>,
+
+        /// Expose only snapshots matching these source labels
+        #[arg(short = 'S', long = "source")]
+        source: Vec<String>,
 
         /// Listen address (default: 127.0.0.1:8080)
         #[arg(long, default_value = "127.0.0.1:8080")]
@@ -317,24 +337,26 @@ fn dispatch_command(
     match command {
         Commands::Init => run_init(cfg, label),
         Commands::Backup {
-            snapshot,
+            label: user_label,
             compression,
+            source,
             paths,
-        } => run_backup(cfg, label, snapshot.clone(), compression.clone(), paths.clone(), sources),
-        Commands::List { snapshot } => run_list(cfg, label, snapshot.clone()),
+        } => run_backup(cfg, label, user_label.clone(), compression.clone(), paths.clone(), sources, source),
+        Commands::List { snapshot, source, last } => run_list(cfg, label, snapshot.clone(), source, *last),
         Commands::Extract {
             snapshot,
             dest,
             pattern,
         } => run_extract(cfg, label, snapshot.clone(), dest.clone(), pattern.clone()),
         Commands::Delete { snapshot, dry_run } => run_delete(cfg, label, snapshot.clone(), *dry_run),
-        Commands::Prune { dry_run, list } => run_prune(cfg, label, *dry_run, *list, sources),
+        Commands::Prune { dry_run, list, source } => run_prune(cfg, label, *dry_run, *list, sources, source),
         Commands::Check { verify_data } => run_check(cfg, label, *verify_data),
         Commands::Mount {
             snapshot,
+            source,
             address,
             cache_size,
-        } => run_mount(cfg, label, snapshot.clone(), address.clone(), *cache_size),
+        } => run_mount(cfg, label, snapshot.clone(), address.clone(), *cache_size, source),
         Commands::Compact {
             threshold,
             max_repack_size,
@@ -421,12 +443,14 @@ fn run_init(config: &VgerConfig, label: Option<&str>) -> Result<(), Box<dyn std:
 fn run_backup(
     config: &VgerConfig,
     label: Option<&str>,
-    snapshot_name: Option<String>,
+    user_label: Option<String>,
     compression_override: Option<String>,
     paths: Vec<String>,
     sources: &[SourceEntry],
+    source_filter: &[String],
 ) -> Result<(), Box<dyn std::error::Error>> {
     let passphrase = get_passphrase(config, label)?;
+    let user_label_str = user_label.as_deref().unwrap_or("");
 
     // Determine compression
     let compression = if let Some(ref algo) = compression_override {
@@ -435,17 +459,15 @@ fn run_backup(
         Compression::from_config(&config.compression.algorithm, config.compression.zstd_level)?
     };
 
+    if !source_filter.is_empty() && !paths.is_empty() {
+        return Err("cannot combine --source with ad-hoc paths".into());
+    }
+
     if !paths.is_empty() {
         // Ad-hoc paths mode: each path gets its own snapshot
-        if snapshot_name.is_some() && paths.len() > 1 {
-            return Err("--snapshot cannot be used with multiple ad-hoc paths".into());
-        }
-
         for path in &paths {
             let source_label = config::label_from_path(path);
-            let name = snapshot_name
-                .clone()
-                .unwrap_or_else(generate_snapshot_name);
+            let name = generate_snapshot_name();
 
             let stats = commands::backup::run(
                 config,
@@ -455,9 +477,13 @@ fn run_backup(
                 &source_label,
                 &config.exclude_patterns,
                 compression,
+                user_label_str,
             )?;
 
             println!("Snapshot created: {name}");
+            if !user_label_str.is_empty() {
+                println!("  Label: {user_label_str}");
+            }
             println!(
                 "  Source: {path} (label: {source_label})",
             );
@@ -472,15 +498,16 @@ fn run_backup(
     } else if sources.is_empty() {
         return Err("no sources configured and no paths specified".into());
     } else {
-        // Config sources mode: each source gets its own snapshot
-        if snapshot_name.is_some() && sources.len() > 1 {
-            return Err("--snapshot cannot be used with multiple sources".into());
-        }
+        // Filter sources by --source if specified
+        let active_sources: Vec<&SourceEntry> = if source_filter.is_empty() {
+            sources.iter().collect()
+        } else {
+            config::select_sources(sources, source_filter)
+                .map_err(|e| -> Box<dyn std::error::Error> { e.into() })?
+        };
 
-        for source in sources {
-            let name = snapshot_name
-                .clone()
-                .unwrap_or_else(generate_snapshot_name);
+        for source in &active_sources {
+            let name = generate_snapshot_name();
 
             let has_source_hooks = !source.hooks.before.is_empty()
                 || !source.hooks.after.is_empty()
@@ -496,9 +523,13 @@ fn run_backup(
                     &source.label,
                     &source.exclude,
                     compression,
+                    user_label_str,
                 )?;
 
                 println!("Snapshot created: {name}");
+                if !user_label_str.is_empty() {
+                    println!("  Label: {user_label_str}");
+                }
                 println!(
                     "  Source: {} (label: {})",
                     source.path, source.label,
@@ -536,13 +567,31 @@ fn run_list(
     config: &VgerConfig,
     label: Option<&str>,
     snapshot_name: Option<String>,
+    source_filter: &[String],
+    last: Option<usize>,
 ) -> Result<(), Box<dyn std::error::Error>> {
+    if snapshot_name.is_some() && !source_filter.is_empty() {
+        return Err("cannot combine --source with --snapshot".into());
+    }
+
     let passphrase = get_passphrase(config, label)?;
 
     let result = commands::list::run(config, passphrase.as_deref(), snapshot_name.as_deref())?;
 
     match result {
-        commands::list::ListResult::Snapshots(snapshots) => {
+        commands::list::ListResult::Snapshots(mut snapshots) => {
+            // Filter by source label if requested
+            if !source_filter.is_empty() {
+                snapshots.retain(|e| source_filter.iter().any(|f| f == &e.source_label));
+            }
+
+            // Truncate to last N entries
+            if let Some(n) = last {
+                let len = snapshots.len();
+                if n < len {
+                    snapshots.drain(..len - n);
+                }
+            }
             if snapshots.is_empty() {
                 println!("No snapshots found.");
                 return Ok(());
@@ -550,7 +599,7 @@ fn run_list(
 
             let mut table = Table::new();
             table.load_preset(UTF8_FULL_CONDENSED);
-            table.set_header(vec!["ID", "Label", "Date"]);
+            table.set_header(vec!["ID", "Source", "Label", "Date"]);
 
             for entry in &snapshots {
                 table.add_row(vec![
@@ -559,6 +608,11 @@ fn run_list(
                         "-".to_string()
                     } else {
                         entry.source_label.clone()
+                    },
+                    if entry.label.is_empty() {
+                        "-".to_string()
+                    } else {
+                        entry.label.clone()
                     },
                     entry.time.format("%Y-%m-%d %H:%M:%S").to_string(),
                 ]);
@@ -646,11 +700,12 @@ fn run_prune(
     dry_run: bool,
     list: bool,
     sources: &[SourceEntry],
+    source_filter: &[String],
 ) -> Result<(), Box<dyn std::error::Error>> {
     let passphrase = get_passphrase(config, label)?;
 
     let (stats, list_entries) =
-        commands::prune::run(config, passphrase.as_deref(), dry_run, list, sources)?;
+        commands::prune::run(config, passphrase.as_deref(), dry_run, list, sources, source_filter)?;
 
     if list || dry_run {
         for entry in &list_entries {
@@ -725,6 +780,7 @@ fn run_mount(
     snapshot_name: Option<String>,
     address: String,
     cache_size: usize,
+    source_filter: &[String],
 ) -> Result<(), Box<dyn std::error::Error>> {
     let passphrase = get_passphrase(config, label)?;
 
@@ -734,6 +790,7 @@ fn run_mount(
         snapshot_name.as_deref(),
         &address,
         cache_size,
+        source_filter,
     )?;
 
     Ok(())

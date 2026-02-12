@@ -19,6 +19,9 @@ pub struct SnapshotEntry {
     /// Label of the source that produced this snapshot.
     #[serde(default)]
     pub source_label: String,
+    /// User-provided annotation for this snapshot.
+    #[serde(default)]
+    pub label: String,
 }
 
 impl Manifest {

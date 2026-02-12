@@ -540,6 +540,29 @@ pub fn select_repo<'a>(repos: &'a [ResolvedRepo], selector: &str) -> Option<&'a 
         })
 }
 
+/// Select sources by label from a list of source entries.
+///
+/// Returns an error with available source labels if any selector doesn't match.
+pub fn select_sources<'a>(
+    sources: &'a [SourceEntry],
+    selectors: &[String],
+) -> std::result::Result<Vec<&'a SourceEntry>, String> {
+    let mut result = Vec::new();
+    for sel in selectors {
+        match sources.iter().find(|s| s.label == *sel) {
+            Some(s) => result.push(s),
+            None => {
+                let available: Vec<&str> = sources.iter().map(|s| s.label.as_str()).collect();
+                return Err(format!(
+                    "no source matching '{sel}'\nAvailable sources: {}",
+                    available.join(", ")
+                ));
+            }
+        }
+    }
+    Ok(result)
+}
+
 // --- Config resolution ---
 
 /// Tracks where the config file was found.
@@ -1055,6 +1078,67 @@ repositories:
             repo_hooks: HooksConfig::default(),
             sources: vec![],
         }
+    }
+
+    // --- select_sources tests ---
+
+    fn make_test_source(label: &str) -> SourceEntry {
+        SourceEntry {
+            path: format!("/home/{label}"),
+            label: label.to_string(),
+            exclude: Vec::new(),
+            hooks: SourceHooksConfig::default(),
+            retention: None,
+            repos: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn test_select_sources_by_label() {
+        let sources = vec![
+            make_test_source("docs"),
+            make_test_source("photos"),
+            make_test_source("music"),
+        ];
+
+        let result = select_sources(&sources, &["photos".into()]).unwrap();
+        assert_eq!(result.len(), 1);
+        assert_eq!(result[0].label, "photos");
+    }
+
+    #[test]
+    fn test_select_sources_multiple() {
+        let sources = vec![
+            make_test_source("docs"),
+            make_test_source("photos"),
+            make_test_source("music"),
+        ];
+
+        let result = select_sources(&sources, &["docs".into(), "music".into()]).unwrap();
+        assert_eq!(result.len(), 2);
+        assert_eq!(result[0].label, "docs");
+        assert_eq!(result[1].label, "music");
+    }
+
+    #[test]
+    fn test_select_sources_no_match() {
+        let sources = vec![
+            make_test_source("docs"),
+            make_test_source("photos"),
+        ];
+
+        let err = select_sources(&sources, &["nonexistent".into()]).unwrap_err();
+        assert!(err.contains("no source matching 'nonexistent'"), "unexpected: {err}");
+        assert!(err.contains("docs"), "should list available sources: {err}");
+        assert!(err.contains("photos"), "should list available sources: {err}");
+    }
+
+    #[test]
+    fn test_select_sources_empty_selectors() {
+        let sources = vec![make_test_source("docs")];
+
+        let result = select_sources(&sources, &[]).unwrap();
+        assert!(result.is_empty());
     }
 
     // --- Hooks config tests ---

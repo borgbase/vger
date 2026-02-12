@@ -8,6 +8,7 @@ fn make_entry(name: &str) -> SnapshotEntry {
         id: vec![0u8; 32],
         time: Utc::now(),
         source_label: String::new(),
+        label: String::new(),
     }
 }
 

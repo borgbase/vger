@@ -54,6 +54,7 @@ fn manifest_survives_reopen() {
             id: vec![0x42; 32],
             time: Utc::now(),
             source_label: String::new(),
+            label: String::new(),
         });
         repo.save_state().unwrap();
     }

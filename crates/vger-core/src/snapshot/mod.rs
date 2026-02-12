@@ -27,6 +27,9 @@ pub struct SnapshotMeta {
     /// Source directories that were backed up.
     #[serde(default)]
     pub source_paths: Vec<String>,
+    /// User-provided annotation for this snapshot.
+    #[serde(default)]
+    pub label: String,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
