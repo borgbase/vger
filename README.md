@@ -6,7 +6,7 @@
 
 A fast, encrypted, deduplicated backup tool written in Rust.
 
-Inspired by BorgBackup, Borgmatic, restic, and rustic. V'Ger uses its own on-disk format and is not compatible with Borg or Restic repositories.
+Inspired by [BorgBackup](https://github.com/borgbackup/borg/), [Borgmatic](https://torsion.org/borgmatic/), [Restic](https://github.com/restic/restic), and [Rustic](https://github.com/rustic-rs/rustic). V'Ger uses its own on-disk format and is not compatible with Borg or Restic repositories.
 
 ## Features
 
@@ -22,27 +22,21 @@ Inspired by BorgBackup, Borgmatic, restic, and rustic. V'Ger uses its own on-dis
 
 ## Quick start
 
-```bash
-cargo build --release
+Download a binary from the [releases page](https://github.com/borgbase/vger/releases), then:
 
-# Generate a starter config
+```bash
+# Generate a starter config and edit it
 vger config
 
-# Initialize and run a backup
+# Initialize the repository and run a backup
 vger init
 vger backup
 
-# Inspect snapshots
+# List snapshots
 vger list
-
-# Show repository statistics
-vger info
-
-# Start desktop UI (Slint + tray + scheduler)
-vger-gui
 ```
 
-For full command examples, see [Quick Start](docs/src/quickstart.md).
+See the [full documentation](https://vger.borgbase.com) for storage backends, restore, maintenance, and more.
 
 ## Desktop UI
 
@@ -63,34 +57,6 @@ schedule:
   on_startup: false
   jitter_seconds: 0
   passphrase_prompt_timeout_seconds: 300
-```
-
-## Documentation
-
-This repository now uses mdBook for project documentation in `docs/`.
-
-- Docs home: [docs/src/index.md](docs/src/index.md)
-- Quick start: [docs/src/quickstart.md](docs/src/quickstart.md)
-- Configuration reference: [docs/src/configuration.md](docs/src/configuration.md)
-- Server mode: [docs/src/server-mode.md](docs/src/server-mode.md)
-- Architecture notes and research: [docs/src/architecture.md](docs/src/architecture.md)
-- Design notes: [docs/src/design.md](docs/src/design.md)
-- Workflow placeholders: [docs/src/workflows/index.md](docs/src/workflows/index.md)
-
-Build the docs site:
-
-```bash
-make docs-build
-# or directly
-mdbook build docs
-```
-
-Serve locally:
-
-```bash
-make docs-serve
-# or directly
-mdbook serve docs --open
 ```
 
 ## License

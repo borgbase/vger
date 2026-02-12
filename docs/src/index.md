@@ -37,13 +37,9 @@ V'Ger is a fast, encrypted, deduplicated backup tool written in Rust. It's based
 | Storage | borgstore + SSH RPC | Local, S3, SFTP, REST, rclone | OpenDAL (local, S3, many more) | OpenDAL (local, S3) + vger-server |
 | Repo compatibility | Borg v1/v2/v3 | Restic format | Restic-compatible | Own format |
 
-## Getting started
-
-- [Installing](install.md)
-- [Quick Start](quickstart.md)
-
 ## Usage
 
+- [Installing](install.md)
 - [Initialize and Set Up a Repository](init-setup.md)
 - [Storage Backends](backends.md)
 - [Make a Backup](backup.md)

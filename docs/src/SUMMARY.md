@@ -1,14 +1,11 @@
 # Summary
 
 [Home](index.md)
-
-# Getting Started
-
-- [Installing](install.md)
 - [Quick Start](quickstart.md)
 
 # Usage
 
+- [Installing](install.md)
 - [Initialize and Set Up a Repository](init-setup.md)
 - [Storage Backends](backends.md)
 - [Make a Backup](backup.md)
