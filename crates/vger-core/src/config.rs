@@ -146,7 +146,8 @@ where
 pub enum SourceInput {
     Simple(String),
     Rich {
-        path: String,
+        path: Option<String>,
+        paths: Option<Vec<String>>,
         label: Option<String>,
         #[serde(default)]
         exclude: Vec<String>,
@@ -161,7 +162,7 @@ pub enum SourceInput {
 /// Canonical resolved source entry.
 #[derive(Debug, Clone)]
 pub struct SourceEntry {
-    pub path: String,
+    pub paths: Vec<String>,
     pub label: String,
     pub exclude: Vec<String>,
     pub hooks: SourceHooksConfig,
@@ -395,7 +396,7 @@ struct ConfigDocument {
 type RawConfig = ConfigDocument;
 
 /// Expand a leading `~` or `~/` to the user's home directory.
-fn expand_tilde(path: &str) -> String {
+pub fn expand_tilde(path: &str) -> String {
     if path == "~" || path.starts_with("~/") {
         if let Some(home) = dirs::home_dir() {
             return home.join(&path[2..]).to_string_lossy().to_string();
@@ -412,39 +413,119 @@ pub fn label_from_path(path: &str) -> String {
         .unwrap_or_else(|| path.to_string())
 }
 
-/// Normalize a `SourceInput` into a `SourceEntry`.
-fn normalize_source(input: SourceInput) -> SourceEntry {
-    match input {
-        SourceInput::Simple(path) => {
-            let label = label_from_path(&path);
-            SourceEntry {
-                path: expand_tilde(&path),
-                label,
-                exclude: Vec::new(),
-                hooks: SourceHooksConfig::default(),
-                retention: None,
-                repos: Vec::new(),
+/// Normalize a list of `SourceInput` into resolved `SourceEntry` values.
+///
+/// - All `Simple(String)` entries are grouped into a single `SourceEntry`:
+///   - If exactly 1 simple entry, label = `label_from_path()` (backward compat)
+///   - If multiple, label = `"default"` and all paths are collected
+/// - Each `Rich` entry is normalized individually.
+///   - `path:` is sugar for `paths: [path]` — exactly one must be set.
+///   - Multi-path rich entries require an explicit `label`.
+fn normalize_sources(inputs: Vec<SourceInput>) -> crate::error::Result<Vec<SourceEntry>> {
+    let mut simple_paths: Vec<String> = Vec::new();
+    let mut rich_entries: Vec<SourceEntry> = Vec::new();
+
+    for input in inputs {
+        match input {
+            SourceInput::Simple(path) => {
+                simple_paths.push(expand_tilde(&path));
             }
-        }
-        SourceInput::Rich {
-            path,
-            label,
-            exclude,
-            hooks,
-            retention,
-            repos,
-        } => {
-            let label = label.unwrap_or_else(|| label_from_path(&path));
-            SourceEntry {
-                path: expand_tilde(&path),
+            SourceInput::Rich {
+                path,
+                paths,
                 label,
                 exclude,
                 hooks,
                 retention,
                 repos,
+            } => {
+                let resolved_paths = match (path, paths) {
+                    (Some(p), None) => vec![expand_tilde(&p)],
+                    (None, Some(ps)) => {
+                        if ps.is_empty() {
+                            return Err(crate::error::VgerError::Config(
+                                "source 'paths' must not be empty".into(),
+                            ));
+                        }
+                        ps.iter().map(|p| expand_tilde(p)).collect()
+                    }
+                    (Some(_), Some(_)) => {
+                        return Err(crate::error::VgerError::Config(
+                            "source entry cannot have both 'path' and 'paths'".into(),
+                        ));
+                    }
+                    (None, None) => {
+                        return Err(crate::error::VgerError::Config(
+                            "source entry must have 'path' or 'paths'".into(),
+                        ));
+                    }
+                };
+
+                // Multi-path rich entries require an explicit label
+                if resolved_paths.len() > 1 && label.is_none() {
+                    return Err(crate::error::VgerError::Config(
+                        "multi-path source entries require an explicit 'label'".into(),
+                    ));
+                }
+
+                let label = label.unwrap_or_else(|| label_from_path(&resolved_paths[0]));
+
+                // Validate no duplicate basenames within a multi-path entry
+                if resolved_paths.len() > 1 {
+                    let mut basenames = std::collections::HashSet::new();
+                    for p in &resolved_paths {
+                        let base = label_from_path(p);
+                        if !basenames.insert(base.clone()) {
+                            return Err(crate::error::VgerError::Config(format!(
+                                "duplicate basename '{base}' in multi-path source '{label}'"
+                            )));
+                        }
+                    }
+                }
+
+                rich_entries.push(SourceEntry {
+                    paths: resolved_paths,
+                    label,
+                    exclude,
+                    hooks,
+                    retention,
+                    repos,
+                });
             }
         }
     }
+
+    let mut result = Vec::new();
+
+    // Group all simple entries into one SourceEntry
+    if !simple_paths.is_empty() {
+        let label = if simple_paths.len() == 1 {
+            label_from_path(&simple_paths[0])
+        } else {
+            // Validate no duplicate basenames
+            let mut basenames = std::collections::HashSet::new();
+            for p in &simple_paths {
+                let base = label_from_path(p);
+                if !basenames.insert(base.clone()) {
+                    return Err(crate::error::VgerError::Config(format!(
+                        "duplicate basename '{base}' in simple sources (use rich entries with explicit labels to disambiguate)"
+                    )));
+                }
+            }
+            "default".to_string()
+        };
+        result.push(SourceEntry {
+            paths: simple_paths,
+            label,
+            exclude: Vec::new(),
+            hooks: SourceHooksConfig::default(),
+            retention: None,
+            repos: Vec::new(),
+        });
+    }
+
+    result.extend(rich_entries);
+    Ok(result)
 }
 
 /// A fully resolved repository with its merged config.
@@ -497,7 +578,7 @@ fn resolve_document(raw: ConfigDocument) -> crate::error::Result<Vec<ResolvedRep
     }
 
     // Normalize sources
-    let all_sources: Vec<SourceEntry> = raw.sources.into_iter().map(normalize_source).collect();
+    let all_sources: Vec<SourceEntry> = normalize_sources(raw.sources)?;
 
     // Check for duplicate source labels
     let mut source_labels = std::collections::HashSet::new();
@@ -549,7 +630,7 @@ fn resolve_document(raw: ConfigDocument) -> crate::error::Result<Vec<ResolvedRep
                     let mut merged_exclude = raw.exclude_patterns.clone();
                     merged_exclude.extend(src.exclude.clone());
                     SourceEntry {
-                        path: src.path.clone(),
+                        paths: src.paths.clone(),
                         label: src.label.clone(),
                         exclude: merged_exclude,
                         hooks: src.hooks.clone(),
@@ -859,7 +940,7 @@ mod tests {
         assert_eq!(repos.len(), 1);
         assert_eq!(repos[0].config.repository.url, "/path/to/repo");
         assert_eq!(repos[0].sources.len(), 1);
-        assert_eq!(repos[0].sources[0].path, "/home/user/documents");
+        assert_eq!(repos[0].sources[0].paths, vec!["/home/user/documents"]);
         assert_eq!(repos[0].sources[0].label, "documents");
     }
 
@@ -916,7 +997,7 @@ sources:
         assert_eq!(repos[0].config.repository.url, "/tmp/repo");
         assert_eq!(repos[0].config.encryption.mode, "none");
         assert_eq!(repos[0].sources.len(), 1);
-        assert_eq!(repos[0].sources[0].path, "/home/user");
+        assert_eq!(repos[0].sources[0].paths, vec!["/home/user"]);
         assert_eq!(repos[0].sources[0].label, "user");
     }
 
@@ -952,7 +1033,7 @@ repositories:
         assert_eq!(repos[0].config.compression.algorithm, "lz4");
         assert_eq!(repos[0].config.retention.keep_daily, Some(7));
         assert_eq!(repos[0].sources.len(), 1);
-        assert_eq!(repos[0].sources[0].path, "/home/user");
+        assert_eq!(repos[0].sources[0].paths, vec!["/home/user"]);
 
         assert_eq!(repos[1].label.as_deref(), Some("remote"));
         assert_eq!(repos[1].config.repository.url, "/backups/remote");
@@ -996,7 +1077,7 @@ repositories:
         assert_eq!(local.config.compression.algorithm, "lz4");
         assert_eq!(local.config.retention.keep_daily, Some(7));
         assert_eq!(local.sources.len(), 1);
-        assert_eq!(local.sources[0].path, "/home/user");
+        assert_eq!(local.sources[0].paths, vec!["/home/user"]);
 
         // Second repo uses overrides
         let remote = &repos[1];
@@ -1159,7 +1240,7 @@ repositories:
 
     fn make_test_source(label: &str) -> SourceEntry {
         SourceEntry {
-            path: format!("/home/{label}"),
+            paths: vec![format!("/home/{label}")],
             label: label.to_string(),
             exclude: Vec::new(),
             hooks: SourceHooksConfig::default(),
@@ -1321,7 +1402,25 @@ repositories:
     // --- Sources tests ---
 
     #[test]
-    fn test_sources_simple() {
+    fn test_sources_simple_single() {
+        let yaml = r#"
+repositories:
+  - url: /tmp/repo
+sources:
+  - /home/user/documents
+"#;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.yaml");
+        fs::write(&path, yaml).unwrap();
+
+        let repos = load_and_resolve(&path).unwrap();
+        assert_eq!(repos[0].sources.len(), 1);
+        assert_eq!(repos[0].sources[0].paths, vec!["/home/user/documents"]);
+        assert_eq!(repos[0].sources[0].label, "documents");
+    }
+
+    #[test]
+    fn test_sources_simple_multiple_grouped() {
         let yaml = r#"
 repositories:
   - url: /tmp/repo
@@ -1334,11 +1433,13 @@ sources:
         fs::write(&path, yaml).unwrap();
 
         let repos = load_and_resolve(&path).unwrap();
-        assert_eq!(repos[0].sources.len(), 2);
-        assert_eq!(repos[0].sources[0].path, "/home/user/documents");
-        assert_eq!(repos[0].sources[0].label, "documents");
-        assert_eq!(repos[0].sources[1].path, "/home/user/photos");
-        assert_eq!(repos[0].sources[1].label, "photos");
+        // Multiple simple sources are grouped into a single entry
+        assert_eq!(repos[0].sources.len(), 1);
+        assert_eq!(
+            repos[0].sources[0].paths,
+            vec!["/home/user/documents", "/home/user/photos"]
+        );
+        assert_eq!(repos[0].sources[0].label, "default");
     }
 
     #[test]
@@ -1362,7 +1463,7 @@ sources:
         let repos = load_and_resolve(&path).unwrap();
         assert_eq!(repos[0].sources.len(), 1);
         let src = &repos[0].sources[0];
-        assert_eq!(src.path, "/home/user/documents");
+        assert_eq!(src.paths, vec!["/home/user/documents"]);
         assert_eq!(src.label, "docs");
         assert_eq!(src.exclude, vec!["*.tmp"]);
         assert_eq!(src.retention.as_ref().unwrap().keep_daily, Some(14));
@@ -1384,8 +1485,11 @@ sources:
 
         let repos = load_and_resolve(&path).unwrap();
         assert_eq!(repos[0].sources.len(), 2);
+        // Simple entries come first (grouped), then rich entries
         assert_eq!(repos[0].sources[0].label, "photos");
+        assert_eq!(repos[0].sources[0].paths, vec!["/home/user/photos"]);
         assert_eq!(repos[0].sources[1].label, "docs");
+        assert_eq!(repos[0].sources[1].paths, vec!["/home/user/documents"]);
     }
 
     #[test]
@@ -1549,16 +1653,193 @@ sources:
 
         // Simple source path should be expanded
         assert!(
-            repos[0].sources[0].path.starts_with(&home),
+            repos[0].sources[0].paths[0].starts_with(&home),
             "source path not expanded: {}",
-            repos[0].sources[0].path
+            repos[0].sources[0].paths[0]
         );
 
         // Rich source path should be expanded
         assert!(
-            repos[0].sources[1].path.starts_with(&home),
+            repos[0].sources[1].paths[0].starts_with(&home),
             "rich source path not expanded: {}",
-            repos[0].sources[1].path
+            repos[0].sources[1].paths[0]
+        );
+    }
+
+    // --- Multi-path source tests ---
+
+    #[test]
+    fn test_sources_rich_paths_plural() {
+        let yaml = r#"
+repositories:
+  - url: /tmp/repo
+sources:
+  - paths:
+      - /home/user/documents
+      - /home/user/photos
+    label: multi
+"#;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.yaml");
+        fs::write(&path, yaml).unwrap();
+
+        let repos = load_and_resolve(&path).unwrap();
+        assert_eq!(repos[0].sources.len(), 1);
+        let src = &repos[0].sources[0];
+        assert_eq!(
+            src.paths,
+            vec!["/home/user/documents", "/home/user/photos"]
+        );
+        assert_eq!(src.label, "multi");
+    }
+
+    #[test]
+    fn test_sources_rich_path_singular_still_works() {
+        let yaml = r#"
+repositories:
+  - url: /tmp/repo
+sources:
+  - path: /home/user/documents
+    label: docs
+"#;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.yaml");
+        fs::write(&path, yaml).unwrap();
+
+        let repos = load_and_resolve(&path).unwrap();
+        assert_eq!(repos[0].sources[0].paths, vec!["/home/user/documents"]);
+        assert_eq!(repos[0].sources[0].label, "docs");
+    }
+
+    #[test]
+    fn test_sources_reject_both_path_and_paths() {
+        let yaml = r#"
+repositories:
+  - url: /tmp/repo
+sources:
+  - path: /home/user/documents
+    paths:
+      - /home/user/photos
+    label: bad
+"#;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.yaml");
+        fs::write(&path, yaml).unwrap();
+
+        let err = load_and_resolve(&path).unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            msg.contains("cannot have both 'path' and 'paths'"),
+            "unexpected: {msg}"
+        );
+    }
+
+    #[test]
+    fn test_sources_reject_neither_path_nor_paths() {
+        let yaml = r#"
+repositories:
+  - url: /tmp/repo
+sources:
+  - label: bad
+    exclude:
+      - "*.tmp"
+"#;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.yaml");
+        fs::write(&path, yaml).unwrap();
+
+        let err = load_and_resolve(&path).unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            msg.contains("must have 'path' or 'paths'"),
+            "unexpected: {msg}"
+        );
+    }
+
+    #[test]
+    fn test_sources_multi_path_requires_label() {
+        let yaml = r#"
+repositories:
+  - url: /tmp/repo
+sources:
+  - paths:
+      - /home/user/documents
+      - /home/user/photos
+"#;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.yaml");
+        fs::write(&path, yaml).unwrap();
+
+        let err = load_and_resolve(&path).unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            msg.contains("require an explicit 'label'"),
+            "unexpected: {msg}"
+        );
+    }
+
+    #[test]
+    fn test_sources_reject_duplicate_basenames_in_multi_path() {
+        let yaml = r#"
+repositories:
+  - url: /tmp/repo
+sources:
+  - paths:
+      - /home/user/a/docs
+      - /home/user/b/docs
+    label: multi
+"#;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.yaml");
+        fs::write(&path, yaml).unwrap();
+
+        let err = load_and_resolve(&path).unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            msg.contains("duplicate basename 'docs'"),
+            "unexpected: {msg}"
+        );
+    }
+
+    #[test]
+    fn test_sources_reject_duplicate_basenames_in_simple_group() {
+        let yaml = r#"
+repositories:
+  - url: /tmp/repo
+sources:
+  - /home/user/a/docs
+  - /home/user/b/docs
+"#;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.yaml");
+        fs::write(&path, yaml).unwrap();
+
+        let err = load_and_resolve(&path).unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            msg.contains("duplicate basename 'docs'"),
+            "unexpected: {msg}"
+        );
+    }
+
+    #[test]
+    fn test_sources_reject_empty_paths_list() {
+        let yaml = r#"
+repositories:
+  - url: /tmp/repo
+sources:
+  - paths: []
+    label: empty
+"#;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.yaml");
+        fs::write(&path, yaml).unwrap();
+
+        let err = load_and_resolve(&path).unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            msg.contains("must not be empty"),
+            "unexpected: {msg}"
         );
     }
 }

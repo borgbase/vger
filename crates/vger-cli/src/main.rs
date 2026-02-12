@@ -60,7 +60,7 @@ enum Commands {
         #[arg(short = 'S', long = "source")]
         source: Vec<String>,
 
-        /// Ad-hoc paths to back up (creates one snapshot per path)
+        /// Ad-hoc paths to back up (grouped into a single snapshot)
         paths: Vec<String>,
     },
 
@@ -291,7 +291,7 @@ fn main() {
                 label: repo.label.clone(),
                 error: None,
                 source_label: None,
-                source_path: None,
+                source_paths: None,
             };
             hooks::run_with_hooks(&repo.global_hooks, &repo.repo_hooks, &mut ctx, run_action)
         } else {
@@ -614,37 +614,41 @@ fn run_backup(
         }
 
         if !paths.is_empty() {
-            // Ad-hoc paths mode: each path gets its own snapshot
-            for path in &paths {
-                let source_label = config::label_from_path(path);
-                let name = generate_snapshot_name();
+            // Ad-hoc paths mode: group all paths into a single snapshot
+            let expanded: Vec<String> = paths.iter().map(|p| config::expand_tilde(p)).collect();
+            let source_label = if expanded.len() == 1 {
+                config::label_from_path(&expanded[0])
+            } else {
+                "adhoc".to_string()
+            };
+            let name = generate_snapshot_name();
 
-                let stats = commands::backup::run(
-                    config,
-                    commands::backup::BackupRequest {
-                        snapshot_name: &name,
-                        passphrase,
-                        source_path: path,
-                        source_label: &source_label,
-                        exclude_patterns: &config.exclude_patterns,
-                        compression,
-                        label: user_label_str,
-                    },
-                )?;
+            let stats = commands::backup::run(
+                config,
+                commands::backup::BackupRequest {
+                    snapshot_name: &name,
+                    passphrase,
+                    source_paths: &expanded,
+                    source_label: &source_label,
+                    exclude_patterns: &config.exclude_patterns,
+                    compression,
+                    label: user_label_str,
+                },
+            )?;
 
-                println!("Snapshot created: {name}");
-                if !user_label_str.is_empty() {
-                    println!("  Label: {user_label_str}");
-                }
-                println!("  Source: {path} (label: {source_label})");
-                println!(
-                    "  Files: {}, Original: {}, Compressed: {}, Deduplicated: {}",
-                    stats.nfiles,
-                    format_bytes(stats.original_size),
-                    format_bytes(stats.compressed_size),
-                    format_bytes(stats.deduplicated_size),
-                );
+            println!("Snapshot created: {name}");
+            if !user_label_str.is_empty() {
+                println!("  Label: {user_label_str}");
             }
+            let paths_display = expanded.join(", ");
+            println!("  Source: {paths_display} (label: {source_label})");
+            println!(
+                "  Files: {}, Original: {}, Compressed: {}, Deduplicated: {}",
+                stats.nfiles,
+                format_bytes(stats.original_size),
+                format_bytes(stats.compressed_size),
+                format_bytes(stats.deduplicated_size),
+            );
         } else if sources.is_empty() {
             return Err("no sources configured and no paths specified".into());
         } else {
@@ -670,7 +674,7 @@ fn run_backup(
                         commands::backup::BackupRequest {
                             snapshot_name: &name,
                             passphrase,
-                            source_path: &source.path,
+                            source_paths: &source.paths,
                             source_label: &source.label,
                             exclude_patterns: &source.exclude,
                             compression,
@@ -682,7 +686,8 @@ fn run_backup(
                     if !user_label_str.is_empty() {
                         println!("  Label: {user_label_str}");
                     }
-                    println!("  Source: {} (label: {})", source.path, source.label);
+                    let paths_display = source.paths.join(", ");
+                    println!("  Source: {paths_display} (label: {})", source.label);
                     println!(
                         "  Files: {}, Original: {}, Compressed: {}, Deduplicated: {}",
                         stats.nfiles,
@@ -700,7 +705,7 @@ fn run_backup(
                         label: label.map(|s| s.to_string()),
                         error: None,
                         source_label: Some(source.label.clone()),
-                        source_path: Some(source.path.clone()),
+                        source_paths: Some(source.paths.clone()),
                     };
                     hooks::run_source_hooks(&source.hooks, &mut ctx, backup_action)?;
                 } else {

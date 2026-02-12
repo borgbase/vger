@@ -44,11 +44,11 @@ fn flush_item_stream_chunk(
     Ok(())
 }
 
-/// Run `vger backup` for a single source directory.
+/// Run `vger backup` for one or more source directories.
 pub struct BackupRequest<'a> {
     pub snapshot_name: &'a str,
     pub passphrase: Option<&'a str>,
-    pub source_path: &'a str,
+    pub source_paths: &'a [String],
     pub source_label: &'a str,
     pub exclude_patterns: &'a [String],
     pub compression: Compression,
@@ -58,11 +58,17 @@ pub struct BackupRequest<'a> {
 pub fn run(config: &VgerConfig, req: BackupRequest<'_>) -> Result<SnapshotStats> {
     let snapshot_name = req.snapshot_name;
     let passphrase = req.passphrase;
-    let source_path = req.source_path;
+    let source_paths = req.source_paths;
     let source_label = req.source_label;
     let exclude_patterns = req.exclude_patterns;
     let compression = req.compression;
     let label = req.label;
+
+    if source_paths.is_empty() {
+        return Err(VgerError::Other("no source paths specified".into()));
+    }
+
+    let multi_path = source_paths.len() > 1;
 
     let backend = storage::backend_from_config(&config.repository)?;
     let mut repo = Repository::open(backend, passphrase)?;
@@ -92,107 +98,159 @@ pub fn run(config: &VgerConfig, req: BackupRequest<'_>) -> Result<SnapshotStats>
             .build()
             .map_err(|e| VgerError::Config(format!("glob build: {e}")))?;
 
-        // Walk source directory
-        let source = Path::new(source_path);
-        if !source.exists() {
-            return Err(VgerError::Other(format!(
-                "source directory does not exist: {source_path}"
-            )));
-        }
-
-        for entry in WalkDir::new(source).follow_links(false).sort_by_file_name() {
-            let entry = entry.map_err(|e| VgerError::Other(format!("walkdir error: {e}")))?;
-
-            let rel_path = entry
-                .path()
-                .strip_prefix(source)
-                .unwrap_or(entry.path())
-                .to_string_lossy()
-                .to_string();
-
-            // Skip root directory itself
-            if rel_path.is_empty() {
-                continue;
+        // Walk each source directory
+        for source_path in source_paths {
+            let source = Path::new(source_path.as_str());
+            if !source.exists() {
+                return Err(VgerError::Other(format!(
+                    "source directory does not exist: {source_path}"
+                )));
             }
 
-            // Apply exclude patterns
-            if excludes.is_match(&rel_path) {
-                continue;
-            }
-
-            let metadata = entry.metadata().map_err(|e| {
-                VgerError::Other(format!("stat error for {}: {e}", entry.path().display()))
-            })?;
-
-            let file_type = metadata.file_type();
-
-            let (entry_type, link_target) = if file_type.is_dir() {
-                (ItemType::Directory, None)
-            } else if file_type.is_symlink() {
-                let target = std::fs::read_link(entry.path())
-                    .map_err(|e| VgerError::Other(format!("readlink: {e}")))?;
-                (
-                    ItemType::Symlink,
-                    Some(target.to_string_lossy().to_string()),
-                )
-            } else if file_type.is_file() {
-                (ItemType::RegularFile, None)
+            // For multi-path mode, derive basename prefix
+            let prefix = if multi_path {
+                let base = source
+                    .file_name()
+                    .map(|n| n.to_string_lossy().to_string())
+                    .unwrap_or_else(|| source_path.clone());
+                // Emit a directory item for the prefix
+                let dir_item = Item {
+                    path: base.clone(),
+                    entry_type: ItemType::Directory,
+                    mode: 0o755,
+                    uid: 0,
+                    gid: 0,
+                    user: None,
+                    group: None,
+                    mtime: 0,
+                    atime: None,
+                    ctime: None,
+                    size: 0,
+                    chunks: Vec::new(),
+                    link_target: None,
+                    xattrs: None,
+                };
+                let item_bytes = rmp_serde::to_vec(&dir_item)?;
+                item_stream.extend_from_slice(&item_bytes);
+                if item_stream.len() >= items_config.avg_size as usize {
+                    flush_item_stream_chunk(
+                        repo,
+                        &mut item_stream,
+                        &mut item_ptrs,
+                        compression,
+                    )?;
+                }
+                Some(base)
             } else {
-                // Skip special files (block devices, FIFOs, etc.)
-                continue;
+                None
             };
 
-            let mtime_ns = metadata.mtime() * 1_000_000_000 + metadata.mtime_nsec();
+            for entry in WalkDir::new(source).follow_links(false).sort_by_file_name() {
+                let entry = entry.map_err(|e| VgerError::Other(format!("walkdir error: {e}")))?;
 
-            let mut item = Item {
-                path: rel_path,
-                entry_type,
-                mode: metadata.mode(),
-                uid: metadata.uid(),
-                gid: metadata.gid(),
-                user: None,
-                group: None,
-                mtime: mtime_ns,
-                atime: None,
-                ctime: None,
-                size: metadata.len(),
-                chunks: Vec::new(),
-                link_target,
-                xattrs: None,
-            };
+                let rel_path = entry
+                    .path()
+                    .strip_prefix(source)
+                    .unwrap_or(entry.path())
+                    .to_string_lossy()
+                    .to_string();
 
-            // For regular files, chunk and store the content
-            if entry_type == ItemType::RegularFile && metadata.len() > 0 {
-                let file_data = std::fs::read(entry.path()).map_err(VgerError::Io)?;
-
-                let chunk_ranges = chunker::chunk_data(&file_data, &repo.config.chunker_params);
-
-                for (offset, length) in chunk_ranges {
-                    let chunk_data = &file_data[offset..offset + length];
-                    let (chunk_id, csize, is_new) =
-                        repo.store_chunk(chunk_data, compression, PackType::Data)?;
-
-                    stats.original_size += length as u64;
-                    stats.compressed_size += csize as u64;
-                    if is_new {
-                        stats.deduplicated_size += csize as u64;
-                    }
-
-                    item.chunks.push(ChunkRef {
-                        id: chunk_id,
-                        size: length as u32,
-                        csize,
-                    });
+                // Skip root directory itself
+                if rel_path.is_empty() {
+                    continue;
                 }
 
-                stats.nfiles += 1;
-            }
+                // Apply exclude patterns
+                if excludes.is_match(&rel_path) {
+                    continue;
+                }
 
-            // Stream item metadata to avoid materializing a full Vec<Item>.
-            let item_bytes = rmp_serde::to_vec(&item)?;
-            item_stream.extend_from_slice(&item_bytes);
-            if item_stream.len() >= items_config.avg_size as usize {
-                flush_item_stream_chunk(repo, &mut item_stream, &mut item_ptrs, compression)?;
+                let metadata = entry.metadata().map_err(|e| {
+                    VgerError::Other(format!("stat error for {}: {e}", entry.path().display()))
+                })?;
+
+                let file_type = metadata.file_type();
+
+                let (entry_type, link_target) = if file_type.is_dir() {
+                    (ItemType::Directory, None)
+                } else if file_type.is_symlink() {
+                    let target = std::fs::read_link(entry.path())
+                        .map_err(|e| VgerError::Other(format!("readlink: {e}")))?;
+                    (
+                        ItemType::Symlink,
+                        Some(target.to_string_lossy().to_string()),
+                    )
+                } else if file_type.is_file() {
+                    (ItemType::RegularFile, None)
+                } else {
+                    // Skip special files (block devices, FIFOs, etc.)
+                    continue;
+                };
+
+                let mtime_ns = metadata.mtime() * 1_000_000_000 + metadata.mtime_nsec();
+
+                // In multi-path mode, prefix each item path with the source basename
+                let item_path = match &prefix {
+                    Some(pfx) => format!("{pfx}/{rel_path}"),
+                    None => rel_path,
+                };
+
+                let mut item = Item {
+                    path: item_path,
+                    entry_type,
+                    mode: metadata.mode(),
+                    uid: metadata.uid(),
+                    gid: metadata.gid(),
+                    user: None,
+                    group: None,
+                    mtime: mtime_ns,
+                    atime: None,
+                    ctime: None,
+                    size: metadata.len(),
+                    chunks: Vec::new(),
+                    link_target,
+                    xattrs: None,
+                };
+
+                // For regular files, chunk and store the content
+                if entry_type == ItemType::RegularFile && metadata.len() > 0 {
+                    let file_data = std::fs::read(entry.path()).map_err(VgerError::Io)?;
+
+                    let chunk_ranges =
+                        chunker::chunk_data(&file_data, &repo.config.chunker_params);
+
+                    for (offset, length) in chunk_ranges {
+                        let chunk_data = &file_data[offset..offset + length];
+                        let (chunk_id, csize, is_new) =
+                            repo.store_chunk(chunk_data, compression, PackType::Data)?;
+
+                        stats.original_size += length as u64;
+                        stats.compressed_size += csize as u64;
+                        if is_new {
+                            stats.deduplicated_size += csize as u64;
+                        }
+
+                        item.chunks.push(ChunkRef {
+                            id: chunk_id,
+                            size: length as u32,
+                            csize,
+                        });
+                    }
+
+                    stats.nfiles += 1;
+                }
+
+                // Stream item metadata to avoid materializing a full Vec<Item>.
+                let item_bytes = rmp_serde::to_vec(&item)?;
+                item_stream.extend_from_slice(&item_bytes);
+                if item_stream.len() >= items_config.avg_size as usize {
+                    flush_item_stream_chunk(
+                        repo,
+                        &mut item_stream,
+                        &mut item_ptrs,
+                        compression,
+                    )?;
+                }
             }
         }
         flush_item_stream_chunk(repo, &mut item_stream, &mut item_ptrs, compression)?;
@@ -216,7 +274,7 @@ pub fn run(config: &VgerConfig, req: BackupRequest<'_>) -> Result<SnapshotStats>
             item_ptrs,
             stats: stats.clone(),
             source_label: source_label.to_string(),
-            source_paths: vec![source_path.to_string()],
+            source_paths: source_paths.to_vec(),
             label: label.to_string(),
         };
 

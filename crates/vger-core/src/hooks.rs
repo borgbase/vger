@@ -12,7 +12,7 @@ pub struct HookContext {
     pub label: Option<String>,
     pub error: Option<String>,
     pub source_label: Option<String>,
-    pub source_path: Option<String>,
+    pub source_paths: Option<Vec<String>>,
 }
 
 /// Run the full hook lifecycle around an action:
@@ -114,8 +114,8 @@ fn execute_hook_command(cmd: &str, ctx: &HookContext) -> Result<()> {
     if let Some(ref source_label) = ctx.source_label {
         child.env("VGER_SOURCE_LABEL", source_label);
     }
-    if let Some(ref source_path) = ctx.source_path {
-        child.env("VGER_SOURCE_PATH", source_path);
+    if let Some(ref source_paths) = ctx.source_paths {
+        child.env("VGER_SOURCE_PATH", source_paths.join(":"));
     }
 
     let output = child
@@ -143,7 +143,12 @@ fn substitute_variables(cmd: &str, ctx: &HookContext) -> String {
     result = result.replace("{label}", ctx.label.as_deref().unwrap_or(""));
     result = result.replace("{error}", ctx.error.as_deref().unwrap_or(""));
     result = result.replace("{source_label}", ctx.source_label.as_deref().unwrap_or(""));
-    result = result.replace("{source_path}", ctx.source_path.as_deref().unwrap_or(""));
+    let source_path_str = ctx
+        .source_paths
+        .as_ref()
+        .map(|ps| ps.join(":"))
+        .unwrap_or_default();
+    result = result.replace("{source_path}", &source_path_str);
     result
 }
 
@@ -202,7 +207,7 @@ mod tests {
             label: Some("test".to_string()),
             error: None,
             source_label: None,
-            source_path: None,
+            source_paths: None,
         }
     }
 
@@ -225,7 +230,7 @@ mod tests {
             label: Some("nas".into()),
             error: Some("disk full".into()),
             source_label: Some("docs".into()),
-            source_path: Some("/home/user/docs".into()),
+            source_paths: Some(vec!["/home/user/docs".into()]),
         };
         let result = substitute_variables(
             "echo {command} {repository} {label} {error} {source_label} {source_path}",
@@ -238,6 +243,20 @@ mod tests {
     }
 
     #[test]
+    fn test_variable_substitution_multi_paths() {
+        let ctx = HookContext {
+            command: "backup".into(),
+            repository: "/mnt/nas".into(),
+            label: Some("nas".into()),
+            error: None,
+            source_label: Some("default".into()),
+            source_paths: Some(vec!["/home/user/docs".into(), "/home/user/photos".into()]),
+        };
+        let result = substitute_variables("paths={source_path}", &ctx);
+        assert_eq!(result, "paths=/home/user/docs:/home/user/photos");
+    }
+
+    #[test]
     fn test_variable_substitution_missing_optionals() {
         let ctx = HookContext {
             command: "backup".into(),
@@ -245,7 +264,7 @@ mod tests {
             label: None,
             error: None,
             source_label: None,
-            source_path: None,
+            source_paths: None,
         };
         let result = substitute_variables("cmd={command} label={label} err={error}", &ctx);
         assert_eq!(result, "cmd=backup label= err=");
