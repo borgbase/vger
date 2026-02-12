@@ -129,15 +129,15 @@ impl PackWriter {
         self.pack_type
     }
 
-    /// Flush the buffered blobs into a pack file.
-    /// Returns (pack_id, vec of (chunk_id, stored_size, offset, refcount)).
-    pub fn flush(
+    /// Assemble buffered blobs into a pack, compute its PackId, and clear internal state.
+    /// Does NOT write to storage — the caller is responsible for uploading `pack_bytes`.
+    /// Returns (pack_id, pack_bytes, vec of (chunk_id, stored_size, offset, refcount)).
+    pub fn seal(
         &mut self,
-        storage: &dyn StorageBackend,
         crypto: &dyn CryptoEngine,
-    ) -> Result<(PackId, Vec<(ChunkId, u32, u64, u32)>)> {
+    ) -> Result<(PackId, Vec<u8>, Vec<(ChunkId, u32, u64, u32)>)> {
         if self.buffer.is_empty() {
-            return Err(VgerError::Other("cannot flush empty pack writer".into()));
+            return Err(VgerError::Other("cannot seal empty pack writer".into()));
         }
 
         // Build header entries
@@ -176,9 +176,6 @@ impl PackWriter {
         // Compute pack ID = BLAKE2b-256 of entire pack contents
         let pack_id = PackId::compute(&pack_bytes);
 
-        // Write to storage
-        storage.put(&pack_id.storage_key(), &pack_bytes)?;
-
         // Collect results with refcounts from pending map
         let mut results: Vec<(ChunkId, u32, u64, u32)> = Vec::with_capacity(header_entries.len());
         for entry in &header_entries {
@@ -195,6 +192,18 @@ impl PackWriter {
         self.current_size = 0;
         self.pending.clear();
 
+        Ok((pack_id, pack_bytes, results))
+    }
+
+    /// Flush the buffered blobs into a pack file (seal + upload).
+    /// Returns (pack_id, vec of (chunk_id, stored_size, offset, refcount)).
+    pub fn flush(
+        &mut self,
+        storage: &dyn StorageBackend,
+        crypto: &dyn CryptoEngine,
+    ) -> Result<(PackId, Vec<(ChunkId, u32, u64, u32)>)> {
+        let (pack_id, pack_bytes, results) = self.seal(crypto)?;
+        storage.put(&pack_id.storage_key(), &pack_bytes)?;
         Ok((pack_id, results))
     }
 }

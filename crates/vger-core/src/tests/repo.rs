@@ -35,9 +35,9 @@ fn init_twice_fails() {
     )
     .unwrap();
 
-    // Try to init again with the same storage
+    // Try to init again with the same storage (clone the Arc into a new Box)
     let result = Repository::init(
-        repo.storage,
+        Box::new(repo.storage.clone()),
         EncryptionMode::None,
         ChunkerConfig::default(),
         None,

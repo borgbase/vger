@@ -4,6 +4,10 @@ pub mod lock;
 pub mod manifest;
 pub mod pack;
 
+use std::collections::VecDeque;
+use std::sync::Arc;
+use std::thread::JoinHandle;
+
 use chrono::{DateTime, Utc};
 use rand::RngCore;
 use serde::{Deserialize, Serialize};
@@ -46,6 +50,9 @@ fn default_max_pack_size() -> u32 {
     512 * 1024 * 1024
 }
 
+/// Maximum number of in-flight background pack uploads.
+const MAX_IN_FLIGHT_PACK_UPLOADS: usize = 4;
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum EncryptionMode {
     None,
@@ -54,7 +61,7 @@ pub enum EncryptionMode {
 
 /// A handle to an opened repository.
 pub struct Repository {
-    pub storage: Box<dyn StorageBackend>,
+    pub storage: Arc<dyn StorageBackend>,
     pub crypto: Box<dyn CryptoEngine>,
     pub manifest: Manifest,
     pub chunk_index: ChunkIndex,
@@ -62,6 +69,8 @@ pub struct Repository {
     pub file_cache: FileCache,
     data_pack_writer: PackWriter,
     tree_pack_writer: PackWriter,
+    /// Background pack upload threads waiting to be joined.
+    pending_uploads: VecDeque<JoinHandle<Result<()>>>,
 }
 
 impl Repository {
@@ -73,6 +82,8 @@ impl Repository {
         passphrase: Option<&str>,
         repo_config_opts: Option<&RepositoryConfig>,
     ) -> Result<Self> {
+        let storage: Arc<dyn StorageBackend> = Arc::from(storage);
+
         // Check that the repo doesn't already exist
         if storage.exists("config")? {
             return Err(VgerError::RepoAlreadyExists("repository".into()));
@@ -165,11 +176,14 @@ impl Repository {
             file_cache: FileCache::new(),
             data_pack_writer: PackWriter::new(PackType::Data, data_target),
             tree_pack_writer: PackWriter::new(PackType::Tree, tree_target),
+            pending_uploads: VecDeque::new(),
         })
     }
 
     /// Open an existing repository.
     pub fn open(storage: Box<dyn StorageBackend>, passphrase: Option<&str>) -> Result<Self> {
+        let storage: Arc<dyn StorageBackend> = Arc::from(storage);
+
         // Read config
         let config_data = storage
             .get("config")?
@@ -249,7 +263,34 @@ impl Repository {
             file_cache,
             data_pack_writer: PackWriter::new(PackType::Data, data_target),
             tree_pack_writer: PackWriter::new(PackType::Tree, tree_target),
+            pending_uploads: VecDeque::new(),
         })
+    }
+
+    /// Wait for one background pack upload to finish (if any).
+    fn wait_one_pending_upload(&mut self) -> Result<()> {
+        if let Some(handle) = self.pending_uploads.pop_front() {
+            handle
+                .join()
+                .map_err(|_| VgerError::Other("pack upload thread panicked".into()))??;
+        }
+        Ok(())
+    }
+
+    /// Wait for all background pack uploads to finish.
+    fn wait_pending_uploads(&mut self) -> Result<()> {
+        while !self.pending_uploads.is_empty() {
+            self.wait_one_pending_upload()?;
+        }
+        Ok(())
+    }
+
+    /// Apply backpressure to keep the number of in-flight uploads bounded.
+    fn cap_pending_uploads(&mut self) -> Result<()> {
+        while self.pending_uploads.len() >= MAX_IN_FLIGHT_PACK_UPLOADS {
+            self.wait_one_pending_upload()?;
+        }
+        Ok(())
     }
 
     /// Save the manifest and chunk index back to storage.
@@ -318,42 +359,55 @@ impl Repository {
     ) -> Result<u32> {
         let stored_size = packed.len() as u32;
 
-        // Add to the appropriate pack writer
-        let writer = match pack_type {
-            PackType::Data => &mut self.data_pack_writer,
-            PackType::Tree => &mut self.tree_pack_writer,
+        // Add blob and check flush in a scoped borrow
+        let should_flush = {
+            let writer = match pack_type {
+                PackType::Data => &mut self.data_pack_writer,
+                PackType::Tree => &mut self.tree_pack_writer,
+            };
+            writer.add_blob(
+                ObjectType::ChunkData as u8,
+                chunk_id,
+                packed,
+                uncompressed_size,
+            );
+            writer.should_flush()
         };
-        writer.add_blob(
-            ObjectType::ChunkData as u8,
-            chunk_id,
-            packed,
-            uncompressed_size,
-        );
 
-        // Flush if target size reached
-        if writer.should_flush() {
-            // Need to flush — use the free function to avoid borrow issues
-            match pack_type {
-                PackType::Data => {
-                    flush_writer(
-                        &mut self.data_pack_writer,
-                        self.storage.as_ref(),
-                        self.crypto.as_ref(),
-                        &mut self.chunk_index,
-                    )?;
-                }
-                PackType::Tree => {
-                    flush_writer(
-                        &mut self.tree_pack_writer,
-                        self.storage.as_ref(),
-                        self.crypto.as_ref(),
-                        &mut self.chunk_index,
-                    )?;
-                }
-            }
+        if should_flush {
+            self.flush_writer_async(pack_type)?;
         }
 
         Ok(stored_size)
+    }
+
+    /// Seal a pack writer and upload in the background.
+    /// The ChunkIndex is updated immediately; the upload proceeds in a separate thread.
+    fn flush_writer_async(&mut self, pack_type: PackType) -> Result<()> {
+        // Keep upload fan-out bounded to avoid excessive memory/thread pressure.
+        self.cap_pending_uploads()?;
+
+        // Seal — each match arm borrows a specific field, allowing disjoint borrows with crypto
+        let (pack_id, pack_bytes, entries) = match pack_type {
+            PackType::Data => self.data_pack_writer.seal(self.crypto.as_ref())?,
+            PackType::Tree => self.tree_pack_writer.seal(self.crypto.as_ref())?,
+        };
+
+        // Update index immediately — offsets and PackId are known before upload
+        for (chunk_id, stored_size, offset, refcount) in entries {
+            self.chunk_index.add(chunk_id, stored_size, pack_id, offset);
+            for _ in 1..refcount {
+                self.chunk_index.increment_refcount(&chunk_id);
+            }
+        }
+
+        // Upload in background thread
+        let storage = Arc::clone(&self.storage);
+        let key = pack_id.storage_key();
+        self.pending_uploads
+            .push_back(std::thread::spawn(move || storage.put_owned(&key, pack_bytes)));
+
+        Ok(())
     }
 
     /// Store a chunk in the repository. Returns (chunk_id, stored_size, was_new).
@@ -400,42 +454,16 @@ impl Repository {
         compress::decompress(&compressed)
     }
 
-    /// Flush all pending pack writes.
+    /// Flush all pending pack writes and wait for background uploads.
     pub fn flush_packs(&mut self) -> Result<()> {
         if self.data_pack_writer.has_pending() {
-            flush_writer(
-                &mut self.data_pack_writer,
-                self.storage.as_ref(),
-                self.crypto.as_ref(),
-                &mut self.chunk_index,
-            )?;
+            self.flush_writer_async(PackType::Data)?;
         }
         if self.tree_pack_writer.has_pending() {
-            flush_writer(
-                &mut self.tree_pack_writer,
-                self.storage.as_ref(),
-                self.crypto.as_ref(),
-                &mut self.chunk_index,
-            )?;
+            self.flush_writer_async(PackType::Tree)?;
         }
+        // Wait for all background uploads to complete before returning.
+        self.wait_pending_uploads()?;
         Ok(())
     }
-}
-
-/// Flush a single PackWriter and update the ChunkIndex with committed entries.
-fn flush_writer(
-    writer: &mut PackWriter,
-    storage: &dyn StorageBackend,
-    crypto: &dyn CryptoEngine,
-    index: &mut ChunkIndex,
-) -> Result<()> {
-    let (pack_id, entries) = writer.flush(storage, crypto)?;
-    for (chunk_id, stored_size, offset, refcount) in entries {
-        // Add entry with first ref, then increment for additional refs
-        index.add(chunk_id, stored_size, pack_id, offset);
-        for _ in 1..refcount {
-            index.increment_refcount(&chunk_id);
-        }
-    }
-    Ok(())
 }

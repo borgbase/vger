@@ -2,6 +2,7 @@ pub mod opendal_backend;
 #[cfg(feature = "backend-rest")]
 pub mod rest_backend;
 
+use std::sync::Arc;
 use std::time::Duration;
 
 use opendal::layers::RetryLayer;
@@ -34,6 +35,39 @@ pub trait StorageBackend: Send + Sync {
 
     /// Create a directory marker (no-op for flat object stores).
     fn create_dir(&self, key: &str) -> Result<()>;
+
+    /// Write an object from an owned buffer. Backends can override to avoid
+    /// an extra copy when the caller already owns the data.
+    fn put_owned(&self, key: &str, data: Vec<u8>) -> Result<()> {
+        self.put(key, &data)
+    }
+}
+
+impl StorageBackend for Arc<dyn StorageBackend> {
+    fn get(&self, key: &str) -> Result<Option<Vec<u8>>> {
+        (**self).get(key)
+    }
+    fn put(&self, key: &str, data: &[u8]) -> Result<()> {
+        (**self).put(key, data)
+    }
+    fn delete(&self, key: &str) -> Result<()> {
+        (**self).delete(key)
+    }
+    fn exists(&self, key: &str) -> Result<bool> {
+        (**self).exists(key)
+    }
+    fn list(&self, prefix: &str) -> Result<Vec<String>> {
+        (**self).list(prefix)
+    }
+    fn get_range(&self, key: &str, offset: u64, length: u64) -> Result<Option<Vec<u8>>> {
+        (**self).get_range(key, offset, length)
+    }
+    fn create_dir(&self, key: &str) -> Result<()> {
+        (**self).create_dir(key)
+    }
+    fn put_owned(&self, key: &str, data: Vec<u8>) -> Result<()> {
+        (**self).put_owned(key, data)
+    }
 }
 
 /// Parsed repository URL.
@@ -216,7 +250,11 @@ pub fn backend_from_config(cfg: &RepositoryConfig) -> Result<Box<dyn StorageBack
             )?;
             let op = apply_retry(op, &cfg.retry);
             Ok(Box::new(
-                opendal_backend::OpendalBackend::from_async_operator(op)?,
+                opendal_backend::OpendalBackend::from_async_operator_tuned(
+                    op,
+                    Some(opendal_backend::S3_UPLOAD_CHUNK_SIZE_BYTES),
+                    Some(opendal_backend::S3_UPLOAD_CONCURRENCY),
+                )?,
             ))
         }
         #[cfg(feature = "backend-sftp")]

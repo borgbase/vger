@@ -58,16 +58,24 @@ impl ByteRateLimiter {
             return;
         }
 
-        let mut state = match self.state.lock() {
-            Ok(guard) => guard,
-            Err(poisoned) => poisoned.into_inner(),
-        };
-        state.bytes_consumed = state.bytes_consumed.saturating_add(bytes as u128);
+        let sleep_duration = {
+            let mut state = match self.state.lock() {
+                Ok(guard) => guard,
+                Err(poisoned) => poisoned.into_inner(),
+            };
+            state.bytes_consumed = state.bytes_consumed.saturating_add(bytes as u128);
 
-        let elapsed_secs = state.start.elapsed().as_secs_f64();
-        let expected_secs = state.bytes_consumed as f64 / self.bytes_per_sec as f64;
-        if expected_secs > elapsed_secs {
-            std::thread::sleep(Duration::from_secs_f64(expected_secs - elapsed_secs));
+            let elapsed_secs = state.start.elapsed().as_secs_f64();
+            let expected_secs = state.bytes_consumed as f64 / self.bytes_per_sec as f64;
+            if expected_secs > elapsed_secs {
+                Some(Duration::from_secs_f64(expected_secs - elapsed_secs))
+            } else {
+                None
+            }
+        }; // lock released
+
+        if let Some(d) = sleep_duration {
+            std::thread::sleep(d);
         }
     }
 }
@@ -174,6 +182,13 @@ impl StorageBackend for ThrottledStorageBackend {
 
     fn create_dir(&self, key: &str) -> Result<()> {
         self.inner.create_dir(key)
+    }
+
+    fn put_owned(&self, key: &str, data: Vec<u8>) -> Result<()> {
+        if let Some(limiter) = self.write_limiter.as_ref() {
+            limiter.consume(data.len());
+        }
+        self.inner.put_owned(key, data)
     }
 }
 
