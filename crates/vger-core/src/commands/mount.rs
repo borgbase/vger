@@ -182,6 +182,225 @@ fn lookup<'a>(root: &'a VfsNode, path: &[u8]) -> Option<&'a VfsNode> {
     Some(current)
 }
 
+// ─── HTML Web UI ──────────────────────────────────────────────────────────
+
+fn html_escape(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for c in s.chars() {
+        match c {
+            '&' => out.push_str("&amp;"),
+            '<' => out.push_str("&lt;"),
+            '>' => out.push_str("&gt;"),
+            '"' => out.push_str("&quot;"),
+            _ => out.push(c),
+        }
+    }
+    out
+}
+
+fn percent_encode_path(s: &str) -> String {
+    let mut out = String::with_capacity(s.len() * 2);
+    for b in s.bytes() {
+        match b {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' | b'/' => {
+                out.push(b as char)
+            }
+            _ => {
+                out.push('%');
+                out.push_str(&format!("{:02X}", b));
+            }
+        }
+    }
+    out
+}
+
+fn format_size(bytes: u64) -> String {
+    const UNITS: &[&str] = &["B", "KiB", "MiB", "GiB", "TiB"];
+    if bytes == 0 {
+        return "0 B".to_string();
+    }
+    let mut size = bytes as f64;
+    for unit in UNITS {
+        if size < 1024.0 {
+            return if *unit == "B" {
+                format!("{size:.0} {unit}")
+            } else {
+                format!("{size:.1} {unit}")
+            };
+        }
+        size /= 1024.0;
+    }
+    format!("{size:.1} PiB")
+}
+
+fn format_mtime(t: SystemTime) -> String {
+    let dt: chrono::DateTime<chrono::Local> = t.into();
+    dt.format("%Y-%m-%d %H:%M").to_string()
+}
+
+/// Determine what to do with an incoming request: serve HTML, redirect, or
+/// pass through to the WebDAV handler.
+enum BrowserAction {
+    ServeHtml,
+    Redirect(String),
+    PassThrough,
+}
+
+fn classify_browser_request<B>(req: &hyper::Request<B>, tree: &VfsNode) -> BrowserAction {
+    if req.method() != hyper::Method::GET {
+        return BrowserAction::PassThrough;
+    }
+    let is_browser = req
+        .headers()
+        .get("accept")
+        .and_then(|v| v.to_str().ok())
+        .map_or(false, |s| s.contains("text/html"));
+    if !is_browser {
+        return BrowserAction::PassThrough;
+    }
+    let path = req.uri().path();
+    match lookup(tree, path.as_bytes()) {
+        Some(VfsNode::Dir { .. }) => {
+            if path == "/" || path.ends_with('/') {
+                BrowserAction::ServeHtml
+            } else {
+                BrowserAction::Redirect(format!("{path}/"))
+            }
+        }
+        _ => BrowserAction::PassThrough,
+    }
+}
+
+fn render_directory_html(path: &str, tree: &VfsNode) -> String {
+    let node = lookup(tree, path.as_bytes());
+    let children = match node {
+        Some(VfsNode::Dir { children, .. }) => children,
+        _ => return String::from("<html><body><h1>Not Found</h1></body></html>"),
+    };
+
+    // Collect and sort entries: dirs first, then files, alphabetical within each
+    let mut dirs: Vec<(&String, &VfsNode)> = Vec::new();
+    let mut files: Vec<(&String, &VfsNode)> = Vec::new();
+    for (name, child) in children {
+        match child {
+            VfsNode::Dir { .. } => dirs.push((name, child)),
+            _ => files.push((name, child)),
+        }
+    }
+    dirs.sort_by(|a, b| a.0.to_lowercase().cmp(&b.0.to_lowercase()));
+    files.sort_by(|a, b| a.0.to_lowercase().cmp(&b.0.to_lowercase()));
+
+    let display_path = if path.is_empty() || path == "/" {
+        "/"
+    } else {
+        path
+    };
+    let title = html_escape(display_path);
+
+    // Build breadcrumbs
+    let mut breadcrumbs = String::from(r#"<a href="/">root</a>"#);
+    if path != "/" && !path.is_empty() {
+        let trimmed = path.trim_matches('/');
+        let mut href = String::from("/");
+        for part in trimmed.split('/') {
+            if part.is_empty() {
+                continue;
+            }
+            href.push_str(&percent_encode_path(part));
+            href.push('/');
+            breadcrumbs.push_str(&format!(
+                r#" / <a href="{}">{}</a>"#,
+                href,
+                html_escape(part),
+            ));
+        }
+    }
+
+    let mut rows = String::new();
+
+    // Parent directory link
+    if path != "/" && !path.is_empty() {
+        rows.push_str(
+            r#"<tr><td class="icon">📁</td><td><a href="../">../</a></td><td class="size"></td><td class="mtime"></td></tr>
+"#,
+        );
+    }
+
+    for (name, child) in &dirs {
+        let meta = node_meta(child);
+        let mtime = format_mtime(meta.mtime);
+        rows.push_str(&format!(
+            r#"<tr><td class="icon">📁</td><td><a href="{}/"><strong>{}/</strong></a></td><td class="size">—</td><td class="mtime">{}</td></tr>
+"#,
+            percent_encode_path(name),
+            html_escape(name),
+            mtime,
+        ));
+    }
+
+    for (name, child) in &files {
+        let meta = node_meta(child);
+        let mtime = format_mtime(meta.mtime);
+        let (icon, display) = match child {
+            VfsNode::Symlink { _target, .. } => (
+                "🔗",
+                format!("{} → {}", html_escape(name), html_escape(_target)),
+            ),
+            _ => ("📄", html_escape(name)),
+        };
+        rows.push_str(&format!(
+            r#"<tr><td class="icon">{icon}</td><td><a href="{}">{display}</a></td><td class="size">{}</td><td class="mtime">{}</td></tr>
+"#,
+            percent_encode_path(name),
+            format_size(meta.size),
+            mtime,
+        ));
+    }
+
+    format!(
+        r##"<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>vger — {title}</title>
+<style>
+:root {{ --bg: #fff; --fg: #1a1a1a; --link: #0066cc; --border: #e0e0e0; --hover: #f5f5f5; --muted: #666; }}
+@media (prefers-color-scheme: dark) {{
+  :root {{ --bg: #1a1a1a; --fg: #e0e0e0; --link: #6cb6ff; --border: #333; --hover: #252525; --muted: #999; }}
+}}
+* {{ margin: 0; padding: 0; box-sizing: border-box; }}
+body {{ font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, monospace; background: var(--bg); color: var(--fg); padding: 2rem; max-width: 960px; margin: 0 auto; }}
+h1 {{ font-size: 1.1rem; font-weight: 600; margin-bottom: 0.5rem; word-break: break-all; }}
+.breadcrumbs {{ font-size: 0.85rem; color: var(--muted); margin-bottom: 1.5rem; }}
+.breadcrumbs a {{ color: var(--link); text-decoration: none; }}
+.breadcrumbs a:hover {{ text-decoration: underline; }}
+table {{ width: 100%; border-collapse: collapse; font-size: 0.9rem; }}
+th {{ text-align: left; padding: 0.5rem 0.75rem; border-bottom: 2px solid var(--border); font-weight: 600; color: var(--muted); font-size: 0.8rem; text-transform: uppercase; letter-spacing: 0.05em; }}
+td {{ padding: 0.4rem 0.75rem; border-bottom: 1px solid var(--border); }}
+tr:hover {{ background: var(--hover); }}
+a {{ color: var(--link); text-decoration: none; }}
+a:hover {{ text-decoration: underline; }}
+.icon {{ width: 1.5rem; text-align: center; }}
+.size {{ text-align: right; color: var(--muted); white-space: nowrap; }}
+.mtime {{ color: var(--muted); white-space: nowrap; }}
+footer {{ margin-top: 2rem; font-size: 0.75rem; color: var(--muted); }}
+</style>
+</head>
+<body>
+<h1>{title}</h1>
+<div class="breadcrumbs">{breadcrumbs}</div>
+<table>
+<thead><tr><th></th><th>Name</th><th style="text-align:right">Size</th><th>Modified</th></tr></thead>
+<tbody>
+{rows}</tbody>
+</table>
+<footer>vger backup — WebDAV + Web UI</footer>
+</body>
+</html>"##
+    )
+}
+
 // ─── DavMetaData ───────────────────────────────────────────────────────────
 
 impl DavMetaData for VfsMeta {
@@ -490,8 +709,10 @@ pub fn run(
     let cache_size = NonZeroUsize::new(cache_size).unwrap_or(NonZeroUsize::new(256).unwrap());
     let cache = Arc::new(Mutex::new(LruCache::new(cache_size)));
 
+    let tree = Arc::new(tree);
+
     let fs = VgerDavFs {
-        tree: Arc::new(tree),
+        tree: tree.clone(),
         repo,
         cache,
     };
@@ -503,10 +724,10 @@ pub fn run(
     let rt = tokio::runtime::Runtime::new()
         .map_err(|e| VgerError::Other(format!("failed to create tokio runtime: {e}")))?;
 
-    rt.block_on(async { serve(handler, address).await })
+    rt.block_on(async { serve(handler, tree, address).await })
 }
 
-async fn serve(handler: DavHandler, address: &str) -> Result<()> {
+async fn serve(handler: DavHandler, tree: Arc<VfsNode>, address: &str) -> Result<()> {
     let addr: std::net::SocketAddr = address
         .parse()
         .map_err(|e| VgerError::Config(format!("invalid address '{address}': {e}")))?;
@@ -515,8 +736,9 @@ async fn serve(handler: DavHandler, address: &str) -> Result<()> {
         .await
         .map_err(|e| VgerError::Other(format!("failed to bind to {addr}: {e}")))?;
 
-    eprintln!("WebDAV server listening on http://{addr}");
-    eprintln!("Connect with: Finder → Go → Connect to Server → http://{addr}");
+    eprintln!("Serving on http://{addr}");
+    eprintln!("  Browse in browser:  http://{addr}");
+    eprintln!("  WebDAV (Finder):    Go → Connect to Server → http://{addr}");
     eprintln!("Press Ctrl+C to stop.");
 
     loop {
@@ -526,6 +748,7 @@ async fn serve(handler: DavHandler, address: &str) -> Result<()> {
                     .map_err(|e| VgerError::Other(format!("accept error: {e}")))?;
                 let io = TokioIo::new(stream);
                 let handler = handler.clone();
+                let tree = tree.clone();
 
                 tokio::spawn(async move {
                     if let Err(e) = http1::Builder::new()
@@ -533,8 +756,31 @@ async fn serve(handler: DavHandler, address: &str) -> Result<()> {
                             io,
                             service_fn(move |req| {
                                 let handler = handler.clone();
+                                let tree = tree.clone();
                                 async move {
-                                    Ok::<_, Infallible>(handler.handle(req).await)
+                                    match classify_browser_request(&req, &tree) {
+                                        BrowserAction::ServeHtml => {
+                                            let path = req.uri().path().to_string();
+                                            let html = render_directory_html(&path, &tree);
+                                            let resp = hyper::Response::builder()
+                                                .status(200)
+                                                .header("content-type", "text/html; charset=utf-8")
+                                                .body(dav_server::body::Body::from(html))
+                                                .unwrap();
+                                            Ok::<_, Infallible>(resp)
+                                        }
+                                        BrowserAction::Redirect(location) => {
+                                            let resp = hyper::Response::builder()
+                                                .status(301)
+                                                .header("location", location)
+                                                .body(dav_server::body::Body::from(""))
+                                                .unwrap();
+                                            Ok::<_, Infallible>(resp)
+                                        }
+                                        BrowserAction::PassThrough => {
+                                            Ok::<_, Infallible>(handler.handle(req).await)
+                                        }
+                                    }
                                 }
                             }),
                         )
