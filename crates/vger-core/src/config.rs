@@ -101,19 +101,20 @@ impl HooksConfig {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RepositoryConfig {
-    pub path: String,
-    #[serde(default = "default_backend")]
-    pub backend: String,
-    pub s3_bucket: Option<String>,
-    pub s3_region: Option<String>,
-    pub s3_endpoint: Option<String>,
-    pub sftp_host: Option<String>,
-    pub sftp_user: Option<String>,
-    pub sftp_port: Option<u16>,
+    /// Repository URL: bare path, `file://`, `s3://`, `sftp://`, or `http(s)://`.
+    pub url: String,
+    /// S3 region (default: us-east-1).
+    pub region: Option<String>,
+    /// S3 access key ID.
+    pub access_key_id: Option<String>,
+    /// S3 secret access key.
+    pub secret_access_key: Option<String>,
+    /// S3 endpoint override (for S3-compatible stores when the URL heuristic is insufficient).
+    pub endpoint: Option<String>,
+    /// Path to SSH private key for SFTP backend.
+    pub sftp_key: Option<String>,
     /// Bearer token for REST backend authentication.
     pub rest_token: Option<String>,
-    /// Command to retrieve the REST token (stdout is used as the token).
-    pub rest_token_command: Option<String>,
     #[serde(default = "default_min_pack_size")]
     pub min_pack_size: u32,
     #[serde(default = "default_max_pack_size")]
@@ -175,10 +176,6 @@ impl Default for CompressionConfig {
     }
 }
 
-fn default_backend() -> String {
-    "local".to_string()
-}
-
 fn default_encryption_mode() -> String {
     "aes256gcm".to_string()
 }
@@ -219,18 +216,14 @@ fn default_snapshot_format() -> String {
 /// Contains all `RepositoryConfig` fields plus optional per-repo overrides.
 #[derive(Debug, Clone, Deserialize)]
 pub struct RepositoryEntry {
-    // Required repository fields
-    pub path: String,
-    #[serde(default = "default_backend")]
-    pub backend: String,
-    pub s3_bucket: Option<String>,
-    pub s3_region: Option<String>,
-    pub s3_endpoint: Option<String>,
-    pub sftp_host: Option<String>,
-    pub sftp_user: Option<String>,
-    pub sftp_port: Option<u16>,
+    /// Repository URL: bare path, `file://`, `s3://`, `sftp://`, or `http(s)://`.
+    pub url: String,
+    pub region: Option<String>,
+    pub access_key_id: Option<String>,
+    pub secret_access_key: Option<String>,
+    pub endpoint: Option<String>,
+    pub sftp_key: Option<String>,
     pub rest_token: Option<String>,
-    pub rest_token_command: Option<String>,
     pub min_pack_size: Option<u32>,
     pub max_pack_size: Option<u32>,
 
@@ -251,16 +244,13 @@ pub struct RepositoryEntry {
 impl RepositoryEntry {
     fn to_repo_config(&self) -> RepositoryConfig {
         RepositoryConfig {
-            path: self.path.clone(),
-            backend: self.backend.clone(),
-            s3_bucket: self.s3_bucket.clone(),
-            s3_region: self.s3_region.clone(),
-            s3_endpoint: self.s3_endpoint.clone(),
-            sftp_host: self.sftp_host.clone(),
-            sftp_user: self.sftp_user.clone(),
-            sftp_port: self.sftp_port,
+            url: self.url.clone(),
+            region: self.region.clone(),
+            access_key_id: self.access_key_id.clone(),
+            secret_access_key: self.secret_access_key.clone(),
+            endpoint: self.endpoint.clone(),
+            sftp_key: self.sftp_key.clone(),
             rest_token: self.rest_token.clone(),
-            rest_token_command: self.rest_token_command.clone(),
             min_pack_size: self.min_pack_size.unwrap_or_else(default_min_pack_size),
             max_pack_size: self.max_pack_size.unwrap_or_else(default_max_pack_size),
         }
@@ -373,15 +363,15 @@ fn resolve_raw_config(raw: RawConfig) -> crate::error::Result<Vec<ResolvedRepo>>
     Ok(repos)
 }
 
-/// Select a repository by label or path from a list of resolved repos.
+/// Select a repository by label or URL from a list of resolved repos.
 pub fn select_repo<'a>(repos: &'a [ResolvedRepo], selector: &str) -> Option<&'a ResolvedRepo> {
     // Try label match first
     repos
         .iter()
         .find(|r| r.label.as_deref() == Some(selector))
         .or_else(|| {
-            // Fall back to path match
-            repos.iter().find(|r| r.config.repository.path == selector)
+            // Fall back to URL match
+            repos.iter().find(|r| r.config.repository.url == selector)
         })
 }
 
@@ -480,9 +470,8 @@ pub fn minimal_config_template() -> &'static str {
 # See https://github.com/your-org/vger for full documentation.
 
 repositories:
-  - path: /path/to/repo
+  - url: /path/to/repo
     label: main
-    # backend: local              # "local", "s3", or "rest" (default: "local")
 
 encryption:
   mode: aes256gcm
@@ -505,10 +494,15 @@ source_directories:
 # Top-level settings serve as defaults; per-repo entries can override
 # encryption, compression, retention, and source_directories.
 #
-#  - path: s3://bucket/remote
+# URL formats:
+#   Local:  /backups/repo  or  file:///backups/repo
+#   S3:     s3://bucket/prefix  or  s3://endpoint:port/bucket/prefix
+#   SFTP:   sftp://user@host/path
+#   REST:   https://backup.example.com/repo
+#
+#  - url: s3://my-bucket/vger
 #    label: remote
-#    backend: s3
-#    s3_bucket: my-bucket
+#    region: us-east-1
 #    compression:
 #      algorithm: zstd
 #    retention:
@@ -561,7 +555,7 @@ mod tests {
         let _lock = GLOBAL_STATE.lock().unwrap();
         let dir = tempfile::tempdir().unwrap();
         let config_path = dir.path().join("vger.yaml");
-        fs::write(&config_path, "repositories:\n  - path: /tmp/repo\n").unwrap();
+        fs::write(&config_path, "repositories:\n  - url: /tmp/repo\n").unwrap();
 
         let original = std::env::current_dir().unwrap();
         std::env::set_current_dir(dir.path()).unwrap();
@@ -597,7 +591,7 @@ mod tests {
         let raw = parsed.unwrap();
         let repos = resolve_raw_config(raw).unwrap();
         assert_eq!(repos.len(), 1);
-        assert_eq!(repos[0].config.repository.path, "/path/to/repo");
+        assert_eq!(repos[0].config.repository.url, "/path/to/repo");
     }
 
     #[test]
@@ -635,7 +629,7 @@ mod tests {
     fn test_single_repo() {
         let yaml = r#"
 repositories:
-  - path: /tmp/repo
+  - url: /tmp/repo
     label: main
 encryption:
   mode: none
@@ -649,7 +643,7 @@ source_directories:
         let repos = load_and_resolve(&path).unwrap();
         assert_eq!(repos.len(), 1);
         assert_eq!(repos[0].label.as_deref(), Some("main"));
-        assert_eq!(repos[0].config.repository.path, "/tmp/repo");
+        assert_eq!(repos[0].config.repository.url, "/tmp/repo");
         assert_eq!(repos[0].config.encryption.mode, "none");
         assert_eq!(repos[0].config.source_directories, vec!["/home/user"]);
     }
@@ -667,9 +661,9 @@ retention:
   keep_daily: 7
 
 repositories:
-  - path: /backups/local
+  - url: /backups/local
     label: local
-  - path: /backups/remote
+  - url: /backups/remote
     label: remote
 "#;
         let dir = tempfile::tempdir().unwrap();
@@ -680,7 +674,7 @@ repositories:
         assert_eq!(repos.len(), 2);
 
         assert_eq!(repos[0].label.as_deref(), Some("local"));
-        assert_eq!(repos[0].config.repository.path, "/backups/local");
+        assert_eq!(repos[0].config.repository.url, "/backups/local");
         // Inherits top-level defaults
         assert_eq!(repos[0].config.encryption.mode, "aes256gcm");
         assert_eq!(repos[0].config.compression.algorithm, "lz4");
@@ -688,7 +682,7 @@ repositories:
         assert_eq!(repos[0].config.source_directories, vec!["/home/user"]);
 
         assert_eq!(repos[1].label.as_deref(), Some("remote"));
-        assert_eq!(repos[1].config.repository.path, "/backups/remote");
+        assert_eq!(repos[1].config.repository.url, "/backups/remote");
     }
 
     #[test]
@@ -704,9 +698,9 @@ retention:
   keep_daily: 7
 
 repositories:
-  - path: /backups/local
+  - url: /backups/local
     label: local
-  - path: /backups/remote
+  - url: /backups/remote
     label: remote
     encryption:
       mode: aes256gcm
@@ -746,9 +740,9 @@ repositories:
     fn test_multi_repo_pack_size_defaults() {
         let yaml = r#"
 repositories:
-  - path: /backups/a
+  - url: /backups/a
     min_pack_size: 1048576
-  - path: /backups/b
+  - url: /backups/b
 "#;
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("config.yaml");
@@ -792,9 +786,9 @@ repositories: []
     fn test_reject_duplicate_labels() {
         let yaml = r#"
 repositories:
-  - path: /backups/a
+  - url: /backups/a
     label: same
-  - path: /backups/b
+  - url: /backups/b
     label: same
 "#;
         let dir = tempfile::tempdir().unwrap();
@@ -814,11 +808,11 @@ repositories:
         ];
 
         let found = select_repo(&repos, "remote").unwrap();
-        assert_eq!(found.config.repository.path, "/backups/remote");
+        assert_eq!(found.config.repository.url, "/backups/remote");
     }
 
     #[test]
-    fn test_select_repo_by_path() {
+    fn test_select_repo_by_url() {
         let repos = vec![
             make_test_repo("/backups/local", Some("local")),
             make_test_repo("/backups/unlabeled", None),
@@ -826,7 +820,7 @@ repositories:
 
         let found = select_repo(&repos, "/backups/unlabeled").unwrap();
         assert!(found.label.is_none());
-        assert_eq!(found.config.repository.path, "/backups/unlabeled");
+        assert_eq!(found.config.repository.url, "/backups/unlabeled");
     }
 
     #[test]
@@ -840,32 +834,29 @@ repositories:
     fn test_load_config_returns_first_repo() {
         let yaml = r#"
 repositories:
-  - path: /tmp/first
-  - path: /tmp/second
+  - url: /tmp/first
+  - url: /tmp/second
 "#;
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("config.yaml");
         fs::write(&path, yaml).unwrap();
 
         let config = load_config(&path).unwrap();
-        assert_eq!(config.repository.path, "/tmp/first");
+        assert_eq!(config.repository.url, "/tmp/first");
     }
 
-    fn make_test_repo(path: &str, label: Option<&str>) -> ResolvedRepo {
+    fn make_test_repo(url: &str, label: Option<&str>) -> ResolvedRepo {
         ResolvedRepo {
             label: label.map(|s| s.to_string()),
             config: VgerConfig {
                 repository: RepositoryConfig {
-                    path: path.to_string(),
-                    backend: "local".to_string(),
-                    s3_bucket: None,
-                    s3_region: None,
-                    s3_endpoint: None,
-                    sftp_host: None,
-                    sftp_user: None,
-                    sftp_port: None,
+                    url: url.to_string(),
+                    region: None,
+                    access_key_id: None,
+                    secret_access_key: None,
+                    endpoint: None,
+                    sftp_key: None,
                     rest_token: None,
-                    rest_token_command: None,
                     min_pack_size: default_min_pack_size(),
                     max_pack_size: default_max_pack_size(),
                 },
@@ -888,7 +879,7 @@ repositories:
     fn test_hooks_deserialize() {
         let yaml = r#"
 repositories:
-  - path: /tmp/repo
+  - url: /tmp/repo
 hooks:
   before_backup:
     - "pg_dump mydb > /tmp/db.sql"
@@ -912,7 +903,7 @@ hooks:
     fn test_hooks_default_empty() {
         let yaml = r#"
 repositories:
-  - path: /tmp/repo
+  - url: /tmp/repo
 "#;
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("config.yaml");
@@ -927,7 +918,7 @@ repositories:
     fn test_hooks_per_repo() {
         let yaml = r#"
 repositories:
-  - path: /tmp/repo
+  - url: /tmp/repo
     label: main
     hooks:
       before:
@@ -949,7 +940,7 @@ repositories:
     fn test_hooks_validation_rejects_bad_keys() {
         let yaml = r#"
 repositories:
-  - path: /tmp/repo
+  - url: /tmp/repo
 hooks:
   before_invalid_command:
     - "echo nope"
@@ -967,7 +958,7 @@ hooks:
     fn test_hooks_validation_rejects_bad_repo_keys() {
         let yaml = r#"
 repositories:
-  - path: /tmp/repo
+  - url: /tmp/repo
     hooks:
       on_start:
         - "echo nope"

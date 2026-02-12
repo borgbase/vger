@@ -158,10 +158,9 @@ vger-server --config vger-server.toml
 
 ```yaml
 repositories:
-  - path: "https://backup.example.com/myrepo"
-    backend: "rest"
+  - url: "https://backup.example.com/myrepo"
+    label: "server"
     rest_token: "some-secret-token"
-    # rest_token_command: "pass show borg-token"  # alternative: shell command
 
 encryption:
   mode: "aes256gcm"
@@ -185,18 +184,16 @@ Returns server status, uptime, disk free space, and repo count.
 
 ```yaml
 repositories:
-  - path: "/backup/repo"           # Local path, S3 prefix, or REST URL
+  - url: "/backup/repo"             # Local path, file://, s3://, sftp://, or https://
     label: "main"                  # Short name for --repo selection
-    # backend: "local"             # "local", "s3", or "rest" (default: "local")
     # min_pack_size: 33554432      # Pack size floor (default 32 MiB)
     # max_pack_size: 536870912     # Pack size ceiling (default 512 MiB)
-    # S3-specific options:
-    # s3_bucket: "my-backups"
-    # s3_region: "us-east-1"
-    # s3_endpoint: "http://localhost:9000"  # For MinIO etc.
-    # REST-specific options:
+    # S3-specific options (s3:// URLs):
+    # region: "us-east-1"
+    # access_key_id: "AKIA..."
+    # secret_access_key: "..."
+    # REST-specific options (https:// URLs):
     # rest_token: "secret"                  # Bearer token for REST server
-    # rest_token_command: "pass show borg"  # Alternative: shell command for token
 
 encryption:
   mode: "aes256gcm"              # "aes256gcm" or "none"

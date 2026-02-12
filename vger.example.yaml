@@ -5,26 +5,43 @@
 # Top-level settings (encryption, compression, etc.) serve as defaults.
 # Each repository entry can override: encryption, compression, retention,
 # and source_directories.
-# Select a single repo at runtime with: vger --repo <label-or-path>
+# Select a single repo at runtime with: vger --repo <label-or-url>
+#
+# URL formats:
+#   Local:  /backups/repo  or  file:///backups/repo
+#   S3:     s3://bucket/prefix  or  s3://endpoint:port/bucket/prefix
+#   SFTP:   sftp://user@host/path  (compile with feature 'backend-sftp')
+#   REST:   https://backup.example.com/repo  (compile with feature 'backend-rest')
 repositories:
-  - path: /backups/myrepo
+  - url: /backups/myrepo
     label: main
 
-    # Storage backend: "local", "s3", or "rest" (default: "local")
-    # backend: local
+  # S3 (AWS default endpoint — host is the bucket name):
+  # - url: s3://my-bucket/vger
+  #   label: aws
+  #   region: us-east-1
+  #   access_key_id: AKIA...
+  #   secret_access_key: ...
 
-    # S3 backend settings (only used when backend is "s3")
-    # s3_bucket: my-backup-bucket
-    # s3_region: us-east-1
-    # s3_endpoint: https://s3.amazonaws.com  # custom endpoint for S3-compatible stores
+  # S3-compatible (host with dot/port = custom endpoint, first path segment = bucket):
+  # - url: s3://minio.local:9000/my-bucket/vger
+  #   label: minio
+  #   region: us-east-1
+  #   access_key_id: minioadmin
+  #   secret_access_key: minioadmin
 
-    # SFTP settings (not yet implemented)
-    # sftp_host: backup.example.com
-    # sftp_user: backupuser
-    # sftp_port: 22
+  # SFTP:
+  # - url: sftp://backupuser@nas.example.com/backups/vger
+  #   label: remote
+  #   sftp_key: ~/.ssh/id_ed25519
 
-  # Per-repo hooks — run only for this repository
-  # - path: /mnt/nas/repo
+  # REST server (vger-server):
+  # - url: https://backup.example.com/myrepo
+  #   label: server
+  #   rest_token: "secret-token-here"
+
+  # Per-repo hooks — run only for this repository:
+  # - url: /mnt/nas/repo
   #   label: nas
   #   hooks:
   #     before:
@@ -32,11 +49,10 @@ repositories:
   #     finally:
   #       - "umount /mnt/nas"
 
-  # Additional repositories — uncomment to add a second destination:
-  # - path: s3://bucket/remote
-  #   label: remote
-  #   backend: s3
-  #   s3_bucket: my-bucket
+  # Per-repo overrides:
+  # - url: s3://my-bucket/vger
+  #   label: offsite
+  #   region: us-east-1
   #   encryption:
   #     passcommand: "pass show vger-remote"
   #   compression:

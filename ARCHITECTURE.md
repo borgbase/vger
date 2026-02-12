@@ -336,10 +336,9 @@ log_format = "json"              # "json" or "pretty"
 Client config:
 ```yaml
 repositories:
-  - path: https://backup.example.com/myrepo
-    backend: rest
+  - url: https://backup.example.com/myrepo
+    label: server
     rest_token: "secret-token-here"
-    # rest_token_command: "pass show vger-token"
 ```
 
 ---
