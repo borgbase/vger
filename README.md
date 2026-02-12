@@ -244,15 +244,24 @@ sources:
   - path: "/home/user/documents"
     label: "docs"
     exclude: ["*.tmp", ".cache/**"]
+    # Optional per-source overrides:
+    # exclude_if_present: [".nobackup", "CACHEDIR.TAG"]
+    # one_file_system: true
+    # git_ignore: false
     repos: ["main"]               # Only back up to this repo (default: all)
     retention:
       keep_daily: 7
     hooks:
       before: "echo starting docs backup"
 
-exclude_patterns:                # Global exclude patterns (merged with per-source)
+exclude_patterns:                # Global gitignore-style patterns (merged with per-source)
   - "*.tmp"
   - ".cache/**"
+exclude_if_present:              # Skip dirs containing any marker file
+  - ".nobackup"
+  - "CACHEDIR.TAG"
+one_file_system: true            # Don't cross filesystem/mount boundaries (default true)
+git_ignore: false                # Respect .gitignore files (default false)
 
 chunker:                         # Optional, defaults shown
   min_size: 524288               # 512 KiB

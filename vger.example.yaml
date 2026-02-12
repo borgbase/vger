@@ -85,6 +85,10 @@ sources:
 #     exclude:
 #       - "*.tmp"
 #       - ".git/**"
+#     # Optional per-source overrides:
+#     # exclude_if_present: [".nobackup", "CACHEDIR.TAG"]
+#     # one_file_system: true
+#     # git_ignore: false
 #     hooks:
 #       before: "echo backing up docs"
 #       after:
@@ -101,12 +105,23 @@ sources:
 #       keep_daily: 7
 #       keep_monthly: 12
 
-# Glob patterns to exclude from all backups (merged with per-source excludes)
+# Gitignore-style patterns to exclude from all backups (merged with per-source excludes)
 exclude_patterns:
   - "*.tmp"
   - "*.cache"
   - ".DS_Store"
   - "node_modules"
+
+# Skip directories that contain any of these marker files.
+exclude_if_present:
+  - ".nobackup"
+  - "CACHEDIR.TAG"
+
+# Do not cross mount boundaries while walking sources.
+one_file_system: true
+
+# Respect repository .gitignore files while walking sources.
+git_ignore: false
 
 # Content-defined chunking parameters (FastCDC)
 chunker:

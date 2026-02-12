@@ -1,6 +1,10 @@
 use chrono::Utc;
+use vger_core::commands;
 use vger_core::compress::Compression;
-use vger_core::config::ChunkerConfig;
+use vger_core::config::{
+    ChunkerConfig, CompressionConfig, EncryptionConfig, EncryptionModeConfig, RepositoryConfig,
+    RetentionConfig, RetryConfig, VgerConfig,
+};
 use vger_core::repo::manifest::SnapshotEntry;
 use vger_core::repo::pack::PackType;
 use vger_core::repo::{EncryptionMode, Repository};
@@ -21,6 +25,35 @@ fn init_local_repo(dir: &std::path::Path) -> Repository {
 fn open_local_repo(dir: &std::path::Path) -> Repository {
     let storage = Box::new(OpendalBackend::local(dir.to_str().unwrap()).unwrap());
     Repository::open(storage, None).unwrap()
+}
+
+fn make_test_config(repo_dir: &std::path::Path) -> VgerConfig {
+    VgerConfig {
+        repository: RepositoryConfig {
+            url: repo_dir.to_string_lossy().to_string(),
+            region: None,
+            access_key_id: None,
+            secret_access_key: None,
+            endpoint: None,
+            sftp_key: None,
+            rest_token: None,
+            min_pack_size: 32 * 1024 * 1024,
+            max_pack_size: 512 * 1024 * 1024,
+            retry: RetryConfig::default(),
+        },
+        encryption: EncryptionConfig {
+            mode: EncryptionModeConfig::None,
+            passphrase: None,
+            passcommand: None,
+        },
+        exclude_patterns: Vec::new(),
+        exclude_if_present: Vec::new(),
+        one_file_system: true,
+        git_ignore: false,
+        chunker: ChunkerConfig::default(),
+        compression: CompressionConfig::default(),
+        retention: RetentionConfig::default(),
+    }
 }
 
 #[test]
@@ -75,4 +108,99 @@ fn manifest_survives_reopen() {
     let repo = open_local_repo(dir);
     assert_eq!(repo.manifest.snapshots.len(), 1);
     assert_eq!(repo.manifest.snapshots[0].name, "test-snapshot");
+}
+
+#[test]
+fn backup_exclude_if_present_skips_marked_directories() {
+    let tmp = tempfile::tempdir().unwrap();
+    let repo_dir = tmp.path().join("repo");
+    let source_dir = tmp.path().join("source");
+    std::fs::create_dir_all(&repo_dir).unwrap();
+    std::fs::create_dir_all(source_dir.join("keep")).unwrap();
+    std::fs::create_dir_all(source_dir.join("skip")).unwrap();
+    std::fs::write(source_dir.join("keep").join("keep.txt"), b"keep").unwrap();
+    std::fs::write(source_dir.join("skip").join("skip.txt"), b"skip").unwrap();
+    std::fs::write(source_dir.join("skip").join(".nobackup"), b"").unwrap();
+
+    let config = make_test_config(&repo_dir);
+    commands::init::run(&config, None).unwrap();
+
+    let source_paths = vec![source_dir.to_string_lossy().to_string()];
+    let exclude_if_present = vec![".nobackup".to_string()];
+    let exclude_patterns: Vec<String> = Vec::new();
+
+    let stats = commands::backup::run(
+        &config,
+        commands::backup::BackupRequest {
+            snapshot_name: "snap-marker",
+            passphrase: None,
+            source_paths: &source_paths,
+            source_label: "source",
+            exclude_patterns: &exclude_patterns,
+            exclude_if_present: &exclude_if_present,
+            one_file_system: true,
+            git_ignore: false,
+            compression: Compression::None,
+            label: "",
+        },
+    )
+    .unwrap();
+
+    assert_eq!(stats.nfiles, 1);
+}
+
+#[test]
+fn backup_git_ignore_respected_when_enabled() {
+    let tmp = tempfile::tempdir().unwrap();
+    let repo_dir = tmp.path().join("repo");
+    let source_dir = tmp.path().join("source");
+    std::fs::create_dir_all(&repo_dir).unwrap();
+    std::fs::create_dir_all(source_dir.join("target")).unwrap();
+    std::fs::write(source_dir.join(".gitignore"), b"target/\n").unwrap();
+    std::fs::write(source_dir.join("keep.txt"), b"keep").unwrap();
+    std::fs::write(source_dir.join("target").join("ignored.txt"), b"ignore me").unwrap();
+
+    let config = make_test_config(&repo_dir);
+    commands::init::run(&config, None).unwrap();
+
+    let source_paths = vec![source_dir.to_string_lossy().to_string()];
+    let exclude_if_present: Vec<String> = Vec::new();
+    let exclude_patterns: Vec<String> = Vec::new();
+
+    let stats_without_gitignore = commands::backup::run(
+        &config,
+        commands::backup::BackupRequest {
+            snapshot_name: "snap-no-gitignore",
+            passphrase: None,
+            source_paths: &source_paths,
+            source_label: "source",
+            exclude_patterns: &exclude_patterns,
+            exclude_if_present: &exclude_if_present,
+            one_file_system: true,
+            git_ignore: false,
+            compression: Compression::None,
+            label: "",
+        },
+    )
+    .unwrap();
+
+    let stats_with_gitignore = commands::backup::run(
+        &config,
+        commands::backup::BackupRequest {
+            snapshot_name: "snap-with-gitignore",
+            passphrase: None,
+            source_paths: &source_paths,
+            source_label: "source",
+            exclude_patterns: &exclude_patterns,
+            exclude_if_present: &exclude_if_present,
+            one_file_system: true,
+            git_ignore: true,
+            compression: Compression::None,
+            label: "",
+        },
+    )
+    .unwrap();
+
+    assert_eq!(stats_without_gitignore.nfiles, 3);
+    assert_eq!(stats_with_gitignore.nfiles, 2);
 }

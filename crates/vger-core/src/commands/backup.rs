@@ -2,9 +2,9 @@ use std::os::unix::fs::MetadataExt;
 use std::path::Path;
 
 use chrono::Utc;
+use ignore::{gitignore::Gitignore, WalkBuilder};
 use rand::RngCore;
 use tracing::info;
-use walkdir::WalkDir;
 
 use super::util::with_repo_lock;
 use crate::chunker;
@@ -44,6 +44,22 @@ fn flush_item_stream_chunk(
     Ok(())
 }
 
+fn build_explicit_excludes(source: &Path, patterns: &[String]) -> Result<Gitignore> {
+    let mut builder = ignore::gitignore::GitignoreBuilder::new(source);
+    for pat in patterns {
+        builder
+            .add_line(None, pat)
+            .map_err(|e| VgerError::Config(format!("invalid exclude pattern '{pat}': {e}")))?;
+    }
+    builder
+        .build()
+        .map_err(|e| VgerError::Config(format!("exclude matcher build failed: {e}")))
+}
+
+fn should_skip_for_device(one_file_system: bool, source_dev: u64, entry_dev: u64) -> bool {
+    one_file_system && source_dev != entry_dev
+}
+
 /// Run `vger backup` for one or more source directories.
 pub struct BackupRequest<'a> {
     pub snapshot_name: &'a str,
@@ -51,6 +67,9 @@ pub struct BackupRequest<'a> {
     pub source_paths: &'a [String],
     pub source_label: &'a str,
     pub exclude_patterns: &'a [String],
+    pub exclude_if_present: &'a [String],
+    pub one_file_system: bool,
+    pub git_ignore: bool,
     pub compression: Compression,
     pub label: &'a str,
 }
@@ -61,6 +80,9 @@ pub fn run(config: &VgerConfig, req: BackupRequest<'_>) -> Result<SnapshotStats>
     let source_paths = req.source_paths;
     let source_label = req.source_label;
     let exclude_patterns = req.exclude_patterns;
+    let exclude_if_present = req.exclude_if_present;
+    let one_file_system = req.one_file_system;
+    let git_ignore = req.git_ignore;
     let compression = req.compression;
     let label = req.label;
 
@@ -85,19 +107,6 @@ pub fn run(config: &VgerConfig, req: BackupRequest<'_>) -> Result<SnapshotStats>
         let mut item_ptrs: Vec<ChunkId> = Vec::new();
         let items_config = items_chunker_config();
 
-        // Build exclude patterns
-        let mut glob_builder = globset::GlobSetBuilder::new();
-        for pat in exclude_patterns {
-            glob_builder.add(
-                globset::Glob::new(pat).map_err(|e| {
-                    VgerError::Config(format!("invalid exclude pattern '{pat}': {e}"))
-                })?,
-            );
-        }
-        let excludes = glob_builder
-            .build()
-            .map_err(|e| VgerError::Config(format!("glob build: {e}")))?;
-
         // Walk each source directory
         for source_path in source_paths {
             let source = Path::new(source_path.as_str());
@@ -106,6 +115,10 @@ pub fn run(config: &VgerConfig, req: BackupRequest<'_>) -> Result<SnapshotStats>
                     "source directory does not exist: {source_path}"
                 )));
             }
+            let source_dev = std::fs::symlink_metadata(source)
+                .map_err(|e| VgerError::Other(format!("stat error for {}: {e}", source.display())))?
+                .dev();
+            let explicit_excludes = build_explicit_excludes(source, exclude_patterns)?;
 
             // For multi-path mode, derive basename prefix
             let prefix = if multi_path {
@@ -140,8 +153,59 @@ pub fn run(config: &VgerConfig, req: BackupRequest<'_>) -> Result<SnapshotStats>
                 None
             };
 
-            for entry in WalkDir::new(source).follow_links(false).sort_by_file_name() {
-                let entry = entry.map_err(|e| VgerError::Other(format!("walkdir error: {e}")))?;
+            let mut walk_builder = WalkBuilder::new(source);
+            walk_builder.follow_links(false);
+            walk_builder.hidden(false);
+            walk_builder.ignore(false); // Only honor .gitignore (optional), not .ignore.
+            walk_builder.git_global(false); // Ignore user-global excludes.
+            walk_builder.git_exclude(false); // Ignore .git/info/exclude.
+            walk_builder.parents(git_ignore); // Read parent .gitignore only when enabled.
+            walk_builder.git_ignore(git_ignore);
+            walk_builder.require_git(false);
+            walk_builder.sort_by_file_name(std::ffi::OsStr::cmp);
+
+            let markers = exclude_if_present.to_vec();
+            let source_path_buf = source.to_path_buf();
+            walk_builder.filter_entry(move |entry| {
+                let path = entry.path();
+                if path == source_path_buf {
+                    return true;
+                }
+
+                let rel = path.strip_prefix(&source_path_buf).unwrap_or(path);
+                let is_dir = entry.file_type().is_some_and(|ft| ft.is_dir());
+
+                // Apply explicit exclude patterns from config (gitignore syntax).
+                if explicit_excludes
+                    .matched_path_or_any_parents(rel, is_dir)
+                    .is_ignore()
+                {
+                    return false;
+                }
+
+                // Stay on the source filesystem when enabled.
+                if one_file_system {
+                    if let Ok(metadata) = std::fs::symlink_metadata(path) {
+                        if should_skip_for_device(one_file_system, source_dev, metadata.dev()) {
+                            return false;
+                        }
+                    }
+                }
+
+                // Skip directories containing any configured marker file.
+                if is_dir && !markers.is_empty() {
+                    for marker in &markers {
+                        if path.join(marker).exists() {
+                            return false;
+                        }
+                    }
+                }
+
+                true
+            });
+
+            for entry in walk_builder.build() {
+                let entry = entry.map_err(|e| VgerError::Other(format!("walk error: {e}")))?;
 
                 let rel_path = entry
                     .path()
@@ -155,12 +219,7 @@ pub fn run(config: &VgerConfig, req: BackupRequest<'_>) -> Result<SnapshotStats>
                     continue;
                 }
 
-                // Apply exclude patterns
-                if excludes.is_match(&rel_path) {
-                    continue;
-                }
-
-                let metadata = entry.metadata().map_err(|e| {
+                let metadata = std::fs::symlink_metadata(entry.path()).map_err(|e| {
                     VgerError::Other(format!("stat error for {}: {e}", entry.path().display()))
                 })?;
 
@@ -302,4 +361,16 @@ pub fn run(config: &VgerConfig, req: BackupRequest<'_>) -> Result<SnapshotStats>
 
         Ok(stats)
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::should_skip_for_device;
+
+    #[test]
+    fn one_file_system_device_filter_logic() {
+        assert!(should_skip_for_device(true, 42, 43));
+        assert!(!should_skip_for_device(true, 42, 42));
+        assert!(!should_skip_for_device(false, 42, 43));
+    }
 }

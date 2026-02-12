@@ -12,6 +12,12 @@ pub struct VgerConfig {
     #[serde(default)]
     pub exclude_patterns: Vec<String>,
     #[serde(default)]
+    pub exclude_if_present: Vec<String>,
+    #[serde(default = "default_one_file_system")]
+    pub one_file_system: bool,
+    #[serde(default)]
+    pub git_ignore: bool,
+    #[serde(default)]
     pub chunker: ChunkerConfig,
     #[serde(default)]
     pub compression: CompressionConfig,
@@ -151,6 +157,9 @@ pub enum SourceInput {
         label: Option<String>,
         #[serde(default)]
         exclude: Vec<String>,
+        exclude_if_present: Option<Vec<String>>,
+        one_file_system: Option<bool>,
+        git_ignore: Option<bool>,
         #[serde(default)]
         hooks: SourceHooksConfig,
         retention: Option<RetentionConfig>,
@@ -165,6 +174,9 @@ pub struct SourceEntry {
     pub paths: Vec<String>,
     pub label: String,
     pub exclude: Vec<String>,
+    pub exclude_if_present: Vec<String>,
+    pub one_file_system: bool,
+    pub git_ignore: bool,
     pub hooks: SourceHooksConfig,
     pub retention: Option<RetentionConfig>,
     pub repos: Vec<String>,
@@ -341,6 +353,10 @@ fn default_retry_max_delay_ms() -> u64 {
     60_000
 }
 
+fn default_one_file_system() -> bool {
+    true
+}
+
 /// Retry configuration for remote storage backends (S3, SFTP, REST).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RetryConfig {
@@ -424,6 +440,12 @@ struct ConfigDocument {
     #[serde(default)]
     exclude_patterns: Vec<String>,
     #[serde(default)]
+    exclude_if_present: Vec<String>,
+    #[serde(default = "default_one_file_system")]
+    one_file_system: bool,
+    #[serde(default)]
+    git_ignore: bool,
+    #[serde(default)]
     chunker: ChunkerConfig,
     #[serde(default)]
     compression: CompressionConfig,
@@ -464,7 +486,12 @@ pub fn label_from_path(path: &str) -> String {
 /// - Each `Rich` entry is normalized individually.
 ///   - `path:` is sugar for `paths: [path]` — exactly one must be set.
 ///   - Multi-path rich entries require an explicit `label`.
-fn normalize_sources(inputs: Vec<SourceInput>) -> crate::error::Result<Vec<SourceEntry>> {
+fn normalize_sources(
+    inputs: Vec<SourceInput>,
+    default_exclude_if_present: &[String],
+    default_one_file_system: bool,
+    default_git_ignore: bool,
+) -> crate::error::Result<Vec<SourceEntry>> {
     let mut simple_paths: Vec<String> = Vec::new();
     let mut rich_entries: Vec<SourceEntry> = Vec::new();
 
@@ -478,6 +505,9 @@ fn normalize_sources(inputs: Vec<SourceInput>) -> crate::error::Result<Vec<Sourc
                 paths,
                 label,
                 exclude,
+                exclude_if_present,
+                one_file_system,
+                git_ignore,
                 hooks,
                 retention,
                 repos,
@@ -530,6 +560,10 @@ fn normalize_sources(inputs: Vec<SourceInput>) -> crate::error::Result<Vec<Sourc
                     paths: resolved_paths,
                     label,
                     exclude,
+                    exclude_if_present: exclude_if_present
+                        .unwrap_or_else(|| default_exclude_if_present.to_vec()),
+                    one_file_system: one_file_system.unwrap_or(default_one_file_system),
+                    git_ignore: git_ignore.unwrap_or(default_git_ignore),
                     hooks,
                     retention,
                     repos,
@@ -561,6 +595,9 @@ fn normalize_sources(inputs: Vec<SourceInput>) -> crate::error::Result<Vec<Sourc
             paths: simple_paths,
             label,
             exclude: Vec::new(),
+            exclude_if_present: default_exclude_if_present.to_vec(),
+            one_file_system: default_one_file_system,
+            git_ignore: default_git_ignore,
             hooks: SourceHooksConfig::default(),
             retention: None,
             repos: Vec::new(),
@@ -621,7 +658,12 @@ fn resolve_document(raw: ConfigDocument) -> crate::error::Result<Vec<ResolvedRep
     }
 
     // Normalize sources
-    let all_sources: Vec<SourceEntry> = normalize_sources(raw.sources)?;
+    let all_sources: Vec<SourceEntry> = normalize_sources(
+        raw.sources,
+        &raw.exclude_if_present,
+        raw.one_file_system,
+        raw.git_ignore,
+    )?;
 
     // Check for duplicate source labels
     let mut source_labels = std::collections::HashSet::new();
@@ -676,6 +718,9 @@ fn resolve_document(raw: ConfigDocument) -> crate::error::Result<Vec<ResolvedRep
                         paths: src.paths.clone(),
                         label: src.label.clone(),
                         exclude: merged_exclude,
+                        exclude_if_present: src.exclude_if_present.clone(),
+                        one_file_system: src.one_file_system,
+                        git_ignore: src.git_ignore,
                         hooks: src.hooks.clone(),
                         retention: src.retention.clone(),
                         repos: src.repos.clone(),
@@ -689,6 +734,9 @@ fn resolve_document(raw: ConfigDocument) -> crate::error::Result<Vec<ResolvedRep
                     repository: entry.to_repo_config(),
                     encryption: entry.encryption.unwrap_or_else(|| raw.encryption.clone()),
                     exclude_patterns: raw.exclude_patterns.clone(),
+                    exclude_if_present: raw.exclude_if_present.clone(),
+                    one_file_system: raw.one_file_system,
+                    git_ignore: raw.git_ignore,
                     chunker: raw.chunker.clone(),
                     compression: entry.compression.unwrap_or_else(|| raw.compression.clone()),
                     retention: entry.retention.unwrap_or_else(|| raw.retention.clone()),
@@ -850,6 +898,17 @@ sources:
 # exclude_patterns:
 #   - "*.tmp"
 #   - ".cache/**"
+#
+# # Skip directories if any marker file is present:
+# # exclude_if_present:
+# #   - .nobackup
+# #   - CACHEDIR.TAG
+#
+# # Don't cross filesystem boundaries (default: true)
+# # one_file_system: true
+#
+# # Respect repository .gitignore files (default: false)
+# # git_ignore: false
 
 # retention:
 #   keep_daily: 7
@@ -1274,6 +1333,9 @@ repositories:
                 },
                 encryption: EncryptionConfig::default(),
                 exclude_patterns: vec![],
+                exclude_if_present: vec![],
+                one_file_system: default_one_file_system(),
+                git_ignore: false,
                 chunker: ChunkerConfig::default(),
                 compression: CompressionConfig::default(),
                 retention: RetentionConfig::default(),
@@ -1291,6 +1353,9 @@ repositories:
             paths: vec![format!("/home/{label}")],
             label: label.to_string(),
             exclude: Vec::new(),
+            exclude_if_present: Vec::new(),
+            one_file_system: default_one_file_system(),
+            git_ignore: false,
             hooks: SourceHooksConfig::default(),
             retention: None,
             repos: Vec::new(),
@@ -1593,6 +1658,72 @@ sources:
         let src = &repos[0].sources[0];
         // Global + per-source excludes should be merged
         assert_eq!(src.exclude, vec!["*.cache", "*.tmp"]);
+    }
+
+    #[test]
+    fn test_exclusion_feature_defaults() {
+        let yaml = r#"
+repositories:
+  - url: /tmp/repo
+sources:
+  - /home/user/documents
+"#;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.yaml");
+        fs::write(&path, yaml).unwrap();
+
+        let repos = load_and_resolve(&path).unwrap();
+        assert!(repos[0].config.exclude_if_present.is_empty());
+        assert!(repos[0].config.one_file_system);
+        assert!(!repos[0].config.git_ignore);
+
+        let src = &repos[0].sources[0];
+        assert!(src.exclude_if_present.is_empty());
+        assert!(src.one_file_system);
+        assert!(!src.git_ignore);
+    }
+
+    #[test]
+    fn test_source_exclusion_feature_overrides() {
+        let yaml = r#"
+repositories:
+  - url: /tmp/repo
+exclude_if_present:
+  - .nobackup
+  - CACHEDIR.TAG
+one_file_system: true
+git_ignore: false
+sources:
+  - path: /home/user/documents
+    label: docs
+    exclude_if_present:
+      - .skip
+    one_file_system: false
+    git_ignore: true
+  - path: /home/user/photos
+    label: photos
+"#;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.yaml");
+        fs::write(&path, yaml).unwrap();
+
+        let repos = load_and_resolve(&path).unwrap();
+        let docs = repos[0].sources.iter().find(|s| s.label == "docs").unwrap();
+        let photos = repos[0]
+            .sources
+            .iter()
+            .find(|s| s.label == "photos")
+            .unwrap();
+
+        // Per-source marker list replaces global markers when set.
+        assert_eq!(docs.exclude_if_present, vec![".skip"]);
+        assert!(!docs.one_file_system);
+        assert!(docs.git_ignore);
+
+        // Sources without overrides inherit global defaults.
+        assert_eq!(photos.exclude_if_present, vec![".nobackup", "CACHEDIR.TAG"]);
+        assert!(photos.one_file_system);
+        assert!(!photos.git_ignore);
     }
 
     #[test]

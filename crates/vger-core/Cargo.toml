@@ -29,8 +29,8 @@ opendal = { version = "0.51", features = ["services-fs", "services-s3"] }
 url = "2"
 
 # Filesystem
-walkdir = "2"
 globset = "0.4"
+ignore = "0.4"
 filetime = "0.2"
 
 # Time
