@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::fmt;
 use std::path::{Path, PathBuf};
 
@@ -45,6 +46,56 @@ impl RetentionConfig {
             || self.keep_weekly.is_some()
             || self.keep_monthly.is_some()
             || self.keep_yearly.is_some()
+    }
+}
+
+/// Valid hook prefixes.
+const HOOK_PREFIXES: &[&str] = &["before", "after", "failed", "finally"];
+
+/// Valid command suffixes for command-specific hooks.
+const HOOK_COMMANDS: &[&str] = &[
+    "backup", "prune", "compact", "check", "delete", "extract", "init", "list",
+];
+
+/// Hook configuration: flat map of hook keys to lists of shell commands.
+///
+/// Valid keys are bare prefixes (`before`, `after`, `failed`, `finally`) and
+/// command-specific variants (`before_backup`, `finally_prune`, etc.).
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct HooksConfig {
+    #[serde(flatten)]
+    pub hooks: HashMap<String, Vec<String>>,
+}
+
+impl HooksConfig {
+    /// Validate that all keys match valid hook patterns.
+    pub fn validate(&self) -> crate::error::Result<()> {
+        for key in self.hooks.keys() {
+            if HOOK_PREFIXES.contains(&key.as_str()) {
+                continue;
+            }
+            // Check for prefix_command pattern
+            let valid = HOOK_PREFIXES.iter().any(|prefix| {
+                key.strip_prefix(prefix)
+                    .and_then(|rest| rest.strip_prefix('_'))
+                    .is_some_and(|cmd| HOOK_COMMANDS.contains(&cmd))
+            });
+            if !valid {
+                return Err(crate::error::VgerError::Config(format!(
+                    "invalid hook key: '{key}'"
+                )));
+            }
+        }
+        Ok(())
+    }
+
+    /// Look up commands for a hook key, returning an empty slice if absent.
+    pub fn get_hooks(&self, key: &str) -> &[String] {
+        self.hooks.get(key).map(|v| v.as_slice()).unwrap_or(&[])
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.hooks.is_empty()
     }
 }
 
@@ -191,6 +242,10 @@ pub struct RepositoryEntry {
     pub compression: Option<CompressionConfig>,
     pub retention: Option<RetentionConfig>,
     pub source_directories: Option<Vec<String>>,
+
+    /// Per-repo hooks (optional).
+    #[serde(default)]
+    pub hooks: Option<HooksConfig>,
 }
 
 impl RepositoryEntry {
@@ -230,6 +285,9 @@ struct RawConfig {
     snapshot_name_format: String,
     #[serde(default)]
     retention: RetentionConfig,
+    /// Global hooks — apply to all repositories.
+    #[serde(default)]
+    hooks: HooksConfig,
 }
 
 /// A fully resolved repository with its merged config.
@@ -237,6 +295,8 @@ struct RawConfig {
 pub struct ResolvedRepo {
     pub label: Option<String>,
     pub config: VgerConfig,
+    pub global_hooks: HooksConfig,
+    pub repo_hooks: HooksConfig,
 }
 
 /// Load and resolve a config file into one `ResolvedRepo` per repository entry.
@@ -268,11 +328,22 @@ fn resolve_raw_config(raw: RawConfig) -> crate::error::Result<Vec<ResolvedRepo>>
         }
     }
 
+    // Validate global hooks
+    raw.hooks.validate()?;
+
+    // Validate per-repo hooks
+    for entry in &raw.repositories {
+        if let Some(ref h) = entry.hooks {
+            h.validate()?;
+        }
+    }
+
     let repos = raw
         .repositories
         .into_iter()
         .map(|entry| {
             let label = entry.label.clone();
+            let repo_hooks = entry.hooks.clone().unwrap_or_default();
             ResolvedRepo {
                 label,
                 config: VgerConfig {
@@ -293,6 +364,8 @@ fn resolve_raw_config(raw: RawConfig) -> crate::error::Result<Vec<ResolvedRepo>>
                         .retention
                         .unwrap_or_else(|| raw.retention.clone()),
                 },
+                global_hooks: raw.hooks.clone(),
+                repo_hooks,
             }
         })
         .collect();
@@ -736,14 +809,8 @@ repositories:
     #[test]
     fn test_select_repo_by_label() {
         let repos = vec![
-            ResolvedRepo {
-                label: Some("local".into()),
-                config: make_test_config("/backups/local"),
-            },
-            ResolvedRepo {
-                label: Some("remote".into()),
-                config: make_test_config("/backups/remote"),
-            },
+            make_test_repo("/backups/local", Some("local")),
+            make_test_repo("/backups/remote", Some("remote")),
         ];
 
         let found = select_repo(&repos, "remote").unwrap();
@@ -753,14 +820,8 @@ repositories:
     #[test]
     fn test_select_repo_by_path() {
         let repos = vec![
-            ResolvedRepo {
-                label: Some("local".into()),
-                config: make_test_config("/backups/local"),
-            },
-            ResolvedRepo {
-                label: None,
-                config: make_test_config("/backups/unlabeled"),
-            },
+            make_test_repo("/backups/local", Some("local")),
+            make_test_repo("/backups/unlabeled", None),
         ];
 
         let found = select_repo(&repos, "/backups/unlabeled").unwrap();
@@ -770,10 +831,7 @@ repositories:
 
     #[test]
     fn test_select_repo_no_match() {
-        let repos = vec![ResolvedRepo {
-            label: Some("local".into()),
-            config: make_test_config("/backups/local"),
-        }];
+        let repos = vec![make_test_repo("/backups/local", Some("local"))];
 
         assert!(select_repo(&repos, "nonexistent").is_none());
     }
@@ -793,29 +851,133 @@ repositories:
         assert_eq!(config.repository.path, "/tmp/first");
     }
 
-    fn make_test_config(path: &str) -> VgerConfig {
-        VgerConfig {
-            repository: RepositoryConfig {
-                path: path.to_string(),
-                backend: "local".to_string(),
-                s3_bucket: None,
-                s3_region: None,
-                s3_endpoint: None,
-                sftp_host: None,
-                sftp_user: None,
-                sftp_port: None,
-                rest_token: None,
-                rest_token_command: None,
-                min_pack_size: default_min_pack_size(),
-                max_pack_size: default_max_pack_size(),
+    fn make_test_repo(path: &str, label: Option<&str>) -> ResolvedRepo {
+        ResolvedRepo {
+            label: label.map(|s| s.to_string()),
+            config: VgerConfig {
+                repository: RepositoryConfig {
+                    path: path.to_string(),
+                    backend: "local".to_string(),
+                    s3_bucket: None,
+                    s3_region: None,
+                    s3_endpoint: None,
+                    sftp_host: None,
+                    sftp_user: None,
+                    sftp_port: None,
+                    rest_token: None,
+                    rest_token_command: None,
+                    min_pack_size: default_min_pack_size(),
+                    max_pack_size: default_max_pack_size(),
+                },
+                encryption: EncryptionConfig::default(),
+                source_directories: vec![],
+                exclude_patterns: vec![],
+                chunker: ChunkerConfig::default(),
+                compression: CompressionConfig::default(),
+                snapshot_name_format: default_snapshot_format(),
+                retention: RetentionConfig::default(),
             },
-            encryption: EncryptionConfig::default(),
-            source_directories: vec![],
-            exclude_patterns: vec![],
-            chunker: ChunkerConfig::default(),
-            compression: CompressionConfig::default(),
-            snapshot_name_format: default_snapshot_format(),
-            retention: RetentionConfig::default(),
+            global_hooks: HooksConfig::default(),
+            repo_hooks: HooksConfig::default(),
         }
+    }
+
+    // --- Hooks config tests ---
+
+    #[test]
+    fn test_hooks_deserialize() {
+        let yaml = r#"
+repositories:
+  - path: /tmp/repo
+hooks:
+  before_backup:
+    - "pg_dump mydb > /tmp/db.sql"
+  finally_backup:
+    - "rm -f /tmp/db.sql"
+  after:
+    - "echo done"
+"#;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.yaml");
+        fs::write(&path, yaml).unwrap();
+
+        let repos = load_and_resolve(&path).unwrap();
+        assert_eq!(repos[0].global_hooks.get_hooks("before_backup").len(), 1);
+        assert_eq!(repos[0].global_hooks.get_hooks("finally_backup").len(), 1);
+        assert_eq!(repos[0].global_hooks.get_hooks("after").len(), 1);
+        assert!(repos[0].global_hooks.get_hooks("before").is_empty());
+    }
+
+    #[test]
+    fn test_hooks_default_empty() {
+        let yaml = r#"
+repositories:
+  - path: /tmp/repo
+"#;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.yaml");
+        fs::write(&path, yaml).unwrap();
+
+        let repos = load_and_resolve(&path).unwrap();
+        assert!(repos[0].global_hooks.is_empty());
+        assert!(repos[0].repo_hooks.is_empty());
+    }
+
+    #[test]
+    fn test_hooks_per_repo() {
+        let yaml = r#"
+repositories:
+  - path: /tmp/repo
+    label: main
+    hooks:
+      before:
+        - "mount /mnt/nas"
+      finally:
+        - "umount /mnt/nas"
+"#;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.yaml");
+        fs::write(&path, yaml).unwrap();
+
+        let repos = load_and_resolve(&path).unwrap();
+        assert!(repos[0].global_hooks.is_empty());
+        assert_eq!(repos[0].repo_hooks.get_hooks("before").len(), 1);
+        assert_eq!(repos[0].repo_hooks.get_hooks("finally").len(), 1);
+    }
+
+    #[test]
+    fn test_hooks_validation_rejects_bad_keys() {
+        let yaml = r#"
+repositories:
+  - path: /tmp/repo
+hooks:
+  before_invalid_command:
+    - "echo nope"
+"#;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.yaml");
+        fs::write(&path, yaml).unwrap();
+
+        let err = load_and_resolve(&path).unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("invalid hook key"), "unexpected error: {msg}");
+    }
+
+    #[test]
+    fn test_hooks_validation_rejects_bad_repo_keys() {
+        let yaml = r#"
+repositories:
+  - path: /tmp/repo
+    hooks:
+      on_start:
+        - "echo nope"
+"#;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.yaml");
+        fs::write(&path, yaml).unwrap();
+
+        let err = load_and_resolve(&path).unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("invalid hook key"), "unexpected error: {msg}");
     }
 }

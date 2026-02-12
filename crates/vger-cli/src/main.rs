@@ -6,6 +6,7 @@ use vger_core::compress::Compression;
 use vger_core::config::{
     self, ResolvedRepo, VgerConfig,
 };
+use vger_core::hooks::{self, HookContext};
 
 #[derive(Parser)]
 #[command(name = "vger", version, about = "Fast, encrypted, deduplicated backups",
@@ -130,6 +131,20 @@ enum Commands {
     },
 }
 
+fn command_name(cmd: &Commands) -> &'static str {
+    match cmd {
+        Commands::Init => "init",
+        Commands::Backup { .. } => "backup",
+        Commands::List { .. } => "list",
+        Commands::Extract { .. } => "extract",
+        Commands::Delete { .. } => "delete",
+        Commands::Prune { .. } => "prune",
+        Commands::Check { .. } => "check",
+        Commands::Compact { .. } => "compact",
+        Commands::Config { .. } => "config",
+    }
+}
+
 fn main() {
     let cli = Cli::parse();
 
@@ -212,31 +227,23 @@ fn main() {
         let label = repo.label.as_deref();
         let cfg = &repo.config;
 
-        let result = match cli.command {
-            Commands::Init => run_init(cfg, label),
-            Commands::Backup {
-                ref snapshot,
-                ref compression,
-                ref paths,
-            } => run_backup(cfg, label, snapshot.clone(), compression.clone(), paths.clone()),
-            Commands::List { ref snapshot } => run_list(cfg, label, snapshot.clone()),
-            Commands::Extract {
-                ref snapshot,
-                ref dest,
-                ref pattern,
-            } => run_extract(cfg, label, snapshot.clone(), dest.clone(), pattern.clone()),
-            Commands::Delete {
-                ref snapshot,
-                dry_run,
-            } => run_delete(cfg, label, snapshot.clone(), dry_run),
-            Commands::Prune { dry_run, list } => run_prune(cfg, label, dry_run, list),
-            Commands::Check { verify_data } => run_check(cfg, label, verify_data),
-            Commands::Compact {
-                threshold,
-                ref max_repack_size,
-                dry_run,
-            } => run_compact(cfg, label, threshold, max_repack_size.clone(), dry_run),
-            Commands::Config { .. } => unreachable!(),
+        let has_hooks = !repo.global_hooks.is_empty() || !repo.repo_hooks.is_empty();
+
+        let result = if has_hooks {
+            let mut ctx = HookContext {
+                command: command_name(&cli.command).to_string(),
+                repository: cfg.repository.path.clone(),
+                label: repo.label.clone(),
+                error: None,
+            };
+            hooks::run_with_hooks(
+                &repo.global_hooks,
+                &repo.repo_hooks,
+                &mut ctx,
+                || dispatch_command(&cli.command, cfg, label),
+            )
+        } else {
+            dispatch_command(&cli.command, cfg, label)
         };
 
         if let Err(e) = result {
@@ -273,6 +280,36 @@ fn run_config_generate(dest: &str) -> Result<(), Box<dyn std::error::Error>> {
     println!("Config written to: {dest}");
     println!("Edit it to set your repository path and source directories.");
     Ok(())
+}
+
+fn dispatch_command(
+    command: &Commands,
+    cfg: &VgerConfig,
+    label: Option<&str>,
+) -> Result<(), Box<dyn std::error::Error>> {
+    match command {
+        Commands::Init => run_init(cfg, label),
+        Commands::Backup {
+            snapshot,
+            compression,
+            paths,
+        } => run_backup(cfg, label, snapshot.clone(), compression.clone(), paths.clone()),
+        Commands::List { snapshot } => run_list(cfg, label, snapshot.clone()),
+        Commands::Extract {
+            snapshot,
+            dest,
+            pattern,
+        } => run_extract(cfg, label, snapshot.clone(), dest.clone(), pattern.clone()),
+        Commands::Delete { snapshot, dry_run } => run_delete(cfg, label, snapshot.clone(), *dry_run),
+        Commands::Prune { dry_run, list } => run_prune(cfg, label, *dry_run, *list),
+        Commands::Check { verify_data } => run_check(cfg, label, *verify_data),
+        Commands::Compact {
+            threshold,
+            max_repack_size,
+            dry_run,
+        } => run_compact(cfg, label, *threshold, max_repack_size.clone(), *dry_run),
+        Commands::Config { .. } => unreachable!(),
+    }
 }
 
 fn get_passphrase(config: &VgerConfig, label: Option<&str>) -> Result<Option<String>, Box<dyn std::error::Error>> {

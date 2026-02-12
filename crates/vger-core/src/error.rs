@@ -58,6 +58,9 @@ pub enum VgerError {
     #[error("decompression error: {0}")]
     Decompression(String),
 
+    #[error("hook error: {0}")]
+    Hook(String),
+
     #[error("{0}")]
     Other(String),
 }

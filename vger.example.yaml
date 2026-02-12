@@ -23,6 +23,15 @@ repositories:
     # sftp_user: backupuser
     # sftp_port: 22
 
+  # Per-repo hooks — run only for this repository
+  # - path: /mnt/nas/repo
+  #   label: nas
+  #   hooks:
+  #     before:
+  #       - "mount /mnt/nas"
+  #     finally:
+  #       - "umount /mnt/nas"
+
   # Additional repositories — uncomment to add a second destination:
   # - path: s3://bucket/remote
   #   label: remote
@@ -76,6 +85,26 @@ compression:
 
   # Zstd compression level, 1-22 (default: 3, only used when algorithm is "zstd")
   zstd_level: 3
+
+# Hooks — shell commands to run before/after vger commands.
+# Global hooks apply to all repositories. Per-repo hooks go in the repo entry.
+#
+# Hook types:
+#   before / before_<cmd>   — runs before the command (failure aborts)
+#   after / after_<cmd>     — runs after success only
+#   failed / failed_<cmd>   — runs after failure only
+#   finally / finally_<cmd> — runs always, regardless of outcome
+#
+# Variables: {repository}, {command}, {label}, {error}
+# Env vars:  VGER_REPOSITORY, VGER_COMMAND, VGER_LABEL, VGER_ERROR
+#
+# hooks:
+#   before_backup:
+#     - "pg_dump mydb > /tmp/db.sql"
+#   finally_backup:
+#     - "rm -f /tmp/db.sql"
+#   failed:
+#     - "notify-send 'vger {command} failed: {error}'"
 
 # Retention policy for `vger prune`
 # At least one keep_* option must be set for prune to run.
