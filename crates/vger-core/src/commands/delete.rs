@@ -4,10 +4,10 @@ use crate::repo::lock;
 use crate::repo::Repository;
 use crate::storage;
 
-use super::list::{load_archive_items, load_archive_meta};
+use super::list::{load_snapshot_items, load_snapshot_meta};
 
 pub struct DeleteStats {
-    pub archive_name: String,
+    pub snapshot_name: String,
     pub chunks_deleted: u64,
     pub space_freed: u64,
 }
@@ -15,23 +15,23 @@ pub struct DeleteStats {
 pub fn run(
     config: &VgerConfig,
     passphrase: Option<&str>,
-    archive_name: &str,
+    snapshot_name: &str,
     dry_run: bool,
 ) -> Result<DeleteStats> {
     let backend = storage::backend_from_config(&config.repository)?;
     let mut repo = Repository::open(backend, passphrase)?;
     let lock_guard = lock::acquire_lock(repo.storage.as_ref())?;
 
-    // Verify archive exists
+    // Verify snapshot exists
     let entry = repo
         .manifest
-        .find_archive(archive_name)
-        .ok_or_else(|| crate::error::VgerError::ArchiveNotFound(archive_name.into()))?;
-    let archive_id_hex = hex::encode(&entry.id);
+        .find_snapshot(snapshot_name)
+        .ok_or_else(|| crate::error::VgerError::SnapshotNotFound(snapshot_name.into()))?;
+    let snapshot_id_hex = hex::encode(&entry.id);
 
-    // Load archive metadata and items to find all chunk refs
-    let archive_meta = load_archive_meta(&repo, archive_name)?;
-    let items = load_archive_items(&repo, archive_name)?;
+    // Load snapshot metadata and items to find all chunk refs
+    let snapshot_meta = load_snapshot_meta(&repo, snapshot_name)?;
+    let items = load_snapshot_items(&repo, snapshot_name)?;
 
     if dry_run {
         // Count what would be freed
@@ -48,7 +48,7 @@ pub fn run(
                 }
             }
         }
-        for chunk_id in &archive_meta.item_ptrs {
+        for chunk_id in &snapshot_meta.item_ptrs {
             if let Some(entry) = repo.chunk_index.get(chunk_id) {
                 if entry.refcount == 1 {
                     chunks_deleted += 1;
@@ -59,7 +59,7 @@ pub fn run(
 
         lock::release_lock(repo.storage.as_ref(), lock_guard)?;
         return Ok(DeleteStats {
-            archive_name: archive_name.to_string(),
+            snapshot_name: snapshot_name.to_string(),
             chunks_deleted,
             space_freed,
         });
@@ -82,7 +82,7 @@ pub fn run(
     }
 
     // Decrement refcounts for item-stream chunks
-    for chunk_id in &archive_meta.item_ptrs {
+    for chunk_id in &snapshot_meta.item_ptrs {
         if let Some((rc, size)) = repo.chunk_index.decrement(chunk_id) {
             if rc == 0 {
                 chunks_deleted += 1;
@@ -91,19 +91,19 @@ pub fn run(
         }
     }
 
-    // Delete archive metadata object
+    // Delete snapshot metadata object
     repo.storage
-        .delete(&format!("archives/{archive_id_hex}"))?;
+        .delete(&format!("snapshots/{snapshot_id_hex}"))?;
 
     // Remove from manifest
-    repo.manifest.remove_archive(archive_name);
+    repo.manifest.remove_snapshot(snapshot_name);
 
     // Persist state
     repo.save_state()?;
     lock::release_lock(repo.storage.as_ref(), lock_guard)?;
 
     Ok(DeleteStats {
-        archive_name: archive_name.to_string(),
+        snapshot_name: snapshot_name.to_string(),
         chunks_deleted,
         space_freed,
     })

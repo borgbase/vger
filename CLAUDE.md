@@ -40,18 +40,18 @@ crates/
         mod.rs                          # Repository struct — init, open, store_chunk, read_chunk, save_state
         format.rs                       # RepoObj envelope — pack_object / unpack_object
         pack.rs                         # PackWriter, PackType, pack read/write helpers
-        manifest.rs                     # Manifest — archive list
+        manifest.rs                     # Manifest — snapshot list
         lock.rs                         # Advisory JSON lock files
-      archive/
-        mod.rs                          # ArchiveMeta, ArchiveStats
+      snapshot/
+        mod.rs                          # SnapshotMeta, SnapshotStats
         item.rs                         # Item, ItemType, ChunkRef
       commands/
         mod.rs
         init.rs                         # vger init
         backup.rs                       # vger backup (walk + chunk + dedup + compress + encrypt)
-        list.rs                         # vger list (archives or archive contents)
+        list.rs                         # vger list (snapshots or snapshot contents)
         extract.rs                      # vger extract (restore files)
-        delete.rs                       # vger delete (remove archive, decrement refcounts)
+        delete.rs                       # vger delete (remove snapshot, decrement refcounts)
         prune.rs                        # vger prune (retention policy)
         check.rs                        # vger check (integrity verification)
         compact.rs                      # vger compact (repack packs to reclaim space)
@@ -70,7 +70,7 @@ crates/
    - Compress (LZ4/ZSTD) → encrypt (AES-256-GCM) → buffer into `PackWriter`
    - When pack reaches target size → flush to `packs/<shard>/<pack_id>`
 3. Serialize all `Item` structs → chunk the item stream → store item-stream chunks (tree packs)
-4. Build `ArchiveMeta` with `item_ptrs` → encrypt → store at `archives/<id>`
+4. Build `SnapshotMeta` with `item_ptrs` → encrypt → store at `snapshots/<id>`
 5. Flush remaining packs → update manifest + chunk index → encrypt → store
 
 ### Repository on-disk layout
@@ -79,9 +79,9 @@ crates/
 <repo>/
   config              # unencrypted msgpack: RepoConfig (version, chunker params, pack size limits)
   keys/repokey        # Argon2id-wrapped master key
-  manifest            # encrypted: Manifest (archive list)
+  manifest            # encrypted: Manifest (snapshot list)
   index               # encrypted: ChunkIndex (chunk_id → pack_id, offset, size, refcount)
-  archives/<id>       # encrypted: ArchiveMeta per archive
+  snapshots/<id>      # encrypted: SnapshotMeta per snapshot
   packs/<xx>/<id>     # pack files containing compressed+encrypted chunks (256 shard dirs)
   locks/*.json        # advisory locks
 ```
@@ -102,7 +102,7 @@ The type tag byte is used as AAD (authenticated additional data) in AES-GCM.
 - `PackWriter` (repo/pack.rs) — buffers encrypted blobs and flushes them as pack files
 - `PackType` (repo/pack.rs) — `Data` (file content) or `Tree` (item-stream metadata)
 - `Repository` (repo/mod.rs) — central orchestrator, owns storage + crypto + manifest + index + pack writers
-- `Item` (archive/item.rs) — single filesystem entry (file/dir/symlink)
+- `Item` (snapshot/item.rs) — single filesystem entry (file/dir/symlink)
 - `Compression` enum (compress/mod.rs) — 1-byte tag prefix on compressed data
 
 ## Important conventions

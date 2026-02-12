@@ -60,8 +60,8 @@ exclude_patterns:
   - ".DS_Store"
   - "node_modules"
 
-# Archive name format (default: "{hostname}-{now:%Y-%m-%dT%H:%M:%S}")
-archive_name_format: "{hostname}-{now:%Y-%m-%dT%H:%M:%S}"
+# Snapshot name format (default: "{hostname}-{now:%Y-%m-%dT%H:%M:%S}")
+snapshot_name_format: "{hostname}-{now:%Y-%m-%dT%H:%M:%S}"
 
 # Content-defined chunking parameters (FastCDC)
 chunker:
@@ -79,17 +79,17 @@ compression:
 
 # Retention policy for `vger prune`
 # At least one keep_* option must be set for prune to run.
-# Archives matching multiple rules are kept (rules are additive).
+# Snapshots matching multiple rules are kept (rules are additive).
 retention:
-  # Keep all archives created within this duration
+  # Keep all snapshots created within this duration
   # Supported suffixes: h (hours), d (days), w (weeks), m (months ~30d), y (years ~365d)
   # A plain number is treated as days.
   keep_within: "2d"
 
-  # Keep the N most recent archives
+  # Keep the N most recent snapshots
   keep_last: 5
 
-  # Keep N archives per time bucket (newest in each bucket is kept)
+  # Keep N snapshots per time bucket (newest in each bucket is kept)
   keep_hourly: 24
   keep_daily: 7
   keep_weekly: 4

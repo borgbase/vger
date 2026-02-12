@@ -1,4 +1,4 @@
-use crate::archive::item::ItemType;
+use crate::snapshot::item::ItemType;
 use crate::compress;
 use crate::config::VgerConfig;
 use crate::crypto::chunk_id::ChunkId;
@@ -8,7 +8,7 @@ use crate::repo::pack::read_blob_from_pack;
 use crate::repo::Repository;
 use crate::storage;
 
-use super::list::{load_archive_items, load_archive_meta};
+use super::list::{load_snapshot_items, load_snapshot_meta};
 
 /// A single integrity issue found during check.
 #[derive(Debug)]
@@ -19,7 +19,7 @@ pub struct CheckError {
 
 /// Summary of a check run.
 pub struct CheckResult {
-    pub archives_checked: usize,
+    pub snapshots_checked: usize,
     pub items_checked: usize,
     pub chunks_existence_checked: usize,
     pub chunks_data_verified: usize,
@@ -32,25 +32,25 @@ pub fn run(config: &VgerConfig, passphrase: Option<&str>, verify_data: bool) -> 
     let repo = Repository::open(backend, passphrase)?;
 
     let mut errors: Vec<CheckError> = Vec::new();
-    let mut archives_checked: usize = 0;
+    let mut snapshots_checked: usize = 0;
     let mut items_checked: usize = 0;
 
-    // Step 1: Check each archive in manifest
-    let archive_count = repo.manifest.archives.len();
-    for (i, entry) in repo.manifest.archives.iter().enumerate() {
+    // Step 1: Check each snapshot in manifest
+    let snapshot_count = repo.manifest.snapshots.len();
+    for (i, entry) in repo.manifest.snapshots.iter().enumerate() {
         eprintln!(
-            "[{}/{}] Checking archive '{}'...",
+            "[{}/{}] Checking snapshot '{}'...",
             i + 1,
-            archive_count,
+            snapshot_count,
             entry.name
         );
 
-        // Load archive metadata
-        let meta = match load_archive_meta(&repo, &entry.name) {
+        // Load snapshot metadata
+        let meta = match load_snapshot_meta(&repo, &entry.name) {
             Ok(m) => m,
             Err(e) => {
                 errors.push(CheckError {
-                    context: format!("archive '{}'", entry.name),
+                    context: format!("snapshot '{}'", entry.name),
                     message: format!("failed to load metadata: {e}"),
                 });
                 continue;
@@ -61,18 +61,18 @@ pub fn run(config: &VgerConfig, passphrase: Option<&str>, verify_data: bool) -> 
         for chunk_id in &meta.item_ptrs {
             if !repo.chunk_index.contains(chunk_id) {
                 errors.push(CheckError {
-                    context: format!("archive '{}' item_ptrs", entry.name),
+                    context: format!("snapshot '{}' item_ptrs", entry.name),
                     message: format!("chunk {chunk_id} not in index"),
                 });
             }
         }
 
         // Load and check items
-        let items = match load_archive_items(&repo, &entry.name) {
+        let items = match load_snapshot_items(&repo, &entry.name) {
             Ok(items) => items,
             Err(e) => {
                 errors.push(CheckError {
-                    context: format!("archive '{}'", entry.name),
+                    context: format!("snapshot '{}'", entry.name),
                     message: format!("failed to load items: {e}"),
                 });
                 continue;
@@ -84,7 +84,7 @@ pub fn run(config: &VgerConfig, passphrase: Option<&str>, verify_data: bool) -> 
                 for chunk_ref in &item.chunks {
                     if !repo.chunk_index.contains(&chunk_ref.id) {
                         errors.push(CheckError {
-                            context: format!("archive '{}' file '{}'", entry.name, item.path),
+                            context: format!("snapshot '{}' file '{}'", entry.name, item.path),
                             message: format!("chunk {} not in index", chunk_ref.id),
                         });
                     }
@@ -93,7 +93,7 @@ pub fn run(config: &VgerConfig, passphrase: Option<&str>, verify_data: bool) -> 
         }
 
         items_checked += items.len();
-        archives_checked += 1;
+        snapshots_checked += 1;
     }
 
     // Step 2: Verify all chunks' pack files exist in storage
@@ -183,7 +183,7 @@ pub fn run(config: &VgerConfig, passphrase: Option<&str>, verify_data: bool) -> 
     }
 
     Ok(CheckResult {
-        archives_checked,
+        snapshots_checked,
         items_checked,
         chunks_existence_checked,
         chunks_data_verified,

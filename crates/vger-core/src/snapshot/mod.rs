@@ -6,9 +6,9 @@ use serde::{Deserialize, Serialize};
 use crate::config::ChunkerConfig;
 use crate::crypto::chunk_id::ChunkId;
 
-/// Metadata for a single archive, stored at `archives/<id>`.
+/// Metadata for a single snapshot, stored at `snapshots/<id>`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ArchiveMeta {
+pub struct SnapshotMeta {
     pub name: String,
     pub hostname: String,
     pub username: String,
@@ -20,11 +20,11 @@ pub struct ArchiveMeta {
     /// Chunk IDs that contain the serialized item stream.
     pub item_ptrs: Vec<ChunkId>,
     #[serde(default)]
-    pub stats: ArchiveStats,
+    pub stats: SnapshotStats,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
-pub struct ArchiveStats {
+pub struct SnapshotStats {
     pub nfiles: u64,
     pub original_size: u64,
     pub compressed_size: u64,

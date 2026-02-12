@@ -165,7 +165,7 @@ async fn repo_init(state: AppState, repo: &str) -> Result<Response, ServerError>
         // Create base dirs
         std::fs::create_dir_all(&repo_dir_clone)?;
         std::fs::create_dir_all(repo_dir_clone.join("keys"))?;
-        std::fs::create_dir_all(repo_dir_clone.join("archives"))?;
+        std::fs::create_dir_all(repo_dir_clone.join("snapshots"))?;
         std::fs::create_dir_all(repo_dir_clone.join("locks"))?;
         // Create 256 pack shard directories
         for i in 0..=255u8 {

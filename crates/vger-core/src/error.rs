@@ -19,11 +19,11 @@ pub enum VgerError {
     #[error("key derivation error: {0}")]
     KeyDerivation(String),
 
-    #[error("archive not found: '{0}'")]
-    ArchiveNotFound(String),
+    #[error("snapshot not found: '{0}'")]
+    SnapshotNotFound(String),
 
-    #[error("archive already exists: '{0}'")]
-    ArchiveAlreadyExists(String),
+    #[error("snapshot already exists: '{0}'")]
+    SnapshotAlreadyExists(String),
 
     #[error("invalid repository format: {0}")]
     InvalidFormat(String),

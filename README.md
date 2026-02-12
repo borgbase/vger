@@ -12,17 +12,17 @@ Inspired by [BorgBackup](https://www.borgbackup.org/), [Borgmatic](https://torsi
 |---------|-------------|
 | `vger config` | Generate a starter configuration file |
 | `vger init` | Initialize a new backup repository |
-| `vger backup` | Back up files to a new archive |
-| `vger list` | List archives, or files within an archive |
-| `vger extract` | Restore files from an archive |
-| `vger delete` | Delete a specific archive |
-| `vger prune` | Prune archives according to retention policy |
+| `vger backup` | Back up files to a new snapshot |
+| `vger list` | List snapshots, or files within a snapshot |
+| `vger extract` | Restore files from a snapshot |
+| `vger delete` | Delete a specific snapshot |
+| `vger prune` | Prune snapshots according to retention policy |
 | `vger check` | Verify repository integrity (`--verify-data` for full content verification) |
 | `vger compact` | Free space by repacking pack files after delete/prune |
 
 ### Core capabilities
 
-- **Deduplication** — Content-defined chunking (FastCDC) splits files into variable-size chunks. Identical chunks are stored only once, even across archives.
+- **Deduplication** — Content-defined chunking (FastCDC) splits files into variable-size chunks. Identical chunks are stored only once, even across snapshots.
 - **Compression** — LZ4 (fast, default) or Zstandard (better ratio).
 - **Encryption** — AES-256-GCM authenticated encryption with Argon2id key derivation. Plaintext mode also available.
 - **Storage backends** — Abstracted via [Apache OpenDAL](https://opendal.apache.org/). Supports local filesystem, S3-compatible storage, and a dedicated REST server out of the box.
@@ -86,21 +86,21 @@ You can also set `VGER_PASSPHRASE` to supply the passphrase non-interactively (u
 vger init
 
 # Create a backup
-vger backup --archive daily-2025-01-15
+vger backup --snapshot daily-2025-01-15
 
-# List all archives
+# List all snapshots
 vger list
 
-# List files inside an archive
-vger list --archive daily-2025-01-15
+# List files inside a snapshot
+vger list --snapshot daily-2025-01-15
 
 # Restore to a directory
-vger extract --archive daily-2025-01-15 --dest /tmp/restored
+vger extract --snapshot daily-2025-01-15 --dest /tmp/restored
 
-# Delete a specific archive
-vger delete --archive daily-2025-01-15
+# Delete a specific snapshot
+vger delete --snapshot daily-2025-01-15
 
-# Prune old archives per retention policy
+# Prune old snapshots per retention policy
 vger prune
 
 # Verify repository integrity (structural check)
@@ -109,7 +109,7 @@ vger check
 # Full data verification (reads and verifies every chunk)
 vger check --verify-data
 
-# Reclaim space from deleted/pruned archives (dry-run first)
+# Reclaim space from deleted/pruned snapshots (dry-run first)
 vger compact --dry-run
 vger compact
 ```
@@ -219,7 +219,7 @@ compression:
   algorithm: "lz4"               # "lz4", "zstd", or "none"
   zstd_level: 3                  # Only used with zstd
 
-archive_name_format: "{hostname}-{now:%Y-%m-%dT%H:%M:%S}"
+snapshot_name_format: "{hostname}-{now:%Y-%m-%dT%H:%M:%S}"
 ```
 
 ### Multiple repositories
@@ -276,9 +276,9 @@ vger -R /backups/local list
 <repo>/
 ├── config                    # Repository metadata (unencrypted)
 ├── keys/repokey              # Encrypted master key
-├── manifest                  # Encrypted archive list
+├── manifest                  # Encrypted snapshot list
 ├── index                     # Encrypted chunk index
-├── archives/<id>             # Encrypted archive metadata
+├── snapshots/<id>            # Encrypted snapshot metadata
 ├── packs/<xx>/<pack-id>      # Pack files containing compressed+encrypted chunks (256 shard dirs)
 └── locks/                    # Advisory lock files
 ```

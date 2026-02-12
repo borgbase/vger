@@ -4,7 +4,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::crypto::chunk_id::ChunkId;
 
-/// A single filesystem entry stored in an archive.
+/// A single filesystem entry stored in a snapshot.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Item {
     pub path: String,

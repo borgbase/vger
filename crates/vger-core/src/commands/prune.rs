@@ -7,7 +7,7 @@ use crate::repo::lock;
 use crate::repo::Repository;
 use crate::storage;
 
-use super::list::{load_archive_items, load_archive_meta};
+use super::list::{load_snapshot_items, load_snapshot_meta};
 
 pub struct PruneStats {
     pub kept: usize,
@@ -19,7 +19,7 @@ pub struct PruneStats {
 /// Formatted list entry for --list output.
 pub struct PruneListEntry {
     pub action: String,
-    pub archive_name: String,
+    pub snapshot_name: String,
     pub reasons: Vec<String>,
 }
 
@@ -40,7 +40,7 @@ pub fn run(
     let lock_guard = lock::acquire_lock(repo.storage.as_ref())?;
 
     let now = Utc::now();
-    let decisions = apply_policy(&repo.manifest.archives, &config.retention, now)?;
+    let decisions = apply_policy(&repo.manifest.snapshots, &config.retention, now)?;
 
     // Build list output
     let mut list_entries = Vec::new();
@@ -54,17 +54,17 @@ pub fn run(
                 if list || dry_run {
                     list_entries.push(PruneListEntry {
                         action: "keep".into(),
-                        archive_name: entry.archive_name.clone(),
+                        snapshot_name: entry.snapshot_name.clone(),
                         reasons: reasons.clone(),
                     });
                 }
             }
             PruneDecision::Prune => {
-                to_prune.push(entry.archive_name.clone());
+                to_prune.push(entry.snapshot_name.clone());
                 if list || dry_run {
                     list_entries.push(PruneListEntry {
                         action: "prune".into(),
-                        archive_name: entry.archive_name.clone(),
+                        snapshot_name: entry.snapshot_name.clone(),
                         reasons: Vec::new(),
                     });
                 }
@@ -85,21 +85,21 @@ pub fn run(
         ));
     }
 
-    // Delete pruned archives (process oldest first)
+    // Delete pruned snapshots (process oldest first)
     to_prune.reverse();
     let mut total_chunks_deleted = 0u64;
     let mut total_space_freed = 0u64;
 
-    for archive_name in &to_prune {
-        // Get archive ID before we modify manifest
-        let archive_id_hex = repo
+    for snapshot_name in &to_prune {
+        // Get snapshot ID before we modify manifest
+        let snapshot_id_hex = repo
             .manifest
-            .find_archive(archive_name)
+            .find_snapshot(snapshot_name)
             .map(|e| hex::encode(&e.id))
-            .ok_or_else(|| VgerError::ArchiveNotFound(archive_name.clone()))?;
+            .ok_or_else(|| VgerError::SnapshotNotFound(snapshot_name.clone()))?;
 
-        let archive_meta = load_archive_meta(&repo, archive_name)?;
-        let items = load_archive_items(&repo, archive_name)?;
+        let snapshot_meta = load_snapshot_meta(&repo, snapshot_name)?;
+        let items = load_snapshot_items(&repo, snapshot_name)?;
 
         // Decrement data chunk refcounts
         // Orphaned blobs remain in pack files until a future `compact` command.
@@ -115,7 +115,7 @@ pub fn run(
         }
 
         // Decrement item-stream chunk refcounts
-        for chunk_id in &archive_meta.item_ptrs {
+        for chunk_id in &snapshot_meta.item_ptrs {
             if let Some((rc, size)) = repo.chunk_index.decrement(chunk_id) {
                 if rc == 0 {
                     total_chunks_deleted += 1;
@@ -124,12 +124,12 @@ pub fn run(
             }
         }
 
-        // Delete archive metadata
+        // Delete snapshot metadata
         repo.storage
-            .delete(&format!("archives/{archive_id_hex}"))?;
+            .delete(&format!("snapshots/{snapshot_id_hex}"))?;
 
         // Remove from manifest
-        repo.manifest.remove_archive(archive_name);
+        repo.manifest.remove_snapshot(snapshot_name);
     }
 
     // Single atomic save after all deletions

@@ -6,15 +6,15 @@ use rand::RngCore;
 use tracing::info;
 use walkdir::WalkDir;
 
-use crate::archive::item::{ChunkRef, Item, ItemType};
-use crate::archive::{ArchiveMeta, ArchiveStats};
+use crate::snapshot::item::{ChunkRef, Item, ItemType};
+use crate::snapshot::{SnapshotMeta, SnapshotStats};
 use crate::chunker;
 use crate::compress::Compression;
 use crate::config::{VgerConfig, ChunkerConfig};
 use crate::crypto::chunk_id::ChunkId;
 use crate::error::{VgerError, Result};
 use crate::repo::format::{pack_object, ObjectType};
-use crate::repo::manifest::ArchiveEntry;
+use crate::repo::manifest::SnapshotEntry;
 use crate::repo::pack::PackType;
 use crate::repo::{lock, Repository};
 use crate::storage;
@@ -31,24 +31,24 @@ fn items_chunker_config() -> ChunkerConfig {
 /// Run `vger backup`.
 pub fn run(
     config: &VgerConfig,
-    archive_name: &str,
+    snapshot_name: &str,
     passphrase: Option<&str>,
     source_dirs: &[String],
     compression: Compression,
-) -> Result<ArchiveStats> {
+) -> Result<SnapshotStats> {
     let backend = storage::backend_from_config(&config.repository)?;
     let mut repo = Repository::open(backend, passphrase)?;
 
-    // Check archive name is unique
-    if repo.manifest.find_archive(archive_name).is_some() {
-        return Err(VgerError::ArchiveAlreadyExists(archive_name.into()));
+    // Check snapshot name is unique
+    if repo.manifest.find_snapshot(snapshot_name).is_some() {
+        return Err(VgerError::SnapshotAlreadyExists(snapshot_name.into()));
     }
 
     // Acquire lock
     let lock_guard = lock::acquire_lock(repo.storage.as_ref())?;
 
     let time_start = Utc::now();
-    let mut stats = ArchiveStats::default();
+    let mut stats = SnapshotStats::default();
     let mut all_items: Vec<Item> = Vec::new();
 
     // Build exclude patterns
@@ -184,14 +184,14 @@ pub fn run(
 
     let time_end = Utc::now();
 
-    // Build archive metadata
+    // Build snapshot metadata
     let hostname = hostname::get()
         .map(|h| h.to_string_lossy().to_string())
         .unwrap_or_else(|_| "unknown".into());
     let username = whoami::username();
 
-    let archive_meta = ArchiveMeta {
-        name: archive_name.to_string(),
+    let snapshot_meta = SnapshotMeta {
+        name: snapshot_name.to_string(),
         hostname,
         username,
         time: time_start,
@@ -202,21 +202,21 @@ pub fn run(
         stats: stats.clone(),
     };
 
-    // Generate archive ID and store
-    let mut archive_id = vec![0u8; 32];
-    rand::thread_rng().fill_bytes(&mut archive_id);
+    // Generate snapshot ID and store
+    let mut snapshot_id = vec![0u8; 32];
+    rand::thread_rng().fill_bytes(&mut snapshot_id);
 
-    let meta_bytes = rmp_serde::to_vec(&archive_meta)?;
-    let meta_packed = pack_object(ObjectType::ArchiveMeta, &meta_bytes, repo.crypto.as_ref())?;
-    let archive_id_hex = hex::encode(&archive_id);
+    let meta_bytes = rmp_serde::to_vec(&snapshot_meta)?;
+    let meta_packed = pack_object(ObjectType::SnapshotMeta, &meta_bytes, repo.crypto.as_ref())?;
+    let snapshot_id_hex = hex::encode(&snapshot_id);
     repo.storage
-        .put(&format!("archives/{archive_id_hex}"), &meta_packed)?;
+        .put(&format!("snapshots/{snapshot_id_hex}"), &meta_packed)?;
 
     // Update manifest
     repo.manifest.timestamp = Utc::now();
-    repo.manifest.archives.push(ArchiveEntry {
-        name: archive_name.to_string(),
-        id: archive_id,
+    repo.manifest.snapshots.push(SnapshotEntry {
+        name: snapshot_name.to_string(),
+        id: snapshot_id,
         time: time_start,
     });
 
@@ -227,8 +227,8 @@ pub fn run(
     lock::release_lock(repo.storage.as_ref(), lock_guard)?;
 
     info!(
-        "Archive '{}' created: {} files, {} original, {} compressed, {} deduplicated",
-        archive_name, stats.nfiles, stats.original_size, stats.compressed_size, stats.deduplicated_size
+        "Snapshot '{}' created: {} files, {} original, {} compressed, {} deduplicated",
+        snapshot_name, stats.nfiles, stats.original_size, stats.compressed_size, stats.deduplicated_size
     );
 
     Ok(stats)

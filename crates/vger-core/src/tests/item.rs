@@ -1,4 +1,4 @@
-use crate::archive::item::{ChunkRef, Item, ItemType};
+use crate::snapshot::item::{ChunkRef, Item, ItemType};
 use crate::crypto::chunk_id::ChunkId;
 
 fn make_file_item() -> Item {

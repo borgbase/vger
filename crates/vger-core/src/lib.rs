@@ -1,4 +1,4 @@
-pub mod archive;
+pub mod snapshot;
 pub mod chunker;
 pub mod commands;
 pub mod compress;

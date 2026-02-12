@@ -42,11 +42,11 @@ enum Commands {
     /// Initialize a new repository
     Init,
 
-    /// Back up files to a new archive
+    /// Back up files to a new snapshot
     Backup {
-        /// Archive name
+        /// Snapshot name
         #[arg(long)]
-        archive: Option<String>,
+        snapshot: Option<String>,
 
         /// Compression algorithm override (lz4, zstd, none)
         #[arg(long)]
@@ -56,18 +56,18 @@ enum Commands {
         paths: Vec<String>,
     },
 
-    /// List archives or archive contents
+    /// List snapshots or snapshot contents
     List {
-        /// Show contents of a specific archive
+        /// Show contents of a specific snapshot
         #[arg(long)]
-        archive: Option<String>,
+        snapshot: Option<String>,
     },
 
-    /// Extract files from an archive
+    /// Extract files from a snapshot
     Extract {
-        /// Archive to extract from
+        /// Snapshot to extract from
         #[arg(long)]
-        archive: String,
+        snapshot: String,
 
         /// Destination directory
         #[arg(long, default_value = ".")]
@@ -78,24 +78,24 @@ enum Commands {
         pattern: Option<String>,
     },
 
-    /// Delete a specific archive
+    /// Delete a specific snapshot
     Delete {
-        /// Archive name to delete
+        /// Snapshot name to delete
         #[arg(long)]
-        archive: String,
+        snapshot: String,
 
         /// Only show what would be deleted, don't actually delete
         #[arg(short = 'n', long)]
         dry_run: bool,
     },
 
-    /// Prune archives according to retention policy
+    /// Prune snapshots according to retention policy
     Prune {
         /// Only show what would be pruned, don't actually prune
         #[arg(short = 'n', long)]
         dry_run: bool,
 
-        /// Show detailed list of kept/pruned archives with reasons
+        /// Show detailed list of kept/pruned snapshots with reasons
         #[arg(long)]
         list: bool,
     },
@@ -215,20 +215,20 @@ fn main() {
         let result = match cli.command {
             Commands::Init => run_init(cfg, label),
             Commands::Backup {
-                ref archive,
+                ref snapshot,
                 ref compression,
                 ref paths,
-            } => run_backup(cfg, label, archive.clone(), compression.clone(), paths.clone()),
-            Commands::List { ref archive } => run_list(cfg, label, archive.clone()),
+            } => run_backup(cfg, label, snapshot.clone(), compression.clone(), paths.clone()),
+            Commands::List { ref snapshot } => run_list(cfg, label, snapshot.clone()),
             Commands::Extract {
-                ref archive,
+                ref snapshot,
                 ref dest,
                 ref pattern,
-            } => run_extract(cfg, label, archive.clone(), dest.clone(), pattern.clone()),
+            } => run_extract(cfg, label, snapshot.clone(), dest.clone(), pattern.clone()),
             Commands::Delete {
-                ref archive,
+                ref snapshot,
                 dry_run,
-            } => run_delete(cfg, label, archive.clone(), dry_run),
+            } => run_delete(cfg, label, snapshot.clone(), dry_run),
             Commands::Prune { dry_run, list } => run_prune(cfg, label, dry_run, list),
             Commands::Check { verify_data } => run_check(cfg, label, verify_data),
             Commands::Compact {
@@ -352,14 +352,14 @@ fn run_init(config: &VgerConfig, label: Option<&str>) -> Result<(), Box<dyn std:
 fn run_backup(
     config: &VgerConfig,
     label: Option<&str>,
-    archive_name: Option<String>,
+    snapshot_name: Option<String>,
     compression_override: Option<String>,
     paths: Vec<String>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let passphrase = get_passphrase(config, label)?;
 
-    // Determine archive name
-    let name = archive_name.unwrap_or_else(|| {
+    // Determine snapshot name
+    let name = snapshot_name.unwrap_or_else(|| {
         let hostname = hostname::get()
             .map(|h: std::ffi::OsString| h.to_string_lossy().to_string())
             .unwrap_or_else(|_| "unknown".into());
@@ -376,7 +376,7 @@ fn run_backup(
 
     let stats = commands::backup::run(config, &name, passphrase.as_deref(), &paths, compression)?;
 
-    println!("Archive created: {name}");
+    println!("Snapshot created: {name}");
     println!(
         "  Files: {}, Original: {}, Compressed: {}, Deduplicated: {}",
         stats.nfiles,
@@ -391,16 +391,16 @@ fn run_backup(
 fn run_list(
     config: &VgerConfig,
     label: Option<&str>,
-    archive_name: Option<String>,
+    snapshot_name: Option<String>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let passphrase = get_passphrase(config, label)?;
 
-    let result = commands::list::run(config, passphrase.as_deref(), archive_name.as_deref())?;
+    let result = commands::list::run(config, passphrase.as_deref(), snapshot_name.as_deref())?;
 
     match result {
-        commands::list::ListResult::Archives(archives) => {
-            if archives.is_empty() {
-                println!("No archives found.");
+        commands::list::ListResult::Snapshots(snapshots) => {
+            if snapshots.is_empty() {
+                println!("No snapshots found.");
                 return Ok(());
             }
 
@@ -408,7 +408,7 @@ fn run_list(
             table.load_preset(UTF8_FULL_CONDENSED);
             table.set_header(vec!["Name", "Date", "ID"]);
 
-            for entry in &archives {
+            for entry in &snapshots {
                 table.add_row(vec![
                     entry.name.clone(),
                     entry.time.format("%Y-%m-%d %H:%M:%S").to_string(),
@@ -420,9 +420,9 @@ fn run_list(
         commands::list::ListResult::Items(items) => {
             for item in &items {
                 let type_char = match item.entry_type {
-                    vger_core::archive::item::ItemType::Directory => "d",
-                    vger_core::archive::item::ItemType::RegularFile => "-",
-                    vger_core::archive::item::ItemType::Symlink => "l",
+                    vger_core::snapshot::item::ItemType::Directory => "d",
+                    vger_core::snapshot::item::ItemType::RegularFile => "-",
+                    vger_core::snapshot::item::ItemType::Symlink => "l",
                 };
                 println!(
                     "{}{:o} {:>8} {}",
@@ -438,7 +438,7 @@ fn run_list(
 fn run_extract(
     config: &VgerConfig,
     label: Option<&str>,
-    archive_name: String,
+    snapshot_name: String,
     dest: String,
     pattern: Option<String>,
 ) -> Result<(), Box<dyn std::error::Error>> {
@@ -447,7 +447,7 @@ fn run_extract(
     let stats = commands::extract::run(
         config,
         passphrase.as_deref(),
-        &archive_name,
+        &snapshot_name,
         &dest,
         pattern.as_deref(),
     )?;
@@ -466,22 +466,22 @@ fn run_extract(
 fn run_delete(
     config: &VgerConfig,
     label: Option<&str>,
-    archive_name: String,
+    snapshot_name: String,
     dry_run: bool,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let passphrase = get_passphrase(config, label)?;
 
-    let stats = commands::delete::run(config, passphrase.as_deref(), &archive_name, dry_run)?;
+    let stats = commands::delete::run(config, passphrase.as_deref(), &snapshot_name, dry_run)?;
 
     if dry_run {
-        println!("Dry run: would delete archive '{}'", stats.archive_name);
+        println!("Dry run: would delete snapshot '{}'", stats.snapshot_name);
         println!(
             "  Would free: {} chunks, {}",
             stats.chunks_deleted,
             format_bytes(stats.space_freed),
         );
     } else {
-        println!("Deleted archive '{}'", stats.archive_name);
+        println!("Deleted snapshot '{}'", stats.snapshot_name);
         println!(
             "  Freed: {} chunks, {}",
             stats.chunks_deleted,
@@ -506,12 +506,12 @@ fn run_prune(
     if list || dry_run {
         for entry in &list_entries {
             if entry.reasons.is_empty() {
-                println!("{:<6} {}", entry.action, entry.archive_name);
+                println!("{:<6} {}", entry.action, entry.snapshot_name);
             } else {
                 println!(
                     "{:<6} {}  [{}]",
                     entry.action,
-                    entry.archive_name,
+                    entry.snapshot_name,
                     entry.reasons.join(", "),
                 );
             }
@@ -521,12 +521,12 @@ fn run_prune(
 
     if dry_run {
         println!(
-            "Dry run: would keep {} and prune {} archives",
+            "Dry run: would keep {} and prune {} snapshots",
             stats.kept, stats.pruned,
         );
     } else {
         println!(
-            "Pruned {} archives (kept {}), freed {} chunks ({})",
+            "Pruned {} snapshots (kept {}), freed {} chunks ({})",
             stats.pruned,
             stats.kept,
             stats.chunks_deleted,
@@ -555,8 +555,8 @@ fn run_check(
     }
 
     println!(
-        "Check complete: {} archives, {} items, {} chunks existence-checked, {} chunks data-verified, {} errors",
-        result.archives_checked,
+        "Check complete: {} snapshots, {} items, {} chunks existence-checked, {} chunks data-verified, {} errors",
+        result.snapshots_checked,
         result.items_checked,
         result.chunks_existence_checked,
         result.chunks_data_verified,

@@ -67,7 +67,7 @@ fn unknown_type_tag_fails() {
 fn object_type_from_u8_valid() {
     assert_eq!(ObjectType::from_u8(0).unwrap(), ObjectType::Config);
     assert_eq!(ObjectType::from_u8(1).unwrap(), ObjectType::Manifest);
-    assert_eq!(ObjectType::from_u8(2).unwrap(), ObjectType::ArchiveMeta);
+    assert_eq!(ObjectType::from_u8(2).unwrap(), ObjectType::SnapshotMeta);
     assert_eq!(ObjectType::from_u8(3).unwrap(), ObjectType::ChunkData);
     assert_eq!(ObjectType::from_u8(4).unwrap(), ObjectType::ChunkIndex);
     assert_eq!(ObjectType::from_u8(5).unwrap(), ObjectType::PackHeader);

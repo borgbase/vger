@@ -16,17 +16,17 @@ pub struct VgerConfig {
     pub chunker: ChunkerConfig,
     #[serde(default)]
     pub compression: CompressionConfig,
-    #[serde(default = "default_archive_format")]
-    pub archive_name_format: String,
+    #[serde(default = "default_snapshot_format")]
+    pub snapshot_name_format: String,
     #[serde(default)]
     pub retention: RetentionConfig,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct RetentionConfig {
-    /// Keep all archives within this time interval (e.g. "2d", "48h", "1w")
+    /// Keep all snapshots within this time interval (e.g. "2d", "48h", "1w")
     pub keep_within: Option<String>,
-    /// Keep the N most recent archives
+    /// Keep the N most recent snapshots
     pub keep_last: Option<usize>,
     pub keep_hourly: Option<usize>,
     pub keep_daily: Option<usize>,
@@ -160,7 +160,7 @@ fn default_max_pack_size() -> u32 {
     512 * 1024 * 1024 // 512 MiB
 }
 
-fn default_archive_format() -> String {
+fn default_snapshot_format() -> String {
     "{hostname}-{now:%Y-%m-%dT%H:%M:%S}".to_string()
 }
 
@@ -226,8 +226,8 @@ struct RawConfig {
     chunker: ChunkerConfig,
     #[serde(default)]
     compression: CompressionConfig,
-    #[serde(default = "default_archive_format")]
-    archive_name_format: String,
+    #[serde(default = "default_snapshot_format")]
+    snapshot_name_format: String,
     #[serde(default)]
     retention: RetentionConfig,
 }
@@ -288,7 +288,7 @@ fn resolve_raw_config(raw: RawConfig) -> crate::error::Result<Vec<ResolvedRepo>>
                     compression: entry
                         .compression
                         .unwrap_or_else(|| raw.compression.clone()),
-                    archive_name_format: raw.archive_name_format.clone(),
+                    snapshot_name_format: raw.snapshot_name_format.clone(),
                     retention: entry
                         .retention
                         .unwrap_or_else(|| raw.retention.clone()),
@@ -814,7 +814,7 @@ repositories:
             exclude_patterns: vec![],
             chunker: ChunkerConfig::default(),
             compression: CompressionConfig::default(),
-            archive_name_format: default_archive_format(),
+            snapshot_name_format: default_snapshot_format(),
             retention: RetentionConfig::default(),
         }
     }

@@ -7,7 +7,7 @@ use crate::error::{VgerError, Result};
 pub enum ObjectType {
     Config = 0,
     Manifest = 1,
-    ArchiveMeta = 2,
+    SnapshotMeta = 2,
     ChunkData = 3,
     ChunkIndex = 4,
     PackHeader = 5,
@@ -18,7 +18,7 @@ impl ObjectType {
         match v {
             0 => Ok(Self::Config),
             1 => Ok(Self::Manifest),
-            2 => Ok(Self::ArchiveMeta),
+            2 => Ok(Self::SnapshotMeta),
             3 => Ok(Self::ChunkData),
             4 => Ok(Self::ChunkIndex),
             5 => Ok(Self::PackHeader),

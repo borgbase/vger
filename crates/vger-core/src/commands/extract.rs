@@ -3,7 +3,7 @@ use std::path::Path;
 
 use tracing::info;
 
-use crate::archive::item::ItemType;
+use crate::snapshot::item::ItemType;
 use crate::config::VgerConfig;
 use crate::error::{VgerError, Result};
 use crate::repo::Repository;
@@ -13,14 +13,14 @@ use crate::storage;
 pub fn run(
     config: &VgerConfig,
     passphrase: Option<&str>,
-    archive_name: &str,
+    snapshot_name: &str,
     dest: &str,
     pattern: Option<&str>,
 ) -> Result<ExtractStats> {
     let backend = storage::backend_from_config(&config.repository)?;
     let repo = Repository::open(backend, passphrase)?;
 
-    let items = super::list::load_archive_items(&repo, archive_name)?;
+    let items = super::list::load_snapshot_items(&repo, snapshot_name)?;
 
     // Build optional filter pattern
     let filter = pattern.map(|p| {

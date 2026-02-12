@@ -1,6 +1,6 @@
 use vger_core::compress::Compression;
 use vger_core::config::ChunkerConfig;
-use vger_core::repo::manifest::ArchiveEntry;
+use vger_core::repo::manifest::SnapshotEntry;
 use vger_core::repo::pack::PackType;
 use vger_core::repo::{EncryptionMode, Repository};
 use vger_core::storage::opendal_backend::OpendalBackend;
@@ -46,11 +46,11 @@ fn manifest_survives_reopen() {
     let tmp = tempfile::tempdir().unwrap();
     let dir = tmp.path();
 
-    // Init and add an archive entry to manifest
+    // Init and add a snapshot entry to manifest
     {
         let mut repo = init_local_repo(dir);
-        repo.manifest.archives.push(ArchiveEntry {
-            name: "test-archive".to_string(),
+        repo.manifest.snapshots.push(SnapshotEntry {
+            name: "test-snapshot".to_string(),
             id: vec![0x42; 32],
             time: Utc::now(),
         });
@@ -59,6 +59,6 @@ fn manifest_survives_reopen() {
 
     // Reopen and check manifest
     let repo = open_local_repo(dir);
-    assert_eq!(repo.manifest.archives.len(), 1);
-    assert_eq!(repo.manifest.archives[0].name, "test-archive");
+    assert_eq!(repo.manifest.snapshots.len(), 1);
+    assert_eq!(repo.manifest.snapshots[0].name, "test-snapshot");
 }

@@ -4,7 +4,7 @@ use chrono::{DateTime, Datelike, IsoWeek, Timelike, Utc};
 
 use crate::config::RetentionConfig;
 use crate::error::{VgerError, Result};
-use crate::repo::manifest::ArchiveEntry;
+use crate::repo::manifest::SnapshotEntry;
 
 #[derive(Debug, Clone)]
 pub enum PruneDecision {
@@ -14,8 +14,8 @@ pub enum PruneDecision {
 
 #[derive(Debug, Clone)]
 pub struct PruneEntry {
-    pub archive_name: String,
-    pub archive_time: DateTime<Utc>,
+    pub snapshot_name: String,
+    pub snapshot_time: DateTime<Utc>,
     pub decision: PruneDecision,
 }
 
@@ -82,7 +82,7 @@ fn yearly_key(t: &DateTime<Utc>) -> YearlyKey {
 }
 
 /// Apply a bucket-based retention rule. For each new bucket encountered (up to `max_buckets`),
-/// keep the newest archive in that bucket. Already-kept archives still register their bucket
+/// keep the newest snapshot in that bucket. Already-kept snapshots still register their bucket
 /// but don't consume a keeper slot.
 fn apply_bucket_rule<K: Eq + std::hash::Hash>(
     indices: &[usize],
@@ -125,22 +125,22 @@ fn apply_bucket_rule<K: Eq + std::hash::Hash>(
     }
 }
 
-/// Apply the retention policy to a list of archive entries.
-/// Returns a PruneEntry for each archive, sorted newest-first.
+/// Apply the retention policy to a list of snapshot entries.
+/// Returns a PruneEntry for each snapshot, sorted newest-first.
 pub fn apply_policy(
-    archives: &[ArchiveEntry],
+    snapshots: &[SnapshotEntry],
     policy: &RetentionConfig,
     now: DateTime<Utc>,
 ) -> Result<Vec<PruneEntry>> {
-    if archives.is_empty() {
+    if snapshots.is_empty() {
         return Ok(Vec::new());
     }
 
     // Build sorted indices (newest first)
-    let mut indices: Vec<usize> = (0..archives.len()).collect();
-    indices.sort_by(|&a, &b| archives[b].time.cmp(&archives[a].time));
+    let mut indices: Vec<usize> = (0..snapshots.len()).collect();
+    indices.sort_by(|&a, &b| snapshots[b].time.cmp(&snapshots[a].time));
 
-    let times: Vec<DateTime<Utc>> = archives.iter().map(|a| a.time).collect();
+    let times: Vec<DateTime<Utc>> = snapshots.iter().map(|a| a.time).collect();
 
     let mut kept: HashSet<usize> = HashSet::new();
     let mut reasons: HashMap<usize, Vec<String>> = HashMap::new();
@@ -192,11 +192,11 @@ pub fn apply_policy(
         );
     }
 
-    // Safety check: refuse if all archives would be pruned
-    let prune_count = archives.len() - kept.len();
-    if prune_count == archives.len() {
+    // Safety check: refuse if all snapshots would be pruned
+    let prune_count = snapshots.len() - kept.len();
+    if prune_count == snapshots.len() {
         return Err(VgerError::Other(
-            "refusing to prune: policy would remove ALL archives".into(),
+            "refusing to prune: policy would remove ALL snapshots".into(),
         ));
     }
 
@@ -210,8 +210,8 @@ pub fn apply_policy(
                 PruneDecision::Prune
             };
             PruneEntry {
-                archive_name: archives[idx].name.clone(),
-                archive_time: archives[idx].time,
+                snapshot_name: snapshots[idx].name.clone(),
+                snapshot_time: snapshots[idx].time,
                 decision,
             }
         })

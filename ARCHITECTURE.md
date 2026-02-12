@@ -348,9 +348,9 @@ repositories:
 
 **rustic:** Every ID type (`PackId`, `BlobId`, `SnapshotId`, `IndexId`) is a newtype around 32-byte hash. Compile-time prevention of ID confusion.
 
-**vger:** `ChunkId` and `PackId` are newtypes. Other IDs (archive, manifest) are still raw bytes/strings.
+**vger:** `ChunkId` and `PackId` are newtypes. Other IDs (snapshot, manifest) are still raw bytes/strings.
 
-**Recommendation:** Add newtypes for `ArchiveId`, `ManifestId`, etc. Zero-cost abstractions that prevent subtle bugs.
+**Recommendation:** Add newtypes for `SnapshotId`, `ManifestId`, etc. Zero-cost abstractions that prevent subtle bugs.
 
 ### Parallelism & Performance
 
@@ -378,8 +378,8 @@ repositories:
 |---------|-------------|
 | **Pack files** | Chunks grouped into ~32 MiB packs with dynamic sizing, separate data/tree packs |
 | **Retention policies** | `keep_daily`, `keep_weekly`, `keep_monthly`, `keep_yearly`, `keep_last`, `keep_within` |
-| **delete command** | Remove individual archives, decrement refcounts |
-| **prune command** | Apply retention policies, remove expired archives |
+| **delete command** | Remove individual snapshots, decrement refcounts |
+| **prune command** | Apply retention policies, remove expired snapshots |
 | **check command** | Structural integrity + optional `--verify-data` for full content verification |
 | **Type-safe PackId** | Newtype for pack file identifiers with `storage_key()` |
 | **compact command** | Rewrite packs to reclaim space from orphaned blobs after delete/prune |
@@ -392,7 +392,7 @@ repositories:
 |---------|-------------|----------|
 | **Parallel pipeline** | `rayon` for compress/encrypt | High |
 | **File-level cache** | inode/mtime skip for unchanged files (incremental speedup) | High |
-| **Type-safe IDs** | Newtypes for `ArchiveId`, `ManifestId` | Medium |
+| **Type-safe IDs** | Newtypes for `SnapshotId`, `ManifestId` | Medium |
 | **Hot/cold tiering** | Separate backends by access frequency | Medium |
 | **Hooks** | Before/after/failed/finally per command | Medium |
 | **Snapshot filtering** | By host, tag, path, date ranges | Medium |

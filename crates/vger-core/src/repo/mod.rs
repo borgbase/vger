@@ -143,7 +143,7 @@ impl Repository {
         storage.put("index", &index_packed)?;
 
         // Create directory structure
-        storage.create_dir("archives/")?;
+        storage.create_dir("snapshots/")?;
         storage.create_dir("locks/")?;
         for i in 0u8..=255 {
             storage.create_dir(&format!("packs/{:02x}/", i))?;
