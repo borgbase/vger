@@ -33,7 +33,7 @@ pub fn run(
     sources: &[SourceEntry],
     source_filter: &[String],
 ) -> Result<(PruneStats, Vec<PruneListEntry>)> {
-    let backend = storage::backend_from_config(&config.repository)?;
+    let backend = storage::backend_from_config(&config.repository, None)?;
     let mut repo = Repository::open(backend, passphrase)?;
     with_repo_lock(&mut repo, |repo| {
         let now = Utc::now();

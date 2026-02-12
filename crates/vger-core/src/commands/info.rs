@@ -24,7 +24,7 @@ pub struct InfoStats {
 
 /// Run `vger info`.
 pub fn run(config: &VgerConfig, passphrase: Option<&str>) -> Result<InfoStats> {
-    let backend = storage::backend_from_config(&config.repository)?;
+    let backend = storage::backend_from_config(&config.repository, None)?;
     let repo = crate::repo::Repository::open(backend, passphrase)?;
 
     let mut raw_size = 0u64;

@@ -23,7 +23,7 @@ pub fn run(
     passphrase: Option<&str>,
     snapshot_name: Option<&str>,
 ) -> Result<ListResult> {
-    let backend = storage::backend_from_config(&config.repository)?;
+    let backend = storage::backend_from_config(&config.repository, None)?;
     let repo = Repository::open(backend, passphrase)?;
 
     match snapshot_name {

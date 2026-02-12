@@ -238,7 +238,8 @@ pub fn run_with_progress(
     let read_limiter = ByteRateLimiter::from_mib_per_sec(config.limits.io.read_mib_per_sec);
     let transform_pool = build_transform_pool(config.limits.cpu.max_threads)?;
 
-    let backend = storage::backend_from_config(&config.repository)?;
+    let throttle_bps = limits::network_write_throttle_bps(&config.limits);
+    let backend = storage::backend_from_config(&config.repository, throttle_bps)?;
     let backend =
         limits::wrap_backup_storage_backend(backend, &config.repository.url, &config.limits)?;
     let mut repo = Repository::open(backend, passphrase)?;

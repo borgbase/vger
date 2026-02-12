@@ -19,7 +19,7 @@ pub fn run(
     pattern: Option<&str>,
     xattrs_enabled: bool,
 ) -> Result<ExtractStats> {
-    let backend = storage::backend_from_config(&config.repository)?;
+    let backend = storage::backend_from_config(&config.repository, None)?;
     let repo = Repository::open(backend, passphrase)?;
 
     let items = super::list::load_snapshot_items(&repo, snapshot_name)?;

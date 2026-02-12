@@ -18,7 +18,7 @@ pub fn run(
     snapshot_name: &str,
     dry_run: bool,
 ) -> Result<DeleteStats> {
-    let backend = storage::backend_from_config(&config.repository)?;
+    let backend = storage::backend_from_config(&config.repository, None)?;
     let mut repo = Repository::open(backend, passphrase)?;
 
     with_repo_lock(&mut repo, |repo| {

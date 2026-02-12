@@ -40,7 +40,7 @@ pub fn run(
     max_repack_size: Option<u64>,
     dry_run: bool,
 ) -> Result<CompactStats> {
-    let backend = storage::backend_from_config(&config.repository)?;
+    let backend = storage::backend_from_config(&config.repository, None)?;
     let mut repo = Repository::open(backend, passphrase)?;
     with_repo_lock(&mut repo, |repo| {
         compact_repo(repo, threshold, max_repack_size, dry_run)

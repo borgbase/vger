@@ -32,7 +32,7 @@ pub fn run(
     passphrase: Option<&str>,
     verify_data: bool,
 ) -> Result<CheckResult> {
-    let backend = storage::backend_from_config(&config.repository)?;
+    let backend = storage::backend_from_config(&config.repository, None)?;
     let repo = Repository::open(backend, passphrase)?;
 
     let mut errors: Vec<CheckError> = Vec::new();

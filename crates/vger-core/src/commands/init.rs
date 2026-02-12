@@ -5,7 +5,7 @@ use crate::storage;
 
 /// Run `vger init`.
 pub fn run(config: &VgerConfig, passphrase: Option<&str>) -> Result<Repository> {
-    let backend = storage::backend_from_config(&config.repository)?;
+    let backend = storage::backend_from_config(&config.repository, None)?;
 
     let encryption = match config.encryption.mode {
         EncryptionModeConfig::None => EncryptionMode::None,

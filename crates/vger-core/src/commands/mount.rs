@@ -674,7 +674,7 @@ pub fn run(
     cache_size: usize,
     source_filter: &[String],
 ) -> Result<()> {
-    let backend = storage::backend_from_config(&config.repository)?;
+    let backend = storage::backend_from_config(&config.repository, None)?;
     let repo = Repository::open(backend, passphrase)?;
 
     // Build the VFS tree from snapshot items

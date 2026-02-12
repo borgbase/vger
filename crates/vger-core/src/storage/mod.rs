@@ -5,12 +5,21 @@ pub mod rest_backend;
 use std::sync::Arc;
 use std::time::Duration;
 
-use opendal::layers::RetryLayer;
+use opendal::layers::{ConcurrentLimitLayer, RetryLayer, ThrottleLayer};
 use opendal::Operator;
 use url::Url;
 
 use crate::config::{RepositoryConfig, RetryConfig};
 use crate::error::{Result, VgerError};
+
+/// Default concurrent request limit for S3 backends.
+/// Allows for multiple in-flight pack uploads (each with multipart concurrency)
+/// plus reads and metadata operations.
+const DEFAULT_S3_CONCURRENT_REQUESTS: usize = 64;
+
+/// Burst size for ThrottleLayer (256 MiB).
+/// Must be larger than any single write operation (multipart chunks are 32 MiB).
+const THROTTLE_BURST_BYTES: u32 = 256 * 1024 * 1024;
 
 /// Abstract key-value storage for repository objects.
 /// Keys are `/`-separated string paths (e.g. "packs/ab/ab01cd02...").
@@ -222,8 +231,23 @@ fn apply_retry(op: Operator, retry: &RetryConfig) -> Operator {
     )
 }
 
+/// Apply OpenDAL's `ThrottleLayer` to an operator if a bandwidth limit is set.
+fn apply_throttle(op: Operator, throttle_bytes_per_sec: Option<u32>) -> Operator {
+    match throttle_bytes_per_sec {
+        Some(bps) if bps > 0 => op.layer(ThrottleLayer::new(bps, THROTTLE_BURST_BYTES)),
+        _ => op,
+    }
+}
+
 /// Build a storage backend from the repository configuration.
-pub fn backend_from_config(cfg: &RepositoryConfig) -> Result<Box<dyn StorageBackend>> {
+///
+/// `throttle_bytes_per_sec` applies OpenDAL's `ThrottleLayer` for S3/SFTP
+/// backends. For local and REST backends this parameter is ignored (use
+/// `limits::wrap_backup_storage_backend` to throttle those).
+pub fn backend_from_config(
+    cfg: &RepositoryConfig,
+    throttle_bytes_per_sec: Option<u32>,
+) -> Result<Box<dyn StorageBackend>> {
     let parsed = parse_repo_url(&cfg.url)?;
 
     match parsed {
@@ -248,7 +272,10 @@ pub fn backend_from_config(cfg: &RepositoryConfig) -> Result<Box<dyn StorageBack
                 cfg.access_key_id.as_deref(),
                 cfg.secret_access_key.as_deref(),
             )?;
+            // Layer order (inner → outer): S3 → ConcurrentLimit → Retry → Throttle → Blocking
+            let op = op.layer(ConcurrentLimitLayer::new(DEFAULT_S3_CONCURRENT_REQUESTS));
             let op = apply_retry(op, &cfg.retry);
+            let op = apply_throttle(op, throttle_bytes_per_sec);
             Ok(Box::new(
                 opendal_backend::OpendalBackend::from_async_operator_tuned(
                     op,
@@ -272,6 +299,7 @@ pub fn backend_from_config(cfg: &RepositoryConfig) -> Result<Box<dyn StorageBack
                 cfg.sftp_key.as_deref(),
             )?;
             let op = apply_retry(op, &cfg.retry);
+            let op = apply_throttle(op, throttle_bytes_per_sec);
             Ok(Box::new(
                 opendal_backend::OpendalBackend::from_async_operator(op)?,
             ))
