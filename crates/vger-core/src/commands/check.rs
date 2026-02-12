@@ -1,4 +1,3 @@
-use crate::snapshot::item::ItemType;
 use crate::compress;
 use crate::config::VgerConfig;
 use crate::crypto::chunk_id::ChunkId;
@@ -6,6 +5,7 @@ use crate::error::Result;
 use crate::repo::format::unpack_object;
 use crate::repo::pack::read_blob_from_pack;
 use crate::repo::Repository;
+use crate::snapshot::item::ItemType;
 use crate::storage;
 
 use super::list::{load_snapshot_items, load_snapshot_meta};
@@ -27,7 +27,11 @@ pub struct CheckResult {
 }
 
 /// Run `vger check`.
-pub fn run(config: &VgerConfig, passphrase: Option<&str>, verify_data: bool) -> Result<CheckResult> {
+pub fn run(
+    config: &VgerConfig,
+    passphrase: Option<&str>,
+    verify_data: bool,
+) -> Result<CheckResult> {
     let backend = storage::backend_from_config(&config.repository)?;
     let repo = Repository::open(backend, passphrase)?;
 
@@ -109,10 +113,8 @@ pub fn run(config: &VgerConfig, passphrase: Option<&str>, verify_data: bool) -> 
             });
         }
         chunks_existence_checked += 1;
-        if chunks_existence_checked % 1000 == 0 {
-            eprintln!(
-                "  existence: {chunks_existence_checked}/{total_chunks}",
-            );
+        if chunks_existence_checked.is_multiple_of(1000) {
+            eprintln!("  existence: {chunks_existence_checked}/{total_chunks}",);
         }
     }
 
@@ -167,17 +169,13 @@ pub fn run(config: &VgerConfig, passphrase: Option<&str>, verify_data: bool) -> 
             if &recomputed != chunk_id {
                 errors.push(CheckError {
                     context: "verify-data".into(),
-                    message: format!(
-                        "chunk {chunk_id}: ID mismatch (recomputed {recomputed})",
-                    ),
+                    message: format!("chunk {chunk_id}: ID mismatch (recomputed {recomputed})",),
                 });
             }
 
             chunks_data_verified += 1;
-            if chunks_data_verified % 1000 == 0 {
-                eprintln!(
-                    "  verify-data: {chunks_data_verified}/{total_chunks}",
-                );
+            if chunks_data_verified.is_multiple_of(1000) {
+                eprintln!("  verify-data: {chunks_data_verified}/{total_chunks}",);
             }
         }
     }

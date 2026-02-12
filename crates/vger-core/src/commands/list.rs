@@ -1,10 +1,10 @@
-use crate::snapshot::item::Item;
-use crate::snapshot::SnapshotMeta;
 use crate::config::VgerConfig;
-use crate::error::{VgerError, Result};
+use crate::error::{Result, VgerError};
 use crate::repo::format::unpack_object;
 use crate::repo::manifest::SnapshotEntry;
 use crate::repo::Repository;
+use crate::snapshot::item::Item;
+use crate::snapshot::SnapshotMeta;
 use crate::storage;
 
 /// Result of a list operation.
@@ -16,7 +16,11 @@ pub enum ListResult {
 }
 
 /// Run `vger list`.
-pub fn run(config: &VgerConfig, passphrase: Option<&str>, snapshot_name: Option<&str>) -> Result<ListResult> {
+pub fn run(
+    config: &VgerConfig,
+    passphrase: Option<&str>,
+    snapshot_name: Option<&str>,
+) -> Result<ListResult> {
     let backend = storage::backend_from_config(&config.repository)?;
     let repo = Repository::open(backend, passphrase)?;
 

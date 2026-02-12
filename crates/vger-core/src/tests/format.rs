@@ -60,7 +60,10 @@ fn unknown_type_tag_fails() {
     let engine = PlaintextEngine::new(&[0xAA; 32]);
     let result = unpack_object(&[0xFF, 0x01, 0x02], &engine);
     assert!(result.is_err());
-    assert!(matches!(result.unwrap_err(), VgerError::UnknownObjectType(0xFF)));
+    assert!(matches!(
+        result.unwrap_err(),
+        VgerError::UnknownObjectType(0xFF)
+    ));
 }
 
 #[test]

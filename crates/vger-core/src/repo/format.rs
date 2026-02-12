@@ -1,5 +1,5 @@
 use crate::crypto::CryptoEngine;
-use crate::error::{VgerError, Result};
+use crate::error::{Result, VgerError};
 
 /// Object type tags for the repo envelope format.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -50,10 +50,7 @@ pub fn pack_object(
 
 /// Deserialize and decrypt a repo object.
 /// Returns `(object_type, plaintext)`.
-pub fn unpack_object(
-    data: &[u8],
-    crypto: &dyn CryptoEngine,
-) -> Result<(ObjectType, Vec<u8>)> {
+pub fn unpack_object(data: &[u8], crypto: &dyn CryptoEngine) -> Result<(ObjectType, Vec<u8>)> {
     if data.is_empty() {
         return Err(VgerError::InvalidFormat("empty object".into()));
     }

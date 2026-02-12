@@ -141,12 +141,10 @@ fn insert_into_tree(children: &mut HashMap<String, VfsNode>, components: &[&str]
         children.insert(name, node);
     } else {
         let dir_name = components[0].to_string();
-        let entry = children
-            .entry(dir_name)
-            .or_insert_with(|| VfsNode::Dir {
-                children: HashMap::new(),
-                meta: VfsMeta::dir_default(),
-            });
+        let entry = children.entry(dir_name).or_insert_with(|| VfsNode::Dir {
+            children: HashMap::new(),
+            meta: VfsMeta::dir_default(),
+        });
         if let VfsNode::Dir {
             children: ref mut dir_children,
             ..
@@ -254,7 +252,7 @@ fn classify_browser_request<B>(req: &hyper::Request<B>, tree: &VfsNode) -> Brows
         .headers()
         .get("accept")
         .and_then(|v| v.to_str().ok())
-        .map_or(false, |s| s.contains("text/html"));
+        .is_some_and(|s| s.contains("text/html"));
     if !is_browser {
         return BrowserAction::PassThrough;
     }
@@ -494,15 +492,13 @@ impl DavFileSystem for VgerDavFs {
 
             let node = lookup(&self.tree, path.as_bytes()).ok_or(FsError::NotFound)?;
             match node {
-                VfsNode::File { chunks, meta } => {
-                    Ok(Box::new(VgerDavFile {
-                        chunks: chunks.clone(),
-                        meta: meta.clone(),
-                        pos: 0,
-                        repo: self.repo.clone(),
-                        cache: self.cache.clone(),
-                    }) as Box<dyn DavFile>)
-                }
+                VfsNode::File { chunks, meta } => Ok(Box::new(VgerDavFile {
+                    chunks: chunks.clone(),
+                    meta: meta.clone(),
+                    pos: 0,
+                    repo: self.repo.clone(),
+                    cache: self.cache.clone(),
+                }) as Box<dyn DavFile>),
                 _ => Err(FsError::Forbidden),
             }
         })
@@ -604,9 +600,7 @@ impl DavFile for VgerDavFile {
                     let available = chunk_data.len() - start_in_chunk;
                     let to_copy = remaining.min(available);
 
-                    buf.extend_from_slice(
-                        &chunk_data[start_in_chunk..start_in_chunk + to_copy],
-                    );
+                    buf.extend_from_slice(&chunk_data[start_in_chunk..start_in_chunk + to_copy]);
 
                     remaining -= to_copy;
                     offset += to_copy as u64;

@@ -5,7 +5,7 @@ pub mod rest_backend;
 use url::Url;
 
 use crate::config::RepositoryConfig;
-use crate::error::{VgerError, Result};
+use crate::error::{Result, VgerError};
 
 /// Abstract key-value storage for repository objects.
 /// Keys are `/`-separated string paths (e.g. "packs/ab/ab01cd02...").
@@ -80,17 +80,14 @@ pub fn parse_repo_url(raw: &str) -> Result<ParsedUrl> {
     }
 
     // Try to parse as URL
-    let url = Url::parse(trimmed).map_err(|e| {
-        VgerError::Config(format!("invalid repository URL '{trimmed}': {e}"))
-    })?;
+    let url = Url::parse(trimmed)
+        .map_err(|e| VgerError::Config(format!("invalid repository URL '{trimmed}': {e}")))?;
 
     match url.scheme() {
         "file" => {
             let path = url.path().to_string();
             if path.is_empty() {
-                return Err(VgerError::Config(
-                    "file:// URL has empty path".into(),
-                ));
+                return Err(VgerError::Config("file:// URL has empty path".into()));
             }
             Ok(ParsedUrl::Local { path })
         }
@@ -111,9 +108,9 @@ pub fn parse_repo_url(raw: &str) -> Result<ParsedUrl> {
 /// custom endpoint and the first path segment is the bucket. Otherwise
 /// the host IS the bucket (AWS default endpoint).
 fn parse_s3_url(url: &Url) -> Result<ParsedUrl> {
-    let host = url.host_str().ok_or_else(|| {
-        VgerError::Config("s3:// URL is missing a host/bucket".into())
-    })?;
+    let host = url
+        .host_str()
+        .ok_or_else(|| VgerError::Config("s3:// URL is missing a host/bucket".into()))?;
 
     let has_port = url.port().is_some();
     let has_dot = host.contains('.');
@@ -125,10 +122,7 @@ fn parse_s3_url(url: &Url) -> Result<ParsedUrl> {
         } else {
             "https"
         };
-        let port_suffix = url
-            .port()
-            .map(|p| format!(":{p}"))
-            .unwrap_or_default();
+        let port_suffix = url.port().map(|p| format!(":{p}")).unwrap_or_default();
         let endpoint = format!("{scheme}://{host}{port_suffix}");
 
         let path = url.path().trim_start_matches('/');
@@ -156,9 +150,9 @@ fn parse_s3_url(url: &Url) -> Result<ParsedUrl> {
 
 /// Parse an `sftp://` URL.
 fn parse_sftp_url(url: &Url) -> Result<ParsedUrl> {
-    let host = url.host_str().ok_or_else(|| {
-        VgerError::Config("sftp:// URL is missing a host".into())
-    })?;
+    let host = url
+        .host_str()
+        .ok_or_else(|| VgerError::Config("sftp:// URL is missing a host".into()))?;
 
     let user = if url.username().is_empty() {
         None
@@ -181,16 +175,18 @@ pub fn backend_from_config(cfg: &RepositoryConfig) -> Result<Box<dyn StorageBack
     let parsed = parse_repo_url(&cfg.url)?;
 
     match parsed {
-        ParsedUrl::Local { path } => {
-            Ok(Box::new(opendal_backend::OpendalBackend::local(&path)?))
-        }
+        ParsedUrl::Local { path } => Ok(Box::new(opendal_backend::OpendalBackend::local(&path)?)),
         ParsedUrl::S3 {
             bucket,
             root,
             endpoint: url_endpoint,
         } => {
             // Config `endpoint` field overrides URL-derived endpoint
-            let endpoint = cfg.endpoint.as_deref().map(|s| s.to_string()).or(url_endpoint);
+            let endpoint = cfg
+                .endpoint
+                .as_deref()
+                .map(|s| s.to_string())
+                .or(url_endpoint);
             let region = cfg.region.as_deref().unwrap_or("us-east-1");
             Ok(Box::new(opendal_backend::OpendalBackend::s3(
                 &bucket,
@@ -207,15 +203,13 @@ pub fn backend_from_config(cfg: &RepositoryConfig) -> Result<Box<dyn StorageBack
             host,
             port,
             path,
-        } => {
-            Ok(Box::new(opendal_backend::OpendalBackend::sftp(
-                &host,
-                user.as_deref(),
-                port,
-                &path,
-                cfg.sftp_key.as_deref(),
-            )?))
-        }
+        } => Ok(Box::new(opendal_backend::OpendalBackend::sftp(
+            &host,
+            user.as_deref(),
+            port,
+            &path,
+            cfg.sftp_key.as_deref(),
+        )?)),
         #[cfg(not(feature = "backend-sftp"))]
         ParsedUrl::Sftp { .. } => Err(VgerError::UnsupportedBackend(
             "sftp (compile with feature 'backend-sftp')".into(),

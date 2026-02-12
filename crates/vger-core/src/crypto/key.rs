@@ -4,7 +4,7 @@ use argon2::Argon2;
 use rand::RngCore;
 use serde::{Deserialize, Serialize};
 
-use crate::error::{VgerError, Result};
+use crate::error::{Result, VgerError};
 
 /// The master key material — never stored in plaintext on disk.
 pub struct MasterKey {
@@ -97,15 +97,15 @@ impl MasterKey {
     pub fn from_encrypted(encrypted: &EncryptedKey, passphrase: &str) -> Result<Self> {
         let wrapping_key = derive_key_from_passphrase(passphrase, &encrypted.kdf)?;
 
-        let cipher = Aes256Gcm::new_from_slice(&wrapping_key)
-            .map_err(|_| VgerError::DecryptionFailed)?;
+        let cipher =
+            Aes256Gcm::new_from_slice(&wrapping_key).map_err(|_| VgerError::DecryptionFailed)?;
         let nonce = Nonce::from_slice(&encrypted.nonce);
         let plaintext = cipher
             .decrypt(nonce, encrypted.encrypted_payload.as_ref())
             .map_err(|_| VgerError::DecryptionFailed)?;
 
-        let payload: MasterKeyPayload = rmp_serde::from_slice(&plaintext)
-            .map_err(|_| VgerError::DecryptionFailed)?;
+        let payload: MasterKeyPayload =
+            rmp_serde::from_slice(&plaintext).map_err(|_| VgerError::DecryptionFailed)?;
 
         let mut encryption_key = [0u8; 32];
         let mut chunk_id_key = [0u8; 32];

@@ -76,8 +76,14 @@ fn roundtrip_empty_payload_zstd() {
 
 #[test]
 fn from_config_valid() {
-    assert_eq!(Compression::from_config("none", 3).unwrap(), Compression::None);
-    assert_eq!(Compression::from_config("lz4", 3).unwrap(), Compression::Lz4);
+    assert_eq!(
+        Compression::from_config("none", 3).unwrap(),
+        Compression::None
+    );
+    assert_eq!(
+        Compression::from_config("lz4", 3).unwrap(),
+        Compression::Lz4
+    );
     assert_eq!(
         Compression::from_config("zstd", 5).unwrap(),
         Compression::Zstd { level: 5 }

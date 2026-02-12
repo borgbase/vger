@@ -1,22 +1,20 @@
 use serde::{Deserialize, Serialize};
 
-use crate::error::{VgerError, Result};
+use crate::config::CompressionAlgorithm;
+use crate::error::{Result, VgerError};
 
 const TAG_NONE: u8 = 0x00;
 const TAG_LZ4: u8 = 0x01;
 const TAG_ZSTD: u8 = 0x02;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub enum Compression {
     None,
+    #[default]
     Lz4,
-    Zstd { level: i32 },
-}
-
-impl Default for Compression {
-    fn default() -> Self {
-        Compression::Lz4
-    }
+    Zstd {
+        level: i32,
+    },
 }
 
 impl Compression {
@@ -29,6 +27,14 @@ impl Compression {
             other => Err(VgerError::Config(format!(
                 "unknown compression algorithm: {other}"
             ))),
+        }
+    }
+
+    pub fn from_algorithm(algorithm: CompressionAlgorithm, zstd_level: i32) -> Self {
+        match algorithm {
+            CompressionAlgorithm::None => Compression::None,
+            CompressionAlgorithm::Lz4 => Compression::Lz4,
+            CompressionAlgorithm::Zstd => Compression::Zstd { level: zstd_level },
         }
     }
 }

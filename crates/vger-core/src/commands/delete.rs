@@ -1,10 +1,10 @@
 use crate::config::VgerConfig;
 use crate::error::Result;
-use crate::repo::lock;
 use crate::repo::Repository;
 use crate::storage;
 
 use super::list::{load_snapshot_items, load_snapshot_meta};
+use super::util::with_repo_lock;
 
 pub struct DeleteStats {
     pub snapshot_name: String,
@@ -20,91 +20,90 @@ pub fn run(
 ) -> Result<DeleteStats> {
     let backend = storage::backend_from_config(&config.repository)?;
     let mut repo = Repository::open(backend, passphrase)?;
-    let lock_guard = lock::acquire_lock(repo.storage.as_ref())?;
 
-    // Verify snapshot exists
-    let entry = repo
-        .manifest
-        .find_snapshot(snapshot_name)
-        .ok_or_else(|| crate::error::VgerError::SnapshotNotFound(snapshot_name.into()))?;
-    let snapshot_id_hex = hex::encode(&entry.id);
+    with_repo_lock(&mut repo, |repo| {
+        // Verify snapshot exists
+        let entry = repo
+            .manifest
+            .find_snapshot(snapshot_name)
+            .ok_or_else(|| crate::error::VgerError::SnapshotNotFound(snapshot_name.into()))?;
+        let snapshot_id_hex = hex::encode(&entry.id);
 
-    // Load snapshot metadata and items to find all chunk refs
-    let snapshot_meta = load_snapshot_meta(&repo, snapshot_name)?;
-    let items = load_snapshot_items(&repo, snapshot_name)?;
+        // Load snapshot metadata and items to find all chunk refs
+        let snapshot_meta = load_snapshot_meta(repo, snapshot_name)?;
+        let items = load_snapshot_items(repo, snapshot_name)?;
 
-    if dry_run {
-        // Count what would be freed
-        let mut chunks_deleted = 0u64;
-        let mut space_freed = 0u64;
+        if dry_run {
+            // Count what would be freed
+            let mut chunks_deleted = 0u64;
+            let mut space_freed = 0u64;
 
-        for item in &items {
-            for chunk_ref in &item.chunks {
-                if let Some(entry) = repo.chunk_index.get(&chunk_ref.id) {
+            for item in &items {
+                for chunk_ref in &item.chunks {
+                    if let Some(entry) = repo.chunk_index.get(&chunk_ref.id) {
+                        if entry.refcount == 1 {
+                            chunks_deleted += 1;
+                            space_freed += entry.stored_size as u64;
+                        }
+                    }
+                }
+            }
+            for chunk_id in &snapshot_meta.item_ptrs {
+                if let Some(entry) = repo.chunk_index.get(chunk_id) {
                     if entry.refcount == 1 {
                         chunks_deleted += 1;
                         space_freed += entry.stored_size as u64;
                     }
                 }
             }
+
+            return Ok(DeleteStats {
+                snapshot_name: snapshot_name.to_string(),
+                chunks_deleted,
+                space_freed,
+            });
         }
-        for chunk_id in &snapshot_meta.item_ptrs {
-            if let Some(entry) = repo.chunk_index.get(chunk_id) {
-                if entry.refcount == 1 {
-                    chunks_deleted += 1;
-                    space_freed += entry.stored_size as u64;
+
+        // Decrement refcounts for data chunks
+        // Orphaned blobs remain in pack files until a future `compact` command.
+        let mut chunks_deleted = 0u64;
+        let mut space_freed = 0u64;
+
+        for item in &items {
+            for chunk_ref in &item.chunks {
+                if let Some((rc, size)) = repo.chunk_index.decrement(&chunk_ref.id) {
+                    if rc == 0 {
+                        chunks_deleted += 1;
+                        space_freed += size as u64;
+                    }
                 }
             }
         }
 
-        lock::release_lock(repo.storage.as_ref(), lock_guard)?;
-        return Ok(DeleteStats {
-            snapshot_name: snapshot_name.to_string(),
-            chunks_deleted,
-            space_freed,
-        });
-    }
-
-    // Decrement refcounts for data chunks
-    // Orphaned blobs remain in pack files until a future `compact` command.
-    let mut chunks_deleted = 0u64;
-    let mut space_freed = 0u64;
-
-    for item in &items {
-        for chunk_ref in &item.chunks {
-            if let Some((rc, size)) = repo.chunk_index.decrement(&chunk_ref.id) {
+        // Decrement refcounts for item-stream chunks
+        for chunk_id in &snapshot_meta.item_ptrs {
+            if let Some((rc, size)) = repo.chunk_index.decrement(chunk_id) {
                 if rc == 0 {
                     chunks_deleted += 1;
                     space_freed += size as u64;
                 }
             }
         }
-    }
 
-    // Decrement refcounts for item-stream chunks
-    for chunk_id in &snapshot_meta.item_ptrs {
-        if let Some((rc, size)) = repo.chunk_index.decrement(chunk_id) {
-            if rc == 0 {
-                chunks_deleted += 1;
-                space_freed += size as u64;
-            }
-        }
-    }
+        // Delete snapshot metadata object
+        repo.storage
+            .delete(&format!("snapshots/{snapshot_id_hex}"))?;
 
-    // Delete snapshot metadata object
-    repo.storage
-        .delete(&format!("snapshots/{snapshot_id_hex}"))?;
+        // Remove from manifest
+        repo.manifest.remove_snapshot(snapshot_name);
 
-    // Remove from manifest
-    repo.manifest.remove_snapshot(snapshot_name);
+        // Persist state
+        repo.save_state()?;
 
-    // Persist state
-    repo.save_state()?;
-    lock::release_lock(repo.storage.as_ref(), lock_guard)?;
-
-    Ok(DeleteStats {
-        snapshot_name: snapshot_name.to_string(),
-        chunks_deleted,
-        space_freed,
+        Ok(DeleteStats {
+            snapshot_name: snapshot_name.to_string(),
+            chunks_deleted,
+            space_freed,
+        })
     })
 }

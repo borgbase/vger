@@ -1,5 +1,5 @@
-use crate::snapshot::item::{ChunkRef, Item, ItemType};
 use crate::crypto::chunk_id::ChunkId;
+use crate::snapshot::item::{ChunkRef, Item, ItemType};
 
 fn make_file_item() -> Item {
     Item {
@@ -91,10 +91,7 @@ fn item_serde_roundtrip_symlink() {
     let serialized = rmp_serde::to_vec(&item).unwrap();
     let deserialized: Item = rmp_serde::from_slice(&serialized).unwrap();
     assert_eq!(deserialized.entry_type, ItemType::Symlink);
-    assert_eq!(
-        deserialized.link_target.as_deref(),
-        Some("/usr/bin/target")
-    );
+    assert_eq!(deserialized.link_target.as_deref(), Some("/usr/bin/target"));
 }
 
 #[test]

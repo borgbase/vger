@@ -5,7 +5,7 @@ use serde::{Deserialize, Serialize};
 use crate::crypto::chunk_id::ChunkId;
 use crate::crypto::pack_id::PackId;
 use crate::crypto::CryptoEngine;
-use crate::error::{VgerError, Result};
+use crate::error::{Result, VgerError};
 use crate::storage::StorageBackend;
 
 use super::format::{pack_object, unpack_object, ObjectType};
@@ -78,7 +78,11 @@ impl PackWriter {
             PACK_HEADER_SIZE as u64 + 4 // 4B length prefix for this blob
         } else {
             PACK_HEADER_SIZE as u64
-                + self.buffer.iter().map(|b| 4 + b.encrypted_data.len() as u64).sum::<u64>()
+                + self
+                    .buffer
+                    .iter()
+                    .map(|b| 4 + b.encrypted_data.len() as u64)
+                    .sum::<u64>()
                 + 4 // 4B length prefix for this blob
         };
 
@@ -138,7 +142,8 @@ impl PackWriter {
 
         // Build header entries
         let mut header_entries: Vec<PackHeaderEntry> = Vec::with_capacity(self.buffer.len());
-        let mut pack_bytes: Vec<u8> = Vec::with_capacity(PACK_HEADER_SIZE + self.current_size + 1024);
+        let mut pack_bytes: Vec<u8> =
+            Vec::with_capacity(PACK_HEADER_SIZE + self.current_size + 1024);
 
         // Write pack magic + version
         pack_bytes.extend_from_slice(PACK_MAGIC);
@@ -177,7 +182,11 @@ impl PackWriter {
         // Collect results with refcounts from pending map
         let mut results: Vec<(ChunkId, u32, u64, u32)> = Vec::with_capacity(header_entries.len());
         for entry in &header_entries {
-            let refcount = self.pending.get(&entry.chunk_id).map(|(_, rc)| *rc).unwrap_or(1);
+            let refcount = self
+                .pending
+                .get(&entry.chunk_id)
+                .map(|(_, rc)| *rc)
+                .unwrap_or(1);
             results.push((entry.chunk_id, entry.length, entry.offset, refcount));
         }
 
@@ -223,7 +232,9 @@ pub fn read_pack_header(
         u32::from_le_bytes(pack_data[len_offset..len_offset + 4].try_into().unwrap()) as usize;
 
     if header_len + 4 > pack_data.len() - PACK_HEADER_SIZE {
-        return Err(VgerError::InvalidFormat("invalid pack header length".into()));
+        return Err(VgerError::InvalidFormat(
+            "invalid pack header length".into(),
+        ));
     }
 
     let header_start = len_offset - header_len;
@@ -236,10 +247,7 @@ pub fn read_pack_header(
 
 /// Forward-scan a pack file using per-blob length prefixes (for recovery).
 /// Returns (offset, length) pairs for each blob.
-pub fn scan_pack_blobs(
-    storage: &dyn StorageBackend,
-    pack_id: &PackId,
-) -> Result<Vec<(u64, u32)>> {
+pub fn scan_pack_blobs(storage: &dyn StorageBackend, pack_id: &PackId) -> Result<Vec<(u64, u32)>> {
     let pack_data = storage
         .get(&pack_id.storage_key())?
         .ok_or_else(|| VgerError::Other(format!("pack not found: {pack_id}")))?;
@@ -263,8 +271,7 @@ pub fn scan_pack_blobs(
     let blobs_end = len_offset - header_len;
 
     while pos + 4 <= blobs_end {
-        let blob_len =
-            u32::from_le_bytes(pack_data[pos..pos + 4].try_into().unwrap());
+        let blob_len = u32::from_le_bytes(pack_data[pos..pos + 4].try_into().unwrap());
         let blob_offset = (pos + 4) as u64;
         if pos + 4 + blob_len as usize > blobs_end {
             break;
@@ -277,7 +284,11 @@ pub fn scan_pack_blobs(
 }
 
 /// Compute the dynamic target pack size for data packs.
-pub fn compute_data_pack_target(num_data_packs: usize, min_pack_size: u32, max_pack_size: u32) -> usize {
+pub fn compute_data_pack_target(
+    num_data_packs: usize,
+    min_pack_size: u32,
+    max_pack_size: u32,
+) -> usize {
     let min = min_pack_size as f64;
     let max = max_pack_size as f64;
     let target = min * (num_data_packs as f64 / 100.0).sqrt();

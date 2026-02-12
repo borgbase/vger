@@ -140,22 +140,10 @@ fn execute_hook_command(cmd: &str, ctx: &HookContext) -> Result<()> {
 fn substitute_variables(cmd: &str, ctx: &HookContext) -> String {
     let mut result = cmd.replace("{command}", &ctx.command);
     result = result.replace("{repository}", &ctx.repository);
-    result = result.replace(
-        "{label}",
-        ctx.label.as_deref().unwrap_or(""),
-    );
-    result = result.replace(
-        "{error}",
-        ctx.error.as_deref().unwrap_or(""),
-    );
-    result = result.replace(
-        "{source_label}",
-        ctx.source_label.as_deref().unwrap_or(""),
-    );
-    result = result.replace(
-        "{source_path}",
-        ctx.source_path.as_deref().unwrap_or(""),
-    );
+    result = result.replace("{label}", ctx.label.as_deref().unwrap_or(""));
+    result = result.replace("{error}", ctx.error.as_deref().unwrap_or(""));
+    result = result.replace("{source_label}", ctx.source_label.as_deref().unwrap_or(""));
+    result = result.replace("{source_path}", ctx.source_path.as_deref().unwrap_or(""));
     result
 }
 
@@ -243,7 +231,10 @@ mod tests {
             "echo {command} {repository} {label} {error} {source_label} {source_path}",
             &ctx,
         );
-        assert_eq!(result, "echo backup /mnt/nas nas disk full docs /home/user/docs");
+        assert_eq!(
+            result,
+            "echo backup /mnt/nas nas disk full docs /home/user/docs"
+        );
     }
 
     #[test]
@@ -321,9 +312,8 @@ mod tests {
         let global2 = hooks_from(&[("after", vec![&cmd2])]);
         let mut ctx2 = make_ctx("backup");
 
-        let _result: std::result::Result<(), _> = run_with_hooks(&global2, &repo, &mut ctx2, || {
-            Err("action failed".into())
-        });
+        let _result: std::result::Result<(), _> =
+            run_with_hooks(&global2, &repo, &mut ctx2, || Err("action failed".into()));
         assert!(!marker2.exists(), "after hook should NOT run on failure");
     }
 
@@ -337,9 +327,8 @@ mod tests {
         let repo = HooksConfig::default();
         let mut ctx = make_ctx("backup");
 
-        let _result: std::result::Result<(), _> = run_with_hooks(&global, &repo, &mut ctx, || {
-            Err("something broke".into())
-        });
+        let _result: std::result::Result<(), _> =
+            run_with_hooks(&global, &repo, &mut ctx, || Err("something broke".into()));
         assert!(marker.exists(), "failed hook should run on failure");
 
         // Now test success case
@@ -372,9 +361,8 @@ mod tests {
         let global2 = hooks_from(&[("finally", vec![&cmd2])]);
         let mut ctx2 = make_ctx("backup");
 
-        let _result: std::result::Result<(), _> = run_with_hooks(&global2, &repo, &mut ctx2, || {
-            Err("error".into())
-        });
+        let _result: std::result::Result<(), _> =
+            run_with_hooks(&global2, &repo, &mut ctx2, || Err("error".into()));
         assert!(marker2.exists(), "finally should run on failure");
     }
 

@@ -18,10 +18,17 @@ fn chunks_cover_entire_input() {
     // Verify no gaps or overlaps
     let mut expected_offset = 0;
     for (offset, length) in &chunks {
-        assert_eq!(*offset, expected_offset, "gap or overlap at offset {offset}");
+        assert_eq!(
+            *offset, expected_offset,
+            "gap or overlap at offset {offset}"
+        );
         expected_offset = offset + length;
     }
-    assert_eq!(expected_offset, data.len(), "chunks don't cover entire input");
+    assert_eq!(
+        expected_offset,
+        data.len(),
+        "chunks don't cover entire input"
+    );
 }
 
 #[test]

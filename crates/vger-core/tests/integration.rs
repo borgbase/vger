@@ -1,14 +1,21 @@
+use chrono::Utc;
 use vger_core::compress::Compression;
 use vger_core::config::ChunkerConfig;
 use vger_core::repo::manifest::SnapshotEntry;
 use vger_core::repo::pack::PackType;
 use vger_core::repo::{EncryptionMode, Repository};
 use vger_core::storage::opendal_backend::OpendalBackend;
-use chrono::Utc;
 
 fn init_local_repo(dir: &std::path::Path) -> Repository {
     let storage = Box::new(OpendalBackend::local(dir.to_str().unwrap()).unwrap());
-    Repository::init(storage, EncryptionMode::None, ChunkerConfig::default(), None, None).unwrap()
+    Repository::init(
+        storage,
+        EncryptionMode::None,
+        ChunkerConfig::default(),
+        None,
+        None,
+    )
+    .unwrap()
 }
 
 fn open_local_repo(dir: &std::path::Path) -> Repository {
@@ -26,8 +33,12 @@ fn init_store_reopen_read() {
     let data2 = b"chunk two data for integration test";
     let (id1, id2) = {
         let mut repo = init_local_repo(dir);
-        let (id1, _, _) = repo.store_chunk(data1, Compression::Lz4, PackType::Data).unwrap();
-        let (id2, _, _) = repo.store_chunk(data2, Compression::Lz4, PackType::Data).unwrap();
+        let (id1, _, _) = repo
+            .store_chunk(data1, Compression::Lz4, PackType::Data)
+            .unwrap();
+        let (id2, _, _) = repo
+            .store_chunk(data2, Compression::Lz4, PackType::Data)
+            .unwrap();
         repo.save_state().unwrap();
         (id1, id2)
     };

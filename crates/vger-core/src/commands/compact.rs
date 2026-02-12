@@ -2,10 +2,10 @@ use std::collections::HashSet;
 
 use tracing::{info, warn};
 
+use super::util::with_repo_lock;
 use crate::config::VgerConfig;
 use crate::crypto::pack_id::PackId;
 use crate::error::Result;
-use crate::repo::lock;
 use crate::repo::pack::{
     read_blob_from_pack, read_pack_header, PackHeaderEntry, PackType, PackWriter,
 };
@@ -42,12 +42,9 @@ pub fn run(
 ) -> Result<CompactStats> {
     let backend = storage::backend_from_config(&config.repository)?;
     let mut repo = Repository::open(backend, passphrase)?;
-    let lock_guard = lock::acquire_lock(repo.storage.as_ref())?;
-
-    let stats = compact_repo(&mut repo, threshold, max_repack_size, dry_run)?;
-
-    lock::release_lock(repo.storage.as_ref(), lock_guard)?;
-    Ok(stats)
+    with_repo_lock(&mut repo, |repo| {
+        compact_repo(repo, threshold, max_repack_size, dry_run)
+    })
 }
 
 /// Core compact logic operating on an already-opened repository.
@@ -88,17 +85,14 @@ pub fn compact_repo(
 
             stats.packs_total += 1;
 
-            let entries = match read_pack_header(
-                repo.storage.as_ref(),
-                &pack_id,
-                repo.crypto.as_ref(),
-            ) {
-                Ok(e) => e,
-                Err(e) => {
-                    warn!("Skipping corrupt pack {}: {}", pack_id, e);
-                    continue;
-                }
-            };
+            let entries =
+                match read_pack_header(repo.storage.as_ref(), &pack_id, repo.crypto.as_ref()) {
+                    Ok(e) => e,
+                    Err(e) => {
+                        warn!("Skipping corrupt pack {}: {}", pack_id, e);
+                        continue;
+                    }
+                };
 
             let mut live_entries = Vec::new();
             let mut total_bytes: u64 = 0;

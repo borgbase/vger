@@ -1,6 +1,6 @@
 use chrono::Utc;
 
-use crate::repo::manifest::{SnapshotEntry, Manifest};
+use crate::repo::manifest::{Manifest, SnapshotEntry};
 
 fn make_entry(name: &str) -> SnapshotEntry {
     SnapshotEntry {

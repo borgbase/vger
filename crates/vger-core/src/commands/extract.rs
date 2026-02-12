@@ -3,10 +3,10 @@ use std::path::Path;
 
 use tracing::info;
 
-use crate::snapshot::item::ItemType;
 use crate::config::VgerConfig;
-use crate::error::{VgerError, Result};
+use crate::error::{Result, VgerError};
 use crate::repo::Repository;
+use crate::snapshot::item::ItemType;
 use crate::storage;
 
 /// Run `vger extract`.
@@ -23,13 +23,15 @@ pub fn run(
     let items = super::list::load_snapshot_items(&repo, snapshot_name)?;
 
     // Build optional filter pattern
-    let filter = pattern.map(|p| {
-        globset::GlobBuilder::new(p)
-            .literal_separator(false)
-            .build()
-            .map(|g| g.compile_matcher())
-    }).transpose()
-    .map_err(|e| VgerError::Config(format!("invalid pattern: {e}")))?;
+    let filter = pattern
+        .map(|p| {
+            globset::GlobBuilder::new(p)
+                .literal_separator(false)
+                .build()
+                .map(|g| g.compile_matcher())
+        })
+        .transpose()
+        .map_err(|e| VgerError::Config(format!("invalid pattern: {e}")))?;
 
     let dest_path = Path::new(dest);
     std::fs::create_dir_all(dest_path)?;
@@ -63,7 +65,8 @@ pub fn run(
             ItemType::Directory => {
                 std::fs::create_dir_all(&target)?;
                 // Set permissions (ignore errors on directories for now, re-set after)
-                let _ = std::fs::set_permissions(&target, std::fs::Permissions::from_mode(item.mode));
+                let _ =
+                    std::fs::set_permissions(&target, std::fs::Permissions::from_mode(item.mode));
                 stats.dirs += 1;
             }
             ItemType::Symlink => {
@@ -90,10 +93,8 @@ pub fn run(
                 }
 
                 // Set permissions
-                let _ = std::fs::set_permissions(
-                    &target,
-                    std::fs::Permissions::from_mode(item.mode),
-                );
+                let _ =
+                    std::fs::set_permissions(&target, std::fs::Permissions::from_mode(item.mode));
 
                 // Set modification time
                 let mtime_secs = item.mtime / 1_000_000_000;

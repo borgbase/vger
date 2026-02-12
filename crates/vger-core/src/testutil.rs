@@ -77,8 +77,14 @@ impl StorageBackend for MemoryBackend {
 /// Create a plaintext repository backed by MemoryBackend.
 pub fn test_repo_plaintext() -> Repository {
     let storage = Box::new(MemoryBackend::new());
-    Repository::init(storage, EncryptionMode::None, ChunkerConfig::default(), None, None)
-        .expect("failed to init test repo")
+    Repository::init(
+        storage,
+        EncryptionMode::None,
+        ChunkerConfig::default(),
+        None,
+        None,
+    )
+    .expect("failed to init test repo")
 }
 
 /// Fixed chunk ID key for deterministic tests.

@@ -52,8 +52,9 @@ fn init_twice_fails() {
 fn store_and_read_chunk_roundtrip() {
     let mut repo = test_repo_plaintext();
     let data = b"hello, this is chunk data for testing";
-    let (chunk_id, _stored_size, is_new) =
-        repo.store_chunk(data, Compression::None, PackType::Data).unwrap();
+    let (chunk_id, _stored_size, is_new) = repo
+        .store_chunk(data, Compression::None, PackType::Data)
+        .unwrap();
     assert!(is_new);
 
     // Flush packs so chunks are readable
@@ -68,10 +69,14 @@ fn store_chunk_dedup() {
     let mut repo = test_repo_plaintext();
     let data = b"duplicate chunk data";
 
-    let (id1, _size1, is_new1) = repo.store_chunk(data, Compression::None, PackType::Data).unwrap();
+    let (id1, _size1, is_new1) = repo
+        .store_chunk(data, Compression::None, PackType::Data)
+        .unwrap();
     assert!(is_new1);
 
-    let (id2, _size2, is_new2) = repo.store_chunk(data, Compression::None, PackType::Data).unwrap();
+    let (id2, _size2, is_new2) = repo
+        .store_chunk(data, Compression::None, PackType::Data)
+        .unwrap();
     assert!(!is_new2, "second store should be a dedup hit");
     assert_eq!(id1, id2);
 
@@ -87,8 +92,9 @@ fn store_chunk_dedup() {
 fn store_chunk_with_compression() {
     let mut repo = test_repo_plaintext();
     let data = b"compressible data that should survive lz4 round-trip";
-    let (chunk_id, _stored_size, is_new) =
-        repo.store_chunk(data, Compression::Lz4, PackType::Data).unwrap();
+    let (chunk_id, _stored_size, is_new) = repo
+        .store_chunk(data, Compression::Lz4, PackType::Data)
+        .unwrap();
     assert!(is_new);
 
     // Flush packs so chunks are readable
@@ -102,7 +108,8 @@ fn store_chunk_with_compression() {
 fn save_state_persists_manifest_and_index() {
     let mut repo = test_repo_plaintext();
     let data = b"persistent chunk";
-    repo.store_chunk(data, Compression::None, PackType::Data).unwrap();
+    repo.store_chunk(data, Compression::None, PackType::Data)
+        .unwrap();
     repo.save_state().unwrap();
 
     // Verify manifest and index are updated in storage

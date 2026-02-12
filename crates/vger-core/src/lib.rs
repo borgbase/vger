@@ -1,4 +1,3 @@
-pub mod snapshot;
 pub mod chunker;
 pub mod commands;
 pub mod compress;
@@ -9,9 +8,10 @@ pub mod hooks;
 pub mod index;
 pub mod prune;
 pub mod repo;
+pub mod snapshot;
 pub mod storage;
 
 #[cfg(test)]
-mod testutil;
-#[cfg(test)]
 mod tests;
+#[cfg(test)]
+mod testutil;

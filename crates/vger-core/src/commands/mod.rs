@@ -1,6 +1,6 @@
+pub mod backup;
 pub mod check;
 pub mod compact;
-pub mod backup;
 pub mod delete;
 pub mod extract;
 pub mod init;
@@ -8,3 +8,4 @@ pub mod list;
 #[cfg(feature = "mount")]
 pub mod mount;
 pub mod prune;
+pub mod util;

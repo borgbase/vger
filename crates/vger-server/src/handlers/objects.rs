@@ -184,11 +184,7 @@ pub async fn post_object(
     Ok(StatusCode::BAD_REQUEST.into_response())
 }
 
-async fn list_keys(
-    state: AppState,
-    repo: &str,
-    prefix: &str,
-) -> Result<Response, ServerError> {
+async fn list_keys(state: AppState, repo: &str, prefix: &str) -> Result<Response, ServerError> {
     let dir_path = state
         .file_path(repo, prefix)
         .ok_or_else(|| ServerError::BadRequest("invalid path".into()))?;

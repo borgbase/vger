@@ -2,12 +2,12 @@ pub mod admin;
 pub mod locks;
 pub mod objects;
 
-use axum::Router;
 use axum::body::Body;
 use axum::extract::State;
 use axum::http::{Request, StatusCode};
 use axum::middleware::{self, Next};
 use axum::response::{IntoResponse, Response};
+use axum::Router;
 use subtle::ConstantTimeEq;
 use tower_http::trace::TraceLayer;
 
@@ -18,18 +18,13 @@ pub fn router(state: AppState) -> Router {
         // Lock endpoints
         .route(
             "/{repo}/locks/{id}",
-            axum::routing::post(locks::acquire_lock)
-                .delete(locks::release_lock),
+            axum::routing::post(locks::acquire_lock).delete(locks::release_lock),
         )
-        .route(
-            "/{repo}/locks",
-            axum::routing::get(locks::list_locks),
-        )
+        .route("/{repo}/locks", axum::routing::get(locks::list_locks))
         // Admin endpoints (query-string dispatched)
         .route(
             "/{repo}",
-            axum::routing::get(admin::repo_dispatch)
-                .post(admin::repo_action_dispatch),
+            axum::routing::get(admin::repo_dispatch).post(admin::repo_action_dispatch),
         )
         // Repo listing
         .route("/", axum::routing::get(admin::list_repos))

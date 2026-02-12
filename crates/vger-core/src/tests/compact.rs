@@ -4,12 +4,25 @@ use crate::repo::pack::PackType;
 use crate::testutil::test_repo_plaintext;
 
 /// Helper: store two distinct chunks and flush, returning their chunk IDs.
-fn store_two_chunks(repo: &mut crate::repo::Repository) -> (crate::crypto::chunk_id::ChunkId, crate::crypto::chunk_id::ChunkId) {
+fn store_two_chunks(
+    repo: &mut crate::repo::Repository,
+) -> (
+    crate::crypto::chunk_id::ChunkId,
+    crate::crypto::chunk_id::ChunkId,
+) {
     let (id_a, _, _) = repo
-        .store_chunk(b"chunk-a-data-for-compact-test", Compression::None, PackType::Data)
+        .store_chunk(
+            b"chunk-a-data-for-compact-test",
+            Compression::None,
+            PackType::Data,
+        )
         .unwrap();
     let (id_b, _, _) = repo
-        .store_chunk(b"chunk-b-data-for-compact-test", Compression::None, PackType::Data)
+        .store_chunk(
+            b"chunk-b-data-for-compact-test",
+            Compression::None,
+            PackType::Data,
+        )
         .unwrap();
     repo.save_state().unwrap();
     (id_a, id_b)
@@ -112,7 +125,11 @@ fn compact_empty_pack_deleted() {
 
     // Store a single chunk and flush
     let (id_a, _, _) = repo
-        .store_chunk(b"lone-chunk-data-for-empty-pack-test", Compression::None, PackType::Data)
+        .store_chunk(
+            b"lone-chunk-data-for-empty-pack-test",
+            Compression::None,
+            PackType::Data,
+        )
         .unwrap();
     repo.save_state().unwrap();
 

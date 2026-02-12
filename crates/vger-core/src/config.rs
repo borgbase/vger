@@ -194,9 +194,32 @@ pub struct RepositoryConfig {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct EncryptionConfig {
     #[serde(default = "default_encryption_mode")]
-    pub mode: String,
+    pub mode: EncryptionModeConfig,
     pub passphrase: Option<String>,
     pub passcommand: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum EncryptionModeConfig {
+    #[serde(rename = "none")]
+    None,
+    #[serde(rename = "aes256gcm")]
+    Aes256Gcm,
+}
+
+impl EncryptionModeConfig {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            EncryptionModeConfig::None => "none",
+            EncryptionModeConfig::Aes256Gcm => "aes256gcm",
+        }
+    }
+}
+
+impl PartialEq<&str> for EncryptionModeConfig {
+    fn eq(&self, other: &&str) -> bool {
+        self.as_str() == *other
+    }
 }
 
 impl Default for EncryptionConfig {
@@ -232,9 +255,33 @@ impl Default for ChunkerConfig {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CompressionConfig {
     #[serde(default = "default_algorithm")]
-    pub algorithm: String,
+    pub algorithm: CompressionAlgorithm,
     #[serde(default = "default_zstd_level")]
     pub zstd_level: i32,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum CompressionAlgorithm {
+    None,
+    Lz4,
+    Zstd,
+}
+
+impl CompressionAlgorithm {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            CompressionAlgorithm::None => "none",
+            CompressionAlgorithm::Lz4 => "lz4",
+            CompressionAlgorithm::Zstd => "zstd",
+        }
+    }
+}
+
+impl PartialEq<&str> for CompressionAlgorithm {
+    fn eq(&self, other: &&str) -> bool {
+        self.as_str() == *other
+    }
 }
 
 impl Default for CompressionConfig {
@@ -246,8 +293,8 @@ impl Default for CompressionConfig {
     }
 }
 
-fn default_encryption_mode() -> String {
-    "aes256gcm".to_string()
+fn default_encryption_mode() -> EncryptionModeConfig {
+    EncryptionModeConfig::Aes256Gcm
 }
 
 fn default_min_size() -> u32 {
@@ -262,8 +309,8 @@ fn default_max_size() -> u32 {
     8 * 1024 * 1024 // 8 MiB
 }
 
-fn default_algorithm() -> String {
-    "lz4".to_string()
+fn default_algorithm() -> CompressionAlgorithm {
+    CompressionAlgorithm::Lz4
 }
 
 fn default_zstd_level() -> i32 {
@@ -324,7 +371,7 @@ impl RepositoryEntry {
 
 /// Intermediate deserialization struct for the YAML config file.
 #[derive(Debug, Deserialize)]
-struct RawConfig {
+struct ConfigDocument {
     repositories: Vec<RepositoryEntry>,
     #[serde(default)]
     encryption: EncryptionConfig,
@@ -342,6 +389,10 @@ struct RawConfig {
     #[serde(default)]
     hooks: HooksConfig,
 }
+
+// Backward-compatible alias used by internal tests.
+#[cfg(test)]
+type RawConfig = ConfigDocument;
 
 /// Derive a label from a path by taking the last component (basename).
 pub fn label_from_path(path: &str) -> String {
@@ -401,14 +452,14 @@ pub fn load_and_resolve(path: &Path) -> crate::error::Result<Vec<ResolvedRepo>> 
     let contents = std::fs::read_to_string(path).map_err(|e| {
         crate::error::VgerError::Config(format!("cannot read '{}': {e}", path.display()))
     })?;
-    let raw: RawConfig = serde_yaml::from_str(&contents).map_err(|e| {
+    let raw: ConfigDocument = serde_yaml::from_str(&contents).map_err(|e| {
         crate::error::VgerError::Config(format!("invalid config '{}': {e}", path.display()))
     })?;
 
-    resolve_raw_config(raw)
+    resolve_document(raw)
 }
 
-fn resolve_raw_config(raw: RawConfig) -> crate::error::Result<Vec<ResolvedRepo>> {
+fn resolve_document(raw: ConfigDocument) -> crate::error::Result<Vec<ResolvedRepo>> {
     if raw.repositories.is_empty() {
         return Err(crate::error::VgerError::Config(
             "'repositories:' must not be empty".into(),
@@ -436,11 +487,7 @@ fn resolve_raw_config(raw: RawConfig) -> crate::error::Result<Vec<ResolvedRepo>>
     }
 
     // Normalize sources
-    let all_sources: Vec<SourceEntry> = raw
-        .sources
-        .into_iter()
-        .map(normalize_source)
-        .collect();
+    let all_sources: Vec<SourceEntry> = raw.sources.into_iter().map(normalize_source).collect();
 
     // Check for duplicate source labels
     let mut source_labels = std::collections::HashSet::new();
@@ -506,17 +553,11 @@ fn resolve_raw_config(raw: RawConfig) -> crate::error::Result<Vec<ResolvedRepo>>
                 label: entry_label,
                 config: VgerConfig {
                     repository: entry.to_repo_config(),
-                    encryption: entry
-                        .encryption
-                        .unwrap_or_else(|| raw.encryption.clone()),
+                    encryption: entry.encryption.unwrap_or_else(|| raw.encryption.clone()),
                     exclude_patterns: raw.exclude_patterns.clone(),
                     chunker: raw.chunker.clone(),
-                    compression: entry
-                        .compression
-                        .unwrap_or_else(|| raw.compression.clone()),
-                    retention: entry
-                        .retention
-                        .unwrap_or_else(|| raw.retention.clone()),
+                    compression: entry.compression.unwrap_or_else(|| raw.compression.clone()),
+                    retention: entry.retention.unwrap_or_else(|| raw.retention.clone()),
                 },
                 global_hooks: raw.hooks.clone(),
                 repo_hooks,
@@ -647,6 +688,9 @@ pub fn resolve_config_path(cli_config: Option<&str>) -> Option<ConfigSource> {
 }
 
 /// Load and parse a config file. Returns the first repository's config.
+#[deprecated(
+    note = "prefer load_and_resolve() and explicit repository selection for multi-repo configs"
+)]
 pub fn load_config(path: &Path) -> crate::error::Result<VgerConfig> {
     let repos = load_and_resolve(path)?;
     Ok(repos.into_iter().next().unwrap().config)
@@ -767,7 +811,13 @@ mod tests {
         std::env::set_current_dir(original).unwrap();
 
         let source = result.unwrap();
-        assert!(matches!(source, ConfigSource::SearchOrder { level: "project", .. }));
+        assert!(matches!(
+            source,
+            ConfigSource::SearchOrder {
+                level: "project",
+                ..
+            }
+        ));
     }
 
     #[test]
@@ -789,9 +839,13 @@ mod tests {
     fn test_minimal_template_is_valid_yaml() {
         let template = minimal_config_template();
         let parsed: Result<RawConfig, _> = serde_yaml::from_str(template);
-        assert!(parsed.is_ok(), "template should parse as valid YAML: {:?}", parsed.err());
+        assert!(
+            parsed.is_ok(),
+            "template should parse as valid YAML: {:?}",
+            parsed.err()
+        );
         let raw = parsed.unwrap();
-        let repos = resolve_raw_config(raw).unwrap();
+        let repos = resolve_document(raw).unwrap();
         assert_eq!(repos.len(), 1);
         assert_eq!(repos[0].config.repository.url, "/path/to/repo");
         assert_eq!(repos[0].sources.len(), 1);
@@ -800,6 +854,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(deprecated)]
     fn test_load_config_missing_file() {
         let result = load_config(Path::new("/nonexistent/path/config.yaml"));
         assert!(result.is_err());
@@ -958,8 +1013,14 @@ repositories:
 
         let repos = load_and_resolve(&path).unwrap();
         assert_eq!(repos[0].config.repository.min_pack_size, 1048576);
-        assert_eq!(repos[1].config.repository.min_pack_size, default_min_pack_size());
-        assert_eq!(repos[1].config.repository.max_pack_size, default_max_pack_size());
+        assert_eq!(
+            repos[1].config.repository.min_pack_size,
+            default_min_pack_size()
+        );
+        assert_eq!(
+            repos[1].config.repository.max_pack_size,
+            default_max_pack_size()
+        );
     }
 
     #[test]
@@ -1005,7 +1066,10 @@ repositories:
 
         let err = load_and_resolve(&path).unwrap_err();
         let msg = err.to_string();
-        assert!(msg.contains("duplicate repository label"), "unexpected error: {msg}");
+        assert!(
+            msg.contains("duplicate repository label"),
+            "unexpected error: {msg}"
+        );
     }
 
     #[test]
@@ -1039,6 +1103,7 @@ repositories:
     }
 
     #[test]
+    #[allow(deprecated)]
     fn test_load_config_returns_first_repo() {
         let yaml = r#"
 repositories:
@@ -1122,15 +1187,18 @@ repositories:
 
     #[test]
     fn test_select_sources_no_match() {
-        let sources = vec![
-            make_test_source("docs"),
-            make_test_source("photos"),
-        ];
+        let sources = vec![make_test_source("docs"), make_test_source("photos")];
 
         let err = select_sources(&sources, &["nonexistent".into()]).unwrap_err();
-        assert!(err.contains("no source matching 'nonexistent'"), "unexpected: {err}");
+        assert!(
+            err.contains("no source matching 'nonexistent'"),
+            "unexpected: {err}"
+        );
         assert!(err.contains("docs"), "should list available sources: {err}");
-        assert!(err.contains("photos"), "should list available sources: {err}");
+        assert!(
+            err.contains("photos"),
+            "should list available sources: {err}"
+        );
     }
 
     #[test]

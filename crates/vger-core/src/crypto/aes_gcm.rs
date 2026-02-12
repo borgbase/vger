@@ -3,7 +3,7 @@ use aes_gcm::{Aes256Gcm, Nonce};
 use rand::RngCore;
 
 use super::CryptoEngine;
-use crate::error::{VgerError, Result};
+use crate::error::{Result, VgerError};
 
 /// AES-256-GCM authenticated encryption engine.
 pub struct Aes256GcmEngine {

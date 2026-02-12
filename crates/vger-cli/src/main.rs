@@ -1,16 +1,17 @@
 use clap::{Parser, Subcommand};
-use comfy_table::{Table, presets::UTF8_FULL_CONDENSED};
+use comfy_table::{presets::UTF8_FULL_CONDENSED, Table};
 use rand::RngCore;
 
 use vger_core::commands;
 use vger_core::compress::Compression;
-use vger_core::config::{
-    self, ResolvedRepo, SourceEntry, VgerConfig,
-};
+use vger_core::config::{self, EncryptionModeConfig, ResolvedRepo, SourceEntry, VgerConfig};
 use vger_core::hooks::{self, HookContext};
 
 #[derive(Parser)]
-#[command(name = "vger", version, about = "Fast, encrypted, deduplicated backups",
+#[command(
+    name = "vger",
+    version,
+    about = "Fast, encrypted, deduplicated backups",
     after_help = "\
 Configuration file lookup order:
   1. --config <path>             (explicit flag)
@@ -21,7 +22,8 @@ Configuration file lookup order:
 
 Environment variables:
   VGER_CONFIG       Path to configuration file (overrides default search)
-  VGER_PASSPHRASE   Repository passphrase (skips interactive prompt)")]
+  VGER_PASSPHRASE   Repository passphrase (skips interactive prompt)"
+)]
 struct Cli {
     /// Path to configuration file (overrides VGER_CONFIG and default search)
     #[arg(short, long)]
@@ -261,10 +263,7 @@ fn main() {
 
     for repo in &repos {
         if multi {
-            let name = repo
-                .label
-                .as_deref()
-                .unwrap_or(&repo.config.repository.url);
+            let name = repo.label.as_deref().unwrap_or(&repo.config.repository.url);
             eprintln!("--- Repository: {name} ---");
         }
 
@@ -282,12 +281,9 @@ fn main() {
                 source_label: None,
                 source_path: None,
             };
-            hooks::run_with_hooks(
-                &repo.global_hooks,
-                &repo.repo_hooks,
-                &mut ctx,
-                || dispatch_command(&cli.command, cfg, label, &repo.sources),
-            )
+            hooks::run_with_hooks(&repo.global_hooks, &repo.repo_hooks, &mut ctx, || {
+                dispatch_command(&cli.command, cfg, label, &repo.sources)
+            })
         } else {
             dispatch_command(&cli.command, cfg, label, &repo.sources)
         };
@@ -328,6 +324,15 @@ fn run_config_generate(dest: &str) -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
+fn with_repo_passphrase<T>(
+    config: &VgerConfig,
+    label: Option<&str>,
+    action: impl FnOnce(Option<&str>) -> Result<T, Box<dyn std::error::Error>>,
+) -> Result<T, Box<dyn std::error::Error>> {
+    let passphrase = get_passphrase(config, label)?;
+    action(passphrase.as_deref())
+}
+
 fn dispatch_command(
     command: &Commands,
     cfg: &VgerConfig,
@@ -341,22 +346,47 @@ fn dispatch_command(
             compression,
             source,
             paths,
-        } => run_backup(cfg, label, user_label.clone(), compression.clone(), paths.clone(), sources, source),
-        Commands::List { snapshot, source, last } => run_list(cfg, label, snapshot.clone(), source, *last),
+        } => run_backup(
+            cfg,
+            label,
+            user_label.clone(),
+            compression.clone(),
+            paths.clone(),
+            sources,
+            source,
+        ),
+        Commands::List {
+            snapshot,
+            source,
+            last,
+        } => run_list(cfg, label, snapshot.clone(), source, *last),
         Commands::Extract {
             snapshot,
             dest,
             pattern,
         } => run_extract(cfg, label, snapshot.clone(), dest.clone(), pattern.clone()),
-        Commands::Delete { snapshot, dry_run } => run_delete(cfg, label, snapshot.clone(), *dry_run),
-        Commands::Prune { dry_run, list, source } => run_prune(cfg, label, *dry_run, *list, sources, source),
+        Commands::Delete { snapshot, dry_run } => {
+            run_delete(cfg, label, snapshot.clone(), *dry_run)
+        }
+        Commands::Prune {
+            dry_run,
+            list,
+            source,
+        } => run_prune(cfg, label, *dry_run, *list, sources, source),
         Commands::Check { verify_data } => run_check(cfg, label, *verify_data),
         Commands::Mount {
             snapshot,
             source,
             address,
             cache_size,
-        } => run_mount(cfg, label, snapshot.clone(), address.clone(), *cache_size, source),
+        } => run_mount(
+            cfg,
+            label,
+            snapshot.clone(),
+            address.clone(),
+            *cache_size,
+            source,
+        ),
         Commands::Compact {
             threshold,
             max_repack_size,
@@ -366,34 +396,16 @@ fn dispatch_command(
     }
 }
 
-fn get_passphrase(config: &VgerConfig, label: Option<&str>) -> Result<Option<String>, Box<dyn std::error::Error>> {
-    if config.encryption.mode == "none" {
+fn get_passphrase(
+    config: &VgerConfig,
+    label: Option<&str>,
+) -> Result<Option<String>, Box<dyn std::error::Error>> {
+    if config.encryption.mode == EncryptionModeConfig::None {
         return Ok(None);
     }
 
-    // Check for inline passphrase
-    if let Some(ref p) = config.encryption.passphrase {
-        return Ok(Some(p.clone()));
-    }
-
-    // Check for passcommand
-    if let Some(ref cmd) = config.encryption.passcommand {
-        let output = std::process::Command::new("sh")
-            .arg("-c")
-            .arg(cmd)
-            .output()?;
-        if !output.status.success() {
-            return Err(format!("passcommand failed: {}", String::from_utf8_lossy(&output.stderr)).into());
-        }
-        let pass = String::from_utf8(output.stdout)?.trim().to_string();
+    if let Some(pass) = configured_passphrase(config)? {
         return Ok(Some(pass));
-    }
-
-    // Check VGER_PASSPHRASE env var
-    if let Ok(pass) = std::env::var("VGER_PASSPHRASE") {
-        if !pass.is_empty() {
-            return Ok(Some(pass));
-        }
     }
 
     // Interactive prompt
@@ -405,35 +417,57 @@ fn get_passphrase(config: &VgerConfig, label: Option<&str>) -> Result<Option<Str
     Ok(Some(pass))
 }
 
-fn run_init(config: &VgerConfig, label: Option<&str>) -> Result<(), Box<dyn std::error::Error>> {
-    let passphrase = if config.encryption.mode != "none" {
-        // Try config passphrase/passcommand first, then env var, then interactive
-        if let Some(p) = get_passphrase(config, label)? {
-            Some(p)
-        } else if let Ok(p) = std::env::var("VGER_PASSPHRASE") {
-            if !p.is_empty() {
-                Some(p)
-            } else {
-                let suffix = label.map(|l| format!(" for '{l}'")).unwrap_or_default();
-                let p1 = rpassword::prompt_password(format!("Enter new passphrase{suffix}: "))?;
-                let p2 = rpassword::prompt_password(format!("Confirm passphrase{suffix}: "))?;
-                if p1 != p2 {
-                    return Err("passphrases do not match".into());
-                }
-                Some(p1)
-            }
-        } else {
-            let suffix = label.map(|l| format!(" for '{l}'")).unwrap_or_default();
-            let p1 = rpassword::prompt_password(format!("Enter new passphrase{suffix}: "))?;
-            let p2 = rpassword::prompt_password(format!("Confirm passphrase{suffix}: "))?;
-            if p1 != p2 {
-                return Err("passphrases do not match".into());
-            }
-            Some(p1)
+fn configured_passphrase(
+    config: &VgerConfig,
+) -> Result<Option<String>, Box<dyn std::error::Error>> {
+    if let Some(ref p) = config.encryption.passphrase {
+        return Ok(Some(p.clone()));
+    }
+    if let Some(ref cmd) = config.encryption.passcommand {
+        let output = std::process::Command::new("sh")
+            .arg("-c")
+            .arg(cmd)
+            .output()?;
+        if !output.status.success() {
+            return Err(format!(
+                "passcommand failed: {}",
+                String::from_utf8_lossy(&output.stderr)
+            )
+            .into());
         }
-    } else {
-        None
-    };
+        let pass = String::from_utf8(output.stdout)?.trim().to_string();
+        return Ok(Some(pass));
+    }
+    if let Ok(pass) = std::env::var("VGER_PASSPHRASE") {
+        if !pass.is_empty() {
+            return Ok(Some(pass));
+        }
+    }
+    Ok(None)
+}
+
+fn get_init_passphrase(
+    config: &VgerConfig,
+    label: Option<&str>,
+) -> Result<Option<String>, Box<dyn std::error::Error>> {
+    if config.encryption.mode == EncryptionModeConfig::None {
+        return Ok(None);
+    }
+    if let Some(pass) = configured_passphrase(config)? {
+        return Ok(Some(pass));
+    }
+
+    let suffix = label.map(|l| format!(" for '{l}'")).unwrap_or_default();
+    let p1 = rpassword::prompt_password(format!("Enter new passphrase{suffix}: "))?;
+    let p2 = rpassword::prompt_password(format!("Confirm passphrase{suffix}: "))?;
+    if p1 != p2 {
+        return Err("passphrases do not match".into());
+    }
+    Ok(Some(p1))
+}
+
+fn run_init(config: &VgerConfig, label: Option<&str>) -> Result<(), Box<dyn std::error::Error>> {
+    let passphrase = get_init_passphrase(config, label)?;
 
     commands::init::run(config, passphrase.as_deref())?;
     println!("Repository initialized at: {}", config.repository.url);
@@ -449,91 +483,44 @@ fn run_backup(
     sources: &[SourceEntry],
     source_filter: &[String],
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let passphrase = get_passphrase(config, label)?;
-    let user_label_str = user_label.as_deref().unwrap_or("");
+    with_repo_passphrase(config, label, |passphrase| {
+        let user_label_str = user_label.as_deref().unwrap_or("");
 
-    // Determine compression
-    let compression = if let Some(ref algo) = compression_override {
-        Compression::from_config(algo, config.compression.zstd_level)?
-    } else {
-        Compression::from_config(&config.compression.algorithm, config.compression.zstd_level)?
-    };
-
-    if !source_filter.is_empty() && !paths.is_empty() {
-        return Err("cannot combine --source with ad-hoc paths".into());
-    }
-
-    if !paths.is_empty() {
-        // Ad-hoc paths mode: each path gets its own snapshot
-        for path in &paths {
-            let source_label = config::label_from_path(path);
-            let name = generate_snapshot_name();
-
-            let stats = commands::backup::run(
-                config,
-                &name,
-                passphrase.as_deref(),
-                path,
-                &source_label,
-                &config.exclude_patterns,
-                compression,
-                user_label_str,
-            )?;
-
-            println!("Snapshot created: {name}");
-            if !user_label_str.is_empty() {
-                println!("  Label: {user_label_str}");
-            }
-            println!(
-                "  Source: {path} (label: {source_label})",
-            );
-            println!(
-                "  Files: {}, Original: {}, Compressed: {}, Deduplicated: {}",
-                stats.nfiles,
-                format_bytes(stats.original_size),
-                format_bytes(stats.compressed_size),
-                format_bytes(stats.deduplicated_size),
-            );
-        }
-    } else if sources.is_empty() {
-        return Err("no sources configured and no paths specified".into());
-    } else {
-        // Filter sources by --source if specified
-        let active_sources: Vec<&SourceEntry> = if source_filter.is_empty() {
-            sources.iter().collect()
+        // Determine compression
+        let compression = if let Some(ref algo) = compression_override {
+            Compression::from_config(algo, config.compression.zstd_level)?
         } else {
-            config::select_sources(sources, source_filter)
-                .map_err(|e| -> Box<dyn std::error::Error> { e.into() })?
+            Compression::from_algorithm(config.compression.algorithm, config.compression.zstd_level)
         };
 
-        for source in &active_sources {
-            let name = generate_snapshot_name();
+        if !source_filter.is_empty() && !paths.is_empty() {
+            return Err("cannot combine --source with ad-hoc paths".into());
+        }
 
-            let has_source_hooks = !source.hooks.before.is_empty()
-                || !source.hooks.after.is_empty()
-                || !source.hooks.failed.is_empty()
-                || !source.hooks.finally.is_empty();
+        if !paths.is_empty() {
+            // Ad-hoc paths mode: each path gets its own snapshot
+            for path in &paths {
+                let source_label = config::label_from_path(path);
+                let name = generate_snapshot_name();
 
-            let backup_action = || -> Result<(), Box<dyn std::error::Error>> {
                 let stats = commands::backup::run(
                     config,
-                    &name,
-                    passphrase.as_deref(),
-                    &source.path,
-                    &source.label,
-                    &source.exclude,
-                    compression,
-                    user_label_str,
+                    commands::backup::BackupRequest {
+                        snapshot_name: &name,
+                        passphrase,
+                        source_path: path,
+                        source_label: &source_label,
+                        exclude_patterns: &config.exclude_patterns,
+                        compression,
+                        label: user_label_str,
+                    },
                 )?;
 
                 println!("Snapshot created: {name}");
                 if !user_label_str.is_empty() {
                     println!("  Label: {user_label_str}");
                 }
-                println!(
-                    "  Source: {} (label: {})",
-                    source.path, source.label,
-                );
+                println!("  Source: {path} (label: {source_label})");
                 println!(
                     "  Files: {}, Original: {}, Compressed: {}, Deduplicated: {}",
                     stats.nfiles,
@@ -541,26 +528,73 @@ fn run_backup(
                     format_bytes(stats.compressed_size),
                     format_bytes(stats.deduplicated_size),
                 );
-                Ok(())
+            }
+        } else if sources.is_empty() {
+            return Err("no sources configured and no paths specified".into());
+        } else {
+            // Filter sources by --source if specified
+            let active_sources: Vec<&SourceEntry> = if source_filter.is_empty() {
+                sources.iter().collect()
+            } else {
+                config::select_sources(sources, source_filter)
+                    .map_err(|e| -> Box<dyn std::error::Error> { e.into() })?
             };
 
-            if has_source_hooks {
-                let mut ctx = HookContext {
-                    command: "backup".to_string(),
-                    repository: config.repository.url.clone(),
-                    label: label.map(|s| s.to_string()),
-                    error: None,
-                    source_label: Some(source.label.clone()),
-                    source_path: Some(source.path.clone()),
+            for source in &active_sources {
+                let name = generate_snapshot_name();
+
+                let has_source_hooks = !source.hooks.before.is_empty()
+                    || !source.hooks.after.is_empty()
+                    || !source.hooks.failed.is_empty()
+                    || !source.hooks.finally.is_empty();
+
+                let backup_action = || -> Result<(), Box<dyn std::error::Error>> {
+                    let stats = commands::backup::run(
+                        config,
+                        commands::backup::BackupRequest {
+                            snapshot_name: &name,
+                            passphrase,
+                            source_path: &source.path,
+                            source_label: &source.label,
+                            exclude_patterns: &source.exclude,
+                            compression,
+                            label: user_label_str,
+                        },
+                    )?;
+
+                    println!("Snapshot created: {name}");
+                    if !user_label_str.is_empty() {
+                        println!("  Label: {user_label_str}");
+                    }
+                    println!("  Source: {} (label: {})", source.path, source.label);
+                    println!(
+                        "  Files: {}, Original: {}, Compressed: {}, Deduplicated: {}",
+                        stats.nfiles,
+                        format_bytes(stats.original_size),
+                        format_bytes(stats.compressed_size),
+                        format_bytes(stats.deduplicated_size),
+                    );
+                    Ok(())
                 };
-                hooks::run_source_hooks(&source.hooks, &mut ctx, backup_action)?;
-            } else {
-                backup_action()?;
+
+                if has_source_hooks {
+                    let mut ctx = HookContext {
+                        command: "backup".to_string(),
+                        repository: config.repository.url.clone(),
+                        label: label.map(|s| s.to_string()),
+                        error: None,
+                        source_label: Some(source.label.clone()),
+                        source_path: Some(source.path.clone()),
+                    };
+                    hooks::run_source_hooks(&source.hooks, &mut ctx, backup_action)?;
+                } else {
+                    backup_action()?;
+                }
             }
         }
-    }
 
-    Ok(())
+        Ok(())
+    })
 }
 
 fn run_list(
@@ -574,9 +608,10 @@ fn run_list(
         return Err("cannot combine --source with --snapshot".into());
     }
 
-    let passphrase = get_passphrase(config, label)?;
-
-    let result = commands::list::run(config, passphrase.as_deref(), snapshot_name.as_deref())?;
+    let result = with_repo_passphrase(config, label, |passphrase| {
+        commands::list::run(config, passphrase, snapshot_name.as_deref())
+            .map_err(|e| -> Box<dyn std::error::Error> { Box::new(e) })
+    })?;
 
     match result {
         commands::list::ListResult::Snapshots(mut snapshots) => {
@@ -628,7 +663,10 @@ fn run_list(
                 };
                 println!(
                     "{}{:o} {:>8} {}",
-                    type_char, item.mode & 0o7777, item.size, item.path
+                    type_char,
+                    item.mode & 0o7777,
+                    item.size,
+                    item.path
                 );
             }
         }
@@ -644,15 +682,16 @@ fn run_extract(
     dest: String,
     pattern: Option<String>,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let passphrase = get_passphrase(config, label)?;
-
-    let stats = commands::extract::run(
-        config,
-        passphrase.as_deref(),
-        &snapshot_name,
-        &dest,
-        pattern.as_deref(),
-    )?;
+    let stats = with_repo_passphrase(config, label, |passphrase| {
+        commands::extract::run(
+            config,
+            passphrase,
+            &snapshot_name,
+            &dest,
+            pattern.as_deref(),
+        )
+        .map_err(|e| -> Box<dyn std::error::Error> { Box::new(e) })
+    })?;
 
     println!(
         "Extracted: {} files, {} dirs, {} symlinks ({})",
@@ -671,9 +710,10 @@ fn run_delete(
     snapshot_name: String,
     dry_run: bool,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let passphrase = get_passphrase(config, label)?;
-
-    let stats = commands::delete::run(config, passphrase.as_deref(), &snapshot_name, dry_run)?;
+    let stats = with_repo_passphrase(config, label, |passphrase| {
+        commands::delete::run(config, passphrase, &snapshot_name, dry_run)
+            .map_err(|e| -> Box<dyn std::error::Error> { Box::new(e) })
+    })?;
 
     if dry_run {
         println!("Dry run: would delete snapshot '{}'", stats.snapshot_name);
@@ -702,10 +742,10 @@ fn run_prune(
     sources: &[SourceEntry],
     source_filter: &[String],
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let passphrase = get_passphrase(config, label)?;
-
-    let (stats, list_entries) =
-        commands::prune::run(config, passphrase.as_deref(), dry_run, list, sources, source_filter)?;
+    let (stats, list_entries) = with_repo_passphrase(config, label, |passphrase| {
+        commands::prune::run(config, passphrase, dry_run, list, sources, source_filter)
+            .map_err(|e| -> Box<dyn std::error::Error> { Box::new(e) })
+    })?;
 
     if list || dry_run {
         for entry in &list_entries {
@@ -746,9 +786,10 @@ fn run_check(
     label: Option<&str>,
     verify_data: bool,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let passphrase = get_passphrase(config, label)?;
-
-    let result = commands::check::run(config, passphrase.as_deref(), verify_data)?;
+    let result = with_repo_passphrase(config, label, |passphrase| {
+        commands::check::run(config, passphrase, verify_data)
+            .map_err(|e| -> Box<dyn std::error::Error> { Box::new(e) })
+    })?;
 
     if !result.errors.is_empty() {
         println!("Errors found:");
@@ -782,16 +823,17 @@ fn run_mount(
     cache_size: usize,
     source_filter: &[String],
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let passphrase = get_passphrase(config, label)?;
-
-    commands::mount::run(
-        config,
-        passphrase.as_deref(),
-        snapshot_name.as_deref(),
-        &address,
-        cache_size,
-        source_filter,
-    )?;
+    with_repo_passphrase(config, label, |passphrase| {
+        commands::mount::run(
+            config,
+            passphrase,
+            snapshot_name.as_deref(),
+            &address,
+            cache_size,
+            source_filter,
+        )
+        .map_err(|e| -> Box<dyn std::error::Error> { Box::new(e) })
+    })?;
 
     Ok(())
 }
@@ -803,13 +845,12 @@ fn run_compact(
     max_repack_size: Option<String>,
     dry_run: bool,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let passphrase = get_passphrase(config, label)?;
+    let max_bytes = max_repack_size.map(|s| parse_size(&s)).transpose()?;
 
-    let max_bytes = max_repack_size
-        .map(|s| parse_size(&s))
-        .transpose()?;
-
-    let stats = commands::compact::run(config, passphrase.as_deref(), threshold, max_bytes, dry_run)?;
+    let stats = with_repo_passphrase(config, label, |passphrase| {
+        commands::compact::run(config, passphrase, threshold, max_bytes, dry_run)
+            .map_err(|e| -> Box<dyn std::error::Error> { Box::new(e) })
+    })?;
 
     if dry_run {
         println!(
@@ -849,7 +890,9 @@ fn parse_size(s: &str) -> Result<u64, Box<dyn std::error::Error>> {
         _ => (s, 1u64),
     };
 
-    let num: f64 = num_str.parse().map_err(|_| format!("invalid size: '{s}'"))?;
+    let num: f64 = num_str
+        .parse()
+        .map_err(|_| format!("invalid size: '{s}'"))?;
     Ok((num * multiplier as f64) as u64)
 }
 

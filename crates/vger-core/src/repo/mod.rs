@@ -12,7 +12,7 @@ use crate::config::{ChunkerConfig, RepositoryConfig};
 use crate::crypto::chunk_id::ChunkId;
 use crate::crypto::key::{EncryptedKey, MasterKey};
 use crate::crypto::{self, CryptoEngine, PlaintextEngine};
-use crate::error::{VgerError, Result};
+use crate::error::{Result, VgerError};
 use crate::index::ChunkIndex;
 use crate::storage::StorageBackend;
 
@@ -210,7 +210,9 @@ impl Repository {
             .ok_or_else(|| VgerError::InvalidFormat("missing manifest".into()))?;
         let (obj_type, manifest_bytes) = unpack_object(&manifest_data, crypto.as_ref())?;
         if obj_type != ObjectType::Manifest {
-            return Err(VgerError::InvalidFormat("manifest has wrong type tag".into()));
+            return Err(VgerError::InvalidFormat(
+                "manifest has wrong type tag".into(),
+            ));
         }
         let manifest: Manifest = rmp_serde::from_slice(&manifest_bytes)?;
 
@@ -256,8 +258,7 @@ impl Repository {
 
         // Save chunk index
         let index_bytes = rmp_serde::to_vec(&self.chunk_index)?;
-        let index_packed =
-            pack_object(ObjectType::ChunkIndex, &index_bytes, self.crypto.as_ref())?;
+        let index_packed = pack_object(ObjectType::ChunkIndex, &index_bytes, self.crypto.as_ref())?;
         self.storage.put("index", &index_packed)?;
 
         Ok(())
@@ -282,12 +283,18 @@ impl Repository {
 
         // Dedup check against pending blobs in both pack writers
         if self.data_pack_writer.contains_pending(&chunk_id) {
-            let stored_size = self.data_pack_writer.get_pending_stored_size(&chunk_id).unwrap();
+            let stored_size = self
+                .data_pack_writer
+                .get_pending_stored_size(&chunk_id)
+                .unwrap();
             self.data_pack_writer.increment_pending(&chunk_id);
             return Ok((chunk_id, stored_size, false));
         }
         if self.tree_pack_writer.contains_pending(&chunk_id) {
-            let stored_size = self.tree_pack_writer.get_pending_stored_size(&chunk_id).unwrap();
+            let stored_size = self
+                .tree_pack_writer
+                .get_pending_stored_size(&chunk_id)
+                .unwrap();
             self.tree_pack_writer.increment_pending(&chunk_id);
             return Ok((chunk_id, stored_size, false));
         }
@@ -305,7 +312,12 @@ impl Repository {
             PackType::Data => &mut self.data_pack_writer,
             PackType::Tree => &mut self.tree_pack_writer,
         };
-        writer.add_blob(ObjectType::ChunkData as u8, chunk_id, packed, uncompressed_size);
+        writer.add_blob(
+            ObjectType::ChunkData as u8,
+            chunk_id,
+            packed,
+            uncompressed_size,
+        );
 
         // Flush if target size reached
         if writer.should_flush() {

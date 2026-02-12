@@ -3,7 +3,7 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 use chrono::{DateTime, Datelike, IsoWeek, Timelike, Utc};
 
 use crate::config::RetentionConfig;
-use crate::error::{VgerError, Result};
+use crate::error::{Result, VgerError};
 use crate::repo::manifest::SnapshotEntry;
 
 #[derive(Debug, Clone)]
@@ -173,22 +173,58 @@ pub fn apply_policy(
 
     // Bucket rules: hourly → daily → weekly → monthly → yearly
     if let Some(n) = policy.keep_hourly {
-        apply_bucket_rule(&indices, &times, &mut kept, &mut reasons, n, hourly_key, "hourly");
+        apply_bucket_rule(
+            &indices,
+            &times,
+            &mut kept,
+            &mut reasons,
+            n,
+            hourly_key,
+            "hourly",
+        );
     }
     if let Some(n) = policy.keep_daily {
-        apply_bucket_rule(&indices, &times, &mut kept, &mut reasons, n, daily_key, "daily");
+        apply_bucket_rule(
+            &indices,
+            &times,
+            &mut kept,
+            &mut reasons,
+            n,
+            daily_key,
+            "daily",
+        );
     }
     if let Some(n) = policy.keep_weekly {
-        apply_bucket_rule(&indices, &times, &mut kept, &mut reasons, n, weekly_key, "weekly");
+        apply_bucket_rule(
+            &indices,
+            &times,
+            &mut kept,
+            &mut reasons,
+            n,
+            weekly_key,
+            "weekly",
+        );
     }
     if let Some(n) = policy.keep_monthly {
         apply_bucket_rule(
-            &indices, &times, &mut kept, &mut reasons, n, monthly_key, "monthly",
+            &indices,
+            &times,
+            &mut kept,
+            &mut reasons,
+            n,
+            monthly_key,
+            "monthly",
         );
     }
     if let Some(n) = policy.keep_yearly {
         apply_bucket_rule(
-            &indices, &times, &mut kept, &mut reasons, n, yearly_key, "yearly",
+            &indices,
+            &times,
+            &mut kept,
+            &mut reasons,
+            n,
+            yearly_key,
+            "yearly",
         );
     }
 
@@ -247,9 +283,7 @@ pub fn apply_policy_by_label(
         let group_snapshots: Vec<SnapshotEntry> =
             indices.iter().map(|&i| snapshots[i].clone()).collect();
 
-        let policy = source_retentions
-            .get(*label)
-            .unwrap_or(default_retention);
+        let policy = source_retentions.get(*label).unwrap_or(default_retention);
 
         if !policy.has_any_rule() {
             // No retention rules for this group — keep all

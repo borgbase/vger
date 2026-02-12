@@ -1,6 +1,6 @@
 use std::io::Read;
 
-use crate::error::{VgerError, Result};
+use crate::error::{Result, VgerError};
 use crate::storage::StorageBackend;
 
 /// HTTP REST backend for remote repository access via vger-server.

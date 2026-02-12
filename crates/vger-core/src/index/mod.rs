@@ -87,7 +87,13 @@ impl ChunkIndex {
 
     /// Update the storage location of an existing chunk (used by compact).
     /// Returns `true` if the chunk was found and updated.
-    pub fn update_location(&mut self, id: &ChunkId, pack_id: PackId, pack_offset: u64, stored_size: u32) -> bool {
+    pub fn update_location(
+        &mut self,
+        id: &ChunkId,
+        pack_id: PackId,
+        pack_offset: u64,
+        stored_size: u32,
+    ) -> bool {
         if let Some(entry) = self.entries.get_mut(id) {
             entry.pack_id = pack_id;
             entry.pack_offset = pack_offset;

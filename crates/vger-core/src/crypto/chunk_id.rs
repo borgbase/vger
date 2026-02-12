@@ -13,8 +13,8 @@ pub struct ChunkId(pub [u8; 32]);
 impl ChunkId {
     /// Compute a chunk ID using keyed BLAKE2b-256 (BLAKE2b-MAC with 32-byte output).
     pub fn compute(key: &[u8; 32], data: &[u8]) -> Self {
-        let mut hasher = KeyedBlake2b256::new_from_slice(key)
-            .expect("valid 32-byte key for BLAKE2b");
+        let mut hasher =
+            KeyedBlake2b256::new_from_slice(key).expect("valid 32-byte key for BLAKE2b");
         Mac::update(&mut hasher, data);
         let result = hasher.finalize();
         let mut out = [0u8; 32];

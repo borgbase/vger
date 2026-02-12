@@ -87,12 +87,7 @@ pub async fn health(State(state): State<AppState>) -> impl IntoResponse {
     let data_dir = state.inner.data_dir.clone();
     let repo_count = tokio::task::spawn_blocking(move || {
         std::fs::read_dir(&data_dir)
-            .map(|entries| {
-                entries
-                    .flatten()
-                    .filter(|e| e.path().is_dir())
-                    .count()
-            })
+            .map(|entries| entries.flatten().filter(|e| e.path().is_dir()).count())
             .unwrap_or(0)
     })
     .await
@@ -237,12 +232,11 @@ async fn repack(
     let repo_name = repo.to_string();
     let state_clone = state.clone();
 
-    let results = tokio::task::spawn_blocking(move || {
-        execute_repack(&state_clone, &repo_name, &plan)
-    })
-    .await
-    .map_err(|e| ServerError::Internal(e.to_string()))?
-    .map_err(|e| ServerError::Internal(e.to_string()))?;
+    let results =
+        tokio::task::spawn_blocking(move || execute_repack(&state_clone, &repo_name, &plan))
+            .await
+            .map_err(|e| ServerError::Internal(e.to_string()))?
+            .map_err(|e| ServerError::Internal(e.to_string()))?;
 
     Ok(axum::Json(results).into_response())
 }
@@ -298,11 +292,7 @@ struct RepackOpResult {
     deleted: bool,
 }
 
-fn execute_repack(
-    state: &AppState,
-    repo: &str,
-    plan: &RepackPlan,
-) -> Result<RepackResult, String> {
+fn execute_repack(state: &AppState, repo: &str, plan: &RepackPlan) -> Result<RepackResult, String> {
     use std::io::{Read, Seek, SeekFrom};
 
     let mut completed = Vec::new();
@@ -368,8 +358,7 @@ fn execute_repack(
             .ok_or_else(|| "invalid new pack path".to_string())?;
 
         if let Some(parent) = new_pack_path.parent() {
-            std::fs::create_dir_all(parent)
-                .map_err(|e| format!("mkdir: {e}"))?;
+            std::fs::create_dir_all(parent).map_err(|e| format!("mkdir: {e}"))?;
         }
 
         std::fs::write(&new_pack_path, &new_pack_data)
@@ -435,9 +424,7 @@ fn check_structure(repo_dir: &std::path::Path) -> serde_json::Value {
                 let shard_name = shard_entry.file_name().to_string_lossy().to_string();
 
                 // Verify shard is 2-char hex
-                if shard_name.len() != 2
-                    || !shard_name.chars().all(|c| c.is_ascii_hexdigit())
-                {
+                if shard_name.len() != 2 || !shard_name.chars().all(|c| c.is_ascii_hexdigit()) {
                     errors.push(format!("invalid shard directory: packs/{shard_name}"));
                     continue;
                 }
@@ -451,9 +438,8 @@ fn check_structure(repo_dir: &std::path::Path) -> serde_json::Value {
                         if pack_name.len() != 64
                             || !pack_name.chars().all(|c| c.is_ascii_hexdigit())
                         {
-                            errors.push(format!(
-                                "invalid pack name: packs/{shard_name}/{pack_name}"
-                            ));
+                            errors
+                                .push(format!("invalid pack name: packs/{shard_name}/{pack_name}"));
                         }
 
                         let meta = pack_entry.metadata();
