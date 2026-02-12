@@ -1,4 +1,5 @@
 use crate::config::{EncryptionModeConfig, VgerConfig};
+use crate::crypto::select::{self, AutoAeadMode};
 use crate::error::Result;
 use crate::repo::{EncryptionMode, Repository};
 use crate::storage;
@@ -9,7 +10,12 @@ pub fn run(config: &VgerConfig, passphrase: Option<&str>) -> Result<Repository> 
 
     let encryption = match config.encryption.mode {
         EncryptionModeConfig::None => EncryptionMode::None,
+        EncryptionModeConfig::Auto => match select::select_best_aead() {
+            AutoAeadMode::Aes256Gcm => EncryptionMode::Aes256Gcm,
+            AutoAeadMode::Chacha20Poly1305 => EncryptionMode::Chacha20Poly1305,
+        },
         EncryptionModeConfig::Aes256Gcm => EncryptionMode::Aes256Gcm,
+        EncryptionModeConfig::Chacha20Poly1305 => EncryptionMode::Chacha20Poly1305,
     };
 
     let repo = Repository::init(

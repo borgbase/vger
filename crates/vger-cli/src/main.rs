@@ -748,8 +748,9 @@ fn get_init_passphrase(
 fn run_init(config: &VgerConfig, label: Option<&str>) -> Result<(), Box<dyn std::error::Error>> {
     let passphrase = get_init_passphrase(config, label)?;
 
-    commands::init::run(config, passphrase.as_deref())?;
+    let repo = commands::init::run(config, passphrase.as_deref())?;
     println!("Repository initialized at: {}", config.repository.url);
+    println!("Encryption mode: {}", repo.config.encryption.as_str());
     Ok(())
 }
 
@@ -1149,10 +1150,7 @@ fn run_info(config: &VgerConfig, label: Option<&str>) -> Result<(), Box<dyn std:
     table.add_row(vec!["Repository".to_string(), repo_name.to_string()]);
     table.add_row(vec!["URL".to_string(), config.repository.url.clone()]);
 
-    let encryption = match &stats.encryption {
-        vger_core::repo::EncryptionMode::None => "none",
-        vger_core::repo::EncryptionMode::Aes256Gcm => "aes256gcm",
-    };
+    let encryption = stats.encryption.as_str();
     table.add_row(vec!["Encryption".to_string(), encryption.to_string()]);
     table.add_row(vec![
         "Created".to_string(),

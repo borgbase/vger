@@ -62,7 +62,7 @@ repositories:
     rest_token: "some-secret-token"
 
 encryption:
-  mode: "aes256gcm"
+  mode: "auto"
 
 sources:
   - "/home/user/documents"

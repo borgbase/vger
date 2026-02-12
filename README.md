@@ -12,7 +12,7 @@ Inspired by [BorgBackup](https://github.com/borgbackup/borg/), [Borgmatic](https
 
 - Deduplication via FastCDC content-defined chunking
 - Compression with LZ4 (default), Zstandard, or none
-- Encryption with AES-256-GCM and Argon2id key derivation
+- Encryption with auto-selected AES-256-GCM or ChaCha20-Poly1305 and Argon2id key derivation
 - Storage backends via Apache OpenDAL (local filesystem, S3-compatible storage, SFTP)
 - Dedicated REST server (`vger-server`) for append-only enforcement, quotas, lock TTLs, and server-side compaction
 - Built-in web interface (webDAV) to browse snapshots and restore files
@@ -61,4 +61,4 @@ schedule:
 
 ## License
 
-TBD
+GNU General Public License v3.0

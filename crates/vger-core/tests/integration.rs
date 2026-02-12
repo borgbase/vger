@@ -135,6 +135,28 @@ fn manifest_survives_reopen() {
 }
 
 #[test]
+fn init_auto_mode_persists_concrete_encryption_mode() {
+    let tmp = tempfile::tempdir().unwrap();
+    let repo_dir = tmp.path().join("repo");
+    std::fs::create_dir_all(&repo_dir).unwrap();
+
+    let mut config = make_test_config(&repo_dir);
+    config.encryption.mode = EncryptionModeConfig::Auto;
+
+    let repo = commands::init::run(&config, Some("test-passphrase")).unwrap();
+    let selected = repo.config.encryption.clone();
+    assert!(matches!(
+        selected,
+        EncryptionMode::Aes256Gcm | EncryptionMode::Chacha20Poly1305
+    ));
+    drop(repo);
+
+    let storage = Box::new(OpendalBackend::local(repo_dir.to_str().unwrap()).unwrap());
+    let reopened = Repository::open(storage, Some("test-passphrase")).unwrap();
+    assert_eq!(reopened.config.encryption, selected);
+}
+
+#[test]
 fn backup_exclude_if_present_skips_marked_directories() {
     let tmp = tempfile::tempdir().unwrap();
     let repo_dir = tmp.path().join("repo");

@@ -67,8 +67,8 @@ repositories:
 
 # Encryption settings
 encryption:
-  # Mode: "aes256gcm" or "none" (default: "aes256gcm")
-  mode: aes256gcm
+  # Mode: "auto", "aes256gcm", "chacha20poly1305", or "none" (default: "auto")
+  mode: auto
 
   # Passphrase (optional — if omitted, vger will prompt interactively)
   # passphrase: my-secret-passphrase

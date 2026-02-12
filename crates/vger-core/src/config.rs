@@ -369,15 +369,21 @@ pub struct EncryptionConfig {
 pub enum EncryptionModeConfig {
     #[serde(rename = "none")]
     None,
+    #[serde(rename = "auto")]
+    Auto,
     #[serde(rename = "aes256gcm")]
     Aes256Gcm,
+    #[serde(rename = "chacha20poly1305")]
+    Chacha20Poly1305,
 }
 
 impl EncryptionModeConfig {
     pub fn as_str(self) -> &'static str {
         match self {
             EncryptionModeConfig::None => "none",
+            EncryptionModeConfig::Auto => "auto",
             EncryptionModeConfig::Aes256Gcm => "aes256gcm",
+            EncryptionModeConfig::Chacha20Poly1305 => "chacha20poly1305",
         }
     }
 }
@@ -460,7 +466,7 @@ impl Default for CompressionConfig {
 }
 
 fn default_encryption_mode() -> EncryptionModeConfig {
-    EncryptionModeConfig::Aes256Gcm
+    EncryptionModeConfig::Auto
 }
 
 fn default_min_size() -> u32 {
@@ -1252,7 +1258,7 @@ repositories:
     label: main
 
 encryption:
-  mode: aes256gcm
+  mode: auto
   # passphrase: secret
   # passcommand: "pass show vger"
 
@@ -1541,6 +1547,40 @@ repositories:
         assert_eq!(repos[1].label.as_deref(), Some("remote"));
         assert_eq!(repos[1].config.repository.url, "/backups/remote");
         assert_eq!(repos[1].sources.len(), 1);
+    }
+
+    #[test]
+    fn test_encryption_mode_defaults_to_auto_when_omitted() {
+        let yaml = r#"
+repositories:
+  - url: /tmp/repo
+sources:
+  - /home/user
+"#;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.yaml");
+        fs::write(&path, yaml).unwrap();
+
+        let repos = load_and_resolve(&path).unwrap();
+        assert_eq!(repos[0].config.encryption.mode, "auto");
+    }
+
+    #[test]
+    fn test_encryption_mode_chacha20poly1305_parses() {
+        let yaml = r#"
+encryption:
+  mode: chacha20poly1305
+repositories:
+  - url: /tmp/repo
+sources:
+  - /home/user
+"#;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.yaml");
+        fs::write(&path, yaml).unwrap();
+
+        let repos = load_and_resolve(&path).unwrap();
+        assert_eq!(repos[0].config.encryption.mode, "chacha20poly1305");
     }
 
     #[test]

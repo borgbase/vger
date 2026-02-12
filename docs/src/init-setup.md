@@ -16,7 +16,7 @@ vger config --dest ~/.config/vger/config.yaml
 
 ## Encryption
 
-Encryption is enabled by default (AES-256-GCM). No config is needed unless you want to disable it with `mode: "none"`.
+Encryption is enabled by default (`mode: "auto"`). During `init`, vger benchmarks AES-256-GCM and ChaCha20-Poly1305, chooses one, and stores that concrete mode in the repository config. No config is needed unless you want to force a mode or disable encryption with `mode: "none"`.
 
 The passphrase is requested interactively at init time. You can also supply it via:
 

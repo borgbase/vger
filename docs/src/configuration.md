@@ -20,7 +20,7 @@ You can also set `VGER_PASSPHRASE` to supply the passphrase non-interactively.
 
 ## Minimal example
 
-A complete but minimal working config. Encryption defaults to AES-256-GCM, so you only need repositories and sources:
+A complete but minimal working config. Encryption defaults to `auto` (init benchmarks AES-256-GCM vs ChaCha20-Poly1305 and pins the repo), so you only need repositories and sources:
 
 ```yaml
 repositories:
@@ -97,11 +97,13 @@ These directories are backed up together as one snapshot. You cannot use both `p
 
 ## Encryption
 
-Encryption is enabled by default (AES-256-GCM with Argon2id key derivation). You only need an `encryption` section to supply a passcommand or to disable encryption:
+Encryption is enabled by default (`auto` mode with Argon2id key derivation). You only need an `encryption` section to supply a passcommand, force a specific algorithm, or disable encryption:
 
 ```yaml
 encryption:
-  # mode: "aes256gcm"                # Default — can be omitted
+  # mode: "auto"                     # Default — benchmark at init and persist chosen mode
+  # mode: "aes256gcm"                # Force AES-256-GCM
+  # mode: "chacha20poly1305"         # Force ChaCha20-Poly1305
   # mode: "none"                     # Disable encryption
   # passphrase: "inline-secret"      # Not recommended for production
   # passcommand: "pass show borg"    # Shell command that prints the passphrase

@@ -8,6 +8,7 @@ use std::time::{Duration, Instant};
 use chrono::{DateTime, Local};
 use crossbeam_channel::{Receiver, Sender};
 use notify::{Config as NotifyConfig, RecommendedWatcher, RecursiveMode, Watcher};
+use slint::{ModelRc, SharedString, StandardListViewItem, VecModel};
 use tray_icon::menu::{Menu, MenuEvent, MenuId, MenuItem};
 use tray_icon::{Icon, TrayIconBuilder};
 use vger_core::app::{self, operations, passphrase};
@@ -15,68 +16,44 @@ use vger_core::config::{self, ResolvedRepo, ScheduleConfig};
 use vger_core::error::VgerError;
 
 slint::slint! {
-    import { VerticalBox, HorizontalBox, Button, LineEdit, ScrollView, TabWidget, ComboBox } from "std-widgets.slint";
+    import { VerticalBox, HorizontalBox, Button, LineEdit, ScrollView, TabWidget, ComboBox, StandardTableView } from "std-widgets.slint";
 
-    export component MainWindow inherits Window {
-        in-out property <string> config_path;
-        in-out property <string> schedule_text;
-        in-out property <string> status_text;
-        in-out property <string> snapshot_id;
-        in-out property <string> extract_dest;
+    export component RestoreWindow inherits Window {
+        in-out property <string> snapshot_name;
+        in-out property <string> repo_name;
+        in-out property <string> extract_dest: ".";
         in-out property <string> extract_pattern;
-        in-out property <string> snapshots_text;
-        in-out property <string> snapshot_items_text;
-        in-out property <string> log_text;
-        in-out property <string> repo_info_text;
-        in-out property <string> sources_text;
-        in-out property <[string]> repo_names;
-        in-out property <[string]> source_names;
-        in-out property <string> repos_combo_value;
-        in-out property <string> sources_combo_value;
-        in-out property <string> snapshots_repo_combo_value;
+        in-out property <string> status_text: "Ready";
+        in-out property <[[StandardListViewItem]]> contents_rows: [];
 
-        callback backup_all_clicked();
-        callback refresh_snapshots_clicked();
-        callback show_snapshot_items_clicked();
-        callback extract_clicked();
-        callback reload_config_clicked();
-        callback pause_schedule_clicked();
-        callback quit_clicked();
-        callback fetch_repo_info_clicked();
-        callback backup_repo_clicked();
-        callback backup_source_clicked();
+        callback restore_all_clicked();
+        callback restore_filtered_clicked();
 
-        title: "V'Ger";
-        width: 1100px;
-        height: 760px;
+        title: "Restore Snapshot";
+        width: 900px;
+        height: 600px;
 
         VerticalBox {
             padding: 12px;
             spacing: 8px;
 
-            // ── Header ──
-
-            Text {
-                text: "V'Ger Desktop";
-                font-size: 26px;
+            HorizontalBox {
+                spacing: 8px;
+                Text { text: "Snapshot:"; vertical-alignment: center; }
+                Text { text: root.snapshot_name; vertical-alignment: center; }
+                Text { text: "  Repository:"; vertical-alignment: center; }
+                Text { text: root.repo_name; vertical-alignment: center; }
             }
 
-            HorizontalBox {
-                spacing: 10px;
-                Text { text: "Config:"; }
-                Text { text: root.config_path; wrap: word-wrap; }
-            }
-
-            HorizontalBox {
-                spacing: 10px;
-                Text { text: "Schedule:"; }
-                Text { text: root.schedule_text; wrap: word-wrap; }
-            }
-
-            HorizontalBox {
-                spacing: 10px;
-                Text { text: "Status:"; }
-                Text { text: root.status_text; wrap: word-wrap; }
+            StandardTableView {
+                vertical-stretch: 1;
+                columns: [
+                    { title: "Path", horizontal-stretch: 1 },
+                    { title: "Type", min-width: 50px },
+                    { title: "Permissions", min-width: 80px },
+                    { title: "Size", min-width: 90px },
+                ];
+                rows: root.contents_rows;
             }
 
             Rectangle {
@@ -86,68 +63,104 @@ slint::slint! {
 
             HorizontalBox {
                 spacing: 8px;
-                Button {
-                    text: "Backup All";
-                    clicked => { root.backup_all_clicked(); }
-                }
-                Button {
-                    text: "Reload Config";
-                    clicked => { root.reload_config_clicked(); }
-                }
-                Button {
-                    text: "Pause/Resume Schedule";
-                    clicked => { root.pause_schedule_clicked(); }
-                }
-                Button {
-                    text: "Quit";
-                    clicked => { root.quit_clicked(); }
+                Text { text: "Destination:"; vertical-alignment: center; }
+                LineEdit {
+                    horizontal-stretch: 1;
+                    text <=> root.extract_dest;
                 }
             }
 
-            Rectangle {
-                height: 1px;
-                background: #d5d5d5;
+            HorizontalBox {
+                spacing: 8px;
+                Text { text: "Filter pattern (optional):"; vertical-alignment: center; }
+                LineEdit {
+                    horizontal-stretch: 1;
+                    text <=> root.extract_pattern;
+                }
             }
+
+            HorizontalBox {
+                spacing: 8px;
+                Button {
+                    text: "Restore All";
+                    clicked => { root.restore_all_clicked(); }
+                }
+                Button {
+                    text: "Restore Filtered";
+                    clicked => { root.restore_filtered_clicked(); }
+                }
+                Text {
+                    vertical-alignment: center;
+                    text: root.status_text;
+                }
+            }
+        }
+    }
+
+    export component MainWindow inherits Window {
+        in-out property <string> config_path;
+        in-out property <string> schedule_text;
+        in-out property <string> status_text;
+        in-out property <string> log_text;
+
+        // Repo table
+        in-out property <[[StandardListViewItem]]> repo_rows: [];
+
+        // Source table
+        in-out property <[[StandardListViewItem]]> source_rows: [];
+
+        // Snapshot table
+        in-out property <[string]> repo_names: [];
+        in-out property <string> snapshots_repo_combo_value;
+        in-out property <[[StandardListViewItem]]> snapshot_rows: [];
+
+        callback backup_all_clicked();
+        callback reload_config_clicked();
+        callback pause_schedule_clicked();
+        callback quit_clicked();
+        callback backup_selected_repo_clicked(/* row */ int);
+        callback backup_selected_source_clicked(/* row */ int);
+        callback refresh_snapshots_clicked();
+        callback restore_selected_snapshot_clicked(/* row */ int);
+        callback snapshots_repo_changed(/* value */ string);
+
+        title: "V'Ger";
+        width: 1100px;
+        height: 760px;
+
+        VerticalBox {
+            padding: 0px;
+            spacing: 0px;
 
             // ── Tabs ──
-
             TabWidget {
+                vertical-stretch: 1;
+
                 Tab {
                     title: "Repositories";
                     VerticalBox {
                         spacing: 8px;
                         padding: 8px;
 
-                        HorizontalBox {
-                            spacing: 8px;
-                            Text { text: "Repository:"; vertical-alignment: center; }
-                            ComboBox {
-                                model: root.repo_names;
-                                current-value <=> root.repos_combo_value;
-                            }
-                            Button {
-                                text: "Fetch Info";
-                                clicked => { root.fetch_repo_info_clicked(); }
-                            }
-                            Button {
-                                text: "Backup This Repo";
-                                clicked => { root.backup_repo_clicked(); }
-                            }
+                        repo-table := StandardTableView {
+                            vertical-stretch: 1;
+                            columns: [
+                                { title: "Name" },
+                                { title: "Encryption" },
+                                { title: "Snapshots" },
+                                { title: "Last Snapshot" },
+                                { title: "Raw Size" },
+                                { title: "Dedup Size" },
+                            ];
+                            rows: root.repo_rows;
                         }
 
-                        Text {
-                            text: "Repository Info";
-                            font-size: 16px;
-                        }
-                        ScrollView {
-                            vertical-stretch: 1;
-                            Rectangle {
-                                background: #f4f4f4;
-                                border-color: #dcdcdc;
-                                border-width: 1px;
-                                Text {
-                                    text: root.repo_info_text;
-                                    wrap: word-wrap;
+                        HorizontalBox {
+                            spacing: 8px;
+                            Button {
+                                text: "Backup Selected Repo";
+                                clicked => {
+                                    root.backup-selected-repo-clicked(repo-table.current-row);
                                 }
                             }
                         }
@@ -160,32 +173,23 @@ slint::slint! {
                         spacing: 8px;
                         padding: 8px;
 
-                        HorizontalBox {
-                            spacing: 8px;
-                            Text { text: "Source:"; vertical-alignment: center; }
-                            ComboBox {
-                                model: root.source_names;
-                                current-value <=> root.sources_combo_value;
-                            }
-                            Button {
-                                text: "Backup Source";
-                                clicked => { root.backup_source_clicked(); }
-                            }
+                        source-table := StandardTableView {
+                            vertical-stretch: 1;
+                            columns: [
+                                { title: "Label" },
+                                { title: "Paths" },
+                                { title: "Excludes" },
+                                { title: "Target Repos" },
+                            ];
+                            rows: root.source_rows;
                         }
 
-                        Text {
-                            text: "Configured Sources";
-                            font-size: 16px;
-                        }
-                        ScrollView {
-                            vertical-stretch: 1;
-                            Rectangle {
-                                background: #f4f4f4;
-                                border-color: #dcdcdc;
-                                border-width: 1px;
-                                Text {
-                                    text: root.sources_text;
-                                    wrap: word-wrap;
+                        HorizontalBox {
+                            spacing: 8px;
+                            Button {
+                                text: "Backup Selected Source";
+                                clicked => {
+                                    root.backup-selected-source-clicked(source-table.current-row);
                                 }
                             }
                         }
@@ -204,79 +208,52 @@ slint::slint! {
                             ComboBox {
                                 model: root.repo_names;
                                 current-value <=> root.snapshots_repo_combo_value;
+                                selected(value) => {
+                                    root.snapshots_repo_changed(value);
+                                }
                             }
                             Button {
-                                text: "Refresh Snapshots";
+                                text: "Refresh";
                                 clicked => { root.refresh_snapshots_clicked(); }
                             }
                         }
 
+                        snapshot-table := StandardTableView {
+                            vertical-stretch: 1;
+                            columns: [
+                                { title: "ID" },
+                                { title: "Source" },
+                                { title: "Label" },
+                                { title: "Time" },
+                            ];
+                            rows: root.snapshot_rows;
+                        }
+
                         HorizontalBox {
                             spacing: 8px;
-                            Text { text: "Snapshot ID:"; }
-                            LineEdit { text <=> root.snapshot_id; }
                             Button {
-                                text: "Show Contents";
-                                clicked => { root.show_snapshot_items_clicked(); }
+                                text: "Restore Selected Snapshot";
+                                clicked => {
+                                    root.restore-selected-snapshot-clicked(snapshot-table.current-row);
+                                }
                             }
                         }
+                    }
+                }
 
-                        HorizontalBox {
-                            spacing: 8px;
-                            Text { text: "Extract Destination:"; }
-                            LineEdit { text <=> root.extract_dest; }
-                        }
-
-                        HorizontalBox {
-                            spacing: 8px;
-                            Text { text: "Extract Pattern (optional):"; }
-                            LineEdit { text <=> root.extract_pattern; }
-                            Button {
-                                text: "Extract";
-                                clicked => { root.extract_clicked(); }
-                            }
-                        }
-
-                        HorizontalBox {
-                            spacing: 12px;
-
-                            VerticalBox {
-                                spacing: 6px;
+                Tab {
+                    title: "Log";
+                    VerticalBox {
+                        padding: 8px;
+                        ScrollView {
+                            vertical-stretch: 1;
+                            Rectangle {
+                                background: #f4f4f4;
+                                border-color: #dcdcdc;
+                                border-width: 1px;
                                 Text {
-                                    text: "Snapshots";
-                                    font-size: 16px;
-                                }
-                                ScrollView {
-                                    height: 180px;
-                                    Rectangle {
-                                        background: #f4f4f4;
-                                        border-color: #dcdcdc;
-                                        border-width: 1px;
-                                        Text {
-                                            text: root.snapshots_text;
-                                            wrap: word-wrap;
-                                        }
-                                    }
-                                }
-                            }
-
-                            VerticalBox {
-                                spacing: 6px;
-                                Text {
-                                    text: "Snapshot Contents";
-                                    font-size: 16px;
-                                }
-                                ScrollView {
-                                    height: 180px;
-                                    Rectangle {
-                                        background: #f4f4f4;
-                                        border-color: #dcdcdc;
-                                        border-width: 1px;
-                                        Text {
-                                            text: root.snapshot_items_text;
-                                            wrap: word-wrap;
-                                        }
-                                    }
+                                    text: root.log_text;
+                                    wrap: word-wrap;
                                 }
                             }
                         }
@@ -284,27 +261,63 @@ slint::slint! {
                 }
             }
 
-            // ── Footer ──
-
-            Text {
-                text: "Activity Log";
-                font-size: 16px;
+            // ── Status bar ──
+            Rectangle {
+                height: 1px;
+                background: #d5d5d5;
             }
-            ScrollView {
-                vertical-stretch: 1;
-                Rectangle {
-                    background: #f4f4f4;
-                    border-color: #dcdcdc;
-                    border-width: 1px;
-                    Text {
-                        text: root.log_text;
-                        wrap: word-wrap;
-                    }
+
+            HorizontalBox {
+                padding-left: 12px;
+                padding-right: 12px;
+                padding-top: 6px;
+                padding-bottom: 6px;
+                spacing: 16px;
+
+                Text { text: "Schedule:"; vertical-alignment: center; }
+                Text { text: root.schedule_text; vertical-alignment: center; horizontal-stretch: 1; }
+                Text { text: "Status:"; vertical-alignment: center; }
+                Text { text: root.status_text; vertical-alignment: center; }
+            }
+
+            // ── Bottom bar ──
+            Rectangle {
+                height: 1px;
+                background: #d5d5d5;
+            }
+
+            HorizontalBox {
+                padding-left: 12px;
+                padding-right: 12px;
+                padding-top: 6px;
+                padding-bottom: 6px;
+                spacing: 8px;
+
+                Text { text: "Config:"; vertical-alignment: center; }
+                Text { text: root.config_path; vertical-alignment: center; horizontal-stretch: 1; }
+
+                Button {
+                    text: "Backup All";
+                    clicked => { root.backup_all_clicked(); }
+                }
+                Button {
+                    text: "Reload";
+                    clicked => { root.reload_config_clicked(); }
+                }
+                Button {
+                    text: "Pause/Resume";
+                    clicked => { root.pause_schedule_clicked(); }
+                }
+                Button {
+                    text: "Quit";
+                    clicked => { root.quit_clicked(); }
                 }
             }
         }
     }
 }
+
+// ── Commands and Events ──
 
 #[derive(Debug)]
 enum AppCommand {
@@ -312,23 +325,21 @@ enum AppCommand {
         scheduled: bool,
     },
     RunBackupRepo {
-        repo_selector: String,
+        repo_name: String,
     },
     RunBackupSource {
-        source_selector: String,
+        source_label: String,
     },
-    FetchRepoInfo {
-        repo_selector: String,
-    },
+    FetchAllRepoInfo,
     RefreshSnapshots {
         repo_selector: String,
     },
-    ShowSnapshotItems {
-        repo_selector: String,
-        snapshot: String,
+    FetchSnapshotContents {
+        repo_name: String,
+        snapshot_name: String,
     },
     Extract {
-        repo_selector: String,
+        repo_name: String,
         snapshot: String,
         dest: String,
         pattern: Option<String>,
@@ -343,16 +354,32 @@ enum AppCommand {
 enum UiEvent {
     Status(String),
     Log(String),
-    ConfigInfo { path: String, schedule: String },
-    SnapshotsText(String),
-    SnapshotItemsText(String),
-    RepoInfoText(String),
-    SourcesText(String),
+    ConfigInfo {
+        path: String,
+        schedule: String,
+    },
     RepoNames(Vec<String>),
-    SourceNames(Vec<String>),
+    RepoTableData {
+        rows: Vec<Vec<String>>,
+        repo_labels: Vec<String>,
+    },
+    SourceTableData {
+        rows: Vec<Vec<String>>,
+        source_labels: Vec<String>,
+    },
+    SnapshotTableData {
+        rows: Vec<Vec<String>>,
+        snapshot_ids: Vec<String>,
+        repo_names: Vec<String>,
+    },
+    SnapshotContentsData {
+        rows: Vec<Vec<String>>,
+    },
     Quit,
     ShowWindow,
 }
+
+// ── Scheduler ──
 
 #[derive(Debug)]
 struct SchedulerState {
@@ -382,6 +409,8 @@ fn schedule_description(schedule: &ScheduleConfig, paused: bool) -> String {
     )
 }
 
+// ── Tray icon ──
+
 fn build_tray_icon() -> Result<(tray_icon::TrayIcon, MenuId, MenuId, MenuId, MenuId), String> {
     let menu = Menu::new();
 
@@ -399,16 +428,20 @@ fn build_tray_icon() -> Result<(tray_icon::TrayIcon, MenuId, MenuId, MenuId, Men
     menu.append(&quit_item)
         .map_err(|e| format!("tray menu append failed: {e}"))?;
 
-    let mut rgba = Vec::with_capacity(16 * 16 * 4);
-    for _ in 0..(16 * 16) {
-        rgba.extend_from_slice(&[0x10, 0x8e, 0xf1, 0xff]);
-    }
-    let icon = Icon::from_rgba(rgba, 16, 16).map_err(|e| format!("tray icon error: {e}"))?;
+    let logo_bytes = include_bytes!("../../../docs/src/images/logo_simple.png");
+    let logo_img = image::load_from_memory(logo_bytes)
+        .map_err(|e| format!("failed to decode logo: {e}"))?
+        .resize(44, 44, image::imageops::FilterType::Lanczos3)
+        .into_rgba8();
+    let (w, h) = logo_img.dimensions();
+    let icon =
+        Icon::from_rgba(logo_img.into_raw(), w, h).map_err(|e| format!("tray icon error: {e}"))?;
 
     let tray = TrayIconBuilder::new()
         .with_menu(Box::new(menu))
         .with_tooltip("V'Ger")
         .with_icon(icon)
+        .with_icon_as_template(true)
         .build()
         .map_err(|e| format!("tray icon build failed: {e}"))?;
 
@@ -420,6 +453,8 @@ fn build_tray_icon() -> Result<(tray_icon::TrayIcon, MenuId, MenuId, MenuId, Men
         quit_item.id().clone(),
     ))
 }
+
+// ── Config watcher ──
 
 fn spawn_config_watcher(path: PathBuf, app_tx: Sender<AppCommand>) {
     thread::spawn(move || {
@@ -450,6 +485,8 @@ fn spawn_config_watcher(path: PathBuf, app_tx: Sender<AppCommand>) {
         }
     });
 }
+
+// ── Scheduler thread ──
 
 fn spawn_scheduler(
     app_tx: Sender<AppCommand>,
@@ -495,6 +532,8 @@ fn spawn_scheduler(
     });
 }
 
+// ── Helpers ──
+
 fn format_repo_name(repo: &ResolvedRepo) -> String {
     repo.label
         .clone()
@@ -518,87 +557,65 @@ fn format_bytes(bytes: u64) -> String {
     }
 }
 
-fn format_info_stats(repo_name: &str, stats: &vger_core::commands::info::InfoStats) -> String {
-    let encryption = format!("{:?}", stats.encryption);
-    let last_snapshot = stats
-        .last_snapshot_time
-        .map(|t| {
-            let local: DateTime<Local> = t.with_timezone(&Local);
-            local.format("%Y-%m-%d %H:%M:%S").to_string()
+fn to_table_model(rows: Vec<Vec<String>>) -> ModelRc<ModelRc<StandardListViewItem>> {
+    let outer: Vec<ModelRc<StandardListViewItem>> = rows
+        .into_iter()
+        .map(|row| {
+            let items: Vec<StandardListViewItem> = row
+                .into_iter()
+                .map(|cell| StandardListViewItem::from(SharedString::from(cell)))
+                .collect();
+            ModelRc::new(VecModel::from(items))
         })
-        .unwrap_or_else(|| "N/A".to_string());
-    let created: DateTime<Local> = stats.repo_created.with_timezone(&Local);
-
-    format!(
-        "Repository: {repo_name}\n\
-         Created: {}\n\
-         Encryption: {encryption}\n\
-         Snapshots: {}\n\
-         Last snapshot: {last_snapshot}\n\
-         \n\
-         Raw size: {}\n\
-         Compressed size: {}\n\
-         Deduplicated size: {}\n\
-         \n\
-         Unique chunks: {}\n\
-         Unique stored size: {}\n\
-         Referenced stored size: {}",
-        created.format("%Y-%m-%d %H:%M:%S"),
-        stats.snapshot_count,
-        format_bytes(stats.raw_size),
-        format_bytes(stats.compressed_size),
-        format_bytes(stats.deduplicated_size),
-        stats.unique_chunks,
-        format_bytes(stats.unique_stored_size),
-        format_bytes(stats.referenced_stored_size),
-    )
+        .collect();
+    ModelRc::new(VecModel::from(outer))
 }
 
-fn format_sources_text(repos: &[ResolvedRepo]) -> String {
-    let mut seen_labels = std::collections::HashSet::new();
-    let mut lines = Vec::new();
-
-    for repo in repos {
-        for source in &repo.sources {
-            if !seen_labels.insert(&source.label) {
-                continue;
-            }
-            lines.push(format!("Source: {}", source.label));
-            lines.push(format!("  Paths: {}", source.paths.join(", ")));
-            if !source.exclude.is_empty() {
-                lines.push(format!("  Exclude: {}", source.exclude.join(", ")));
-            }
-            if !source.repos.is_empty() {
-                lines.push(format!("  Target repos: {}", source.repos.join(", ")));
-            } else {
-                lines.push("  Target repos: (all)".to_string());
-            }
-            lines.push(String::new());
-        }
-    }
-
-    if lines.is_empty() {
-        "No sources configured.".to_string()
-    } else {
-        lines.join("\n")
-    }
+fn to_string_model(items: Vec<String>) -> ModelRc<SharedString> {
+    let shared: Vec<SharedString> = items.into_iter().map(SharedString::from).collect();
+    ModelRc::new(VecModel::from(shared))
 }
 
 fn collect_repo_names(repos: &[ResolvedRepo]) -> Vec<String> {
     repos.iter().map(|r| format_repo_name(r)).collect()
 }
 
-fn collect_source_names(repos: &[ResolvedRepo]) -> Vec<String> {
+fn build_source_table_data(repos: &[ResolvedRepo]) -> (Vec<Vec<String>>, Vec<String>) {
     let mut seen = std::collections::HashSet::new();
-    let mut names = Vec::new();
+    let mut rows = Vec::new();
+    let mut labels = Vec::new();
+
     for repo in repos {
         for source in &repo.sources {
-            if seen.insert(source.label.clone()) {
-                names.push(source.label.clone());
+            if !seen.insert(source.label.clone()) {
+                continue;
             }
+            let target = if source.repos.is_empty() {
+                "(all)".to_string()
+            } else {
+                source.repos.join(", ")
+            };
+            rows.push(vec![
+                source.label.clone(),
+                source.paths.join(", "),
+                source.exclude.join(", "),
+                target,
+            ]);
+            labels.push(source.label.clone());
         }
     }
-    names
+
+    (rows, labels)
+}
+
+fn send_structured_data(ui_tx: &Sender<UiEvent>, repos: &[ResolvedRepo]) {
+    let _ = ui_tx.send(UiEvent::RepoNames(collect_repo_names(repos)));
+
+    let (rows, labels) = build_source_table_data(repos);
+    let _ = ui_tx.send(UiEvent::SourceTableData {
+        rows,
+        source_labels: labels,
+    });
 }
 
 fn resolve_passphrase_for_repo(repo: &ResolvedRepo) -> Result<Option<String>, VgerError> {
@@ -631,39 +648,6 @@ fn get_or_resolve_passphrase(
         cache.insert(key.clone(), p.clone());
     }
     Ok(pass)
-}
-
-fn snapshot_rows_for_repo(
-    repo: &ResolvedRepo,
-    passphrase: Option<&str>,
-) -> Result<Vec<String>, VgerError> {
-    let mut snapshots = operations::list_snapshots(&repo.config, passphrase)?;
-    snapshots.sort_by_key(|s| s.time);
-
-    let repo_name = format_repo_name(repo);
-    Ok(snapshots
-        .into_iter()
-        .map(|s| {
-            let ts: DateTime<Local> = s.time.with_timezone(&Local);
-            let label = if s.label.is_empty() {
-                "-"
-            } else {
-                s.label.as_str()
-            };
-            let source = if s.source_label.is_empty() {
-                "-"
-            } else {
-                s.source_label.as_str()
-            };
-            format!(
-                "[{repo_name}] {}  source={} label={} time={}",
-                s.name,
-                source,
-                label,
-                ts.format("%Y-%m-%d %H:%M:%S")
-            )
-        })
-        .collect())
 }
 
 fn select_repos<'a>(
@@ -712,12 +696,6 @@ fn send_log(ui_tx: &Sender<UiEvent>, message: impl Into<String>) {
     let _ = ui_tx.send(UiEvent::Log(message.into()));
 }
 
-fn send_combo_data(ui_tx: &Sender<UiEvent>, repos: &[ResolvedRepo]) {
-    let _ = ui_tx.send(UiEvent::RepoNames(collect_repo_names(repos)));
-    let _ = ui_tx.send(UiEvent::SourceNames(collect_source_names(repos)));
-    let _ = ui_tx.send(UiEvent::SourcesText(format_sources_text(repos)));
-}
-
 fn log_backup_report(
     ui_tx: &Sender<UiEvent>,
     repo_name: &str,
@@ -742,6 +720,8 @@ fn log_backup_report(
         );
     }
 }
+
+// ── Worker thread ──
 
 fn run_worker(
     app_tx: Sender<AppCommand>,
@@ -771,7 +751,10 @@ fn run_worker(
         schedule: schedule_description(&schedule, schedule_paused),
     });
 
-    send_combo_data(&ui_tx, &runtime.repos);
+    send_structured_data(&ui_tx, &runtime.repos);
+
+    // Auto-fetch repo info at startup
+    let _ = app_tx.send(AppCommand::FetchAllRepoInfo);
 
     if schedule.enabled && schedule.on_startup {
         let _ = ui_tx.send(UiEvent::Log(
@@ -832,31 +815,29 @@ fn run_worker(
                 backup_running.store(false, Ordering::SeqCst);
                 let _ = ui_tx.send(UiEvent::Status("Idle".to_string()));
             }
-            AppCommand::RunBackupRepo { repo_selector } => {
-                let repo_selector = repo_selector.trim().to_string();
-                if repo_selector.is_empty() {
+            AppCommand::RunBackupRepo { repo_name } => {
+                let repo_name_sel = repo_name.trim().to_string();
+                if repo_name_sel.is_empty() {
                     send_log(&ui_tx, "Select a repository first.");
                     continue;
                 }
 
-                let repo = match config::select_repo(&runtime.repos, &repo_selector) {
+                let repo = match config::select_repo(&runtime.repos, &repo_name_sel) {
                     Some(r) => r,
                     None => {
-                        send_log(&ui_tx, format!("No repository matching '{repo_selector}'."));
+                        send_log(&ui_tx, format!("No repository matching '{repo_name_sel}'."));
                         continue;
                     }
                 };
 
                 backup_running.store(true, Ordering::SeqCst);
-                let repo_name = format_repo_name(repo);
-                let _ = ui_tx.send(UiEvent::Status(format!(
-                    "Running backup for [{repo_name}]..."
-                )));
+                let rn = format_repo_name(repo);
+                let _ = ui_tx.send(UiEvent::Status(format!("Running backup for [{rn}]...")));
 
                 let passphrase = match get_or_resolve_passphrase(repo, &mut passphrases) {
                     Ok(p) => p,
                     Err(e) => {
-                        send_log(&ui_tx, format!("[{repo_name}] passphrase error: {e}"));
+                        send_log(&ui_tx, format!("[{rn}] passphrase error: {e}"));
                         backup_running.store(false, Ordering::SeqCst);
                         let _ = ui_tx.send(UiEvent::Status("Idle".to_string()));
                         continue;
@@ -868,7 +849,7 @@ fn run_worker(
                 {
                     send_log(
                         &ui_tx,
-                        format!("[{repo_name}] passphrase prompt canceled; skipping."),
+                        format!("[{rn}] passphrase prompt canceled; skipping."),
                     );
                     backup_running.store(false, Ordering::SeqCst);
                     let _ = ui_tx.send(UiEvent::Status("Idle".to_string()));
@@ -881,23 +862,23 @@ fn run_worker(
                     passphrase.as_deref(),
                     None,
                 ) {
-                    Ok(report) => log_backup_report(&ui_tx, &repo_name, &report),
-                    Err(e) => send_log(&ui_tx, format!("[{repo_name}] backup failed: {e}")),
+                    Ok(report) => log_backup_report(&ui_tx, &rn, &report),
+                    Err(e) => send_log(&ui_tx, format!("[{rn}] backup failed: {e}")),
                 }
 
                 backup_running.store(false, Ordering::SeqCst);
                 let _ = ui_tx.send(UiEvent::Status("Idle".to_string()));
             }
-            AppCommand::RunBackupSource { source_selector } => {
-                let source_selector = source_selector.trim().to_string();
-                if source_selector.is_empty() {
+            AppCommand::RunBackupSource { source_label } => {
+                let source_label = source_label.trim().to_string();
+                if source_label.is_empty() {
                     send_log(&ui_tx, "Select a source first.");
                     continue;
                 }
 
                 backup_running.store(true, Ordering::SeqCst);
                 let _ = ui_tx.send(UiEvent::Status(format!(
-                    "Running backup for source '{source_selector}'..."
+                    "Running backup for source '{source_label}'..."
                 )));
 
                 let mut any_backed_up = false;
@@ -905,7 +886,7 @@ fn run_worker(
                     let matching_sources: Vec<config::SourceEntry> = repo
                         .sources
                         .iter()
-                        .filter(|s| s.label == source_selector)
+                        .filter(|s| s.label == source_label)
                         .cloned()
                         .collect();
 
@@ -951,58 +932,64 @@ fn run_worker(
                 if !any_backed_up {
                     send_log(
                         &ui_tx,
-                        format!("No repositories found with source '{source_selector}'."),
+                        format!("No repositories found with source '{source_label}'."),
                     );
                 }
 
                 backup_running.store(false, Ordering::SeqCst);
                 let _ = ui_tx.send(UiEvent::Status("Idle".to_string()));
             }
-            AppCommand::FetchRepoInfo { repo_selector } => {
-                let repo_selector = repo_selector.trim().to_string();
-                if repo_selector.is_empty() {
-                    send_log(&ui_tx, "Select a repository first.");
-                    continue;
+            AppCommand::FetchAllRepoInfo => {
+                let _ = ui_tx.send(UiEvent::Status("Fetching repository info...".to_string()));
+
+                let mut rows = Vec::new();
+                let mut labels = Vec::new();
+
+                for repo in &runtime.repos {
+                    let repo_name = format_repo_name(repo);
+                    let passphrase = match get_or_resolve_passphrase(repo, &mut passphrases) {
+                        Ok(p) => p,
+                        Err(e) => {
+                            send_log(&ui_tx, format!("[{repo_name}] passphrase error: {e}"));
+                            continue;
+                        }
+                    };
+
+                    match vger_core::commands::info::run(&repo.config, passphrase.as_deref()) {
+                        Ok(stats) => {
+                            let encryption = format!("{:?}", stats.encryption);
+                            let last_snapshot = stats
+                                .last_snapshot_time
+                                .map(|t| {
+                                    let local: DateTime<Local> = t.with_timezone(&Local);
+                                    local.format("%Y-%m-%d %H:%M:%S").to_string()
+                                })
+                                .unwrap_or_else(|| "N/A".to_string());
+
+                            rows.push(vec![
+                                repo_name.clone(),
+                                encryption,
+                                stats.snapshot_count.to_string(),
+                                last_snapshot,
+                                format_bytes(stats.raw_size),
+                                format_bytes(stats.deduplicated_size),
+                            ]);
+                            labels.push(repo_name);
+                        }
+                        Err(e) => {
+                            send_log(&ui_tx, format!("[{repo_name}] info failed: {e}"));
+                        }
+                    }
                 }
 
-                let repo = match config::select_repo(&runtime.repos, &repo_selector) {
-                    Some(r) => r,
-                    None => {
-                        send_log(&ui_tx, format!("No repository matching '{repo_selector}'."));
-                        continue;
-                    }
-                };
-
-                let repo_name = format_repo_name(repo);
-                let _ = ui_tx.send(UiEvent::Status(format!(
-                    "Fetching info for [{repo_name}]..."
-                )));
-
-                let passphrase = match get_or_resolve_passphrase(repo, &mut passphrases) {
-                    Ok(p) => p,
-                    Err(e) => {
-                        send_log(&ui_tx, format!("[{repo_name}] passphrase error: {e}"));
-                        let _ = ui_tx.send(UiEvent::Status("Idle".to_string()));
-                        continue;
-                    }
-                };
-
-                match vger_core::commands::info::run(&repo.config, passphrase.as_deref()) {
-                    Ok(stats) => {
-                        let text = format_info_stats(&repo_name, &stats);
-                        let _ = ui_tx.send(UiEvent::RepoInfoText(text));
-                        send_log(&ui_tx, format!("Fetched info for [{repo_name}]."));
-                    }
-                    Err(e) => {
-                        send_log(&ui_tx, format!("[{repo_name}] info failed: {e}"));
-                    }
-                }
-
+                let _ = ui_tx.send(UiEvent::RepoTableData {
+                    rows,
+                    repo_labels: labels,
+                });
                 let _ = ui_tx.send(UiEvent::Status("Idle".to_string()));
             }
             AppCommand::RefreshSnapshots { repo_selector } => {
                 let _ = ui_tx.send(UiEvent::Status("Loading snapshots...".to_string()));
-                let mut rows = Vec::new();
 
                 let repos_to_scan = match select_repos(&runtime.repos, &repo_selector) {
                     Ok(repos) => repos,
@@ -1013,103 +1000,125 @@ fn run_worker(
                     }
                 };
 
+                let mut rows = Vec::new();
+                let mut snapshot_ids = Vec::new();
+                let mut repo_names = Vec::new();
+
                 for repo in repos_to_scan {
+                    let repo_name = format_repo_name(repo);
                     let passphrase = match get_or_resolve_passphrase(repo, &mut passphrases) {
                         Ok(pass) => pass,
                         Err(e) => {
-                            send_log(
-                                &ui_tx,
-                                format!("[{}] passphrase error: {e}", format_repo_name(repo)),
-                            );
+                            send_log(&ui_tx, format!("[{repo_name}] passphrase error: {e}"));
                             continue;
                         }
                     };
 
-                    match snapshot_rows_for_repo(repo, passphrase.as_deref()) {
-                        Ok(mut repo_rows) => rows.append(&mut repo_rows),
+                    match operations::list_snapshots(&repo.config, passphrase.as_deref()) {
+                        Ok(mut snapshots) => {
+                            snapshots.sort_by_key(|s| s.time);
+                            for s in snapshots {
+                                let ts: DateTime<Local> = s.time.with_timezone(&Local);
+                                let label = if s.label.is_empty() {
+                                    "-".to_string()
+                                } else {
+                                    s.label.clone()
+                                };
+                                let source = if s.source_label.is_empty() {
+                                    "-".to_string()
+                                } else {
+                                    s.source_label.clone()
+                                };
+                                rows.push(vec![
+                                    s.name.clone(),
+                                    source,
+                                    label,
+                                    ts.format("%Y-%m-%d %H:%M:%S").to_string(),
+                                ]);
+                                snapshot_ids.push(s.name.clone());
+                                repo_names.push(repo_name.clone());
+                            }
+                        }
                         Err(e) => {
                             send_log(
                                 &ui_tx,
-                                format!(
-                                    "[{}] snapshot listing failed: {e}",
-                                    format_repo_name(repo)
-                                ),
+                                format!("[{repo_name}] snapshot listing failed: {e}"),
                             );
                         }
                     }
                 }
 
-                if rows.is_empty() {
-                    rows.push("No snapshots found.".to_string());
-                }
-
-                let _ = ui_tx.send(UiEvent::SnapshotsText(rows.join("\n")));
+                let _ = ui_tx.send(UiEvent::SnapshotTableData {
+                    rows,
+                    snapshot_ids,
+                    repo_names,
+                });
                 let _ = ui_tx.send(UiEvent::Status("Idle".to_string()));
             }
-            AppCommand::ShowSnapshotItems {
-                repo_selector,
-                snapshot,
+            AppCommand::FetchSnapshotContents {
+                repo_name,
+                snapshot_name,
             } => {
-                let snapshot = snapshot.trim().to_string();
-                if snapshot.is_empty() {
-                    send_log(&ui_tx, "Snapshot ID is required to list contents.");
-                    continue;
-                }
-
                 let _ = ui_tx.send(UiEvent::Status("Loading snapshot contents...".to_string()));
 
                 match find_repo_for_snapshot(
                     &runtime.repos,
-                    &repo_selector,
-                    &snapshot,
+                    &repo_name,
+                    &snapshot_name,
                     &mut passphrases,
                 ) {
-                    Ok((repo, passphrase)) => match operations::list_snapshot_items(
-                        &repo.config,
-                        passphrase.as_deref(),
-                        &snapshot,
-                    ) {
-                        Ok(items) => {
-                            let mut lines = Vec::new();
-                            for item in items {
-                                let type_char = match item.entry_type {
-                                    vger_core::snapshot::item::ItemType::Directory => 'd',
-                                    vger_core::snapshot::item::ItemType::RegularFile => '-',
-                                    vger_core::snapshot::item::ItemType::Symlink => 'l',
-                                };
-                                lines.push(format!(
-                                    "{}{:o} {:>10} {}",
-                                    type_char,
-                                    item.mode & 0o7777,
-                                    item.size,
-                                    item.path
-                                ));
-                            }
+                    Ok((repo, passphrase)) => {
+                        match operations::list_snapshot_items(
+                            &repo.config,
+                            passphrase.as_deref(),
+                            &snapshot_name,
+                        ) {
+                            Ok(items) => {
+                                let rows: Vec<Vec<String>> = items
+                                    .iter()
+                                    .map(|item| {
+                                        let type_str = match item.entry_type {
+                                            vger_core::snapshot::item::ItemType::Directory => "dir",
+                                            vger_core::snapshot::item::ItemType::RegularFile => {
+                                                "file"
+                                            }
+                                            vger_core::snapshot::item::ItemType::Symlink => "link",
+                                        };
+                                        vec![
+                                            item.path.clone(),
+                                            type_str.to_string(),
+                                            format!("{:o}", item.mode & 0o7777),
+                                            format_bytes(item.size),
+                                        ]
+                                    })
+                                    .collect();
 
-                            if lines.is_empty() {
-                                lines.push("Snapshot has no entries.".to_string());
-                            }
+                                send_log(
+                                    &ui_tx,
+                                    format!(
+                                        "Loaded {} item(s) from snapshot {} in [{}]",
+                                        rows.len(),
+                                        snapshot_name,
+                                        format_repo_name(repo)
+                                    ),
+                                );
 
-                            let _ = ui_tx.send(UiEvent::SnapshotItemsText(lines.join("\n")));
-                            send_log(
-                                &ui_tx,
-                                format!(
-                                    "Loaded {} item(s) from snapshot {} in [{}]",
-                                    lines.len(),
-                                    snapshot,
-                                    format_repo_name(repo)
-                                ),
-                            );
+                                let _ = ui_tx.send(UiEvent::SnapshotContentsData { rows });
+                            }
+                            Err(e) => {
+                                send_log(&ui_tx, format!("Failed to load snapshot items: {e}"));
+                            }
                         }
-                        Err(e) => send_log(&ui_tx, format!("Failed to load snapshot items: {e}")),
-                    },
-                    Err(e) => send_log(&ui_tx, format!("Failed to resolve snapshot: {e}")),
+                    }
+                    Err(e) => {
+                        send_log(&ui_tx, format!("Failed to resolve snapshot: {e}"));
+                    }
                 }
 
                 let _ = ui_tx.send(UiEvent::Status("Idle".to_string()));
             }
             AppCommand::Extract {
-                repo_selector,
+                repo_name,
                 snapshot,
                 dest,
                 pattern,
@@ -1128,7 +1137,7 @@ fn run_worker(
 
                 match find_repo_for_snapshot(
                     &runtime.repos,
-                    &repo_selector,
+                    &repo_name,
                     &snapshot,
                     &mut passphrases,
                 ) {
@@ -1199,7 +1208,8 @@ fn run_worker(
                             path: config_path.display().to_string(),
                             schedule: schedule_description(&schedule, schedule_paused),
                         });
-                        send_combo_data(&ui_tx, &runtime.repos);
+                        send_structured_data(&ui_tx, &runtime.repos);
+                        let _ = app_tx.send(AppCommand::FetchAllRepoInfo);
                         send_log(&ui_tx, "Configuration reloaded.");
                     }
                     Err(e) => {
@@ -1240,6 +1250,8 @@ fn run_worker(
     }
 }
 
+// ── Main ──
+
 fn append_log(ui: &MainWindow, line: &str) {
     let current = ui.get_log_text();
     let mut next = current.to_string();
@@ -1274,12 +1286,34 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     ui.set_config_path("(loading...)".into());
     ui.set_schedule_text("(loading...)".into());
     ui.set_status_text("Idle".into());
-    ui.set_extract_dest(".".into());
+
+    let restore_win = RestoreWindow::new()?;
+
+    // Parallel arrays for looking up names by table row index.
+    // Wrapped in Arc<Mutex<>> so callbacks and the event loop can share them.
+    let repo_labels: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+    let source_labels: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+    let snapshot_ids: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+    let snapshot_repo_names: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+
+    // ── Event loop consumer ──
 
     let ui_weak_for_events = ui.as_weak();
+    let restore_weak_for_events = restore_win.as_weak();
+    let repo_labels_for_events = repo_labels.clone();
+    let source_labels_for_events = source_labels.clone();
+    let snapshot_ids_for_events = snapshot_ids.clone();
+    let snapshot_repo_names_for_events = snapshot_repo_names.clone();
+
     thread::spawn(move || {
         while let Ok(event) = ui_rx.recv() {
             let ui_weak = ui_weak_for_events.clone();
+            let restore_weak = restore_weak_for_events.clone();
+            let repo_labels = repo_labels_for_events.clone();
+            let source_labels = source_labels_for_events.clone();
+            let snapshot_ids = snapshot_ids_for_events.clone();
+            let snapshot_repo_names = snapshot_repo_names_for_events.clone();
+
             let _ = slint::invoke_from_event_loop(move || {
                 let Some(ui) = ui_weak.upgrade() else {
                     return;
@@ -1292,19 +1326,50 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         ui.set_config_path(path.into());
                         ui.set_schedule_text(schedule.into());
                     }
-                    UiEvent::SnapshotsText(text) => ui.set_snapshots_text(text.into()),
-                    UiEvent::SnapshotItemsText(text) => ui.set_snapshot_items_text(text.into()),
-                    UiEvent::RepoInfoText(text) => ui.set_repo_info_text(text.into()),
-                    UiEvent::SourcesText(text) => ui.set_sources_text(text.into()),
                     UiEvent::RepoNames(names) => {
-                        let shared: Vec<slint::SharedString> =
-                            names.into_iter().map(|s| s.into()).collect();
-                        ui.set_repo_names(slint::ModelRc::new(slint::VecModel::from(shared)));
+                        let first = names.first().cloned().unwrap_or_default();
+                        ui.set_repo_names(to_string_model(names));
+                        // Pre-select first repo in snapshots combo
+                        if ui.get_snapshots_repo_combo_value().is_empty() {
+                            ui.set_snapshots_repo_combo_value(first.into());
+                        }
                     }
-                    UiEvent::SourceNames(names) => {
-                        let shared: Vec<slint::SharedString> =
-                            names.into_iter().map(|s| s.into()).collect();
-                        ui.set_source_names(slint::ModelRc::new(slint::VecModel::from(shared)));
+                    UiEvent::RepoTableData {
+                        rows,
+                        repo_labels: labels,
+                    } => {
+                        if let Ok(mut rl) = repo_labels.lock() {
+                            *rl = labels;
+                        }
+                        ui.set_repo_rows(to_table_model(rows));
+                    }
+                    UiEvent::SourceTableData {
+                        rows,
+                        source_labels: labels,
+                    } => {
+                        if let Ok(mut sl) = source_labels.lock() {
+                            *sl = labels;
+                        }
+                        ui.set_source_rows(to_table_model(rows));
+                    }
+                    UiEvent::SnapshotTableData {
+                        rows,
+                        snapshot_ids: ids,
+                        repo_names: rnames,
+                    } => {
+                        if let Ok(mut si) = snapshot_ids.lock() {
+                            *si = ids;
+                        }
+                        if let Ok(mut sr) = snapshot_repo_names.lock() {
+                            *sr = rnames;
+                        }
+                        ui.set_snapshot_rows(to_table_model(rows));
+                    }
+                    UiEvent::SnapshotContentsData { rows } => {
+                        if let Some(rw) = restore_weak.upgrade() {
+                            rw.set_contents_rows(to_table_model(rows));
+                            rw.set_status_text("Ready".into());
+                        }
                     }
                     UiEvent::Quit => {
                         let _ = slint::quit_event_loop();
@@ -1317,56 +1382,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     });
 
+    // ── Callback wiring: MainWindow ──
+
     let tx = app_tx.clone();
     ui.on_backup_all_clicked(move || {
         let _ = tx.send(AppCommand::RunBackupAll { scheduled: false });
-    });
-
-    let tx = app_tx.clone();
-    let ui_weak = ui.as_weak();
-    ui.on_refresh_snapshots_clicked(move || {
-        let Some(ui) = ui_weak.upgrade() else {
-            return;
-        };
-        let _ = tx.send(AppCommand::RefreshSnapshots {
-            repo_selector: ui.get_snapshots_repo_combo_value().to_string(),
-        });
-    });
-
-    let tx = app_tx.clone();
-    let ui_weak = ui.as_weak();
-    ui.on_show_snapshot_items_clicked(move || {
-        let Some(ui) = ui_weak.upgrade() else {
-            return;
-        };
-        let _ = tx.send(AppCommand::ShowSnapshotItems {
-            repo_selector: ui.get_snapshots_repo_combo_value().to_string(),
-            snapshot: ui.get_snapshot_id().to_string(),
-        });
-    });
-
-    let tx = app_tx.clone();
-    let ui_weak = ui.as_weak();
-    ui.on_extract_clicked(move || {
-        let Some(ui) = ui_weak.upgrade() else {
-            return;
-        };
-
-        let pattern = {
-            let raw = ui.get_extract_pattern().to_string();
-            if raw.trim().is_empty() {
-                None
-            } else {
-                Some(raw)
-            }
-        };
-
-        let _ = tx.send(AppCommand::Extract {
-            repo_selector: ui.get_snapshots_repo_combo_value().to_string(),
-            snapshot: ui.get_snapshot_id().to_string(),
-            dest: ui.get_extract_dest().to_string(),
-            pattern,
-        });
     });
 
     let tx = app_tx.clone();
@@ -1385,39 +1405,125 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     });
 
     let tx = app_tx.clone();
-    let ui_weak = ui.as_weak();
-    ui.on_fetch_repo_info_clicked(move || {
-        let Some(ui) = ui_weak.upgrade() else {
+    let rl = repo_labels.clone();
+    ui.on_backup_selected_repo_clicked(move |row| {
+        if row < 0 {
             return;
-        };
-        let _ = tx.send(AppCommand::FetchRepoInfo {
-            repo_selector: ui.get_repos_combo_value().to_string(),
-        });
+        }
+        if let Ok(labels) = rl.lock() {
+            if let Some(name) = labels.get(row as usize) {
+                let _ = tx.send(AppCommand::RunBackupRepo {
+                    repo_name: name.clone(),
+                });
+            }
+        }
+    });
+
+    let tx = app_tx.clone();
+    let sl = source_labels.clone();
+    ui.on_backup_selected_source_clicked(move |row| {
+        if row < 0 {
+            return;
+        }
+        if let Ok(labels) = sl.lock() {
+            if let Some(label) = labels.get(row as usize) {
+                let _ = tx.send(AppCommand::RunBackupSource {
+                    source_label: label.clone(),
+                });
+            }
+        }
     });
 
     let tx = app_tx.clone();
     let ui_weak = ui.as_weak();
-    ui.on_backup_repo_clicked(move || {
+    ui.on_refresh_snapshots_clicked(move || {
         let Some(ui) = ui_weak.upgrade() else {
             return;
         };
-        let _ = tx.send(AppCommand::RunBackupRepo {
-            repo_selector: ui.get_repos_combo_value().to_string(),
+        let _ = tx.send(AppCommand::RefreshSnapshots {
+            repo_selector: ui.get_snapshots_repo_combo_value().to_string(),
         });
     });
 
     let tx = app_tx.clone();
-    let ui_weak = ui.as_weak();
-    ui.on_backup_source_clicked(move || {
-        let Some(ui) = ui_weak.upgrade() else {
+    ui.on_snapshots_repo_changed({
+        let tx = tx.clone();
+        move |value| {
+            let _ = tx.send(AppCommand::RefreshSnapshots {
+                repo_selector: value.to_string(),
+            });
+        }
+    });
+
+    let tx = app_tx.clone();
+    let si = snapshot_ids.clone();
+    let sr = snapshot_repo_names.clone();
+    let rw_weak = restore_win.as_weak();
+    ui.on_restore_selected_snapshot_clicked(move |row| {
+        if row < 0 {
             return;
+        }
+        let (snap_name, rname) = {
+            let ids = si.lock().unwrap_or_else(|e| e.into_inner());
+            let rnames = sr.lock().unwrap_or_else(|e| e.into_inner());
+            match (ids.get(row as usize), rnames.get(row as usize)) {
+                (Some(id), Some(rn)) => (id.clone(), rn.clone()),
+                _ => return,
+            }
         };
-        let _ = tx.send(AppCommand::RunBackupSource {
-            source_selector: ui.get_sources_combo_value().to_string(),
+
+        if let Some(rw) = rw_weak.upgrade() {
+            rw.set_snapshot_name(snap_name.clone().into());
+            rw.set_repo_name(rname.clone().into());
+            rw.set_status_text("Loading contents...".into());
+            rw.set_contents_rows(to_table_model(vec![]));
+            let _ = rw.show();
+        }
+
+        let _ = tx.send(AppCommand::FetchSnapshotContents {
+            repo_name: rname,
+            snapshot_name: snap_name,
         });
     });
 
-    // Close-to-tray behavior: hide window and keep background tasks running.
+    // ── Callback wiring: RestoreWindow ──
+
+    let tx = app_tx.clone();
+    let rw_weak = restore_win.as_weak();
+    restore_win.on_restore_all_clicked(move || {
+        let Some(rw) = rw_weak.upgrade() else {
+            return;
+        };
+        let _ = tx.send(AppCommand::Extract {
+            repo_name: rw.get_repo_name().to_string(),
+            snapshot: rw.get_snapshot_name().to_string(),
+            dest: rw.get_extract_dest().to_string(),
+            pattern: None,
+        });
+    });
+
+    let tx = app_tx.clone();
+    let rw_weak = restore_win.as_weak();
+    restore_win.on_restore_filtered_clicked(move || {
+        let Some(rw) = rw_weak.upgrade() else {
+            return;
+        };
+        let pattern_raw = rw.get_extract_pattern().to_string();
+        let pattern = if pattern_raw.trim().is_empty() {
+            None
+        } else {
+            Some(pattern_raw)
+        };
+        let _ = tx.send(AppCommand::Extract {
+            repo_name: rw.get_repo_name().to_string(),
+            snapshot: rw.get_snapshot_name().to_string(),
+            dest: rw.get_extract_dest().to_string(),
+            pattern,
+        });
+    });
+
+    // ── Close-to-tray behavior ──
+
     ui.window().on_close_requested({
         let ui_weak = ui.as_weak();
         move || {
@@ -1427,6 +1533,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             slint::CloseRequestResponse::HideWindow
         }
     });
+
+    // ── Tray icon ──
 
     let (_tray_icon, open_item_id, run_now_item_id, pause_item_id, quit_item_id) =
         build_tray_icon().map_err(|e| format!("failed to initialize tray icon: {e}"))?;

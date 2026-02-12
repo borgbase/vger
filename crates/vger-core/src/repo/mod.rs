@@ -57,6 +57,17 @@ const MAX_IN_FLIGHT_PACK_UPLOADS: usize = 4;
 pub enum EncryptionMode {
     None,
     Aes256Gcm,
+    Chacha20Poly1305,
+}
+
+impl EncryptionMode {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            EncryptionMode::None => "none",
+            EncryptionMode::Aes256Gcm => "aes256gcm",
+            EncryptionMode::Chacha20Poly1305 => "chacha20poly1305",
+        }
+    }
 }
 
 /// A handle to an opened repository.
@@ -126,6 +137,18 @@ impl Repository {
                     })?;
                     let enc_key = master_key.to_encrypted(pass)?;
                     let engine = crypto::aes_gcm::Aes256GcmEngine::new(
+                        &master_key.encryption_key,
+                        &master_key.chunk_id_key,
+                    );
+                    (Box::new(engine), Some(enc_key))
+                }
+                EncryptionMode::Chacha20Poly1305 => {
+                    let master_key = MasterKey::generate();
+                    let pass = passphrase.ok_or_else(|| {
+                        VgerError::Config("passphrase required for encrypted repository".into())
+                    })?;
+                    let enc_key = master_key.to_encrypted(pass)?;
+                    let engine = crypto::chacha20_poly1305::ChaCha20Poly1305Engine::new(
                         &master_key.encryption_key,
                         &master_key.chunk_id_key,
                     );
@@ -215,6 +238,21 @@ impl Repository {
                 })?;
                 let master_key = MasterKey::from_encrypted(&enc_key, pass)?;
                 let engine = crypto::aes_gcm::Aes256GcmEngine::new(
+                    &master_key.encryption_key,
+                    &master_key.chunk_id_key,
+                );
+                Box::new(engine)
+            }
+            EncryptionMode::Chacha20Poly1305 => {
+                let key_data = storage
+                    .get("keys/repokey")?
+                    .ok_or_else(|| VgerError::InvalidFormat("missing keys/repokey".into()))?;
+                let enc_key: EncryptedKey = rmp_serde::from_slice(&key_data)?;
+                let pass = passphrase.ok_or_else(|| {
+                    VgerError::Config("passphrase required for encrypted repository".into())
+                })?;
+                let master_key = MasterKey::from_encrypted(&enc_key, pass)?;
+                let engine = crypto::chacha20_poly1305::ChaCha20Poly1305Engine::new(
                     &master_key.encryption_key,
                     &master_key.chunk_id_key,
                 );
@@ -404,8 +442,9 @@ impl Repository {
         // Upload in background thread
         let storage = Arc::clone(&self.storage);
         let key = pack_id.storage_key();
-        self.pending_uploads
-            .push_back(std::thread::spawn(move || storage.put_owned(&key, pack_bytes)));
+        self.pending_uploads.push_back(std::thread::spawn(move || {
+            storage.put_owned(&key, pack_bytes)
+        }));
 
         Ok(())
     }

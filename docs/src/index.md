@@ -10,7 +10,7 @@ V'Ger is a fast, encrypted, deduplicated backup tool written in Rust. It's based
 
 - **Deduplication** via FastCDC content-defined chunking
 - **Compression** with LZ4 (default), Zstandard, or none
-- **Encryption** with AES-256-GCM and Argon2id key derivation
+- **Encryption** with auto-selected AES-256-GCM or ChaCha20-Poly1305 and Argon2id key derivation
 - **Storage backends** via Apache OpenDAL (local filesystem, S3-compatible storage, SFTP)
 - **Dedicated REST server** with append-only enforcement, quotas, and server-side compaction
 - **Built-in web interface** (WebDAV) to browse and restore snapshots
@@ -31,7 +31,7 @@ V'Ger is a fast, encrypted, deduplicated backup tool written in Rust. It's based
 |--------|------|--------|--------|------|
 | Language | Python + Cython | Go | Rust | Rust |
 | Chunker | Buzhash (custom) | Rabin | Rabin (Restic-compat) | FastCDC |
-| Encryption | AES-CTR+HMAC / AES-OCB / ChaCha20 | AES-256-CTR + Poly1305-AES | AES-256-CTR + Poly1305-AES | AES-256-GCM |
+| Encryption | AES-CTR+HMAC / AES-OCB / ChaCha20 | AES-256-CTR + Poly1305-AES | AES-256-CTR + Poly1305-AES | AES-256-GCM / ChaCha20-Poly1305 (auto-select at init) |
 | Key derivation | PBKDF2 or Argon2id | scrypt | scrypt | Argon2id |
 | Serialization | msgpack | JSON + Protocol Buffers | JSON + Protocol Buffers | msgpack |
 | Storage | borgstore + SSH RPC | Local, S3, SFTP, REST, rclone | OpenDAL (local, S3, many more) | OpenDAL (local, S3) + vger-server |

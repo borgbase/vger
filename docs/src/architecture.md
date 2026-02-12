@@ -8,11 +8,12 @@ Technical reference for vger's cryptographic, chunking, compression, and storage
 
 ### Encryption
 
-AES-256-GCM with 12-byte random nonces.
+AEAD with 12-byte random nonces (`AES-256-GCM` or `ChaCha20-Poly1305`).
 
 Rationale:
-- NIST-standardized authenticated encryption
-- Hardware-accelerated on modern CPUs (AES-NI + CLMUL for GHASH)
+- Authenticated encryption with modern, audited constructions
+- `auto` mode benchmarks `AES-256-GCM` vs `ChaCha20-Poly1305` at init and stores one concrete mode per repo
+- Strong performance across mixed CPU capabilities (AES acceleration and non-AES acceleration)
 - 32-byte symmetric keys (simpler key management than split-key schemes)
 - The 1-byte type tag is passed as AAD (authenticated additional data), binding the ciphertext to its intended object type
 
@@ -77,7 +78,7 @@ All persistent data structures use **msgpack** via `rmp_serde`. Structs serializ
 Every encrypted object stored in the repository is wrapped in a `RepoObj` envelope (`repo/format.rs`):
 
 ```text
-[1-byte type_tag][12-byte nonce][ciphertext + 16-byte GCM tag]
+[1-byte type_tag][12-byte nonce][ciphertext + 16-byte AEAD tag]
 ```
 
 The type tag identifies the object kind via the `ObjectType` enum:
@@ -92,7 +93,7 @@ The type tag identifies the object kind via the `ObjectType` enum:
 | 5 | PackHeader | Trailing header inside pack files |
 | 6 | FileCache | File-level cache (inode/mtime skip) |
 
-The type tag byte is passed as AAD (authenticated additional data) to AES-GCM. This binds each ciphertext to its intended object type, preventing an attacker from substituting one object type for another (e.g., swapping a manifest for a snapshot).
+The type tag byte is passed as AAD (authenticated additional data) to the selected AEAD mode. This binds each ciphertext to its intended object type, preventing an attacker from substituting one object type for another (e.g., swapping a manifest for a snapshot).
 
 ---
 
@@ -187,7 +188,7 @@ Chunks are grouped into **pack files** (~32 MiB) instead of being stored as indi
 ```
 
 - **Per-blob length prefix** (4 bytes): enables forward scanning to recover individual blobs even if the trailing header is corrupted
-- Each blob is a complete RepoObj envelope: `[1B type_tag][12B nonce][ciphertext+16B GCM tag]`
+- Each blob is a complete RepoObj envelope: `[1B type_tag][12B nonce][ciphertext+16B AEAD tag]`
 - Each blob is independently encrypted (can read one chunk without decrypting the whole pack)
 - Header at the END allows streaming writes without knowing final header size
 - Header is encrypted as `pack_object(ObjectType::PackHeader, msgpack(Vec<PackHeaderEntry>))`
@@ -237,7 +238,7 @@ walk sources (walkdir + exclude filters)
     → [cache miss] FastCDC content-defined chunking
       → for each chunk: compute ChunkId (keyed BLAKE2b-256)
         → dedup check (committed index + pending pack writers)
-          → [new chunk] compress (LZ4/ZSTD) → encrypt (AES-256-GCM) → buffer into PackWriter
+          → [new chunk] compress (LZ4/ZSTD) → encrypt (selected AEAD mode) → buffer into PackWriter
           → [dedup hit] increment refcount, skip storage
         → when PackWriter reaches target size → flush pack to packs/<shard>/<id>
   → serialize Item to msgpack → append to item stream buffer
