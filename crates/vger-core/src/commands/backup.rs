@@ -90,6 +90,35 @@ enum FileChunkAction {
     },
 }
 
+#[derive(Debug, Clone)]
+pub enum BackupProgressEvent {
+    SourceStarted {
+        source_path: String,
+    },
+    SourceFinished {
+        source_path: String,
+    },
+    FileStarted {
+        path: String,
+    },
+    StatsUpdated {
+        nfiles: u64,
+        original_size: u64,
+        compressed_size: u64,
+        deduplicated_size: u64,
+        current_file: Option<String>,
+    },
+}
+
+fn emit_progress(
+    progress: &mut Option<&mut dyn FnMut(BackupProgressEvent)>,
+    event: BackupProgressEvent,
+) {
+    if let Some(callback) = progress.as_deref_mut() {
+        callback(event);
+    }
+}
+
 /// Run `vger backup` for one or more source directories.
 pub struct BackupRequest<'a> {
     pub snapshot_name: &'a str,
@@ -105,6 +134,14 @@ pub struct BackupRequest<'a> {
 }
 
 pub fn run(config: &VgerConfig, req: BackupRequest<'_>) -> Result<SnapshotStats> {
+    run_with_progress(config, req, None)
+}
+
+pub fn run_with_progress(
+    config: &VgerConfig,
+    req: BackupRequest<'_>,
+    mut progress: Option<&mut dyn FnMut(BackupProgressEvent)>,
+) -> Result<SnapshotStats> {
     let snapshot_name = req.snapshot_name;
     let passphrase = req.passphrase;
     let source_paths = req.source_paths;
@@ -139,6 +176,13 @@ pub fn run(config: &VgerConfig, req: BackupRequest<'_>) -> Result<SnapshotStats>
 
         // Walk each source directory
         for source_path in source_paths {
+            emit_progress(
+                &mut progress,
+                BackupProgressEvent::SourceStarted {
+                    source_path: source_path.clone(),
+                },
+            );
+
             let source = Path::new(source_path.as_str());
             if !source.exists() {
                 return Err(VgerError::Other(format!(
@@ -298,6 +342,13 @@ pub fn run(config: &VgerConfig, req: BackupRequest<'_>) -> Result<SnapshotStats>
 
                 // For regular files, chunk and store the content
                 if entry_type == ItemType::RegularFile && metadata.len() > 0 {
+                    emit_progress(
+                        &mut progress,
+                        BackupProgressEvent::FileStarted {
+                            path: item.path.clone(),
+                        },
+                    );
+
                     let file_data = std::fs::read(entry.path()).map_err(VgerError::Io)?;
                     let chunk_ranges = chunker::chunk_data(&file_data, &repo.config.chunker_params);
                     let chunk_id_key = *repo.crypto.chunk_id_key();
@@ -439,6 +490,16 @@ pub fn run(config: &VgerConfig, req: BackupRequest<'_>) -> Result<SnapshotStats>
                     }
 
                     stats.nfiles += 1;
+                    emit_progress(
+                        &mut progress,
+                        BackupProgressEvent::StatsUpdated {
+                            nfiles: stats.nfiles,
+                            original_size: stats.original_size,
+                            compressed_size: stats.compressed_size,
+                            deduplicated_size: stats.deduplicated_size,
+                            current_file: Some(item.path.clone()),
+                        },
+                    );
                 }
 
                 // Stream item metadata to avoid materializing a full Vec<Item>.
@@ -448,6 +509,13 @@ pub fn run(config: &VgerConfig, req: BackupRequest<'_>) -> Result<SnapshotStats>
                     flush_item_stream_chunk(repo, &mut item_stream, &mut item_ptrs, compression)?;
                 }
             }
+
+            emit_progress(
+                &mut progress,
+                BackupProgressEvent::SourceFinished {
+                    source_path: source_path.clone(),
+                },
+            );
         }
         flush_item_stream_chunk(repo, &mut item_stream, &mut item_ptrs, compression)?;
 

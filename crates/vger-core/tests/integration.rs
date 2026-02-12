@@ -283,3 +283,78 @@ fn backup_deduplicates_identical_files_and_extracts_correctly() {
     assert_eq!(std::fs::read(restore_dir.join("a.bin")).unwrap(), payload);
     assert_eq!(std::fs::read(restore_dir.join("b.bin")).unwrap(), payload);
 }
+
+#[test]
+fn backup_run_with_progress_emits_events_and_final_stats() {
+    let tmp = tempfile::tempdir().unwrap();
+    let repo_dir = tmp.path().join("repo");
+    let source_dir = tmp.path().join("source");
+    std::fs::create_dir_all(&repo_dir).unwrap();
+    std::fs::create_dir_all(&source_dir).unwrap();
+    std::fs::write(source_dir.join("one.txt"), b"one").unwrap();
+    std::fs::write(source_dir.join("two.txt"), b"two").unwrap();
+
+    let config = make_test_config(&repo_dir);
+    commands::init::run(&config, None).unwrap();
+
+    let source_paths = vec![source_dir.to_string_lossy().to_string()];
+    let exclude_if_present: Vec<String> = Vec::new();
+    let exclude_patterns: Vec<String> = Vec::new();
+
+    let mut events = Vec::new();
+    let mut on_progress = |event| events.push(event);
+
+    let stats = commands::backup::run_with_progress(
+        &config,
+        commands::backup::BackupRequest {
+            snapshot_name: "snap-progress",
+            passphrase: None,
+            source_paths: &source_paths,
+            source_label: "source",
+            exclude_patterns: &exclude_patterns,
+            exclude_if_present: &exclude_if_present,
+            one_file_system: true,
+            git_ignore: false,
+            compression: Compression::None,
+            label: "",
+        },
+        Some(&mut on_progress),
+    )
+    .unwrap();
+
+    let file_started_count = events
+        .iter()
+        .filter(|event| {
+            matches!(
+                event,
+                commands::backup::BackupProgressEvent::FileStarted { .. }
+            )
+        })
+        .count();
+    assert_eq!(file_started_count, 2);
+
+    let final_stats_event = events
+        .iter()
+        .rev()
+        .find_map(|event| match event {
+            commands::backup::BackupProgressEvent::StatsUpdated {
+                nfiles,
+                original_size,
+                compressed_size,
+                deduplicated_size,
+                ..
+            } => Some((
+                *nfiles,
+                *original_size,
+                *compressed_size,
+                *deduplicated_size,
+            )),
+            _ => None,
+        })
+        .expect("expected at least one StatsUpdated event");
+
+    assert_eq!(final_stats_event.0, stats.nfiles);
+    assert_eq!(final_stats_event.1, stats.original_size);
+    assert_eq!(final_stats_event.2, stats.compressed_size);
+    assert_eq!(final_stats_event.3, stats.deduplicated_size);
+}
