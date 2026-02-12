@@ -190,6 +190,9 @@ pub struct RepositoryConfig {
     pub min_pack_size: u32,
     #[serde(default = "default_max_pack_size")]
     pub max_pack_size: u32,
+    /// Retry settings for remote backends (S3, SFTP, REST).
+    #[serde(default)]
+    pub retry: RetryConfig,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -326,6 +329,42 @@ fn default_max_pack_size() -> u32 {
     512 * 1024 * 1024 // 512 MiB
 }
 
+fn default_max_retries() -> usize {
+    3
+}
+
+fn default_retry_delay_ms() -> u64 {
+    1000
+}
+
+fn default_retry_max_delay_ms() -> u64 {
+    60_000
+}
+
+/// Retry configuration for remote storage backends (S3, SFTP, REST).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RetryConfig {
+    /// Maximum number of retry attempts (0 = no retries).
+    #[serde(default = "default_max_retries")]
+    pub max_retries: usize,
+    /// Initial delay between retries in milliseconds.
+    #[serde(default = "default_retry_delay_ms")]
+    pub retry_delay_ms: u64,
+    /// Maximum delay between retries in milliseconds.
+    #[serde(default = "default_retry_max_delay_ms")]
+    pub retry_max_delay_ms: u64,
+}
+
+impl Default for RetryConfig {
+    fn default() -> Self {
+        Self {
+            max_retries: default_max_retries(),
+            retry_delay_ms: default_retry_delay_ms(),
+            retry_max_delay_ms: default_retry_max_delay_ms(),
+        }
+    }
+}
+
 /// A single entry in the `repositories:` list.
 /// Contains all `RepositoryConfig` fields plus optional per-repo overrides.
 #[derive(Debug, Clone, Deserialize)]
@@ -349,6 +388,9 @@ pub struct RepositoryEntry {
     pub compression: Option<CompressionConfig>,
     pub retention: Option<RetentionConfig>,
 
+    /// Retry settings for remote backends.
+    pub retry: Option<RetryConfig>,
+
     /// Per-repo hooks (optional).
     #[serde(default)]
     pub hooks: Option<HooksConfig>,
@@ -366,6 +408,7 @@ impl RepositoryEntry {
             rest_token: self.rest_token.clone(),
             min_pack_size: self.min_pack_size.unwrap_or_else(default_min_pack_size),
             max_pack_size: self.max_pack_size.unwrap_or_else(default_max_pack_size),
+            retry: self.retry.clone().unwrap_or_default(),
         }
     }
 }
@@ -844,6 +887,10 @@ sources:
 #      algorithm: zstd
 #    retention:
 #      keep_daily: 30
+#    retry:
+#      max_retries: 5
+#      retry_delay_ms: 2000
+#      retry_max_delay_ms: 120000
 "#
 }
 
@@ -1223,6 +1270,7 @@ repositories:
                     rest_token: None,
                     min_pack_size: default_min_pack_size(),
                     max_pack_size: default_max_pack_size(),
+                    retry: RetryConfig::default(),
                 },
                 encryption: EncryptionConfig::default(),
                 exclude_patterns: vec![],

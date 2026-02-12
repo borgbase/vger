@@ -2,9 +2,13 @@ pub mod opendal_backend;
 #[cfg(feature = "backend-rest")]
 pub mod rest_backend;
 
+use std::time::Duration;
+
+use opendal::layers::RetryLayer;
+use opendal::Operator;
 use url::Url;
 
-use crate::config::RepositoryConfig;
+use crate::config::{RepositoryConfig, RetryConfig};
 use crate::error::{Result, VgerError};
 
 /// Abstract key-value storage for repository objects.
@@ -170,6 +174,20 @@ fn parse_sftp_url(url: &Url) -> Result<ParsedUrl> {
     })
 }
 
+/// Apply OpenDAL's `RetryLayer` to an operator if retries are enabled.
+fn apply_retry(op: Operator, retry: &RetryConfig) -> Operator {
+    if retry.max_retries == 0 {
+        return op;
+    }
+    op.layer(
+        RetryLayer::new()
+            .with_max_times(retry.max_retries)
+            .with_min_delay(Duration::from_millis(retry.retry_delay_ms))
+            .with_max_delay(Duration::from_millis(retry.retry_max_delay_ms))
+            .with_jitter(),
+    )
+}
+
 /// Build a storage backend from the repository configuration.
 pub fn backend_from_config(cfg: &RepositoryConfig) -> Result<Box<dyn StorageBackend>> {
     let parsed = parse_repo_url(&cfg.url)?;
@@ -188,14 +206,16 @@ pub fn backend_from_config(cfg: &RepositoryConfig) -> Result<Box<dyn StorageBack
                 .map(|s| s.to_string())
                 .or(url_endpoint);
             let region = cfg.region.as_deref().unwrap_or("us-east-1");
-            Ok(Box::new(opendal_backend::OpendalBackend::s3(
+            let op = opendal_backend::OpendalBackend::s3_operator(
                 &bucket,
                 region,
                 &root,
                 endpoint.as_deref(),
                 cfg.access_key_id.as_deref(),
                 cfg.secret_access_key.as_deref(),
-            )?))
+            )?;
+            let op = apply_retry(op, &cfg.retry);
+            Ok(Box::new(opendal_backend::OpendalBackend::from_operator(op)))
         }
         #[cfg(feature = "backend-sftp")]
         ParsedUrl::Sftp {
@@ -203,13 +223,17 @@ pub fn backend_from_config(cfg: &RepositoryConfig) -> Result<Box<dyn StorageBack
             host,
             port,
             path,
-        } => Ok(Box::new(opendal_backend::OpendalBackend::sftp(
-            &host,
-            user.as_deref(),
-            port,
-            &path,
-            cfg.sftp_key.as_deref(),
-        )?)),
+        } => {
+            let op = opendal_backend::OpendalBackend::sftp_operator(
+                &host,
+                user.as_deref(),
+                port,
+                &path,
+                cfg.sftp_key.as_deref(),
+            )?;
+            let op = apply_retry(op, &cfg.retry);
+            Ok(Box::new(opendal_backend::OpendalBackend::from_operator(op)))
+        }
         #[cfg(not(feature = "backend-sftp"))]
         ParsedUrl::Sftp { .. } => Err(VgerError::UnsupportedBackend(
             "sftp (compile with feature 'backend-sftp')".into(),
@@ -217,7 +241,11 @@ pub fn backend_from_config(cfg: &RepositoryConfig) -> Result<Box<dyn StorageBack
         #[cfg(feature = "backend-rest")]
         ParsedUrl::Rest { url } => {
             let token = cfg.rest_token.as_deref();
-            Ok(Box::new(rest_backend::RestBackend::new(&url, token)?))
+            Ok(Box::new(rest_backend::RestBackend::new(
+                &url,
+                token,
+                cfg.retry.clone(),
+            )?))
         }
         #[cfg(not(feature = "backend-rest"))]
         ParsedUrl::Rest { .. } => Err(VgerError::UnsupportedBackend(

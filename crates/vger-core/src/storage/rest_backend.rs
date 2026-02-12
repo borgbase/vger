@@ -1,5 +1,7 @@
 use std::io::Read;
+use std::time::Duration;
 
+use crate::config::RetryConfig;
 use crate::error::{Result, VgerError};
 use crate::storage::StorageBackend;
 
@@ -9,14 +11,15 @@ pub struct RestBackend {
     base_url: String,
     agent: ureq::Agent,
     token: Option<String>,
+    retry: RetryConfig,
 }
 
 impl RestBackend {
-    pub fn new(base_url: &str, token: Option<&str>) -> Result<Self> {
+    pub fn new(base_url: &str, token: Option<&str>, retry: RetryConfig) -> Result<Self> {
         let agent = ureq::AgentBuilder::new()
-            .timeout_connect(std::time::Duration::from_secs(30))
-            .timeout_read(std::time::Duration::from_secs(300))
-            .timeout_write(std::time::Duration::from_secs(300))
+            .timeout_connect(Duration::from_secs(30))
+            .timeout_read(Duration::from_secs(300))
+            .timeout_write(Duration::from_secs(300))
             .build();
 
         let base = base_url.trim_end_matches('/').to_string();
@@ -25,6 +28,7 @@ impl RestBackend {
             base_url: base,
             agent,
             token: token.map(|t| t.to_string()),
+            retry,
         })
     }
 
@@ -41,12 +45,52 @@ impl RestBackend {
         }
     }
 
+    /// Retry a closure on transient errors with exponential backoff + jitter.
+    fn retry_call<T>(
+        &self,
+        op_name: &str,
+        f: impl Fn() -> std::result::Result<T, ureq::Error>,
+    ) -> std::result::Result<T, ureq::Error> {
+        let mut delay_ms = self.retry.retry_delay_ms;
+        let mut last_err = None;
+
+        for attempt in 0..=self.retry.max_retries {
+            if attempt > 0 {
+                let jitter = rand::random::<u64>() % delay_ms.max(1);
+                std::thread::sleep(Duration::from_millis(delay_ms + jitter));
+                delay_ms = (delay_ms * 2).min(self.retry.retry_max_delay_ms);
+            }
+            match f() {
+                Ok(val) => return Ok(val),
+                Err(e) if Self::is_retryable(&e) && attempt < self.retry.max_retries => {
+                    tracing::warn!(
+                        "REST {op_name}: transient error (attempt {}/{}), retrying: {e}",
+                        attempt + 1,
+                        self.retry.max_retries,
+                    );
+                    last_err = Some(e);
+                }
+                Err(e) => return Err(e),
+            }
+        }
+        Err(last_err.unwrap())
+    }
+
+    fn is_retryable(err: &ureq::Error) -> bool {
+        match err {
+            ureq::Error::Transport(_) => true,
+            ureq::Error::Status(code, _) => *code == 429 || *code >= 500,
+        }
+    }
+
     /// Batch delete multiple keys in a single request.
     pub fn batch_delete(&self, keys: &[&str]) -> Result<()> {
         let url = format!("{}?batch-delete", self.base_url);
-        let req = self.apply_auth(self.agent.post(&url));
-        let resp = req
-            .send_json(ureq::json!(keys))
+        let resp = self
+            .retry_call("batch-delete", || {
+                let req = self.apply_auth(self.agent.post(&url));
+                req.send_json(ureq::json!(keys))
+            })
             .map_err(|e| VgerError::Other(format!("REST batch-delete: {e}")))?;
         if resp.status() >= 400 {
             return Err(VgerError::Other(format!(
@@ -60,9 +104,11 @@ impl RestBackend {
     /// Get repository statistics from the server.
     pub fn stats(&self) -> Result<serde_json::Value> {
         let url = format!("{}?stats", self.base_url);
-        let req = self.apply_auth(self.agent.get(&url));
-        let resp = req
-            .call()
+        let resp = self
+            .retry_call("stats", || {
+                let req = self.apply_auth(self.agent.get(&url));
+                req.call()
+            })
             .map_err(|e| VgerError::Other(format!("REST stats: {e}")))?;
         let val: serde_json::Value = resp
             .into_json()
@@ -73,9 +119,12 @@ impl RestBackend {
     /// Acquire a lock on the server.
     pub fn acquire_lock(&self, id: &str, info: &serde_json::Value) -> Result<()> {
         let url = format!("{}/locks/{}", self.base_url, id);
-        let req = self.apply_auth(self.agent.post(&url));
-        let resp = req
-            .send_json(info.clone())
+        let info = info.clone();
+        let resp = self
+            .retry_call("lock-acquire", || {
+                let req = self.apply_auth(self.agent.post(&url));
+                req.send_json(info.clone())
+            })
             .map_err(|e| VgerError::Other(format!("REST lock acquire: {e}")))?;
         if resp.status() >= 400 {
             return Err(VgerError::Other(format!(
@@ -89,9 +138,11 @@ impl RestBackend {
     /// Release a lock on the server.
     pub fn release_lock(&self, id: &str) -> Result<()> {
         let url = format!("{}/locks/{}", self.base_url, id);
-        let req = self.apply_auth(self.agent.delete(&url));
-        let resp = req
-            .call()
+        let resp = self
+            .retry_call("lock-release", || {
+                let req = self.apply_auth(self.agent.delete(&url));
+                req.call()
+            })
             .map_err(|e| VgerError::Other(format!("REST lock release: {e}")))?;
         if resp.status() >= 400 {
             return Err(VgerError::Other(format!(
@@ -105,9 +156,12 @@ impl RestBackend {
     /// Send a repack plan to the server for server-side compaction.
     pub fn repack(&self, plan: &serde_json::Value) -> Result<serde_json::Value> {
         let url = format!("{}?repack", self.base_url);
-        let req = self.apply_auth(self.agent.post(&url));
-        let resp = req
-            .send_json(plan.clone())
+        let plan = plan.clone();
+        let resp = self
+            .retry_call("repack", || {
+                let req = self.apply_auth(self.agent.post(&url));
+                req.send_json(plan.clone())
+            })
             .map_err(|e| VgerError::Other(format!("REST repack: {e}")))?;
         if resp.status() >= 400 {
             return Err(VgerError::Other(format!(
@@ -125,13 +179,15 @@ impl RestBackend {
 impl StorageBackend for RestBackend {
     fn get(&self, key: &str) -> Result<Option<Vec<u8>>> {
         let url = self.url(key);
-        let req = self.apply_auth(self.agent.get(&url));
-        match req.call() {
+        match self.retry_call(&format!("GET {key}"), || {
+            let req = self.apply_auth(self.agent.get(&url));
+            req.call()
+        }) {
             Ok(resp) => {
                 let mut buf = Vec::new();
                 resp.into_reader()
                     .read_to_end(&mut buf)
-                    .map_err(|e| VgerError::Io(e))?;
+                    .map_err(VgerError::Io)?;
                 Ok(Some(buf))
             }
             Err(ureq::Error::Status(404, _)) => Ok(None),
@@ -141,16 +197,21 @@ impl StorageBackend for RestBackend {
 
     fn put(&self, key: &str, data: &[u8]) -> Result<()> {
         let url = self.url(key);
-        let req = self.apply_auth(self.agent.put(&url));
-        req.send_bytes(data)
-            .map_err(|e| VgerError::Other(format!("REST PUT {key}: {e}")))?;
+        let data = data.to_vec();
+        self.retry_call(&format!("PUT {key}"), || {
+            let req = self.apply_auth(self.agent.put(&url));
+            req.send_bytes(&data)
+        })
+        .map_err(|e| VgerError::Other(format!("REST PUT {key}: {e}")))?;
         Ok(())
     }
 
     fn delete(&self, key: &str) -> Result<()> {
         let url = self.url(key);
-        let req = self.apply_auth(self.agent.delete(&url));
-        match req.call() {
+        match self.retry_call(&format!("DELETE {key}"), || {
+            let req = self.apply_auth(self.agent.delete(&url));
+            req.call()
+        }) {
             Ok(_) => Ok(()),
             Err(ureq::Error::Status(404, _)) => Ok(()),
             Err(e) => Err(VgerError::Other(format!("REST DELETE {key}: {e}"))),
@@ -159,8 +220,10 @@ impl StorageBackend for RestBackend {
 
     fn exists(&self, key: &str) -> Result<bool> {
         let url = self.url(key);
-        let req = self.apply_auth(self.agent.head(&url));
-        match req.call() {
+        match self.retry_call(&format!("HEAD {key}"), || {
+            let req = self.apply_auth(self.agent.head(&url));
+            req.call()
+        }) {
             Ok(_) => Ok(true),
             Err(ureq::Error::Status(404, _)) => Ok(false),
             Err(e) => Err(VgerError::Other(format!("REST HEAD {key}: {e}"))),
@@ -170,9 +233,11 @@ impl StorageBackend for RestBackend {
     fn list(&self, prefix: &str) -> Result<Vec<String>> {
         let prefix = prefix.trim_start_matches('/');
         let url = format!("{}?list", self.url(prefix));
-        let req = self.apply_auth(self.agent.get(&url));
-        let resp = req
-            .call()
+        let resp = self
+            .retry_call(&format!("LIST {prefix}"), || {
+                let req = self.apply_auth(self.agent.get(&url));
+                req.call()
+            })
             .map_err(|e| VgerError::Other(format!("REST LIST {prefix}: {e}")))?;
         let keys: Vec<String> = resp
             .into_json()
@@ -183,15 +248,18 @@ impl StorageBackend for RestBackend {
     fn get_range(&self, key: &str, offset: u64, length: u64) -> Result<Option<Vec<u8>>> {
         let url = self.url(key);
         let end = offset + length - 1;
-        let req = self
-            .apply_auth(self.agent.get(&url))
-            .set("Range", &format!("bytes={offset}-{end}"));
-        match req.call() {
+        let range_header = format!("bytes={offset}-{end}");
+        match self.retry_call(&format!("GET_RANGE {key}"), || {
+            let req = self
+                .apply_auth(self.agent.get(&url))
+                .set("Range", &range_header);
+            req.call()
+        }) {
             Ok(resp) => {
                 let mut buf = Vec::new();
                 resp.into_reader()
                     .read_to_end(&mut buf)
-                    .map_err(|e| VgerError::Io(e))?;
+                    .map_err(VgerError::Io)?;
                 Ok(Some(buf))
             }
             Err(ureq::Error::Status(404, _)) => Ok(None),
@@ -202,9 +270,11 @@ impl StorageBackend for RestBackend {
     fn create_dir(&self, key: &str) -> Result<()> {
         let key = key.trim_start_matches('/');
         let url = format!("{}?mkdir", self.url(key));
-        let req = self.apply_auth(self.agent.post(&url));
-        req.call()
-            .map_err(|e| VgerError::Other(format!("REST MKDIR {key}: {e}")))?;
+        self.retry_call(&format!("MKDIR {key}"), || {
+            let req = self.apply_auth(self.agent.post(&url));
+            req.call()
+        })
+        .map_err(|e| VgerError::Other(format!("REST MKDIR {key}: {e}")))?;
         Ok(())
     }
 }

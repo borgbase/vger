@@ -8,25 +8,33 @@ pub struct OpendalBackend {
 }
 
 impl OpendalBackend {
-    /// Create a backend backed by a local filesystem directory.
-    pub fn local(root: &str) -> Result<Self> {
-        let builder = opendal::services::Fs::default().root(root);
-        let op = Operator::new(builder)
-            .map_err(|e| VgerError::Other(format!("opendal fs init: {e}")))?
-            .finish()
-            .blocking();
-        Ok(Self { op })
+    /// Create a backend from a pre-configured `Operator` (e.g. with layers applied).
+    pub fn from_operator(op: Operator) -> Self {
+        Self { op: op.blocking() }
     }
 
-    /// Create a backend backed by AWS S3 (or S3-compatible like MinIO).
-    pub fn s3(
+    /// Build an `Operator` for local filesystem (without blocking conversion).
+    pub fn local_operator(root: &str) -> Result<Operator> {
+        let builder = opendal::services::Fs::default().root(root);
+        Operator::new(builder)
+            .map_err(|e| VgerError::Other(format!("opendal fs init: {e}")))
+            .map(|b| b.finish())
+    }
+
+    /// Create a backend backed by a local filesystem directory.
+    pub fn local(root: &str) -> Result<Self> {
+        Ok(Self::from_operator(Self::local_operator(root)?))
+    }
+
+    /// Build an `Operator` for S3 (without blocking conversion).
+    pub fn s3_operator(
         bucket: &str,
         region: &str,
         root: &str,
         endpoint: Option<&str>,
         access_key_id: Option<&str>,
         secret_access_key: Option<&str>,
-    ) -> Result<Self> {
+    ) -> Result<Operator> {
         let mut builder = opendal::services::S3::default()
             .bucket(bucket)
             .region(region)
@@ -40,22 +48,39 @@ impl OpendalBackend {
         if let Some(secret) = secret_access_key {
             builder = builder.secret_access_key(secret);
         }
-        let op = Operator::new(builder)
-            .map_err(|e| VgerError::Other(format!("opendal s3 init: {e}")))?
-            .finish()
-            .blocking();
-        Ok(Self { op })
+        Operator::new(builder)
+            .map_err(|e| VgerError::Other(format!("opendal s3 init: {e}")))
+            .map(|b| b.finish())
     }
 
-    /// Create a backend backed by SFTP.
+    /// Create a backend backed by AWS S3 (or S3-compatible like MinIO).
+    pub fn s3(
+        bucket: &str,
+        region: &str,
+        root: &str,
+        endpoint: Option<&str>,
+        access_key_id: Option<&str>,
+        secret_access_key: Option<&str>,
+    ) -> Result<Self> {
+        Ok(Self::from_operator(Self::s3_operator(
+            bucket,
+            region,
+            root,
+            endpoint,
+            access_key_id,
+            secret_access_key,
+        )?))
+    }
+
+    /// Build an `Operator` for SFTP (without blocking conversion).
     #[cfg(feature = "backend-sftp")]
-    pub fn sftp(
+    pub fn sftp_operator(
         host: &str,
         user: Option<&str>,
         port: Option<u16>,
         root: &str,
         key: Option<&str>,
-    ) -> Result<Self> {
+    ) -> Result<Operator> {
         let port = port.unwrap_or(22);
         let endpoint = format!("ssh://{host}:{port}");
         let mut builder = opendal::services::Sftp::default()
@@ -67,11 +92,23 @@ impl OpendalBackend {
         if let Some(k) = key {
             builder = builder.key(k);
         }
-        let op = Operator::new(builder)
-            .map_err(|e| VgerError::Other(format!("opendal sftp init: {e}")))?
-            .finish()
-            .blocking();
-        Ok(Self { op })
+        Operator::new(builder)
+            .map_err(|e| VgerError::Other(format!("opendal sftp init: {e}")))
+            .map(|b| b.finish())
+    }
+
+    /// Create a backend backed by SFTP.
+    #[cfg(feature = "backend-sftp")]
+    pub fn sftp(
+        host: &str,
+        user: Option<&str>,
+        port: Option<u16>,
+        root: &str,
+        key: Option<&str>,
+    ) -> Result<Self> {
+        Ok(Self::from_operator(Self::sftp_operator(
+            host, user, port, root, key,
+        )?))
     }
 }
 
