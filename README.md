@@ -11,6 +11,8 @@ Inspired by BorgBackup, Borgmatic, restic, and rustic. V'Ger uses its own on-dis
 - Encryption with AES-256-GCM and Argon2id key derivation
 - Storage backends via Apache OpenDAL (local filesystem, S3-compatible storage, SFTP)
 - Dedicated REST server (`vger-server`) for append-only enforcement, quotas, lock TTLs, and server-side compaction
+- Built-in web interface (webDAV) to browse snapshots and restore files
+- Basic GUI (work in progress)
 
 ## Quick start
 

@@ -36,67 +36,20 @@ You can also set `VGER_PASSPHRASE` to supply the passphrase non-interactively.
 # Initialize the repository (prompts for passphrase if encrypted)
 vger init
 
-# Create a backup (auto-generated 8-char hex ID)
+# Create a backup
 vger backup
-
-# Create a backup with a label annotation
-vger backup --label before-upgrade
-
-# Back up only one configured source
-vger backup --source docs
 
 # List all snapshots
 vger list
 
-# List the 5 most recent snapshots
-vger list --last 5
-
-# List snapshots for a specific source
-vger list --source docs
-
 # List files inside a snapshot (use the hex ID from `vger list`)
 vger list --snapshot a1b2c3d4
 
-# Browse snapshots via a local WebDAV server
-vger mount
-
 # Restore to a directory
 vger extract --snapshot a1b2c3d4 --dest /tmp/restored
-
-# Delete a specific snapshot
-vger delete --snapshot a1b2c3d4
-
-# Prune old snapshots per retention policy
-vger prune
-
-# Verify repository integrity (structural check)
-vger check
-
-# Full data verification (reads and verifies every chunk)
-vger check --verify-data
-
-# Reclaim space from deleted/pruned snapshots (dry-run first)
-vger compact --dry-run
-vger compact
 ```
 
-## Mount
-
-Browse snapshot contents via a local WebDAV server.
-
-```bash
-# Serve all snapshots (default: http://127.0.0.1:8080)
-vger mount
-
-# Serve a single snapshot
-vger mount --snapshot a1b2c3d4
-
-# Only snapshots from a specific source
-vger mount --source docs
-
-# Custom listen address
-vger mount --address 127.0.0.1:9090
-```
+For backup options, snapshot browsing, and maintenance tasks, see the [workflow guides](workflows/index.md).
 
 ## Available commands
 

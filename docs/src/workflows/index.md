@@ -1,8 +1,6 @@
 # Workflows
 
-This section will hold end-to-end operational guides as the project stabilizes.
-
-Current placeholders:
+End-to-end operational guides for common vger tasks.
 
 - [Installing](install.md)
 - [Initialize and Set Up a Repository](init-setup.md)

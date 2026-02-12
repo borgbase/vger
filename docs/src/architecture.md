@@ -1,67 +1,79 @@
-# Architecture Notes & Research
+# Architecture
 
-Living document for design research, comparisons with other backup tools, and status of implemented/planned features.
+Technical reference for vger's cryptographic, chunking, compression, and storage design decisions.
 
 ---
 
-## Research: Lessons from rustic-rs (Feb 2025)
+## Encryption
 
-rustic-rs is a mature Rust backup tool (~2,900 stars) that is **fully compatible with restic repositories**. Split across several crates (`rustic_core`, `rustic_backend`, `rustic_cdc`, `aes256ctr_poly1305aes`). This section summarizes what vger can learn from their architecture.
+AES-256-GCM with 12-byte random nonces.
 
-### Encryption: AES-256-CTR + Poly1305-AES vs AES-256-GCM
+Wire format: `[1B type_tag][12B nonce][ciphertext + 16B GCM tag]`
 
-**rustic:** AES-256-CTR with Poly1305-AES (64-byte keys). Wire format: `[16B nonce][ciphertext][16B MAC tag]`. Inherited from restic.
+Rationale:
+- NIST-standardized authenticated encryption
+- Hardware-accelerated on modern CPUs (AES-NI + CLMUL for GHASH)
+- 32-byte symmetric keys (simpler key management than split-key schemes)
+- The 1-byte type tag is passed as AAD (authenticated additional data), binding the ciphertext to its intended object type
 
-**vger:** AES-256-GCM with 12-byte nonces. Wire format: `[1B type_tag][12B nonce][ciphertext + 16B GCM tag]`.
+## Key Derivation
 
-**Verdict — keep AES-256-GCM:**
-- NIST-standardized, hardware-accelerated (AESNI + CLMUL for GHASH)
-- Simpler 32-byte keys vs rustic's 64-byte split keys
-- Poly1305-AES has no AAD support in rustic's impl. vger uses type_tag as AAD — a security win
-- rustic chose Poly1305-AES only for restic compatibility
+Argon2id for passphrase-to-key derivation.
 
-### Key Derivation: scrypt vs Argon2id
+Rationale:
+- Modern memory-hard KDF recommended by OWASP and IETF
+- Resists both GPU and ASIC brute-force attacks
 
-**rustic:** scrypt (N=2^16, r=8, p=1) — restic compatibility.
+## Hashing / Chunk IDs
 
-**vger:** Argon2id — modern, memory-hard, OWASP/IETF recommended.
+Keyed BLAKE2b-256 MAC using a `chunk_id_key` derived from the master key.
 
-**Verdict — keep Argon2id.**
-
-### Hashing / Chunk IDs: SHA-256 vs Keyed BLAKE2b
-
-**rustic:** Unkeyed SHA-256 for all content-addressed IDs.
-
-**vger:** Keyed BLAKE2b-256 MAC with `chunk_id_key` derived from master key.
-
-**Verdict — keep keyed BLAKE2b:**
-- Prevents content confirmation attacks (adversary can't check if known plaintext is in backup)
+Rationale:
+- Prevents content confirmation attacks (an adversary cannot check whether known plaintext exists in the backup without the key)
 - BLAKE2b is faster than SHA-256 in software
-- Trade-off: rustic's unkeyed SHA-256 allows dedup across different encryption keys
+- Trade-off: keyed IDs prevent dedup across different encryption keys (acceptable for vger's single-key-per-repo model)
 
-### Chunking: Rabin Fingerprint vs FastCDC
+## Chunking
 
-**rustic:** Custom `rustic_cdc` crate with Rabin64 polynomial. Default ~8 KiB average. Also supports fixed-size chunking and hierarchical multi-level dedup.
+FastCDC (content-defined chunking) via the `fastcdc` v3 crate.
 
-**vger:** `fastcdc` v3 crate.
+Default parameters: 512 KiB min, 2 MiB average, 8 MiB max (configurable in YAML).
 
-**Verdict — keep FastCDC.** Newer, benchmarks faster. Could consider making chunk sizes configurable and adding fixed-size chunking as a cheap option.
+Rationale:
+- Newer algorithm, benchmarks faster than Rabin fingerprinting
+- Good deduplication ratio with configurable chunk boundaries
 
-### Compression: ZSTD-only vs LZ4/ZSTD/None
+## Compression
 
-**rustic:** ZSTD only (or none). Tied to repo format version.
+Per-chunk compression with a 1-byte tag prefix. Supported algorithms: LZ4, ZSTD, and None.
 
-**vger:** LZ4, ZSTD, and None with 1-byte tag prefix per chunk.
-
-**Verdict — keep current approach.** Per-chunk tags are more flexible.
+Rationale:
+- Per-chunk tags allow mixing algorithms within a single repository
+- LZ4 for speed-sensitive workloads, ZSTD for better compression ratios
+- No repository-wide format version lock-in for compression choice
 
 ---
 
-## Repository Format: Pack Files (Implemented)
+## Repository Layout
+
+```text
+<repo>/
+|- config                    # Repository metadata (unencrypted)
+|- keys/repokey              # Encrypted master key
+|- manifest                  # Encrypted snapshot list
+|- index                     # Encrypted chunk index
+|- snapshots/<id>            # Encrypted snapshot metadata
+|- packs/<xx>/<pack-id>      # Pack files containing compressed+encrypted chunks (256 shard dirs)
+`- locks/                    # Advisory lock files
+```
+
+---
+
+## Pack Files
 
 Chunks are grouped into **pack files** (~32 MiB) instead of being stored as individual files. This reduces file count by 1000x+, critical for cloud storage costs (fewer PUT/GET ops) and filesystem performance (fewer inodes).
 
-### vger Pack File Format
+### Pack File Format
 
 ```text
 [8B magic "VGERPACK\0"][1B version=1]
@@ -72,7 +84,7 @@ Chunks are grouped into **pack files** (~32 MiB) instead of being stored as indi
 [encrypted_header][4B header_length LE]
 ```
 
-- **Per-blob length prefix** (4 bytes): enables forward scanning to recover individual blobs even if the trailing header is corrupted (more resilient than restic/rustic which have no per-blob framing)
+- **Per-blob length prefix** (4 bytes): enables forward scanning to recover individual blobs even if the trailing header is corrupted
 - Each blob is a complete RepoObj envelope: `[1B type_tag][12B nonce][ciphertext+16B GCM tag]`
 - Each blob is independently encrypted (can read one chunk without decrypting the whole pack)
 - Header at the END allows streaming writes without knowing final header size
@@ -110,10 +122,10 @@ target = clamp(min_pack_size * sqrt(num_data_packs / 100), min_pack_size, max_pa
 
 `num_data_packs` is computed at `open()` by counting distinct `pack_id` values in the ChunkIndex (zero extra I/O).
 
-### Comparison with Other Approaches
+### Pack Files vs Individual Files
 
-| Aspect | Pack files (rustic/restic/vger) | Individual files (old vger) |
-|--------|-----------------------------------|-------------------------------|
+| Aspect | Pack files | Individual files |
+|--------|-----------|------------------|
 | File count | Very low (1 file per ~32 MiB) | Very high (1 file per chunk) |
 | S3/cloud cost | Fewer PUT/GET ops, much cheaper | Many small PUTs, expensive at scale |
 | Local FS perf | Efficient, fewer inodes | Can hit inode limits, slow listings |
@@ -121,21 +133,11 @@ target = clamp(min_pack_size * sqrt(num_data_packs / 100), min_pack_size, max_pa
 | GC/compaction | Need `compact` to reclaim space | Simple file deletion |
 | Write speed | Faster (batched writes) | Slower (many small writes) |
 
-The `compact` command reclaims space from orphaned blobs left behind by `delete` and `prune`. See the [Compact Command](#compact-command-implemented) section below.
-
-### rustic/restic Pack File Format (for reference)
-
-```text
-[blob1_encrypted][blob2_encrypted]...[blobN_encrypted][header_encrypted][header_length: u32 LE]
-```
-
-Header entry format (per blob):
-- Uncompressed: `[type: 1B][length: 4B][id: 32B]` = 37 bytes
-- Compressed:   `[type: 1B][length: 4B][uncompressed_len: 4B][id: 32B]` = 41 bytes
+The `compact` command reclaims space from orphaned blobs left behind by `delete` and `prune`. See the [Compact Command](#compact-command) section below.
 
 ---
 
-## Compact Command (Implemented)
+## Compact Command
 
 After `delete` or `prune`, chunk refcounts are decremented and entries with refcount 0 are removed from the `ChunkIndex` — but the encrypted blob data remains in pack files. The `compact` command rewrites packs to reclaim this wasted space.
 
@@ -169,9 +171,7 @@ vger compact [--threshold 10] [--max-repack-size 2G] [-n/--dry-run]
 
 ---
 
----
-
-## Server Architecture (Implemented)
+## Server Architecture
 
 vger includes a dedicated backup server (`vger-server`) for features that dumb storage (S3/WebDAV) cannot provide. The server stores data on its local filesystem, and TLS is handled by a reverse proxy. All data remains client-side encrypted — the server is opaque storage that understands repo structure but never has the encryption key.
 
@@ -343,32 +343,6 @@ repositories:
 
 ---
 
-### Type-Safe IDs
-
-**rustic:** Every ID type (`PackId`, `BlobId`, `SnapshotId`, `IndexId`) is a newtype around 32-byte hash. Compile-time prevention of ID confusion.
-
-**vger:** `ChunkId` and `PackId` are newtypes. Other IDs (snapshot, manifest) are still raw bytes/strings.
-
-**Recommendation:** Add newtypes for `SnapshotId`, `ManifestId`, etc. Zero-cost abstractions that prevent subtle bugs.
-
-### Parallelism & Performance
-
-**rustic:** `rayon` for parallel compression/encryption, `crossbeam-channel` for worker coordination, `pariter` for parallel iterators.
-
-**vger:** Currently single-threaded.
-
-**Recommendation:** `rayon` for the chunk→compress→encrypt pipeline. Natural fit since chunks are independently processable.
-
-### Configuration
-
-**rustic:** TOML with profile-based hierarchical merging (via `conflate` crate), recursive profile includes, env var overrides, per-source backup configs.
-
-**vger:** YAML config inspired by Borgmatic.
-
-**Nice-to-have later:** Profile inheritance, per-source configs, hooks system.
-
----
-
 ## Feature Status
 
 ### Implemented
@@ -384,16 +358,15 @@ repositories:
 | **compact command** | Rewrite packs to reclaim space from orphaned blobs after delete/prune |
 | **REST server** | axum-based backup server with auth, append-only, quotas, freshness tracking, lock TTL, server-side compaction |
 | **REST backend** | `StorageBackend` over HTTP with range-read support (behind `backend-rest` feature) |
+| **Parallel pipeline** | `rayon` for chunk compress/encrypt pipeline |
 
 ### Planned / Not Yet Implemented
 
 | Feature | Description | Priority |
 |---------|-------------|----------|
-| **Parallel pipeline** | `rayon` for compress/encrypt | High |
 | **File-level cache** | inode/mtime skip for unchanged files (incremental speedup) | High |
 | **Type-safe IDs** | Newtypes for `SnapshotId`, `ManifestId` | Medium |
 | **Hot/cold tiering** | Separate backends by access frequency | Medium |
-| **Hooks** | Before/after/failed/finally per command | Medium |
 | **Snapshot filtering** | By host, tag, path, date ranges | Medium |
 | **FUSE mount** | Read-only mount of repository | Medium |
 | **Async I/O** | Non-blocking storage operations | Medium |

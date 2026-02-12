@@ -1,17 +1,44 @@
 # Make a Backup
 
-Status: Placeholder.
+## Run a backup
 
-This page will describe routine backup execution for local and remote repositories.
+```bash
+# Create a backup of all configured sources
+vger backup
+```
 
-Planned sections:
+## Label backups
 
-1. Run a backup
-2. Label backups and source targeting
-3. Validate with list/check
-4. Operational scheduling notes
+```bash
+# Annotate a backup with a label (e.g. before a system change)
+vger backup --label before-upgrade
+```
 
-Related pages:
+## Back up a single source
+
+```bash
+# Back up only the source labeled "docs" in your config
+vger backup --source docs
+```
+
+## List and verify snapshots
+
+```bash
+# List all snapshots
+vger list
+
+# List the 5 most recent snapshots
+vger list --last 5
+
+# List snapshots for a specific source
+vger list --source docs
+
+# List files inside a snapshot
+vger list --snapshot a1b2c3d4
+```
+
+## Related pages
 
 - [Quick Start](../quickstart.md)
 - [Configuration Reference](../configuration.md)
+- [Restore a Backup](restore.md)
