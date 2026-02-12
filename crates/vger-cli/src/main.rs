@@ -3,14 +3,27 @@ use comfy_table::{Table, presets::UTF8_FULL_CONDENSED};
 
 use vger_core::commands;
 use vger_core::compress::Compression;
-use vger_core::config::VgerConfig;
+use vger_core::config::{
+    self, VgerConfig,
+};
 
 #[derive(Parser)]
-#[command(name = "vger", version, about = "Fast, encrypted, deduplicated backups")]
+#[command(name = "vger", version, about = "Fast, encrypted, deduplicated backups",
+    after_help = "\
+Configuration file lookup order:
+  1. --config <path>             (explicit flag)
+  2. $VGER_CONFIG                (environment variable)
+  3. ./vger.yaml                 (project)
+  4. $XDG_CONFIG_HOME/vger/config.yaml or ~/.config/vger/config.yaml (user)
+  5. /etc/vger/config.yaml       (system)
+
+Environment variables:
+  VGER_CONFIG       Path to configuration file (overrides default search)
+  VGER_PASSPHRASE   Repository passphrase (skips interactive prompt)")]
 struct Cli {
-    /// Path to configuration file
-    #[arg(short, long, default_value = "vger.yaml")]
-    config: String,
+    /// Path to configuration file (overrides VGER_CONFIG and default search)
+    #[arg(short, long)]
+    config: Option<String>,
 
     /// Verbosity level (-v, -vv, -vvv)
     #[arg(short, long, action = clap::ArgAction::Count)]
@@ -90,6 +103,13 @@ enum Commands {
         verify_data: bool,
     },
 
+    /// Generate a minimal configuration file
+    Config {
+        /// Destination path for the config file (default: ./vger.yaml)
+        #[arg(short, long, default_value = "vger.yaml")]
+        dest: String,
+    },
+
     /// Free repository space by compacting pack files
     Compact {
         /// Minimum percentage of unused space to trigger repack (default: 10)
@@ -121,18 +141,36 @@ fn main() {
         .with_target(false)
         .init();
 
-    // Load config
-    let config_str = match std::fs::read_to_string(&cli.config) {
-        Ok(s) => s,
-        Err(e) => {
-            eprintln!("Error: cannot read config file '{}': {e}", cli.config);
+    // Handle `config` subcommand early — no config file needed
+    if let Commands::Config { dest } = &cli.command {
+        if let Err(e) = run_config_generate(dest) {
+            eprintln!("Error: {e}");
+            std::process::exit(1);
+        }
+        return;
+    }
+
+    // Resolve config file
+    let source = match config::resolve_config_path(cli.config.as_deref()) {
+        Some(s) => s,
+        None => {
+            eprintln!("Error: no configuration file found.");
+            eprintln!("Searched:");
+            for (path, level) in config::default_config_search_paths() {
+                eprintln!("  {} ({})", path.display(), level);
+            }
+            eprintln!();
+            eprintln!("Run `vger config` to generate a starter config file.");
             std::process::exit(1);
         }
     };
-    let config: VgerConfig = match serde_yaml::from_str(&config_str) {
+
+    tracing::info!("Using config: {source}");
+
+    let config = match config::load_config(source.path()) {
         Ok(c) => c,
         Err(e) => {
-            eprintln!("Error: invalid config file '{}': {e}", cli.config);
+            eprintln!("Error: {e}");
             std::process::exit(1);
         }
     };
@@ -158,12 +196,32 @@ fn main() {
             max_repack_size,
             dry_run,
         } => run_compact(&config, threshold, max_repack_size, dry_run),
+        Commands::Config { .. } => unreachable!(),
     };
 
     if let Err(e) = result {
         eprintln!("Error: {e}");
         std::process::exit(1);
     }
+}
+
+fn run_config_generate(dest: &str) -> Result<(), Box<dyn std::error::Error>> {
+    let path = std::path::Path::new(dest);
+
+    if path.exists() {
+        return Err(format!("file already exists: {dest}").into());
+    }
+
+    if let Some(parent) = path.parent() {
+        if !parent.as_os_str().is_empty() && !parent.exists() {
+            std::fs::create_dir_all(parent)?;
+        }
+    }
+
+    std::fs::write(path, config::minimal_config_template())?;
+    println!("Config written to: {dest}");
+    println!("Edit it to set your repository path and source directories.");
+    Ok(())
 }
 
 fn get_passphrase(config: &VgerConfig) -> Result<Option<String>, Box<dyn std::error::Error>> {
@@ -189,6 +247,13 @@ fn get_passphrase(config: &VgerConfig) -> Result<Option<String>, Box<dyn std::er
         return Ok(Some(pass));
     }
 
+    // Check VGER_PASSPHRASE env var
+    if let Ok(pass) = std::env::var("VGER_PASSPHRASE") {
+        if !pass.is_empty() {
+            return Ok(Some(pass));
+        }
+    }
+
     // Interactive prompt
     let pass = rpassword::prompt_password("Enter passphrase: ")?;
     Ok(Some(pass))
@@ -196,9 +261,20 @@ fn get_passphrase(config: &VgerConfig) -> Result<Option<String>, Box<dyn std::er
 
 fn run_init(config: &VgerConfig) -> Result<(), Box<dyn std::error::Error>> {
     let passphrase = if config.encryption.mode != "none" {
-        // Try config passphrase/passcommand first, fall back to interactive
+        // Try config passphrase/passcommand first, then env var, then interactive
         if let Some(p) = get_passphrase(config)? {
             Some(p)
+        } else if let Ok(p) = std::env::var("VGER_PASSPHRASE") {
+            if !p.is_empty() {
+                Some(p)
+            } else {
+                let p1 = rpassword::prompt_password("Enter new passphrase: ")?;
+                let p2 = rpassword::prompt_password("Confirm passphrase: ")?;
+                if p1 != p2 {
+                    return Err("passphrases do not match".into());
+                }
+                Some(p1)
+            }
         } else {
             let p1 = rpassword::prompt_password("Enter new passphrase: ")?;
             let p2 = rpassword::prompt_password("Confirm passphrase: ")?;

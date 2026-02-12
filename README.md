@@ -10,6 +10,7 @@ Inspired by [BorgBackup](https://www.borgbackup.org/), [Borgmatic](https://torsi
 
 | Command | Description |
 |---------|-------------|
+| `vger config` | Generate a starter configuration file |
 | `vger init` | Initialize a new backup repository |
 | `vger create` | Create a new backup archive |
 | `vger list` | List archives, or files within an archive |
@@ -58,62 +59,59 @@ The binary is at `target/release/vger`.
 
 ### Create a config file
 
-Create `vger.yaml`:
+```bash
+# Generate a starter config in the current directory
+vger config
 
-```yaml
-repository:
-  path: "/path/to/backup/repo"
-  backend: "local"
-
-encryption:
-  mode: "aes256gcm"   # or "none" for unencrypted
-
-source_directories:
-  - "/home/user/documents"
-  - "/home/user/photos"
-
-exclude_patterns:
-  - "*.tmp"
-  - ".cache/**"
-  - "node_modules/**"
-
-compression:
-  algorithm: "lz4"     # "lz4", "zstd", or "none"
+# Or write it to a specific path
+vger config --dest ~/.config/vger/config.yaml
 ```
+
+Edit the generated `vger.yaml` to set your repository path, source directories, and encryption mode. See [Configuration reference](#configuration-reference) for all options.
+
+vger automatically finds config files in this order:
+
+1. `--config <path>` flag
+2. `VGER_CONFIG` environment variable
+3. `./vger.yaml` (project)
+4. `$XDG_CONFIG_HOME/vger/config.yaml` or `~/.config/vger/config.yaml` (user)
+5. `/etc/vger/config.yaml` (system)
+
+You can also set `VGER_PASSPHRASE` to supply the passphrase non-interactively (useful for cron jobs and scripts).
 
 ### Run
 
 ```bash
 # Initialize the repository (prompts for passphrase if encrypted)
-vger --config vger.yaml init
+vger init
 
 # Create a backup
-vger --config vger.yaml create --archive daily-2025-01-15
+vger create --archive daily-2025-01-15
 
 # List all archives
-vger --config vger.yaml list
+vger list
 
 # List files inside an archive
-vger --config vger.yaml list --archive daily-2025-01-15
+vger list --archive daily-2025-01-15
 
 # Restore to a directory
-vger --config vger.yaml extract --archive daily-2025-01-15 --dest /tmp/restored
+vger extract --archive daily-2025-01-15 --dest /tmp/restored
 
 # Delete a specific archive
-vger --config vger.yaml delete --archive daily-2025-01-15
+vger delete --archive daily-2025-01-15
 
 # Prune old archives per retention policy
-vger --config vger.yaml prune
+vger prune
 
 # Verify repository integrity (structural check)
-vger --config vger.yaml check
+vger check
 
 # Full data verification (reads and verifies every chunk)
-vger --config vger.yaml check --verify-data
+vger check --verify-data
 
 # Reclaim space from deleted/pruned archives (dry-run first)
-vger --config vger.yaml compact --dry-run
-vger --config vger.yaml compact
+vger compact --dry-run
+vger compact
 ```
 
 ## Server mode
