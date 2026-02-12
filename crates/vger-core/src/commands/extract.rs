@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Component, Path, PathBuf};
 
@@ -16,6 +17,7 @@ pub fn run(
     snapshot_name: &str,
     dest: &str,
     pattern: Option<&str>,
+    xattrs_enabled: bool,
 ) -> Result<ExtractStats> {
     let backend = storage::backend_from_config(&config.repository)?;
     let repo = Repository::open(backend, passphrase)?;
@@ -73,6 +75,9 @@ pub fn run(
                 // Set permissions (ignore errors on directories for now, re-set after)
                 let _ =
                     std::fs::set_permissions(&target, std::fs::Permissions::from_mode(item.mode));
+                if xattrs_enabled {
+                    apply_item_xattrs(&target, item.xattrs.as_ref());
+                }
                 stats.dirs += 1;
             }
             ItemType::Symlink => {
@@ -81,6 +86,9 @@ pub fn run(
                     // Remove existing if present
                     let _ = std::fs::remove_file(&target);
                     std::os::unix::fs::symlink(link_target, &target)?;
+                    if xattrs_enabled {
+                        apply_item_xattrs(&target, item.xattrs.as_ref());
+                    }
                     stats.symlinks += 1;
                 }
             }
@@ -100,6 +108,9 @@ pub fn run(
                 // Set permissions
                 let _ =
                     std::fs::set_permissions(&target, std::fs::Permissions::from_mode(item.mode));
+                if xattrs_enabled {
+                    apply_item_xattrs(&target, item.xattrs.as_ref());
+                }
 
                 // Set modification time
                 let mtime_secs = item.mtime / 1_000_000_000;
@@ -119,6 +130,30 @@ pub fn run(
     );
 
     Ok(stats)
+}
+
+fn apply_item_xattrs(target: &Path, xattrs: Option<&HashMap<String, Vec<u8>>>) {
+    let Some(xattrs) = xattrs else {
+        return;
+    };
+
+    let mut names: Vec<&str> = xattrs.keys().map(String::as_str).collect();
+    names.sort_unstable();
+
+    for name in names {
+        let Some(value) = xattrs.get(name) else {
+            continue;
+        };
+
+        if let Err(e) = xattr::set(target, name, value) {
+            tracing::warn!(
+                path = %target.display(),
+                attr = %name,
+                error = %e,
+                "failed to restore extended attribute"
+            );
+        }
+    }
 }
 
 #[derive(Debug, Default)]

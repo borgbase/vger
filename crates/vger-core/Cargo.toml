@@ -26,7 +26,7 @@ zstd = "0.13"
 fastcdc = "3"
 
 # Storage
-opendal = { version = "0.51", features = ["services-fs", "services-s3"] }
+opendal = { version = "0.51", features = ["services-fs", "services-s3", "layers-blocking"] }
 url = "2"
 
 # Filesystem
@@ -56,7 +56,7 @@ ureq = { version = "2", features = ["json"], optional = true }
 
 # Mount (WebDAV server)
 dav-server = { version = "0.10", optional = true }
-tokio = { version = "1", features = ["rt-multi-thread", "macros", "signal", "net"], optional = true }
+tokio = { version = "1", features = ["rt-multi-thread"] }
 hyper = { version = "1", features = ["server", "http1"], optional = true }
 hyper-util = { version = "0.1", features = ["tokio"], optional = true }
 lru = { version = "0.12", optional = true }
@@ -67,7 +67,7 @@ futures-util = { version = "0.3", optional = true }
 default = []
 backend-rest = ["ureq"]
 backend-sftp = ["opendal/services-sftp"]
-mount = ["dav-server", "tokio", "hyper", "hyper-util", "lru", "bytes", "futures-util"]
+mount = ["dav-server", "tokio/rt-multi-thread", "tokio/macros", "tokio/signal", "tokio/net", "hyper", "hyper-util", "lru", "bytes", "futures-util"]
 
 [dev-dependencies]
 tempfile = "3"

@@ -97,6 +97,8 @@ sources:
 #     # exclude_if_present: [".nobackup", "CACHEDIR.TAG"]
 #     # one_file_system: true
 #     # git_ignore: false
+#     # xattrs:
+#     #   enabled: false
 #     hooks:
 #       before: "echo backing up docs"
 #       after:
@@ -130,6 +132,11 @@ one_file_system: true
 
 # Respect repository .gitignore files while walking sources.
 git_ignore: false
+
+# Extended attribute handling.
+xattrs:
+  # Preserve filesystem extended attributes during backup and restore.
+  enabled: true
 
 # Content-defined chunking parameters (FastCDC)
 chunker:

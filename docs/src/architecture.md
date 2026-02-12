@@ -90,6 +90,7 @@ The type tag identifies the object kind via the `ObjectType` enum:
 | 3 | ChunkData | Compressed file/item-stream chunks |
 | 4 | ChunkIndex | Chunk-to-pack mapping |
 | 5 | PackHeader | Trailing header inside pack files |
+| 6 | FileCache | File-level cache (inode/mtime skip) |
 
 The type tag byte is passed as AAD (authenticated additional data) to AES-GCM. This binds each ciphertext to its intended object type, preventing an attacker from substituting one object type for another (e.g., swapping a manifest for a snapshot).
 
@@ -231,19 +232,21 @@ target = clamp(min_pack_size * sqrt(num_data_packs / 100), min_pack_size, max_pa
 
 ```text
 walk sources (walkdir + exclude filters)
-  → for each file: FastCDC content-defined chunking
-    → for each chunk: compute ChunkId (keyed BLAKE2b-256)
-      → dedup check (committed index + pending pack writers)
-        → [new chunk] compress (LZ4/ZSTD) → encrypt (AES-256-GCM) → buffer into PackWriter
-        → [dedup hit] increment refcount, skip storage
-      → when PackWriter reaches target size → flush pack to packs/<shard>/<id>
+  → for each file: check file cache (device, inode, mtime, ctime, size)
+    → [cache hit + all chunks in index] reuse cached ChunkRefs, bump refcounts
+    → [cache miss] FastCDC content-defined chunking
+      → for each chunk: compute ChunkId (keyed BLAKE2b-256)
+        → dedup check (committed index + pending pack writers)
+          → [new chunk] compress (LZ4/ZSTD) → encrypt (AES-256-GCM) → buffer into PackWriter
+          → [dedup hit] increment refcount, skip storage
+        → when PackWriter reaches target size → flush pack to packs/<shard>/<id>
   → serialize Item to msgpack → append to item stream buffer
     → when buffer reaches ~128 KiB → chunk as tree pack
 → flush remaining packs
 → build SnapshotMeta (with item_ptrs referencing tree pack chunks)
 → store SnapshotMeta at snapshots/<id>
 → update Manifest
-→ save_state() (flush packs → persist manifest + index)
+→ save_state() (flush packs → persist manifest + index, save file cache locally)
 ```
 
 ### Restore Pipeline
@@ -545,12 +548,12 @@ repositories:
 | **REST server** | axum-based backup server with auth, append-only, quotas, freshness tracking, lock TTL, server-side compaction |
 | **REST backend** | `StorageBackend` over HTTP with range-read support (behind `backend-rest` feature) |
 | **Parallel pipeline** | `rayon` for chunk compress/encrypt pipeline |
+| **File-level cache** | inode/mtime/ctime skip for unchanged files — avoids read, chunk, compress, encrypt. Stored locally in the platform cache dir (macOS: `~/Library/Caches/vger/<repo_id>/filecache`, Linux: `~/.cache/vger/…`) — machine-specific, not in the repo. |
 
 ### Planned / Not Yet Implemented
 
 | Feature | Description | Priority |
 |---------|-------------|----------|
-| **File-level cache** | inode/mtime skip for unchanged files (incremental speedup) | High |
 | **Type-safe IDs** | Newtypes for `SnapshotId`, `ManifestId` | Medium |
 | **Snapshot filtering** | By host, tag, path, date ranges | Medium |
 | **Async I/O** | Non-blocking storage operations | Medium |

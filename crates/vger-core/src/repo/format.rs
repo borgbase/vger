@@ -11,6 +11,7 @@ pub enum ObjectType {
     ChunkData = 3,
     ChunkIndex = 4,
     PackHeader = 5,
+    FileCache = 6,
 }
 
 impl ObjectType {
@@ -22,6 +23,7 @@ impl ObjectType {
             3 => Ok(Self::ChunkData),
             4 => Ok(Self::ChunkIndex),
             5 => Ok(Self::PackHeader),
+            6 => Ok(Self::FileCache),
             _ => Err(VgerError::UnknownObjectType(v)),
         }
     }

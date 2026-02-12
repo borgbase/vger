@@ -71,6 +71,7 @@ pub fn run_backup_for_repo(
                 exclude_if_present: &source.exclude_if_present,
                 one_file_system: source.one_file_system,
                 git_ignore: source.git_ignore,
+                xattrs_enabled: source.xattrs_enabled,
                 compression,
                 label,
             },
@@ -143,5 +144,6 @@ pub fn extract_snapshot(
         &req.snapshot_name,
         &req.destination,
         req.pattern.as_deref(),
+        config.xattrs.enabled,
     )
 }

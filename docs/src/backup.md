@@ -8,6 +8,8 @@ Back up all configured sources to all configured repositories:
 vger backup
 ```
 
+By default, V'Ger preserves filesystem extended attributes (`xattrs`). Configure this globally with `xattrs.enabled`, and override per source in rich `sources` entries.
+
 ## Sources and labels
 
 Each source in your config produces its own snapshot. When you use the rich source form, the `label` field gives each source a short name you can reference from the CLI:

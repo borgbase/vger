@@ -38,6 +38,7 @@ crates/
       index/mod.rs                      # ChunkIndex — HashMap<ChunkId, ChunkIndexEntry>
       repo/
         mod.rs                          # Repository struct — init, open, store_chunk, read_chunk, save_state
+        file_cache.rs                   # FileCache — inode/mtime skip for unchanged files
         format.rs                       # RepoObj envelope — pack_object / unpack_object
         pack.rs                         # PackWriter, PackType, pack read/write helpers
         manifest.rs                     # Manifest — snapshot list
@@ -64,7 +65,8 @@ crates/
 ### Data flow (backup)
 
 1. Walk source dirs (walkdir) → apply exclude patterns (globset)
-2. For each file: read → FastCDC chunk → for each chunk:
+2. For each file: check file cache (device, inode, mtime, ctime, size) → on hit, reuse cached `ChunkRef`s
+3. On cache miss: read → FastCDC chunk → for each chunk:
    - Compute `ChunkId` = keyed BLAKE2b-256(chunk_id_key, data)
    - Check `ChunkIndex` + pending pack writers — if exists, skip (dedup hit)
    - Compress (LZ4/ZSTD) → encrypt (AES-256-GCM) → buffer into `PackWriter`
@@ -131,7 +133,6 @@ The type tag byte is used as AAD (authenticated additional data) in AES-GCM.
 ## What's not implemented yet
 
 - `mount` command
-- File-level cache (inode/mtime skip for unchanged files)
 - Async I/O
 - SSH RPC protocol (use OpenDAL SFTP instead)
 - Hardlinks, block/char devices, FIFOs

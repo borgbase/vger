@@ -215,7 +215,9 @@ pub fn backend_from_config(cfg: &RepositoryConfig) -> Result<Box<dyn StorageBack
                 cfg.secret_access_key.as_deref(),
             )?;
             let op = apply_retry(op, &cfg.retry);
-            Ok(Box::new(opendal_backend::OpendalBackend::from_operator(op)))
+            Ok(Box::new(
+                opendal_backend::OpendalBackend::from_async_operator(op)?,
+            ))
         }
         #[cfg(feature = "backend-sftp")]
         ParsedUrl::Sftp {
@@ -232,7 +234,9 @@ pub fn backend_from_config(cfg: &RepositoryConfig) -> Result<Box<dyn StorageBack
                 cfg.sftp_key.as_deref(),
             )?;
             let op = apply_retry(op, &cfg.retry);
-            Ok(Box::new(opendal_backend::OpendalBackend::from_operator(op)))
+            Ok(Box::new(
+                opendal_backend::OpendalBackend::from_async_operator(op)?,
+            ))
         }
         #[cfg(not(feature = "backend-sftp"))]
         ParsedUrl::Sftp { .. } => Err(VgerError::UnsupportedBackend(

@@ -27,6 +27,8 @@ vger list --snapshot a1b2c3d4
 vger restore --snapshot a1b2c3d4 --dest /tmp/restored
 ```
 
+Restore applies extended attributes (`xattrs`) by default. Control this with the top-level `xattrs.enabled` config setting.
+
 ## Browse via WebDAV (mount)
 
 Browse snapshot contents via a local WebDAV server.

@@ -816,6 +816,7 @@ fn run_backup(
                     exclude_if_present: &config.exclude_if_present,
                     one_file_system: config.one_file_system,
                     git_ignore: config.git_ignore,
+                    xattrs_enabled: config.xattrs.enabled,
                     compression,
                     label: user_label_str,
                 },
@@ -866,6 +867,7 @@ fn run_backup(
                             exclude_if_present: &source.exclude_if_present,
                             one_file_system: source.one_file_system,
                             git_ignore: source.git_ignore,
+                            xattrs_enabled: source.xattrs_enabled,
                             compression,
                             label: user_label_str,
                         },
@@ -1006,6 +1008,7 @@ fn run_extract(
             &snapshot_name,
             &dest,
             pattern.as_deref(),
+            config.xattrs.enabled,
         )
         .map_err(|e| -> Box<dyn std::error::Error> { Box::new(e) })
     })?;

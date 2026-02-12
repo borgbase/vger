@@ -135,6 +135,8 @@ exclude_if_present:                  # Skip dirs containing any marker file
   - "CACHEDIR.TAG"
 one_file_system: true                # Do not cross filesystem/mount boundaries (default true)
 git_ignore: false                    # Respect .gitignore files (default false)
+xattrs:                              # Extended attribute handling
+  enabled: true                      # Preserve xattrs on backup/restore (default true)
 ```
 
 ## Retention
@@ -206,6 +208,8 @@ sources:
   - path: "/home/user/documents"
     label: "docs"
     exclude: ["*.tmp"]
+    xattrs:
+      enabled: false                 # Override top-level xattrs setting for this source
     repos: ["local"]                 # Only back up to the "local" repo
     retention:
       keep_daily: 7

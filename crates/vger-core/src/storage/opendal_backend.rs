@@ -1,7 +1,20 @@
+use std::sync::LazyLock;
+
+use opendal::layers::BlockingLayer;
 use opendal::{BlockingOperator, Operator};
 
 use crate::error::{Result, VgerError};
 use crate::storage::StorageBackend;
+
+/// Tokio runtime used by `BlockingLayer` to bridge async OpenDAL services
+/// (S3, SFTP) into synchronous calls. Created lazily on first use.
+static ASYNC_RUNTIME: LazyLock<tokio::runtime::Runtime> = LazyLock::new(|| {
+    tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(2)
+        .enable_all()
+        .build()
+        .expect("failed to create tokio runtime for blocking layer")
+});
 
 pub struct OpendalBackend {
     op: BlockingOperator,
@@ -9,8 +22,20 @@ pub struct OpendalBackend {
 
 impl OpendalBackend {
     /// Create a backend from a pre-configured `Operator` (e.g. with layers applied).
+    /// Use this for services with native blocking support (e.g. local Fs).
     pub fn from_operator(op: Operator) -> Self {
         Self { op: op.blocking() }
+    }
+
+    /// Create a backend from an async-only operator (S3, SFTP).
+    /// Adds a `BlockingLayer` to bridge async → blocking.
+    pub fn from_async_operator(op: Operator) -> Result<Self> {
+        let _guard = ASYNC_RUNTIME.enter();
+        let op = op.layer(
+            BlockingLayer::create()
+                .map_err(|e| VgerError::Other(format!("failed to create blocking layer: {e}")))?,
+        );
+        Ok(Self { op: op.blocking() })
     }
 
     /// Build an `Operator` for local filesystem (without blocking conversion).

@@ -25,6 +25,8 @@ pub struct VgerConfig {
     #[serde(default)]
     pub retention: RetentionConfig,
     #[serde(default)]
+    pub xattrs: XattrsConfig,
+    #[serde(default)]
     pub schedule: ScheduleConfig,
     #[serde(default)]
     pub limits: ResourceLimitsConfig,
@@ -53,6 +55,20 @@ impl RetentionConfig {
             || self.keep_weekly.is_some()
             || self.keep_monthly.is_some()
             || self.keep_yearly.is_some()
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct XattrsConfig {
+    #[serde(default = "default_xattrs_enabled")]
+    pub enabled: bool,
+}
+
+impl Default for XattrsConfig {
+    fn default() -> Self {
+        Self {
+            enabled: default_xattrs_enabled(),
+        }
     }
 }
 
@@ -292,6 +308,7 @@ pub enum SourceInput {
         exclude_if_present: Option<Vec<String>>,
         one_file_system: Option<bool>,
         git_ignore: Option<bool>,
+        xattrs: Option<XattrsConfig>,
         #[serde(default)]
         hooks: SourceHooksConfig,
         retention: Option<RetentionConfig>,
@@ -309,6 +326,7 @@ pub struct SourceEntry {
     pub exclude_if_present: Vec<String>,
     pub one_file_system: bool,
     pub git_ignore: bool,
+    pub xattrs_enabled: bool,
     pub hooks: SourceHooksConfig,
     pub retention: Option<RetentionConfig>,
     pub repos: Vec<String>,
@@ -489,6 +507,10 @@ fn default_one_file_system() -> bool {
     true
 }
 
+fn default_xattrs_enabled() -> bool {
+    true
+}
+
 fn default_schedule_every() -> String {
     "24h".to_string()
 }
@@ -632,6 +654,8 @@ struct ConfigDocument {
     one_file_system: bool,
     #[serde(default)]
     git_ignore: bool,
+    #[serde(default)]
+    xattrs: XattrsConfig,
     #[serde(default)]
     chunker: ChunkerConfig,
     #[serde(default)]
@@ -815,6 +839,7 @@ fn normalize_sources(
     default_exclude_if_present: &[String],
     default_one_file_system: bool,
     default_git_ignore: bool,
+    default_xattrs_enabled: bool,
 ) -> crate::error::Result<Vec<SourceEntry>> {
     let mut simple_paths: Vec<String> = Vec::new();
     let mut rich_entries: Vec<SourceEntry> = Vec::new();
@@ -832,6 +857,7 @@ fn normalize_sources(
                 exclude_if_present,
                 one_file_system,
                 git_ignore,
+                xattrs,
                 hooks,
                 retention,
                 repos,
@@ -888,6 +914,9 @@ fn normalize_sources(
                         .unwrap_or_else(|| default_exclude_if_present.to_vec()),
                     one_file_system: one_file_system.unwrap_or(default_one_file_system),
                     git_ignore: git_ignore.unwrap_or(default_git_ignore),
+                    xattrs_enabled: xattrs
+                        .map(|cfg| cfg.enabled)
+                        .unwrap_or(default_xattrs_enabled),
                     hooks,
                     retention,
                     repos,
@@ -922,6 +951,7 @@ fn normalize_sources(
             exclude_if_present: default_exclude_if_present.to_vec(),
             one_file_system: default_one_file_system,
             git_ignore: default_git_ignore,
+            xattrs_enabled: default_xattrs_enabled,
             hooks: SourceHooksConfig::default(),
             retention: None,
             repos: Vec::new(),
@@ -992,6 +1022,7 @@ fn resolve_document(raw: ConfigDocument) -> crate::error::Result<Vec<ResolvedRep
         &raw.exclude_if_present,
         raw.one_file_system,
         raw.git_ignore,
+        raw.xattrs.enabled,
     )?;
 
     // Check for duplicate source labels
@@ -1050,6 +1081,7 @@ fn resolve_document(raw: ConfigDocument) -> crate::error::Result<Vec<ResolvedRep
                         exclude_if_present: src.exclude_if_present.clone(),
                         one_file_system: src.one_file_system,
                         git_ignore: src.git_ignore,
+                        xattrs_enabled: src.xattrs_enabled,
                         hooks: src.hooks.clone(),
                         retention: src.retention.clone(),
                         repos: src.repos.clone(),
@@ -1069,6 +1101,7 @@ fn resolve_document(raw: ConfigDocument) -> crate::error::Result<Vec<ResolvedRep
                     chunker: raw.chunker.clone(),
                     compression: entry.compression.unwrap_or_else(|| raw.compression.clone()),
                     retention: entry.retention.unwrap_or_else(|| raw.retention.clone()),
+                    xattrs: raw.xattrs.clone(),
                     schedule: raw.schedule.clone(),
                     limits: entry.limits.unwrap_or_else(|| raw.limits.clone()),
                 },
@@ -1240,6 +1273,10 @@ sources:
 #
 # # Respect repository .gitignore files (default: false)
 # # git_ignore: false
+#
+# # Preserve extended attributes by default.
+# # xattrs:
+# #   enabled: true
 
 # retention:
 #   keep_daily: 7
@@ -1274,6 +1311,8 @@ sources:
 #     label: docs
 #     exclude:
 #       - "*.tmp"
+#     xattrs:
+#       enabled: false
 #     repos:
 #       - main
 #     retention:
@@ -1768,6 +1807,7 @@ repositories:
                 chunker: ChunkerConfig::default(),
                 compression: CompressionConfig::default(),
                 retention: RetentionConfig::default(),
+                xattrs: XattrsConfig::default(),
                 schedule: ScheduleConfig::default(),
                 limits: ResourceLimitsConfig::default(),
             },
@@ -1787,6 +1827,7 @@ repositories:
             exclude_if_present: Vec::new(),
             one_file_system: default_one_file_system(),
             git_ignore: false,
+            xattrs_enabled: default_xattrs_enabled(),
             hooks: SourceHooksConfig::default(),
             retention: None,
             repos: Vec::new(),
@@ -2107,11 +2148,13 @@ sources:
         assert!(repos[0].config.exclude_if_present.is_empty());
         assert!(repos[0].config.one_file_system);
         assert!(!repos[0].config.git_ignore);
+        assert!(repos[0].config.xattrs.enabled);
 
         let src = &repos[0].sources[0];
         assert!(src.exclude_if_present.is_empty());
         assert!(src.one_file_system);
         assert!(!src.git_ignore);
+        assert!(src.xattrs_enabled);
     }
 
     #[test]
@@ -2124,6 +2167,8 @@ exclude_if_present:
   - CACHEDIR.TAG
 one_file_system: true
 git_ignore: false
+xattrs:
+  enabled: false
 sources:
   - path: /home/user/documents
     label: docs
@@ -2131,6 +2176,8 @@ sources:
       - .skip
     one_file_system: false
     git_ignore: true
+    xattrs:
+      enabled: true
   - path: /home/user/photos
     label: photos
 "#;
@@ -2150,11 +2197,13 @@ sources:
         assert_eq!(docs.exclude_if_present, vec![".skip"]);
         assert!(!docs.one_file_system);
         assert!(docs.git_ignore);
+        assert!(docs.xattrs_enabled);
 
         // Sources without overrides inherit global defaults.
         assert_eq!(photos.exclude_if_present, vec![".nobackup", "CACHEDIR.TAG"]);
         assert!(photos.one_file_system);
         assert!(!photos.git_ignore);
+        assert!(!photos.xattrs_enabled);
     }
 
     #[test]

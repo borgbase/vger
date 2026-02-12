@@ -6,7 +6,7 @@ use chrono::Utc;
 use ignore::{gitignore::Gitignore, WalkBuilder};
 use rand::RngCore;
 use rayon::prelude::*;
-use tracing::{info, warn};
+use tracing::{debug, info, warn};
 
 use super::util::with_repo_lock;
 use crate::chunker;
@@ -15,6 +15,7 @@ use crate::config::{ChunkerConfig, VgerConfig};
 use crate::crypto::chunk_id::ChunkId;
 use crate::error::{Result, VgerError};
 use crate::limits::{self, ByteRateLimiter};
+use crate::repo::file_cache::FileCache;
 use crate::repo::format::{pack_object, ObjectType};
 use crate::repo::manifest::SnapshotEntry;
 use crate::repo::pack::PackType;
@@ -61,6 +62,56 @@ fn build_explicit_excludes(source: &Path, patterns: &[String]) -> Result<Gitigno
 
 fn should_skip_for_device(one_file_system: bool, source_dev: u64, entry_dev: u64) -> bool {
     one_file_system && source_dev != entry_dev
+}
+
+fn read_item_xattrs(path: &Path) -> Option<HashMap<String, Vec<u8>>> {
+    let names = match xattr::list(path) {
+        Ok(names) => names,
+        Err(e) => {
+            warn!(
+                path = %path.display(),
+                error = %e,
+                "failed to list extended attributes"
+            );
+            return None;
+        }
+    };
+
+    let mut attrs = HashMap::new();
+    for name in names {
+        let key = match name.to_str() {
+            Some(name) => name.to_string(),
+            None => {
+                warn!(
+                    path = %path.display(),
+                    attr = ?name,
+                    "skipping extended attribute with non-UTF8 name"
+                );
+                continue;
+            }
+        };
+
+        match xattr::get(path, &name) {
+            Ok(Some(value)) => {
+                attrs.insert(key, value);
+            }
+            Ok(None) => {}
+            Err(e) => {
+                warn!(
+                    path = %path.display(),
+                    attr = %key,
+                    error = %e,
+                    "failed to read extended attribute"
+                );
+            }
+        }
+    }
+
+    if attrs.is_empty() {
+        None
+    } else {
+        Some(attrs)
+    }
 }
 
 struct TransformJob {
@@ -130,6 +181,7 @@ pub struct BackupRequest<'a> {
     pub exclude_if_present: &'a [String],
     pub one_file_system: bool,
     pub git_ignore: bool,
+    pub xattrs_enabled: bool,
     pub compression: Compression,
     pub label: &'a str,
 }
@@ -163,6 +215,7 @@ pub fn run_with_progress(
     let exclude_if_present = req.exclude_if_present;
     let one_file_system = req.one_file_system;
     let git_ignore = req.git_ignore;
+    let xattrs_enabled = req.xattrs_enabled;
     let compression = req.compression;
     let label = req.label;
 
@@ -201,6 +254,7 @@ pub fn run_with_progress(
         let mut item_stream = Vec::new();
         let mut item_ptrs: Vec<ChunkId> = Vec::new();
         let items_config = items_chunker_config();
+        let mut new_file_cache = FileCache::new();
 
         // Walk each source directory
         for source_path in source_paths {
@@ -368,6 +422,10 @@ pub fn run_with_progress(
                     xattrs: None,
                 };
 
+                if xattrs_enabled {
+                    item.xattrs = read_item_xattrs(entry.path());
+                }
+
                 // For regular files, chunk and store the content
                 if entry_type == ItemType::RegularFile && metadata.len() > 0 {
                     emit_progress(
@@ -376,6 +434,79 @@ pub fn run_with_progress(
                             path: item.path.clone(),
                         },
                     );
+
+                    // File-level cache: skip read/chunk/compress/encrypt for unchanged files.
+                    let abs_path = entry.path().to_string_lossy().to_string();
+                    let ctime_ns = metadata.ctime() * 1_000_000_000 + metadata.ctime_nsec();
+                    let file_size = metadata.len();
+
+                    let cache_hit = repo.file_cache.lookup(
+                        &abs_path,
+                        metadata.dev(),
+                        metadata.ino(),
+                        mtime_ns,
+                        ctime_ns,
+                        file_size,
+                    );
+
+                    if let Some(cached_refs) = cache_hit {
+                        // Verify all referenced chunks still exist in the index.
+                        let all_present = cached_refs
+                            .iter()
+                            .all(|cr| repo.chunk_index.contains(&cr.id));
+                        if all_present {
+                            // Bump refcounts for all cached chunks.
+                            let mut file_original: u64 = 0;
+                            let mut file_compressed: u64 = 0;
+                            let refs = cached_refs.clone();
+                            for cr in &refs {
+                                repo.chunk_index.increment_refcount(&cr.id);
+                                file_original += cr.size as u64;
+                                file_compressed += cr.csize as u64;
+                            }
+                            item.chunks = refs.clone();
+
+                            stats.nfiles += 1;
+                            stats.original_size += file_original;
+                            stats.compressed_size += file_compressed;
+                            // No deduplicated_size contribution — all chunks already existed.
+
+                            new_file_cache.insert(
+                                abs_path,
+                                metadata.dev(),
+                                metadata.ino(),
+                                mtime_ns,
+                                ctime_ns,
+                                file_size,
+                                refs,
+                            );
+
+                            debug!(path = %item.path, "file cache hit");
+                            emit_progress(
+                                &mut progress,
+                                BackupProgressEvent::StatsUpdated {
+                                    nfiles: stats.nfiles,
+                                    original_size: stats.original_size,
+                                    compressed_size: stats.compressed_size,
+                                    deduplicated_size: stats.deduplicated_size,
+                                    current_file: Some(item.path.clone()),
+                                },
+                            );
+
+                            // Stream item metadata and continue to next entry.
+                            let item_bytes = rmp_serde::to_vec(&item)?;
+                            item_stream.extend_from_slice(&item_bytes);
+                            if item_stream.len() >= items_config.avg_size as usize {
+                                flush_item_stream_chunk(
+                                    repo,
+                                    &mut item_stream,
+                                    &mut item_ptrs,
+                                    compression,
+                                )?;
+                            }
+                            continue;
+                        }
+                    }
 
                     let file_data =
                         limits::read_file_with_limiter(entry.path(), read_limiter.as_deref())?;
@@ -544,6 +675,18 @@ pub fn run_with_progress(
                     }
 
                     stats.nfiles += 1;
+
+                    // Update file cache with the chunks we just stored.
+                    new_file_cache.insert(
+                        abs_path,
+                        metadata.dev(),
+                        metadata.ino(),
+                        mtime_ns,
+                        ctime_ns,
+                        file_size,
+                        item.chunks.clone(),
+                    );
+
                     emit_progress(
                         &mut progress,
                         BackupProgressEvent::StatsUpdated {
@@ -617,7 +760,10 @@ pub fn run_with_progress(
             source_paths: source_paths.to_vec(),
         });
 
-        // Save manifest and index
+        // Replace file cache with the freshly-built one (drops stale entries).
+        repo.file_cache = new_file_cache;
+
+        // Save manifest, index, and file cache
         repo.save_state()?;
 
         info!(

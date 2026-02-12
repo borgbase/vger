@@ -1,3 +1,4 @@
+pub mod file_cache;
 pub mod format;
 pub mod lock;
 pub mod manifest;
@@ -16,6 +17,7 @@ use crate::error::{Result, VgerError};
 use crate::index::ChunkIndex;
 use crate::storage::StorageBackend;
 
+use self::file_cache::FileCache;
 use self::format::{pack_object, unpack_object, ObjectType};
 use self::manifest::Manifest;
 use self::pack::{
@@ -57,6 +59,7 @@ pub struct Repository {
     pub manifest: Manifest,
     pub chunk_index: ChunkIndex,
     pub config: RepoConfig,
+    pub file_cache: FileCache,
     data_pack_writer: PackWriter,
     tree_pack_writer: PackWriter,
 }
@@ -159,6 +162,7 @@ impl Repository {
             manifest,
             chunk_index,
             config: repo_config,
+            file_cache: FileCache::new(),
             data_pack_writer: PackWriter::new(PackType::Data, data_target),
             tree_pack_writer: PackWriter::new(PackType::Tree, tree_target),
         })
@@ -224,6 +228,9 @@ impl Repository {
             ChunkIndex::new()
         };
 
+        // Load file cache from local disk (not from the repo).
+        let file_cache = FileCache::load(&repo_config.id, crypto.as_ref());
+
         // Compute dynamic pack target sizes
         let num_data_packs = chunk_index.count_distinct_packs();
         let data_target = compute_data_pack_target(
@@ -239,6 +246,7 @@ impl Repository {
             manifest,
             chunk_index,
             config: repo_config,
+            file_cache,
             data_pack_writer: PackWriter::new(PackType::Data, data_target),
             tree_pack_writer: PackWriter::new(PackType::Tree, tree_target),
         })
@@ -260,6 +268,10 @@ impl Repository {
         let index_bytes = rmp_serde::to_vec(&self.chunk_index)?;
         let index_packed = pack_object(ObjectType::ChunkIndex, &index_bytes, self.crypto.as_ref())?;
         self.storage.put("index", &index_packed)?;
+
+        // Save file cache to local disk (not to the repo).
+        self.file_cache
+            .save(&self.config.id, self.crypto.as_ref())?;
 
         Ok(())
     }
