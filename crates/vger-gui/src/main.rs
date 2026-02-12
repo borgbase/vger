@@ -15,27 +15,36 @@ use vger_core::config::{self, ResolvedRepo, ScheduleConfig};
 use vger_core::error::VgerError;
 
 slint::slint! {
-    import { VerticalBox, HorizontalBox, Button, LineEdit, ScrollView } from "std-widgets.slint";
+    import { VerticalBox, HorizontalBox, Button, LineEdit, ScrollView, TabWidget, ComboBox } from "std-widgets.slint";
 
     export component MainWindow inherits Window {
         in-out property <string> config_path;
         in-out property <string> schedule_text;
         in-out property <string> status_text;
-        in-out property <string> repo_selector;
         in-out property <string> snapshot_id;
         in-out property <string> extract_dest;
         in-out property <string> extract_pattern;
         in-out property <string> snapshots_text;
         in-out property <string> snapshot_items_text;
         in-out property <string> log_text;
+        in-out property <string> repo_info_text;
+        in-out property <string> sources_text;
+        in-out property <[string]> repo_names;
+        in-out property <[string]> source_names;
+        in-out property <string> repos_combo_value;
+        in-out property <string> sources_combo_value;
+        in-out property <string> snapshots_repo_combo_value;
 
-        callback run_backup_clicked();
+        callback backup_all_clicked();
         callback refresh_snapshots_clicked();
         callback show_snapshot_items_clicked();
         callback extract_clicked();
         callback reload_config_clicked();
         callback pause_schedule_clicked();
         callback quit_clicked();
+        callback fetch_repo_info_clicked();
+        callback backup_repo_clicked();
+        callback backup_source_clicked();
 
         title: "V'Ger";
         width: 1100px;
@@ -44,6 +53,8 @@ slint::slint! {
         VerticalBox {
             padding: 12px;
             spacing: 8px;
+
+            // ── Header ──
 
             Text {
                 text: "V'Ger Desktop";
@@ -76,12 +87,8 @@ slint::slint! {
             HorizontalBox {
                 spacing: 8px;
                 Button {
-                    text: "Run Backup Now";
-                    clicked => { root.run_backup_clicked(); }
-                }
-                Button {
-                    text: "Refresh Snapshots";
-                    clicked => { root.refresh_snapshots_clicked(); }
+                    text: "Backup All";
+                    clicked => { root.backup_all_clicked(); }
                 }
                 Button {
                     text: "Reload Config";
@@ -102,87 +109,189 @@ slint::slint! {
                 background: #d5d5d5;
             }
 
-            HorizontalBox {
-                spacing: 8px;
-                Text { text: "Repo (optional label/url):"; }
-                LineEdit { text <=> root.repo_selector; }
-            }
+            // ── Tabs ──
 
-            HorizontalBox {
-                spacing: 8px;
-                Text { text: "Snapshot ID:"; }
-                LineEdit { text <=> root.snapshot_id; }
-                Button {
-                    text: "Show Contents";
-                    clicked => { root.show_snapshot_items_clicked(); }
-                }
-            }
+            TabWidget {
+                Tab {
+                    title: "Repositories";
+                    VerticalBox {
+                        spacing: 8px;
+                        padding: 8px;
 
-            HorizontalBox {
-                spacing: 8px;
-                Text { text: "Extract Destination:"; }
-                LineEdit { text <=> root.extract_dest; }
-            }
+                        HorizontalBox {
+                            spacing: 8px;
+                            Text { text: "Repository:"; vertical-alignment: center; }
+                            ComboBox {
+                                model: root.repo_names;
+                                current-value <=> root.repos_combo_value;
+                            }
+                            Button {
+                                text: "Fetch Info";
+                                clicked => { root.fetch_repo_info_clicked(); }
+                            }
+                            Button {
+                                text: "Backup This Repo";
+                                clicked => { root.backup_repo_clicked(); }
+                            }
+                        }
 
-            HorizontalBox {
-                spacing: 8px;
-                Text { text: "Extract Pattern (optional):"; }
-                LineEdit { text <=> root.extract_pattern; }
-                Button {
-                    text: "Extract";
-                    clicked => { root.extract_clicked(); }
-                }
-            }
-
-            HorizontalBox {
-                spacing: 12px;
-
-                VerticalBox {
-                    spacing: 6px;
-                    Text {
-                        text: "Snapshots";
-                        font-size: 16px;
-                    }
-                    ScrollView {
-                        height: 180px;
-                        Rectangle {
-                            background: #f4f4f4;
-                            border-color: #dcdcdc;
-                            border-width: 1px;
-                            Text {
-                                text: root.snapshots_text;
-                                wrap: word-wrap;
+                        Text {
+                            text: "Repository Info";
+                            font-size: 16px;
+                        }
+                        ScrollView {
+                            vertical-stretch: 1;
+                            Rectangle {
+                                background: #f4f4f4;
+                                border-color: #dcdcdc;
+                                border-width: 1px;
+                                Text {
+                                    text: root.repo_info_text;
+                                    wrap: word-wrap;
+                                }
                             }
                         }
                     }
                 }
 
-                VerticalBox {
-                    spacing: 6px;
-                    Text {
-                        text: "Snapshot Contents";
-                        font-size: 16px;
+                Tab {
+                    title: "Sources";
+                    VerticalBox {
+                        spacing: 8px;
+                        padding: 8px;
+
+                        HorizontalBox {
+                            spacing: 8px;
+                            Text { text: "Source:"; vertical-alignment: center; }
+                            ComboBox {
+                                model: root.source_names;
+                                current-value <=> root.sources_combo_value;
+                            }
+                            Button {
+                                text: "Backup Source";
+                                clicked => { root.backup_source_clicked(); }
+                            }
+                        }
+
+                        Text {
+                            text: "Configured Sources";
+                            font-size: 16px;
+                        }
+                        ScrollView {
+                            vertical-stretch: 1;
+                            Rectangle {
+                                background: #f4f4f4;
+                                border-color: #dcdcdc;
+                                border-width: 1px;
+                                Text {
+                                    text: root.sources_text;
+                                    wrap: word-wrap;
+                                }
+                            }
+                        }
                     }
-                    ScrollView {
-                        height: 180px;
-                        Rectangle {
-                            background: #f4f4f4;
-                            border-color: #dcdcdc;
-                            border-width: 1px;
-                            Text {
-                                text: root.snapshot_items_text;
-                                wrap: word-wrap;
+                }
+
+                Tab {
+                    title: "Snapshots";
+                    VerticalBox {
+                        spacing: 8px;
+                        padding: 8px;
+
+                        HorizontalBox {
+                            spacing: 8px;
+                            Text { text: "Repository:"; vertical-alignment: center; }
+                            ComboBox {
+                                model: root.repo_names;
+                                current-value <=> root.snapshots_repo_combo_value;
+                            }
+                            Button {
+                                text: "Refresh Snapshots";
+                                clicked => { root.refresh_snapshots_clicked(); }
+                            }
+                        }
+
+                        HorizontalBox {
+                            spacing: 8px;
+                            Text { text: "Snapshot ID:"; }
+                            LineEdit { text <=> root.snapshot_id; }
+                            Button {
+                                text: "Show Contents";
+                                clicked => { root.show_snapshot_items_clicked(); }
+                            }
+                        }
+
+                        HorizontalBox {
+                            spacing: 8px;
+                            Text { text: "Extract Destination:"; }
+                            LineEdit { text <=> root.extract_dest; }
+                        }
+
+                        HorizontalBox {
+                            spacing: 8px;
+                            Text { text: "Extract Pattern (optional):"; }
+                            LineEdit { text <=> root.extract_pattern; }
+                            Button {
+                                text: "Extract";
+                                clicked => { root.extract_clicked(); }
+                            }
+                        }
+
+                        HorizontalBox {
+                            spacing: 12px;
+
+                            VerticalBox {
+                                spacing: 6px;
+                                Text {
+                                    text: "Snapshots";
+                                    font-size: 16px;
+                                }
+                                ScrollView {
+                                    height: 180px;
+                                    Rectangle {
+                                        background: #f4f4f4;
+                                        border-color: #dcdcdc;
+                                        border-width: 1px;
+                                        Text {
+                                            text: root.snapshots_text;
+                                            wrap: word-wrap;
+                                        }
+                                    }
+                                }
+                            }
+
+                            VerticalBox {
+                                spacing: 6px;
+                                Text {
+                                    text: "Snapshot Contents";
+                                    font-size: 16px;
+                                }
+                                ScrollView {
+                                    height: 180px;
+                                    Rectangle {
+                                        background: #f4f4f4;
+                                        border-color: #dcdcdc;
+                                        border-width: 1px;
+                                        Text {
+                                            text: root.snapshot_items_text;
+                                            wrap: word-wrap;
+                                        }
+                                    }
+                                }
                             }
                         }
                     }
                 }
             }
+
+            // ── Footer ──
 
             Text {
                 text: "Activity Log";
                 font-size: 16px;
             }
             ScrollView {
+                vertical-stretch: 1;
                 Rectangle {
                     background: #f4f4f4;
                     border-color: #dcdcdc;
@@ -199,10 +308,21 @@ slint::slint! {
 
 #[derive(Debug)]
 enum AppCommand {
-    RunBackupNow {
+    RunBackupAll {
         scheduled: bool,
     },
-    RefreshSnapshots,
+    RunBackupRepo {
+        repo_selector: String,
+    },
+    RunBackupSource {
+        source_selector: String,
+    },
+    FetchRepoInfo {
+        repo_selector: String,
+    },
+    RefreshSnapshots {
+        repo_selector: String,
+    },
     ShowSnapshotItems {
         repo_selector: String,
         snapshot: String,
@@ -226,6 +346,10 @@ enum UiEvent {
     ConfigInfo { path: String, schedule: String },
     SnapshotsText(String),
     SnapshotItemsText(String),
+    RepoInfoText(String),
+    SourcesText(String),
+    RepoNames(Vec<String>),
+    SourceNames(Vec<String>),
     Quit,
     ShowWindow,
 }
@@ -363,7 +487,7 @@ fn spawn_scheduler(
 
         if should_run
             && app_tx
-                .send(AppCommand::RunBackupNow { scheduled: true })
+                .send(AppCommand::RunBackupAll { scheduled: true })
                 .is_err()
         {
             break;
@@ -394,6 +518,92 @@ fn format_bytes(bytes: u64) -> String {
     }
 }
 
+fn format_info_stats(
+    repo_name: &str,
+    stats: &vger_core::commands::info::InfoStats,
+) -> String {
+    let encryption = format!("{:?}", stats.encryption);
+    let last_snapshot = stats
+        .last_snapshot_time
+        .map(|t| {
+            let local: DateTime<Local> = t.with_timezone(&Local);
+            local.format("%Y-%m-%d %H:%M:%S").to_string()
+        })
+        .unwrap_or_else(|| "N/A".to_string());
+    let created: DateTime<Local> = stats.repo_created.with_timezone(&Local);
+
+    format!(
+        "Repository: {repo_name}\n\
+         Created: {}\n\
+         Encryption: {encryption}\n\
+         Snapshots: {}\n\
+         Last snapshot: {last_snapshot}\n\
+         \n\
+         Raw size: {}\n\
+         Compressed size: {}\n\
+         Deduplicated size: {}\n\
+         \n\
+         Unique chunks: {}\n\
+         Unique stored size: {}\n\
+         Referenced stored size: {}",
+        created.format("%Y-%m-%d %H:%M:%S"),
+        stats.snapshot_count,
+        format_bytes(stats.raw_size),
+        format_bytes(stats.compressed_size),
+        format_bytes(stats.deduplicated_size),
+        stats.unique_chunks,
+        format_bytes(stats.unique_stored_size),
+        format_bytes(stats.referenced_stored_size),
+    )
+}
+
+fn format_sources_text(repos: &[ResolvedRepo]) -> String {
+    let mut seen_labels = std::collections::HashSet::new();
+    let mut lines = Vec::new();
+
+    for repo in repos {
+        for source in &repo.sources {
+            if !seen_labels.insert(&source.label) {
+                continue;
+            }
+            lines.push(format!("Source: {}", source.label));
+            lines.push(format!("  Paths: {}", source.paths.join(", ")));
+            if !source.exclude.is_empty() {
+                lines.push(format!("  Exclude: {}", source.exclude.join(", ")));
+            }
+            if !source.repos.is_empty() {
+                lines.push(format!("  Target repos: {}", source.repos.join(", ")));
+            } else {
+                lines.push("  Target repos: (all)".to_string());
+            }
+            lines.push(String::new());
+        }
+    }
+
+    if lines.is_empty() {
+        "No sources configured.".to_string()
+    } else {
+        lines.join("\n")
+    }
+}
+
+fn collect_repo_names(repos: &[ResolvedRepo]) -> Vec<String> {
+    repos.iter().map(|r| format_repo_name(r)).collect()
+}
+
+fn collect_source_names(repos: &[ResolvedRepo]) -> Vec<String> {
+    let mut seen = std::collections::HashSet::new();
+    let mut names = Vec::new();
+    for repo in repos {
+        for source in &repo.sources {
+            if seen.insert(source.label.clone()) {
+                names.push(source.label.clone());
+            }
+        }
+    }
+    names
+}
+
 fn resolve_passphrase_for_repo(repo: &ResolvedRepo) -> Result<Option<String>, VgerError> {
     let repo_name = format_repo_name(repo);
     passphrase::resolve_passphrase(&repo.config, repo.label.as_deref(), |prompt| {
@@ -409,6 +619,21 @@ fn resolve_passphrase_for_repo(repo: &ResolvedRepo) -> Result<Option<String>, Vg
         let value = tinyfiledialogs::password_box(&title, &message);
         Ok(value.filter(|v| !v.is_empty()))
     })
+}
+
+fn get_or_resolve_passphrase(
+    repo: &ResolvedRepo,
+    cache: &mut HashMap<String, String>,
+) -> Result<Option<String>, VgerError> {
+    let key = &repo.config.repository.url;
+    if let Some(existing) = cache.get(key) {
+        return Ok(Some(existing.clone()));
+    }
+    let pass = resolve_passphrase_for_repo(repo)?;
+    if let Some(ref p) = pass {
+        cache.insert(key.clone(), p.clone());
+    }
+    Ok(pass)
 }
 
 fn snapshot_rows_for_repo(
@@ -490,6 +715,33 @@ fn send_log(ui_tx: &Sender<UiEvent>, message: impl Into<String>) {
     let _ = ui_tx.send(UiEvent::Log(message.into()));
 }
 
+fn send_combo_data(ui_tx: &Sender<UiEvent>, repos: &[ResolvedRepo]) {
+    let _ = ui_tx.send(UiEvent::RepoNames(collect_repo_names(repos)));
+    let _ = ui_tx.send(UiEvent::SourceNames(collect_source_names(repos)));
+    let _ = ui_tx.send(UiEvent::SourcesText(format_sources_text(repos)));
+}
+
+fn log_backup_report(ui_tx: &Sender<UiEvent>, repo_name: &str, report: &operations::BackupRunReport) {
+    if report.created.is_empty() {
+        send_log(ui_tx, format!("[{repo_name}] no snapshots created"));
+        return;
+    }
+    for created in &report.created {
+        send_log(
+            ui_tx,
+            format!(
+                "[{repo_name}] snapshot {} source={} files={} original={} compressed={} deduplicated={}",
+                created.snapshot_name,
+                created.source_label,
+                created.stats.nfiles,
+                format_bytes(created.stats.original_size),
+                format_bytes(created.stats.compressed_size),
+                format_bytes(created.stats.deduplicated_size),
+            ),
+        );
+    }
+}
+
 fn run_worker(
     app_tx: Sender<AppCommand>,
     cmd_rx: Receiver<AppCommand>,
@@ -518,16 +770,18 @@ fn run_worker(
         schedule: schedule_description(&schedule, schedule_paused),
     });
 
+    send_combo_data(&ui_tx, &runtime.repos);
+
     if schedule.enabled && schedule.on_startup {
         let _ = ui_tx.send(UiEvent::Log(
             "Scheduled on-startup backup requested by configuration.".to_string(),
         ));
-        let _ = app_tx.send(AppCommand::RunBackupNow { scheduled: true });
+        let _ = app_tx.send(AppCommand::RunBackupAll { scheduled: true });
     }
 
     while let Ok(cmd) = cmd_rx.recv() {
         match cmd {
-            AppCommand::RunBackupNow { scheduled } => {
+            AppCommand::RunBackupAll { scheduled } => {
                 backup_running.store(true, Ordering::SeqCst);
                 let _ = ui_tx.send(UiEvent::Status(if scheduled {
                     "Running scheduled backup...".to_string()
@@ -538,27 +792,16 @@ fn run_worker(
                 for repo in &runtime.repos {
                     let repo_name = format_repo_name(repo);
 
-                    let passphrase =
-                        if let Some(existing) = passphrases.get(&repo.config.repository.url) {
-                            Some(existing.clone())
-                        } else {
-                            match resolve_passphrase_for_repo(repo) {
-                                Ok(pass) => {
-                                    if let Some(ref p) = pass {
-                                        passphrases
-                                            .insert(repo.config.repository.url.clone(), p.clone());
-                                    }
-                                    pass
-                                }
-                                Err(e) => {
-                                    send_log(
-                                        &ui_tx,
-                                        format!("[{repo_name}] failed to resolve passphrase: {e}"),
-                                    );
-                                    continue;
-                                }
-                            }
-                        };
+                    let passphrase = match get_or_resolve_passphrase(repo, &mut passphrases) {
+                        Ok(pass) => pass,
+                        Err(e) => {
+                            send_log(
+                                &ui_tx,
+                                format!("[{repo_name}] failed to resolve passphrase: {e}"),
+                            );
+                            continue;
+                        }
+                    };
 
                     if repo.config.encryption.mode != vger_core::config::EncryptionModeConfig::None
                         && passphrase.is_none()
@@ -578,27 +821,7 @@ fn run_worker(
                         passphrase.as_deref(),
                         None,
                     ) {
-                        Ok(report) => {
-                            if report.created.is_empty() {
-                                send_log(&ui_tx, format!("[{repo_name}] no snapshots created"));
-                                continue;
-                            }
-
-                            for created in report.created {
-                                send_log(
-                                    &ui_tx,
-                                    format!(
-                                        "[{repo_name}] snapshot {} source={} files={} original={} compressed={} deduplicated={}",
-                                        created.snapshot_name,
-                                        created.source_label,
-                                        created.stats.nfiles,
-                                        format_bytes(created.stats.original_size),
-                                        format_bytes(created.stats.compressed_size),
-                                        format_bytes(created.stats.deduplicated_size),
-                                    ),
-                                );
-                            }
-                        }
+                        Ok(report) => log_backup_report(&ui_tx, &repo_name, &report),
                         Err(e) => {
                             send_log(&ui_tx, format!("[{repo_name}] backup failed: {e}"));
                         }
@@ -608,31 +831,203 @@ fn run_worker(
                 backup_running.store(false, Ordering::SeqCst);
                 let _ = ui_tx.send(UiEvent::Status("Idle".to_string()));
             }
-            AppCommand::RefreshSnapshots => {
+            AppCommand::RunBackupRepo { repo_selector } => {
+                let repo_selector = repo_selector.trim().to_string();
+                if repo_selector.is_empty() {
+                    send_log(&ui_tx, "Select a repository first.");
+                    continue;
+                }
+
+                let repo = match config::select_repo(&runtime.repos, &repo_selector) {
+                    Some(r) => r,
+                    None => {
+                        send_log(
+                            &ui_tx,
+                            format!("No repository matching '{repo_selector}'."),
+                        );
+                        continue;
+                    }
+                };
+
+                backup_running.store(true, Ordering::SeqCst);
+                let repo_name = format_repo_name(repo);
+                let _ = ui_tx.send(UiEvent::Status(format!(
+                    "Running backup for [{repo_name}]..."
+                )));
+
+                let passphrase = match get_or_resolve_passphrase(repo, &mut passphrases) {
+                    Ok(p) => p,
+                    Err(e) => {
+                        send_log(&ui_tx, format!("[{repo_name}] passphrase error: {e}"));
+                        backup_running.store(false, Ordering::SeqCst);
+                        let _ = ui_tx.send(UiEvent::Status("Idle".to_string()));
+                        continue;
+                    }
+                };
+
+                if repo.config.encryption.mode != vger_core::config::EncryptionModeConfig::None
+                    && passphrase.is_none()
+                {
+                    send_log(
+                        &ui_tx,
+                        format!("[{repo_name}] passphrase prompt canceled; skipping."),
+                    );
+                    backup_running.store(false, Ordering::SeqCst);
+                    let _ = ui_tx.send(UiEvent::Status("Idle".to_string()));
+                    continue;
+                }
+
+                match operations::run_backup_for_repo(
+                    &repo.config,
+                    &repo.sources,
+                    passphrase.as_deref(),
+                    None,
+                ) {
+                    Ok(report) => log_backup_report(&ui_tx, &repo_name, &report),
+                    Err(e) => send_log(&ui_tx, format!("[{repo_name}] backup failed: {e}")),
+                }
+
+                backup_running.store(false, Ordering::SeqCst);
+                let _ = ui_tx.send(UiEvent::Status("Idle".to_string()));
+            }
+            AppCommand::RunBackupSource { source_selector } => {
+                let source_selector = source_selector.trim().to_string();
+                if source_selector.is_empty() {
+                    send_log(&ui_tx, "Select a source first.");
+                    continue;
+                }
+
+                backup_running.store(true, Ordering::SeqCst);
+                let _ = ui_tx.send(UiEvent::Status(format!(
+                    "Running backup for source '{source_selector}'..."
+                )));
+
+                let mut any_backed_up = false;
+                for repo in &runtime.repos {
+                    let matching_sources: Vec<config::SourceEntry> = repo
+                        .sources
+                        .iter()
+                        .filter(|s| s.label == source_selector)
+                        .cloned()
+                        .collect();
+
+                    if matching_sources.is_empty() {
+                        continue;
+                    }
+
+                    let repo_name = format_repo_name(repo);
+                    let passphrase = match get_or_resolve_passphrase(repo, &mut passphrases) {
+                        Ok(p) => p,
+                        Err(e) => {
+                            send_log(&ui_tx, format!("[{repo_name}] passphrase error: {e}"));
+                            continue;
+                        }
+                    };
+
+                    if repo.config.encryption.mode
+                        != vger_core::config::EncryptionModeConfig::None
+                        && passphrase.is_none()
+                    {
+                        send_log(
+                            &ui_tx,
+                            format!("[{repo_name}] passphrase prompt canceled; skipping."),
+                        );
+                        continue;
+                    }
+
+                    match operations::run_backup_for_repo(
+                        &repo.config,
+                        &matching_sources,
+                        passphrase.as_deref(),
+                        None,
+                    ) {
+                        Ok(report) => {
+                            any_backed_up = true;
+                            log_backup_report(&ui_tx, &repo_name, &report);
+                        }
+                        Err(e) => {
+                            send_log(&ui_tx, format!("[{repo_name}] backup failed: {e}"));
+                        }
+                    }
+                }
+
+                if !any_backed_up {
+                    send_log(
+                        &ui_tx,
+                        format!("No repositories found with source '{source_selector}'."),
+                    );
+                }
+
+                backup_running.store(false, Ordering::SeqCst);
+                let _ = ui_tx.send(UiEvent::Status("Idle".to_string()));
+            }
+            AppCommand::FetchRepoInfo { repo_selector } => {
+                let repo_selector = repo_selector.trim().to_string();
+                if repo_selector.is_empty() {
+                    send_log(&ui_tx, "Select a repository first.");
+                    continue;
+                }
+
+                let repo = match config::select_repo(&runtime.repos, &repo_selector) {
+                    Some(r) => r,
+                    None => {
+                        send_log(
+                            &ui_tx,
+                            format!("No repository matching '{repo_selector}'."),
+                        );
+                        continue;
+                    }
+                };
+
+                let repo_name = format_repo_name(repo);
+                let _ = ui_tx.send(UiEvent::Status(format!(
+                    "Fetching info for [{repo_name}]..."
+                )));
+
+                let passphrase = match get_or_resolve_passphrase(repo, &mut passphrases) {
+                    Ok(p) => p,
+                    Err(e) => {
+                        send_log(&ui_tx, format!("[{repo_name}] passphrase error: {e}"));
+                        let _ = ui_tx.send(UiEvent::Status("Idle".to_string()));
+                        continue;
+                    }
+                };
+
+                match vger_core::commands::info::run(&repo.config, passphrase.as_deref()) {
+                    Ok(stats) => {
+                        let text = format_info_stats(&repo_name, &stats);
+                        let _ = ui_tx.send(UiEvent::RepoInfoText(text));
+                        send_log(&ui_tx, format!("Fetched info for [{repo_name}]."));
+                    }
+                    Err(e) => {
+                        send_log(&ui_tx, format!("[{repo_name}] info failed: {e}"));
+                    }
+                }
+
+                let _ = ui_tx.send(UiEvent::Status("Idle".to_string()));
+            }
+            AppCommand::RefreshSnapshots { repo_selector } => {
                 let _ = ui_tx.send(UiEvent::Status("Loading snapshots...".to_string()));
                 let mut rows = Vec::new();
 
-                for repo in &runtime.repos {
-                    let passphrase = if let Some(existing) =
-                        passphrases.get(&repo.config.repository.url)
-                    {
-                        Some(existing.clone())
-                    } else {
-                        match resolve_passphrase_for_repo(repo) {
-                            Ok(pass) => {
-                                if let Some(ref p) = pass {
-                                    passphrases
-                                        .insert(repo.config.repository.url.clone(), p.clone());
-                                }
-                                pass
-                            }
-                            Err(e) => {
-                                send_log(
-                                    &ui_tx,
-                                    format!("[{}] passphrase error: {e}", format_repo_name(repo)),
-                                );
-                                continue;
-                            }
+                let repos_to_scan = match select_repos(&runtime.repos, &repo_selector) {
+                    Ok(repos) => repos,
+                    Err(e) => {
+                        send_log(&ui_tx, format!("Failed to select repository: {e}"));
+                        let _ = ui_tx.send(UiEvent::Status("Idle".to_string()));
+                        continue;
+                    }
+                };
+
+                for repo in repos_to_scan {
+                    let passphrase = match get_or_resolve_passphrase(repo, &mut passphrases) {
+                        Ok(pass) => pass,
+                        Err(e) => {
+                            send_log(
+                                &ui_tx,
+                                format!("[{}] passphrase error: {e}", format_repo_name(repo)),
+                            );
+                            continue;
                         }
                     };
 
@@ -810,6 +1205,7 @@ fn run_worker(
                             path: config_path.display().to_string(),
                             schedule: schedule_description(&schedule, schedule_paused),
                         });
+                        send_combo_data(&ui_tx, &runtime.repos);
                         send_log(&ui_tx, "Configuration reloaded.");
                     }
                     Err(e) => {
@@ -904,6 +1300,18 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     }
                     UiEvent::SnapshotsText(text) => ui.set_snapshots_text(text.into()),
                     UiEvent::SnapshotItemsText(text) => ui.set_snapshot_items_text(text.into()),
+                    UiEvent::RepoInfoText(text) => ui.set_repo_info_text(text.into()),
+                    UiEvent::SourcesText(text) => ui.set_sources_text(text.into()),
+                    UiEvent::RepoNames(names) => {
+                        let shared: Vec<slint::SharedString> =
+                            names.into_iter().map(|s| s.into()).collect();
+                        ui.set_repo_names(slint::ModelRc::new(slint::VecModel::from(shared)));
+                    }
+                    UiEvent::SourceNames(names) => {
+                        let shared: Vec<slint::SharedString> =
+                            names.into_iter().map(|s| s.into()).collect();
+                        ui.set_source_names(slint::ModelRc::new(slint::VecModel::from(shared)));
+                    }
                     UiEvent::Quit => {
                         let _ = slint::quit_event_loop();
                     }
@@ -916,13 +1324,19 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     });
 
     let tx = app_tx.clone();
-    ui.on_run_backup_clicked(move || {
-        let _ = tx.send(AppCommand::RunBackupNow { scheduled: false });
+    ui.on_backup_all_clicked(move || {
+        let _ = tx.send(AppCommand::RunBackupAll { scheduled: false });
     });
 
     let tx = app_tx.clone();
+    let ui_weak = ui.as_weak();
     ui.on_refresh_snapshots_clicked(move || {
-        let _ = tx.send(AppCommand::RefreshSnapshots);
+        let Some(ui) = ui_weak.upgrade() else {
+            return;
+        };
+        let _ = tx.send(AppCommand::RefreshSnapshots {
+            repo_selector: ui.get_snapshots_repo_combo_value().to_string(),
+        });
     });
 
     let tx = app_tx.clone();
@@ -932,7 +1346,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             return;
         };
         let _ = tx.send(AppCommand::ShowSnapshotItems {
-            repo_selector: ui.get_repo_selector().to_string(),
+            repo_selector: ui.get_snapshots_repo_combo_value().to_string(),
             snapshot: ui.get_snapshot_id().to_string(),
         });
     });
@@ -954,7 +1368,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         };
 
         let _ = tx.send(AppCommand::Extract {
-            repo_selector: ui.get_repo_selector().to_string(),
+            repo_selector: ui.get_snapshots_repo_combo_value().to_string(),
             snapshot: ui.get_snapshot_id().to_string(),
             dest: ui.get_extract_dest().to_string(),
             pattern,
@@ -974,6 +1388,39 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let tx = app_tx.clone();
     ui.on_quit_clicked(move || {
         let _ = tx.send(AppCommand::Quit);
+    });
+
+    let tx = app_tx.clone();
+    let ui_weak = ui.as_weak();
+    ui.on_fetch_repo_info_clicked(move || {
+        let Some(ui) = ui_weak.upgrade() else {
+            return;
+        };
+        let _ = tx.send(AppCommand::FetchRepoInfo {
+            repo_selector: ui.get_repos_combo_value().to_string(),
+        });
+    });
+
+    let tx = app_tx.clone();
+    let ui_weak = ui.as_weak();
+    ui.on_backup_repo_clicked(move || {
+        let Some(ui) = ui_weak.upgrade() else {
+            return;
+        };
+        let _ = tx.send(AppCommand::RunBackupRepo {
+            repo_selector: ui.get_repos_combo_value().to_string(),
+        });
+    });
+
+    let tx = app_tx.clone();
+    let ui_weak = ui.as_weak();
+    ui.on_backup_source_clicked(move || {
+        let Some(ui) = ui_weak.upgrade() else {
+            return;
+        };
+        let _ = tx.send(AppCommand::RunBackupSource {
+            source_selector: ui.get_sources_combo_value().to_string(),
+        });
     });
 
     // Close-to-tray behavior: hide window and keep background tasks running.
@@ -998,7 +1445,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 if event.id == open_item_id {
                     let _ = tx.send(AppCommand::ShowWindow);
                 } else if event.id == run_now_item_id {
-                    let _ = tx.send(AppCommand::RunBackupNow { scheduled: false });
+                    let _ = tx.send(AppCommand::RunBackupAll { scheduled: false });
                 } else if event.id == pause_item_id {
                     let _ = tx.send(AppCommand::ToggleSchedulePause);
                 } else if event.id == quit_item_id {
