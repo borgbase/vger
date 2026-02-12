@@ -29,6 +29,21 @@ fn items_chunker_config() -> ChunkerConfig {
     }
 }
 
+fn flush_item_stream_chunk(
+    repo: &mut Repository,
+    item_stream: &mut Vec<u8>,
+    item_ptrs: &mut Vec<ChunkId>,
+    compression: Compression,
+) -> Result<()> {
+    if item_stream.is_empty() {
+        return Ok(());
+    }
+    let chunk_data = std::mem::take(item_stream);
+    let (chunk_id, _csize, _is_new) = repo.store_chunk(&chunk_data, compression, PackType::Tree)?;
+    item_ptrs.push(chunk_id);
+    Ok(())
+}
+
 /// Run `vger backup` for a single source directory.
 pub struct BackupRequest<'a> {
     pub snapshot_name: &'a str,
@@ -60,7 +75,9 @@ pub fn run(config: &VgerConfig, req: BackupRequest<'_>) -> Result<SnapshotStats>
 
         let time_start = Utc::now();
         let mut stats = SnapshotStats::default();
-        let mut all_items: Vec<Item> = Vec::new();
+        let mut item_stream = Vec::new();
+        let mut item_ptrs: Vec<ChunkId> = Vec::new();
+        let items_config = items_chunker_config();
 
         // Build exclude patterns
         let mut glob_builder = globset::GlobSetBuilder::new();
@@ -171,23 +188,14 @@ pub fn run(config: &VgerConfig, req: BackupRequest<'_>) -> Result<SnapshotStats>
                 stats.nfiles += 1;
             }
 
-            all_items.push(item);
+            // Stream item metadata to avoid materializing a full Vec<Item>.
+            let item_bytes = rmp_serde::to_vec(&item)?;
+            item_stream.extend_from_slice(&item_bytes);
+            if item_stream.len() >= items_config.avg_size as usize {
+                flush_item_stream_chunk(repo, &mut item_stream, &mut item_ptrs, compression)?;
+            }
         }
-
-        // Serialize all items into a msgpack byte stream
-        let items_bytes = rmp_serde::to_vec(&all_items)?;
-
-        // Chunk the item stream and store each chunk
-        let items_config = items_chunker_config();
-        let item_chunk_ranges = chunker::chunk_data(&items_bytes, &items_config);
-
-        let mut item_ptrs: Vec<ChunkId> = Vec::new();
-        for (offset, length) in item_chunk_ranges {
-            let chunk_data = &items_bytes[offset..offset + length];
-            let (chunk_id, _csize, _is_new) =
-                repo.store_chunk(chunk_data, compression, PackType::Tree)?;
-            item_ptrs.push(chunk_id);
-        }
+        flush_item_stream_chunk(repo, &mut item_stream, &mut item_ptrs, compression)?;
 
         let time_end = Utc::now();
 

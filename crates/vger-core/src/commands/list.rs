@@ -1,3 +1,5 @@
+use serde::Deserialize;
+
 use crate::config::VgerConfig;
 use crate::error::{Result, VgerError};
 use crate::repo::format::unpack_object;
@@ -65,6 +67,54 @@ pub fn load_snapshot_items(repo: &Repository, snapshot_name: &str) -> Result<Vec
         items_stream.extend_from_slice(&chunk_data);
     }
 
-    let items: Vec<Item> = rmp_serde::from_slice(&items_stream)?;
+    decode_items_stream(&items_stream)
+}
+
+fn decode_items_stream(items_stream: &[u8]) -> Result<Vec<Item>> {
+    if items_stream.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    // Items are encoded as concatenated MsgPack Item objects.
+    let mut de = rmp_serde::Deserializer::new(std::io::Cursor::new(items_stream));
+    let mut items = Vec::new();
+    while (de.position() as usize) < items_stream.len() {
+        items.push(Item::deserialize(&mut de)?);
+    }
     Ok(items)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::decode_items_stream;
+    use crate::snapshot::item::Item;
+
+    #[test]
+    fn decode_streamed_item_sequence() {
+        let item = Item {
+            path: "b.txt".into(),
+            entry_type: crate::snapshot::item::ItemType::RegularFile,
+            mode: 0o644,
+            uid: 1000,
+            gid: 1000,
+            user: None,
+            group: None,
+            mtime: 0,
+            atime: None,
+            ctime: None,
+            size: 0,
+            chunks: Vec::new(),
+            link_target: None,
+            xattrs: None,
+        };
+
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(&rmp_serde::to_vec(&item).unwrap());
+        bytes.extend_from_slice(&rmp_serde::to_vec(&item).unwrap());
+
+        let decoded = decode_items_stream(&bytes).unwrap();
+        assert_eq!(decoded.len(), 2);
+        assert_eq!(decoded[0].path, "b.txt");
+        assert_eq!(decoded[1].path, "b.txt");
+    }
 }
