@@ -3,6 +3,7 @@ pub mod check;
 pub mod compact;
 pub mod delete;
 pub mod extract;
+pub mod info;
 pub mod init;
 pub mod list;
 #[cfg(feature = "mount")]

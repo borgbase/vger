@@ -360,3 +360,65 @@ fn backup_run_with_progress_emits_events_and_final_stats() {
     assert_eq!(final_stats_event.2, stats.compressed_size);
     assert_eq!(final_stats_event.3, stats.deduplicated_size);
 }
+
+#[test]
+fn info_reports_repository_statistics() {
+    let tmp = tempfile::tempdir().unwrap();
+    let repo_dir = tmp.path().join("repo");
+    let source_dir = tmp.path().join("source");
+    std::fs::create_dir_all(&repo_dir).unwrap();
+    std::fs::create_dir_all(&source_dir).unwrap();
+
+    let payload: Vec<u8> = (0u32..256 * 1024).map(|i| (i % 251) as u8).collect();
+    std::fs::write(source_dir.join("a.bin"), &payload).unwrap();
+    std::fs::write(source_dir.join("b.bin"), &payload).unwrap();
+
+    let mut config = make_test_config(&repo_dir);
+    config.chunker = ChunkerConfig {
+        min_size: 8 * 1024,
+        avg_size: 16 * 1024,
+        max_size: 64 * 1024,
+    };
+
+    commands::init::run(&config, None).unwrap();
+
+    let empty = commands::info::run(&config, None).unwrap();
+    assert_eq!(empty.snapshot_count, 0);
+    assert!(empty.last_snapshot_time.is_none());
+    assert_eq!(empty.raw_size, 0);
+    assert_eq!(empty.compressed_size, 0);
+    assert_eq!(empty.deduplicated_size, 0);
+    assert_eq!(empty.unique_stored_size, 0);
+    assert_eq!(empty.referenced_stored_size, 0);
+    assert_eq!(empty.unique_chunks, 0);
+
+    let source_paths = vec![source_dir.to_string_lossy().to_string()];
+    let exclude_if_present: Vec<String> = Vec::new();
+    let exclude_patterns: Vec<String> = Vec::new();
+    let backup_stats = commands::backup::run(
+        &config,
+        commands::backup::BackupRequest {
+            snapshot_name: "snap-info",
+            passphrase: None,
+            source_paths: &source_paths,
+            source_label: "source",
+            exclude_patterns: &exclude_patterns,
+            exclude_if_present: &exclude_if_present,
+            one_file_system: true,
+            git_ignore: false,
+            compression: Compression::None,
+            label: "",
+        },
+    )
+    .unwrap();
+
+    let info = commands::info::run(&config, None).unwrap();
+    assert_eq!(info.snapshot_count, 1);
+    assert!(info.last_snapshot_time.is_some());
+    assert_eq!(info.raw_size, backup_stats.original_size);
+    assert_eq!(info.compressed_size, backup_stats.compressed_size);
+    assert_eq!(info.deduplicated_size, backup_stats.deduplicated_size);
+    assert!(info.unique_chunks > 0);
+    assert!(info.unique_stored_size > 0);
+    assert!(info.referenced_stored_size >= info.unique_stored_size);
+}

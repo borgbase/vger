@@ -29,6 +29,9 @@ vger backup
 # Inspect snapshots
 vger list
 
+# Show repository statistics
+vger info
+
 # Start desktop UI (Slint + tray + scheduler)
 vger-gui
 ```

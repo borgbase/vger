@@ -263,6 +263,9 @@ enum Commands {
         verify_data: bool,
     },
 
+    /// Show repository statistics and snapshot totals
+    Info,
+
     /// Generate a minimal configuration file
     Config {
         /// Destination path for the config file (default: ./vger.yaml)
@@ -314,6 +317,7 @@ fn command_name(cmd: &Commands) -> &'static str {
         Commands::Delete { .. } => "delete",
         Commands::Prune { .. } => "prune",
         Commands::Check { .. } => "check",
+        Commands::Info => "info",
         Commands::Mount { .. } => "mount",
         Commands::Compact { .. } => "compact",
         Commands::Config { .. } => "config",
@@ -648,6 +652,7 @@ fn dispatch_command(
             source,
         } => run_prune(cfg, label, *dry_run, *list, sources, source),
         Commands::Check { verify_data } => run_check(cfg, label, *verify_data),
+        Commands::Info => run_info(cfg, label),
         Commands::Mount {
             snapshot,
             source,
@@ -1127,6 +1132,71 @@ fn run_check(
     Ok(())
 }
 
+fn run_info(config: &VgerConfig, label: Option<&str>) -> Result<(), Box<dyn std::error::Error>> {
+    let stats = with_repo_passphrase(config, label, |passphrase| {
+        commands::info::run(config, passphrase)
+            .map_err(|e| -> Box<dyn std::error::Error> { Box::new(e) })
+    })?;
+
+    let mut table = Table::new();
+    table.load_preset(UTF8_FULL_CONDENSED);
+    table.set_header(vec!["Field", "Value"]);
+
+    let repo_name = label.unwrap_or(&config.repository.url);
+    table.add_row(vec!["Repository".to_string(), repo_name.to_string()]);
+    table.add_row(vec!["URL".to_string(), config.repository.url.clone()]);
+
+    let encryption = match &stats.encryption {
+        vger_core::repo::EncryptionMode::None => "none",
+        vger_core::repo::EncryptionMode::Aes256Gcm => "aes256gcm",
+    };
+    table.add_row(vec!["Encryption".to_string(), encryption.to_string()]);
+    table.add_row(vec![
+        "Created".to_string(),
+        stats
+            .repo_created
+            .format("%Y-%m-%d %H:%M:%S UTC")
+            .to_string(),
+    ]);
+    table.add_row(vec![
+        "Snapshots".to_string(),
+        stats.snapshot_count.to_string(),
+    ]);
+
+    let last_snapshot = stats
+        .last_snapshot_time
+        .map(|t| t.format("%Y-%m-%d %H:%M:%S UTC").to_string())
+        .unwrap_or_else(|| "-".to_string());
+    table.add_row(vec!["Last snapshot".to_string(), last_snapshot]);
+    table.add_row(vec![
+        "Raw size (logical sum)".to_string(),
+        format_size_with_bytes(stats.raw_size),
+    ]);
+    table.add_row(vec![
+        "Compressed size (logical sum)".to_string(),
+        format_size_with_bytes(stats.compressed_size),
+    ]);
+    table.add_row(vec![
+        "Deduplicated size (logical sum)".to_string(),
+        format_size_with_bytes(stats.deduplicated_size),
+    ]);
+    table.add_row(vec![
+        "Unique stored size (live)".to_string(),
+        format_size_with_bytes(stats.unique_stored_size),
+    ]);
+    table.add_row(vec![
+        "Referenced stored size (live)".to_string(),
+        format_size_with_bytes(stats.referenced_stored_size),
+    ]);
+    table.add_row(vec![
+        "Unique chunks".to_string(),
+        stats.unique_chunks.to_string(),
+    ]);
+
+    println!("{table}");
+    Ok(())
+}
+
 fn run_mount(
     config: &VgerConfig,
     label: Option<&str>,
@@ -1222,6 +1292,10 @@ fn format_bytes(bytes: u64) -> String {
     } else {
         format!("{bytes} B")
     }
+}
+
+fn format_size_with_bytes(bytes: u64) -> String {
+    format!("{} ({} B)", format_bytes(bytes), bytes)
 }
 
 #[cfg(test)]

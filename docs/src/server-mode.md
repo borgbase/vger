@@ -68,7 +68,7 @@ sources:
   - "/home/user/documents"
 ```
 
-All standard commands (`init`, `backup`, `list`, `extract`, `delete`, `prune`, `check`, `compact`) work over REST without CLI workflow changes.
+All standard commands (`init`, `backup`, `list`, `info`, `extract`, `delete`, `prune`, `check`, `compact`) work over REST without CLI workflow changes.
 
 ## Health check
 

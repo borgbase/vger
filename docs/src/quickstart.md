@@ -42,6 +42,9 @@ vger backup
 # List all snapshots
 vger list
 
+# Show repository statistics
+vger info
+
 # List files inside a snapshot (use the hex ID from `vger list`)
 vger list --snapshot a1b2c3d4
 
@@ -63,5 +66,6 @@ For backup options, snapshot browsing, and maintenance tasks, see the [workflow 
 | `vger delete` | Delete a specific snapshot |
 | `vger prune` | Prune snapshots according to retention policy |
 | `vger check` | Verify repository integrity (`--verify-data` for full content verification) |
+| `vger info` | Show repository statistics (snapshot counts and size totals) |
 | `vger compact` | Free space by repacking pack files after delete/prune |
 | `vger mount` | Browse snapshots via a local WebDAV server |
