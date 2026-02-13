@@ -104,12 +104,24 @@ impl ResourceLimitsConfig {
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct CpuLimitsConfig {
-    /// Max CPU worker threads for backup transforms (0 = default rayon behavior).
+    /// Max CPU worker threads for backup transforms (0 = use all cores, 1 = sequential).
     #[serde(default)]
     pub max_threads: usize,
     /// Unix process niceness target (-20..19). 0 = unchanged.
     #[serde(default)]
     pub nice: i32,
+    /// Max in-flight background pack uploads (default: 4, range: 1-16).
+    #[serde(default)]
+    pub max_upload_concurrency: Option<usize>,
+    /// Batch size in MiB for transform flushes (default: 32, range: 4-256).
+    #[serde(default)]
+    pub transform_batch_mib: Option<usize>,
+    /// Max pending chunk actions before flush (default: 8192, range: 64-65536).
+    #[serde(default)]
+    pub transform_batch_chunks: Option<usize>,
+    /// Depth of the pipeline channel buffer (default: 8, 0 = disable pipeline).
+    #[serde(default)]
+    pub pipeline_depth: Option<usize>,
 }
 
 impl CpuLimitsConfig {
@@ -120,7 +132,55 @@ impl CpuLimitsConfig {
                 self.nice
             )));
         }
+        if let Some(n) = self.max_upload_concurrency {
+            if !(1..=16).contains(&n) {
+                return Err(crate::error::VgerError::Config(format!(
+                    "limits.cpu.max_upload_concurrency must be in [1, 16], got {n}"
+                )));
+            }
+        }
+        if let Some(n) = self.transform_batch_mib {
+            if !(4..=256).contains(&n) {
+                return Err(crate::error::VgerError::Config(format!(
+                    "limits.cpu.transform_batch_mib must be in [4, 256], got {n}"
+                )));
+            }
+        }
+        if let Some(n) = self.transform_batch_chunks {
+            if !(64..=65536).contains(&n) {
+                return Err(crate::error::VgerError::Config(format!(
+                    "limits.cpu.transform_batch_chunks must be in [64, 65536], got {n}"
+                )));
+            }
+        }
+        if let Some(n) = self.pipeline_depth {
+            if n > 64 {
+                return Err(crate::error::VgerError::Config(format!(
+                    "limits.cpu.pipeline_depth must be in [0, 64], got {n}"
+                )));
+            }
+        }
         Ok(())
+    }
+
+    /// Effective transform batch size in bytes.
+    pub fn transform_batch_bytes(&self) -> usize {
+        self.transform_batch_mib.unwrap_or(32) * 1024 * 1024
+    }
+
+    /// Effective max pending chunk actions.
+    pub fn max_pending_actions(&self) -> usize {
+        self.transform_batch_chunks.unwrap_or(8192)
+    }
+
+    /// Effective upload concurrency limit.
+    pub fn upload_concurrency(&self) -> usize {
+        self.max_upload_concurrency.unwrap_or(4)
+    }
+
+    /// Effective pipeline depth (0 = disabled).
+    pub fn effective_pipeline_depth(&self) -> usize {
+        self.pipeline_depth.unwrap_or(8)
     }
 }
 

@@ -49,6 +49,7 @@ thiserror = "2"
 # Logging
 tracing = "0.1"
 rayon = "1"
+crossbeam-channel = "0.5"
 
 # HTTP client (REST backend)
 ureq = { version = "2", features = ["json"], optional = true }

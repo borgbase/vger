@@ -34,10 +34,6 @@ fn items_chunker_config() -> ChunkerConfig {
     }
 }
 
-/// Cap per-file in-memory transform work to avoid unbounded growth on huge files.
-const MAX_PENDING_TRANSFORM_BYTES: usize = 32 * 1024 * 1024;
-const MAX_PENDING_FILE_ACTIONS: usize = 8_192;
-
 fn flush_item_stream_chunk(
     repo: &mut Repository,
     item_stream: &mut Vec<u8>,
@@ -69,7 +65,7 @@ fn append_item_to_stream(
     Ok(())
 }
 
-fn build_explicit_excludes(source: &Path, patterns: &[String]) -> Result<Gitignore> {
+pub(crate) fn build_explicit_excludes(source: &Path, patterns: &[String]) -> Result<Gitignore> {
     let mut builder = ignore::gitignore::GitignoreBuilder::new(source);
     for pat in patterns {
         builder
@@ -81,7 +77,7 @@ fn build_explicit_excludes(source: &Path, patterns: &[String]) -> Result<Gitigno
         .map_err(|e| VgerError::Config(format!("exclude matcher build failed: {e}")))
 }
 
-fn should_skip_for_device(one_file_system: bool, source_dev: u64, entry_dev: u64) -> bool {
+pub(crate) fn should_skip_for_device(one_file_system: bool, source_dev: u64, entry_dev: u64) -> bool {
     one_file_system && source_dev != entry_dev
 }
 
@@ -362,12 +358,18 @@ pub fn run(config: &VgerConfig, req: BackupRequest<'_>) -> Result<SnapshotStats>
 }
 
 fn build_transform_pool(max_threads: usize) -> Result<Option<rayon::ThreadPool>> {
-    if max_threads == 0 {
+    // max_threads == 1 means explicitly sequential (no pool).
+    if max_threads == 1 {
         return Ok(None);
     }
 
-    rayon::ThreadPoolBuilder::new()
-        .num_threads(max_threads)
+    // max_threads == 0 means use all available cores (rayon default).
+    let mut builder = rayon::ThreadPoolBuilder::new();
+    if max_threads > 1 {
+        builder = builder.num_threads(max_threads);
+    }
+
+    builder
         .build()
         .map(Some)
         .map_err(|e| VgerError::Other(format!("failed to create rayon thread pool: {e}")))
@@ -528,6 +530,8 @@ fn process_regular_file_item(
     stats: &mut SnapshotStats,
     new_file_cache: &mut FileCache,
     progress: &mut Option<&mut dyn FnMut(BackupProgressEvent)>,
+    max_pending_transform_bytes: usize,
+    max_pending_file_actions: usize,
 ) -> Result<()> {
     emit_progress(
         progress,
@@ -637,8 +641,8 @@ fn process_regular_file_item(
             }
         }
 
-        if pending_transform_bytes >= MAX_PENDING_TRANSFORM_BYTES
-            || actions.len() >= MAX_PENDING_FILE_ACTIONS
+        if pending_transform_bytes >= max_pending_transform_bytes
+            || actions.len() >= max_pending_file_actions
         {
             flush_regular_file_batch(
                 repo,
@@ -697,6 +701,8 @@ fn process_source_path(
     item_ptrs: &mut Vec<ChunkId>,
     stats: &mut SnapshotStats,
     new_file_cache: &mut FileCache,
+    max_pending_transform_bytes: usize,
+    max_pending_file_actions: usize,
     read_limiter: Option<&ByteRateLimiter>,
     transform_pool: Option<&rayon::ThreadPool>,
     progress: &mut Option<&mut dyn FnMut(BackupProgressEvent)>,
@@ -885,6 +891,8 @@ fn process_source_path(
                 stats,
                 new_file_cache,
                 progress,
+                max_pending_transform_bytes,
+                max_pending_file_actions,
             )?;
         }
 
@@ -905,6 +913,228 @@ fn process_source_path(
             source_path: source_path.to_string(),
         },
     );
+
+    Ok(())
+}
+
+/// Consumer side of the pipeline: processes messages from the I/O producer thread.
+/// Handles dedup checks, compress+encrypt, packing, and item stream building.
+#[allow(clippy::too_many_arguments)]
+fn run_pipeline_backup(
+    rx: &crossbeam_channel::Receiver<super::pipeline::FileMessage>,
+    repo: &mut Repository,
+    compression: Compression,
+    transform_pool: Option<&rayon::ThreadPool>,
+    items_config: &ChunkerConfig,
+    item_stream: &mut Vec<u8>,
+    item_ptrs: &mut Vec<ChunkId>,
+    stats: &mut SnapshotStats,
+    new_file_cache: &mut FileCache,
+    progress: &mut Option<&mut dyn FnMut(BackupProgressEvent)>,
+    max_pending_transform_bytes: usize,
+    max_pending_file_actions: usize,
+) -> Result<()> {
+    use super::pipeline::FileMessage;
+
+    for msg in rx.iter() {
+        match msg {
+            FileMessage::CacheHit {
+                mut item,
+                cached_refs,
+                metadata_summary,
+                abs_path,
+            } => {
+                emit_progress(
+                    progress,
+                    BackupProgressEvent::FileStarted {
+                        path: item.path.clone(),
+                    },
+                );
+
+                // Verify all referenced chunks still exist in the index.
+                let all_present = cached_refs.iter().all(|cr| repo.chunk_exists(&cr.id));
+                if all_present {
+                    let mut file_original: u64 = 0;
+                    let mut file_compressed: u64 = 0;
+                    for cr in &cached_refs {
+                        repo.increment_chunk_ref(&cr.id);
+                        file_original += cr.size as u64;
+                        file_compressed += cr.csize as u64;
+                    }
+                    stats.nfiles += 1;
+                    stats.original_size += file_original;
+                    stats.compressed_size += file_compressed;
+                    item.chunks = cached_refs.clone();
+
+                    new_file_cache.insert(
+                        abs_path,
+                        metadata_summary.device,
+                        metadata_summary.inode,
+                        metadata_summary.mtime_ns,
+                        metadata_summary.ctime_ns,
+                        metadata_summary.size,
+                        item.chunks.clone(),
+                    );
+
+                    debug!(path = %item.path, "file cache hit (pipeline)");
+                    emit_stats_progress(progress, stats, Some(item.path.clone()));
+                } else {
+                    // Cache hit but chunks missing — can't re-chunk here (no file data).
+                    // Treat as zero-content file to avoid data loss. This is a rare edge case
+                    // (chunks pruned between cache load and backup) and will be fixed on next backup.
+                    warn!(
+                        path = %item.path,
+                        "file cache hit but chunks missing from index; skipping content"
+                    );
+                    stats.nfiles += 1;
+                }
+
+                append_item_to_stream(
+                    repo,
+                    item_stream,
+                    item_ptrs,
+                    &item,
+                    items_config,
+                    compression,
+                )?;
+            }
+
+            FileMessage::ChunkedFile {
+                mut item,
+                chunks,
+                metadata_summary,
+                abs_path,
+            } => {
+                emit_progress(
+                    progress,
+                    BackupProgressEvent::FileStarted {
+                        path: item.path.clone(),
+                    },
+                );
+
+                let mut actions: Vec<FileChunkAction> = Vec::new();
+                let mut transform_jobs: Vec<TransformJob> = Vec::new();
+                let mut pending_new: HashMap<ChunkId, usize> = HashMap::new();
+                let mut pending_transform_bytes: usize = 0;
+
+                for produced in &chunks {
+                    let chunk_id = produced.chunk_id;
+                    let size = produced.data.len() as u32;
+
+                    if let Some(csize) = repo.bump_ref_if_exists(&chunk_id) {
+                        actions.push(FileChunkAction::Existing {
+                            chunk_id,
+                            size,
+                            csize,
+                        });
+                    } else {
+                        match pending_new.entry(chunk_id) {
+                            std::collections::hash_map::Entry::Occupied(_) => {
+                                actions.push(FileChunkAction::NewDuplicate { chunk_id, size });
+                            }
+                            std::collections::hash_map::Entry::Vacant(entry) => {
+                                let job_idx = transform_jobs.len();
+                                entry.insert(job_idx);
+                                pending_transform_bytes =
+                                    pending_transform_bytes.saturating_add(produced.data.len());
+                                transform_jobs.push(TransformJob {
+                                    chunk_id,
+                                    data: produced.data.clone(),
+                                });
+                                actions.push(FileChunkAction::NewPrimary {
+                                    chunk_id,
+                                    size,
+                                    job_idx,
+                                });
+                            }
+                        }
+                    }
+
+                    if pending_transform_bytes >= max_pending_transform_bytes
+                        || actions.len() >= max_pending_file_actions
+                    {
+                        flush_regular_file_batch(
+                            repo,
+                            compression,
+                            transform_pool,
+                            &mut actions,
+                            &mut transform_jobs,
+                            &mut item,
+                            stats,
+                        )?;
+                        pending_new.clear();
+                        pending_transform_bytes = 0;
+                    }
+                }
+
+                flush_regular_file_batch(
+                    repo,
+                    compression,
+                    transform_pool,
+                    &mut actions,
+                    &mut transform_jobs,
+                    &mut item,
+                    stats,
+                )?;
+
+                stats.nfiles += 1;
+
+                new_file_cache.insert(
+                    abs_path,
+                    metadata_summary.device,
+                    metadata_summary.inode,
+                    metadata_summary.mtime_ns,
+                    metadata_summary.ctime_ns,
+                    metadata_summary.size,
+                    item.chunks.clone(),
+                );
+
+                emit_stats_progress(progress, stats, Some(item.path.clone()));
+
+                append_item_to_stream(
+                    repo,
+                    item_stream,
+                    item_ptrs,
+                    &item,
+                    items_config,
+                    compression,
+                )?;
+            }
+
+            FileMessage::NonFileItem { item } => {
+                append_item_to_stream(
+                    repo,
+                    item_stream,
+                    item_ptrs,
+                    &item,
+                    items_config,
+                    compression,
+                )?;
+            }
+
+            FileMessage::SourceStarted { source_path } => {
+                emit_progress(
+                    progress,
+                    BackupProgressEvent::SourceStarted { source_path },
+                );
+            }
+
+            FileMessage::SourceFinished { source_path } => {
+                emit_progress(
+                    progress,
+                    BackupProgressEvent::SourceFinished { source_path },
+                );
+            }
+
+            FileMessage::Done => {
+                break;
+            }
+
+            FileMessage::Error(e) => {
+                return Err(e);
+            }
+        }
+    }
 
     Ok(())
 }
@@ -956,6 +1186,10 @@ pub fn run_with_progress(
     };
     let read_limiter = ByteRateLimiter::from_mib_per_sec(config.limits.io.read_mib_per_sec);
     let transform_pool = build_transform_pool(config.limits.cpu.max_threads)?;
+    let max_pending_transform_bytes = config.limits.cpu.transform_batch_bytes();
+    let max_pending_file_actions = config.limits.cpu.max_pending_actions();
+    let upload_concurrency = config.limits.cpu.upload_concurrency();
+    let pipeline_depth = config.limits.cpu.effective_pipeline_depth();
 
     let throttle_bps = limits::network_write_throttle_bps(&config.limits);
     let backend = storage::backend_from_config(&config.repository, throttle_bps)?;
@@ -993,27 +1227,78 @@ pub fn run_with_progress(
             time_start,
         )?;
 
-        // Walk each source directory.
-        for source_path in source_paths {
-            process_source_path(
-                repo,
-                source_path,
-                multi_path,
-                exclude_patterns,
-                exclude_if_present,
-                one_file_system,
-                git_ignore,
-                xattrs_enabled,
-                compression,
-                &items_config,
-                &mut item_stream,
-                &mut item_ptrs,
-                &mut stats,
-                &mut new_file_cache,
-                read_limiter.as_deref(),
-                transform_pool.as_ref(),
-                &mut progress,
-            )?;
+        // Apply configurable upload concurrency.
+        repo.set_max_in_flight_uploads(upload_concurrency);
+
+        if pipeline_depth > 0 && !source_paths.is_empty() {
+            // Pipeline mode: overlap I/O (producer) with CPU work (consumer).
+            // Extract file_cache before the scope so we can lend it immutably
+            // to the producer while the consumer mutates repo.
+            let file_cache_snapshot = std::mem::take(&mut repo.file_cache);
+            let chunk_id_key = *repo.crypto.chunk_id_key();
+            let chunker_config = repo.config.chunker_params.clone();
+
+            let pipeline_result: Result<()> = std::thread::scope(|s| {
+                let (tx, rx) = crossbeam_channel::bounded(pipeline_depth);
+
+                s.spawn(move || {
+                    super::pipeline::run_producer(
+                        &tx,
+                        source_paths,
+                        multi_path,
+                        exclude_patterns,
+                        exclude_if_present,
+                        one_file_system,
+                        git_ignore,
+                        xattrs_enabled,
+                        &chunker_config,
+                        &chunk_id_key,
+                        &file_cache_snapshot,
+                        read_limiter.as_deref(),
+                    );
+                });
+
+                run_pipeline_backup(
+                    &rx,
+                    repo,
+                    compression,
+                    transform_pool.as_ref(),
+                    &items_config,
+                    &mut item_stream,
+                    &mut item_ptrs,
+                    &mut stats,
+                    &mut new_file_cache,
+                    &mut progress,
+                    max_pending_transform_bytes,
+                    max_pending_file_actions,
+                )
+            });
+            pipeline_result?;
+        } else {
+            // Sequential fallback (pipeline_depth == 0 or no source paths).
+            for source_path in source_paths {
+                process_source_path(
+                    repo,
+                    source_path,
+                    multi_path,
+                    exclude_patterns,
+                    exclude_if_present,
+                    one_file_system,
+                    git_ignore,
+                    xattrs_enabled,
+                    compression,
+                    &items_config,
+                    &mut item_stream,
+                    &mut item_ptrs,
+                    &mut stats,
+                    &mut new_file_cache,
+                    max_pending_transform_bytes,
+                    max_pending_file_actions,
+                    read_limiter.as_deref(),
+                    transform_pool.as_ref(),
+                    &mut progress,
+                )?;
+            }
         }
         flush_item_stream_chunk(repo, &mut item_stream, &mut item_ptrs, compression)?;
 

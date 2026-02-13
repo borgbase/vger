@@ -50,8 +50,8 @@ fn default_max_pack_size() -> u32 {
     512 * 1024 * 1024
 }
 
-/// Maximum number of in-flight background pack uploads.
-const MAX_IN_FLIGHT_PACK_UPLOADS: usize = 4;
+/// Default maximum number of in-flight background pack uploads.
+const DEFAULT_IN_FLIGHT_PACK_UPLOADS: usize = 4;
 
 /// Maximum total weight (bytes) of cached blobs in the blob cache.
 const BLOB_CACHE_MAX_BYTES: usize = 32 * 1024 * 1024; // 32 MiB
@@ -137,6 +137,8 @@ pub struct Repository {
     index_delta: Option<IndexDelta>,
     /// Weight-bounded cache for decrypted chunks (used during restore).
     blob_cache: BlobCache,
+    /// Configurable limit for in-flight background pack uploads.
+    max_in_flight_uploads: usize,
 }
 
 impl Repository {
@@ -258,6 +260,7 @@ impl Repository {
             dedup_index: None,
             index_delta: None,
             blob_cache: BlobCache::new(BLOB_CACHE_MAX_BYTES),
+            max_in_flight_uploads: DEFAULT_IN_FLIGHT_PACK_UPLOADS,
         })
     }
 
@@ -360,6 +363,7 @@ impl Repository {
             dedup_index: None,
             index_delta: None,
             blob_cache: BlobCache::new(BLOB_CACHE_MAX_BYTES),
+            max_in_flight_uploads: DEFAULT_IN_FLIGHT_PACK_UPLOADS,
         })
     }
 
@@ -383,10 +387,15 @@ impl Repository {
 
     /// Apply backpressure to keep the number of in-flight uploads bounded.
     fn cap_pending_uploads(&mut self) -> Result<()> {
-        while self.pending_uploads.len() >= MAX_IN_FLIGHT_PACK_UPLOADS {
+        while self.pending_uploads.len() >= self.max_in_flight_uploads {
             self.wait_one_pending_upload()?;
         }
         Ok(())
+    }
+
+    /// Set the maximum number of in-flight background pack uploads.
+    pub fn set_max_in_flight_uploads(&mut self, n: usize) {
+        self.max_in_flight_uploads = n.max(1);
     }
 
     /// Switch to dedup-only index mode to reduce memory during backup.
