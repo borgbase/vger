@@ -111,6 +111,27 @@ perm_of() {
   fi
 }
 
+# Print "mode\tsize" in one fork (halves per-file stat overhead).
+stat_mode_size() {
+  if [[ "$STAT_STYLE" == "gnu" ]]; then
+    stat -c '%a\t%s' "$1"
+  else
+    stat -f '%Lp\t%z' "$1"
+  fi
+}
+
+# Read NUL-delimited paths on stdin, emit "hash  path" lines (sha256sum format).
+sha256_bulk() {
+  case "$SHA_TOOL" in
+    sha256sum) xargs -0 sha256sum ;;
+    shasum)    xargs -0 shasum -a 256 ;;
+    openssl)
+      xargs -0 openssl dgst -sha256 \
+        | sed -E 's/^SHA2-256\((.+)\)= (.+)$/\2  \1/'
+      ;;
+  esac
+}
+
 ITERATIONS=1000
 CHECK_EVERY=50
 VERIFY_DATA_EVERY=0
@@ -298,18 +319,23 @@ fingerprint_tree() {
 
   (
     cd "$root"
-    LC_ALL=C find . -mindepth 1 -print0 | LC_ALL=C sort -z | while IFS= read -r -d '' rel; do
-      if [[ -L "$rel" ]]; then
-        printf 'L\t%s\t%s\n' "$rel" "$(readlink "$rel")"
-      elif [[ -f "$rel" ]]; then
-        local hash size mode
-        hash="$(sha256_file "$rel")"
-        size="$(wc -c <"$rel" | tr -d ' ')"
-        mode="$(perm_of "$rel")"
-        printf 'F\t%s\t%s\t%s\t%s\n' "$rel" "$mode" "$size" "$hash"
-      elif [[ -d "$rel" ]]; then
-        printf 'D\t%s\t%s\n' "$rel" "$(perm_of "$rel")"
-      fi
+
+    # Directories — just path + perms (cheap)
+    LC_ALL=C find . -mindepth 1 -type d -print0 | LC_ALL=C sort -z | while IFS= read -r -d '' rel; do
+      printf 'D\t%s\t%s\n' "$rel" "$(perm_of "$rel")"
+    done
+
+    # Symlinks — path + target (cheap)
+    LC_ALL=C find . -mindepth 1 -type l -print0 | LC_ALL=C sort -z | while IFS= read -r -d '' rel; do
+      printf 'L\t%s\t%s\n' "$rel" "$(readlink "$rel")"
+    done
+
+    # Regular files — bulk hash via xargs (one process per batch, not per file)
+    LC_ALL=C find . -mindepth 1 -type f -print0 | LC_ALL=C sort -z | sha256_bulk | \
+    while IFS= read -r line; do
+      local hash="${line:0:64}"
+      local rel="${line:66}"
+      printf 'F\t%s\t%s\t%s\n' "$rel" "$(stat_mode_size "$rel")" "$hash"
     done
   ) >"$out_file"
 }
@@ -317,18 +343,22 @@ fingerprint_tree() {
 verify_restore_matches() {
   local iter="$1"
   local restored="$2"
+  local src_fp="$3"
 
-  local src_fp="$RUNTIME_DIR/src-$iter.fp"
   local dst_fp="$RUNTIME_DIR/dst-$iter.fp"
-
-  fingerprint_tree "$CORPUS_DIR" "$src_fp"
   fingerprint_tree "$restored" "$dst_fp"
   diff -u "$src_fp" "$dst_fp" >/dev/null
 }
 
 main() {
   write_config
+  log "Initializing repository"
   run_vger 0 init init >/dev/null
+
+  local corpus_fp="$RUNTIME_DIR/corpus.fp"
+  log "Computing corpus fingerprint (once)"
+  fingerprint_tree "$CORPUS_DIR" "$corpus_fp"
+  log "Corpus fingerprint ready"
 
   log "Starting stress run iterations=$ITERATIONS"
 
@@ -349,11 +379,13 @@ main() {
   start_ts="$(date +%s)"
 
   for (( i=1; i<=ITERATIONS; i++ )); do
+    log "[$i/$ITERATIONS] backup"
     backup_log="$(run_vger "$i" backup backup --label "stress-$i")"
     snapshot="$(extract_snapshot_id "$backup_log")" || die "failed to parse snapshot ID"
     backups=$((backups + 1))
     check_locks_clear
 
+    log "[$i/$ITERATIONS] list (snapshot $snapshot)"
     local list_log
     list_log="$(run_vger "$i" list list --last 20)"
     grep -q "$snapshot" "$list_log" || die "snapshot '$snapshot' missing from list output"
@@ -363,37 +395,44 @@ main() {
     rm -rf "$restore_target"
     mkdir -p "$restore_target"
 
+    log "[$i/$ITERATIONS] restore"
     run_vger "$i" restore restore --snapshot "$snapshot" --dest "$restore_target" >/dev/null
-    verify_restore_matches "$i" "$restore_target" || die "restore verification failed (iteration $i)"
+
+    log "[$i/$ITERATIONS] verify"
+    verify_restore_matches "$i" "$restore_target" "$corpus_fp" || die "restore verification failed (iteration $i)"
     restores=$((restores + 1))
 
     if (( i % DELETE_EVERY == 0 )); then
+      log "[$i/$ITERATIONS] delete"
       run_vger "$i" delete delete "$snapshot" >/dev/null
       deletes=$((deletes + 1))
       check_locks_clear
     fi
 
+    log "[$i/$ITERATIONS] compact"
     run_vger "$i" compact compact --threshold "$COMPACT_THRESHOLD" >/dev/null
     compacts=$((compacts + 1))
     check_locks_clear
 
+    log "[$i/$ITERATIONS] prune"
     run_vger "$i" prune prune >/dev/null
     prunes=$((prunes + 1))
     check_locks_clear
 
     if (( CHECK_EVERY > 0 && i % CHECK_EVERY == 0 )); then
+      log "[$i/$ITERATIONS] check"
       run_vger "$i" check check >/dev/null
       checks=$((checks + 1))
     fi
 
     if (( VERIFY_DATA_EVERY > 0 && i % VERIFY_DATA_EVERY == 0 )); then
+      log "[$i/$ITERATIONS] check --verify-data"
       run_vger "$i" check-data check --verify-data >/dev/null
       verify_checks=$((verify_checks + 1))
     fi
 
-    if (( i == 1 || i % 50 == 0 || i == ITERATIONS )); then
-      log "Progress $i/$ITERATIONS"
-    fi
+    local iter_elapsed=$(( $(date +%s) - start_ts ))
+    log "[$i/$ITERATIONS] done (${iter_elapsed}s elapsed)"
   done
 
   local elapsed
