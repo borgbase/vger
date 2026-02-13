@@ -4,6 +4,8 @@
 
 V'Ger is a fast, encrypted, deduplicated backup tool written in Rust. It's centered around a simple YAML config format and includes a desktop GUI and webDAV server to browse snapshots.
 
+**Don't use for production backups yet, but do test it along other backup tools.**
+
 ## Features
 
 - **Deduplication** via FastCDC content-defined chunking
