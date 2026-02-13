@@ -1,5 +1,7 @@
+use std::cell::RefCell;
 use std::collections::HashMap;
 use std::path::PathBuf;
+use std::rc::Rc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread;
@@ -14,9 +16,362 @@ use tray_icon::{Icon, TrayIconBuilder};
 use vger_core::app::{self, operations, passphrase};
 use vger_core::config::{self, ResolvedRepo, ScheduleConfig};
 use vger_core::error::VgerError;
+use vger_core::snapshot::item::{Item, ItemType};
+
+// ── Tree view data structures ──
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CheckState {
+    Unchecked = 0,
+    Checked = 1,
+    Partial = 2,
+}
+
+#[derive(Debug, Clone)]
+struct TreeNode {
+    name: String,
+    full_path: String,
+    entry_type: String,
+    permissions: String,
+    size_str: String,
+    parent: Option<usize>,
+    children: Vec<usize>,
+    expanded: bool,
+    check_state: CheckState,
+    depth: usize,
+    is_dir: bool,
+}
+
+struct FileTree {
+    arena: Vec<TreeNode>,
+    roots: Vec<usize>,
+    visible_rows: Vec<usize>,
+}
+
+impl FileTree {
+    fn build_from_items(items: &[Item]) -> Self {
+        let mut arena = Vec::new();
+        let mut roots = Vec::new();
+        // Map from directory path to node index
+        let mut dir_map: HashMap<String, usize> = HashMap::new();
+
+        // First pass: create all directory nodes from paths
+        // We need to ensure parent directories exist for every item
+        for item in items {
+            let parts: Vec<&str> = item.path.split('/').collect();
+            let mut current_path = String::new();
+
+            // Create directory nodes for all parent components
+            for (i, part) in parts.iter().enumerate() {
+                if i > 0 {
+                    current_path.push('/');
+                }
+                current_path.push_str(part);
+
+                let is_last = i == parts.len() - 1;
+
+                if is_last && item.entry_type != ItemType::Directory {
+                    // This is a file/symlink — will be added in second pass
+                    continue;
+                }
+
+                if dir_map.contains_key(&current_path) {
+                    continue;
+                }
+
+                let parent_path = if i > 0 {
+                    let idx = current_path.rfind('/').unwrap();
+                    Some(current_path[..idx].to_string())
+                } else {
+                    None
+                };
+
+                let parent_idx = parent_path.as_ref().and_then(|p| dir_map.get(p).copied());
+
+                let type_str = "dir".to_string();
+                let permissions = if is_last {
+                    format!("{:o}", item.mode & 0o7777)
+                } else {
+                    String::new()
+                };
+                let size_str = String::new();
+
+                let node_idx = arena.len();
+                arena.push(TreeNode {
+                    name: part.to_string(),
+                    full_path: current_path.clone(),
+                    entry_type: type_str,
+                    permissions,
+                    size_str,
+                    parent: parent_idx,
+                    children: Vec::new(),
+                    expanded: false,
+                    check_state: CheckState::Unchecked,
+                    depth: i,
+                    is_dir: true,
+                });
+
+                if let Some(pidx) = parent_idx {
+                    arena[pidx].children.push(node_idx);
+                } else {
+                    roots.push(node_idx);
+                }
+
+                dir_map.insert(current_path.clone(), node_idx);
+            }
+        }
+
+        // Second pass: add files and symlinks
+        for item in items {
+            if item.entry_type == ItemType::Directory {
+                continue;
+            }
+
+            let parts: Vec<&str> = item.path.split('/').collect();
+            let depth = parts.len() - 1;
+
+            let parent_path = if parts.len() > 1 {
+                Some(parts[..parts.len() - 1].join("/"))
+            } else {
+                None
+            };
+
+            let parent_idx = parent_path.as_ref().and_then(|p| dir_map.get(p).copied());
+            let name = parts.last().unwrap().to_string();
+
+            let type_str = match item.entry_type {
+                ItemType::RegularFile => "file",
+                ItemType::Symlink => "link",
+                ItemType::Directory => unreachable!(),
+            }
+            .to_string();
+
+            let node_idx = arena.len();
+            arena.push(TreeNode {
+                name,
+                full_path: item.path.clone(),
+                entry_type: type_str,
+                permissions: format!("{:o}", item.mode & 0o7777),
+                size_str: format_bytes(item.size),
+                parent: parent_idx,
+                children: Vec::new(),
+                expanded: false,
+                check_state: CheckState::Unchecked,
+                depth,
+                is_dir: false,
+            });
+
+            if let Some(pidx) = parent_idx {
+                arena[pidx].children.push(node_idx);
+            } else {
+                roots.push(node_idx);
+            }
+        }
+
+        // Sort children of each node alphabetically (dirs first, then files)
+        let arena_snapshot: Vec<(bool, String)> = arena
+            .iter()
+            .map(|n| (n.is_dir, n.name.clone()))
+            .collect();
+        for node in &mut arena {
+            node.children.sort_by(|&a, &b| {
+                let (a_dir, ref a_name) = arena_snapshot[a];
+                let (b_dir, ref b_name) = arena_snapshot[b];
+                b_dir.cmp(&a_dir).then_with(|| a_name.to_lowercase().cmp(&b_name.to_lowercase()))
+            });
+        }
+        // Also sort roots
+        roots.sort_by(|&a, &b| {
+            let (a_dir, ref a_name) = arena_snapshot[a];
+            let (b_dir, ref b_name) = arena_snapshot[b];
+            b_dir.cmp(&a_dir).then_with(|| a_name.to_lowercase().cmp(&b_name.to_lowercase()))
+        });
+
+        let mut tree = FileTree {
+            arena,
+            roots,
+            visible_rows: Vec::new(),
+        };
+        tree.rebuild_visible();
+        tree
+    }
+
+    fn rebuild_visible(&mut self) {
+        self.visible_rows.clear();
+        let roots = self.roots.clone();
+        for root in roots {
+            Self::dfs_visible(&self.arena, &mut self.visible_rows, root);
+        }
+    }
+
+    fn dfs_visible(arena: &[TreeNode], visible: &mut Vec<usize>, idx: usize) {
+        visible.push(idx);
+        if arena[idx].is_dir && arena[idx].expanded {
+            let children = arena[idx].children.clone();
+            for child in children {
+                Self::dfs_visible(arena, visible, child);
+            }
+        }
+    }
+
+    fn toggle_expanded(&mut self, node_idx: usize) {
+        if node_idx < self.arena.len() && self.arena[node_idx].is_dir {
+            self.arena[node_idx].expanded = !self.arena[node_idx].expanded;
+            self.rebuild_visible();
+        }
+    }
+
+    fn expand_all(&mut self) {
+        for node in &mut self.arena {
+            if node.is_dir {
+                node.expanded = true;
+            }
+        }
+        self.rebuild_visible();
+    }
+
+    fn collapse_all(&mut self) {
+        for node in &mut self.arena {
+            if node.is_dir {
+                node.expanded = false;
+            }
+        }
+        self.rebuild_visible();
+    }
+
+    fn toggle_check(&mut self, node_idx: usize) {
+        if node_idx >= self.arena.len() {
+            return;
+        }
+
+        let new_state = match self.arena[node_idx].check_state {
+            CheckState::Unchecked => CheckState::Checked,
+            CheckState::Checked | CheckState::Partial => CheckState::Unchecked,
+        };
+
+        // Set this node and all descendants
+        self.set_check_recursive(node_idx, new_state);
+
+        // Walk up parents to recalculate
+        let mut current = self.arena[node_idx].parent;
+        while let Some(parent_idx) = current {
+            self.recalc_parent_check(parent_idx);
+            current = self.arena[parent_idx].parent;
+        }
+    }
+
+    fn set_check_recursive(&mut self, idx: usize, state: CheckState) {
+        self.arena[idx].check_state = state;
+        let children: Vec<usize> = self.arena[idx].children.clone();
+        for child in children {
+            self.set_check_recursive(child, state);
+        }
+    }
+
+    fn recalc_parent_check(&mut self, idx: usize) {
+        let children = &self.arena[idx].children;
+        if children.is_empty() {
+            return;
+        }
+        let all_checked = children
+            .iter()
+            .all(|&c| self.arena[c].check_state == CheckState::Checked);
+        let all_unchecked = children
+            .iter()
+            .all(|&c| self.arena[c].check_state == CheckState::Unchecked);
+
+        self.arena[idx].check_state = if all_checked {
+            CheckState::Checked
+        } else if all_unchecked {
+            CheckState::Unchecked
+        } else {
+            CheckState::Partial
+        };
+    }
+
+    fn select_all(&mut self) {
+        for node in &mut self.arena {
+            node.check_state = CheckState::Checked;
+        }
+    }
+
+    fn deselect_all(&mut self) {
+        for node in &mut self.arena {
+            node.check_state = CheckState::Unchecked;
+        }
+    }
+
+    fn count_checked(&self) -> (usize, usize) {
+        let total = self.arena.iter().filter(|n| !n.is_dir).count();
+        let checked = self
+            .arena
+            .iter()
+            .filter(|n| !n.is_dir && n.check_state == CheckState::Checked)
+            .count();
+        (checked, total)
+    }
+
+    fn collect_checked_paths(&self) -> Vec<String> {
+        // Collect minimal set: if a directory is fully checked, just include that dir
+        // Otherwise include individual checked files
+        let mut paths = Vec::new();
+        self.collect_checked_from_roots(&mut paths);
+        paths
+    }
+
+    fn collect_checked_from_roots(&self, paths: &mut Vec<String>) {
+        for &root in &self.roots {
+            self.collect_checked_node(root, paths);
+        }
+    }
+
+    fn collect_checked_node(&self, idx: usize, paths: &mut Vec<String>) {
+        let node = &self.arena[idx];
+        match node.check_state {
+            CheckState::Checked => {
+                // Include this entire subtree
+                paths.push(node.full_path.clone());
+            }
+            CheckState::Partial => {
+                // Recurse into children
+                for &child in &node.children {
+                    self.collect_checked_node(child, paths);
+                }
+            }
+            CheckState::Unchecked => {
+                // Skip
+            }
+        }
+    }
+
+    fn to_slint_model(&self) -> Vec<TreeRowData> {
+        self.visible_rows
+            .iter()
+            .map(|&idx| {
+                let node = &self.arena[idx];
+                TreeRowData {
+                    name: SharedString::from(&node.name),
+                    type_str: SharedString::from(&node.entry_type),
+                    permissions: SharedString::from(&node.permissions),
+                    size_str: SharedString::from(&node.size_str),
+                    depth: node.depth as i32,
+                    is_dir: node.is_dir,
+                    expanded: node.expanded,
+                    check_state: node.check_state as i32,
+                    node_index: idx as i32,
+                }
+            })
+            .collect()
+    }
+
+    fn selection_text(&self) -> String {
+        let (checked, total) = self.count_checked();
+        format!("{checked} / {total} files selected")
+    }
+}
 
 slint::slint! {
-    import { VerticalBox, HorizontalBox, Button, LineEdit, ScrollView, TabWidget, ComboBox, StandardTableView, ListView } from "std-widgets.slint";
+    import { VerticalBox, HorizontalBox, Button, LineEdit, ScrollView, TabWidget, ComboBox, StandardTableView, ListView, CheckBox } from "std-widgets.slint";
 
     struct RepoInfo {
         name: string,
@@ -32,80 +387,198 @@ slint::slint! {
         target_repos: string,
     }
 
+    // check_state: 0=unchecked, 1=checked, 2=partial
+    struct TreeRowData {
+        name: string,
+        type_str: string,
+        permissions: string,
+        size_str: string,
+        depth: int,
+        is_dir: bool,
+        expanded: bool,
+        check_state: int,
+        node_index: int,
+    }
+
     export component RestoreWindow inherits Window {
         in-out property <string> snapshot_name;
         in-out property <string> repo_name;
-        in-out property <string> extract_dest: ".";
-        in-out property <string> extract_pattern;
         in-out property <string> status_text: "Ready";
-        in-out property <[[StandardListViewItem]]> contents_rows: [];
+        in-out property <string> selection_text: "";
+        in-out property <[TreeRowData]> tree_rows: [];
 
-        callback restore_all_clicked();
-        callback restore_filtered_clicked();
+        callback toggle_expanded(/* node_index */ int);
+        callback toggle_checked(/* node_index */ int);
+        callback expand_all_clicked();
+        callback collapse_all_clicked();
+        callback select_all_clicked();
+        callback deselect_all_clicked();
+        callback restore_selected_clicked();
+        callback cancel_clicked();
 
         title: "Restore Snapshot";
-        width: 900px;
-        height: 600px;
+        preferred-width: 900px;
+        preferred-height: 600px;
 
         VerticalBox {
             padding: 12px;
             spacing: 8px;
 
+            HorizontalLayout {
+                spacing: 24px;
+                HorizontalLayout {
+                    spacing: 4px;
+                    Text { text: "Snapshot:"; vertical-alignment: center; font-weight: 700; }
+                    Text { text: root.snapshot_name; vertical-alignment: center; }
+                }
+                HorizontalLayout {
+                    spacing: 4px;
+                    Text { text: "Repository:"; vertical-alignment: center; font-weight: 700; }
+                    Text { text: root.repo_name; vertical-alignment: center; }
+                }
+                Rectangle { horizontal-stretch: 1; }
+            }
+
+            // Toolbar
             HorizontalBox {
                 spacing: 8px;
-                Text { text: "Snapshot:"; vertical-alignment: center; }
-                Text { text: root.snapshot_name; vertical-alignment: center; }
-                Text { text: "  Repository:"; vertical-alignment: center; }
-                Text { text: root.repo_name; vertical-alignment: center; }
+                Button { text: "Expand All"; clicked => { root.expand_all_clicked(); } }
+                Button { text: "Collapse All"; clicked => { root.collapse_all_clicked(); } }
+                Button { text: "Select All"; clicked => { root.select_all_clicked(); } }
+                Button { text: "Deselect All"; clicked => { root.deselect_all_clicked(); } }
+                Rectangle { horizontal-stretch: 1; }
+                Text { text: root.selection_text; vertical-alignment: center; color: #666666; }
             }
 
-            StandardTableView {
-                vertical-stretch: 1;
-                columns: [
-                    { title: "Path", horizontal-stretch: 1 },
-                    { title: "Type", min-width: 50px },
-                    { title: "Permissions", min-width: 80px },
-                    { title: "Size", min-width: 90px },
-                ];
-                rows: root.contents_rows;
-            }
-
+            // Tree view
             Rectangle {
-                height: 1px;
-                background: #d5d5d5;
+                vertical-stretch: 1;
+                border-width: 1px;
+                border-color: #d5d5d5;
+                border-radius: 4px;
+                background: #fafafa;
+                ListView {
+                for row[row_idx] in root.tree_rows: Rectangle {
+                    height: 28px;
+                    // Hover highlight — declared first so it sits behind the interactive layout
+                    Rectangle {
+                        background: ta.has-hover ? #f0f4fa : transparent;
+                        opacity: 0.5;
+                        ta := TouchArea { }
+                    }
+                    HorizontalLayout {
+                        padding-left: 4px;
+                        padding-right: 8px;
+                        spacing: 0px;
+
+                        // Indentation
+                        Rectangle { width: row.depth * 20px; }
+
+                        // Expand/collapse arrow (for directories)
+                        if row.is_dir: TouchArea {
+                            width: 20px;
+                            mouse-cursor: pointer;
+                            clicked => { root.toggle_expanded(row.node_index); }
+                            Text {
+                                text: row.expanded ? "v" : ">";
+                                font-size: 10px;
+                                color: #666666;
+                                vertical-alignment: center;
+                                horizontal-alignment: center;
+                            }
+                        }
+                        if !row.is_dir: Rectangle { width: 20px; }
+
+                        // Tri-state checkbox
+                        TouchArea {
+                            width: 22px;
+                            mouse-cursor: pointer;
+                            clicked => { root.toggle_checked(row.node_index); }
+                            Rectangle {
+                                x: 2px;
+                                y: (parent.height - 16px) / 2;
+                                width: 16px;
+                                height: 16px;
+                                border-width: 1px;
+                                border-color: row.check_state == 0 ? #aaaaaa : #3584e4;
+                                border-radius: 3px;
+                                background: row.check_state == 1 ? #3584e4 : row.check_state == 2 ? #a0c8f0 : #ffffff;
+
+                                // Checkmark for checked state
+                                if row.check_state == 1: Text {
+                                    text: "x";
+                                    color: white;
+                                    font-size: 12px;
+                                    horizontal-alignment: center;
+                                    vertical-alignment: center;
+                                }
+                                // Dash for partial state
+                                if row.check_state == 2: Rectangle {
+                                    x: 3px;
+                                    y: (parent.height - 2px) / 2;
+                                    width: parent.width - 6px;
+                                    height: 2px;
+                                    background: white;
+                                }
+                            }
+                        }
+
+                        // Name
+                        Text {
+                            text: row.name;
+                            vertical-alignment: center;
+                            horizontal-stretch: 1;
+                            overflow: elide;
+                            font-weight: row.is_dir ? 700 : 400;
+                        }
+
+                        // Type
+                        Text {
+                            text: row.type_str;
+                            vertical-alignment: center;
+                            width: 50px;
+                            color: #888888;
+                            font-size: 11px;
+                        }
+
+                        // Permissions
+                        Text {
+                            text: row.permissions;
+                            vertical-alignment: center;
+                            width: 70px;
+                            color: #888888;
+                            font-size: 11px;
+                        }
+
+                        // Size
+                        Text {
+                            text: row.size_str;
+                            vertical-alignment: center;
+                            width: 80px;
+                            horizontal-alignment: right;
+                            color: #888888;
+                            font-size: 11px;
+                        }
+                    }
+                }
+            }
             }
 
             HorizontalBox {
                 spacing: 8px;
-                Text { text: "Destination:"; vertical-alignment: center; }
-                LineEdit {
-                    horizontal-stretch: 1;
-                    text <=> root.extract_dest;
-                }
-            }
-
-            HorizontalBox {
-                spacing: 8px;
-                Text { text: "Filter pattern (optional):"; vertical-alignment: center; }
-                LineEdit {
-                    horizontal-stretch: 1;
-                    text <=> root.extract_pattern;
-                }
-            }
-
-            HorizontalBox {
-                spacing: 8px;
-                Button {
-                    text: "Restore All";
-                    clicked => { root.restore_all_clicked(); }
-                }
-                Button {
-                    text: "Restore Filtered";
-                    clicked => { root.restore_filtered_clicked(); }
-                }
                 Text {
                     vertical-alignment: center;
                     text: root.status_text;
+                    color: #666666;
+                }
+                Rectangle { horizontal-stretch: 1; }
+                Button {
+                    text: "Cancel";
+                    clicked => { root.cancel_clicked(); }
+                }
+                Button {
+                    text: "Restore Selected";
+                    clicked => { root.restore_selected_clicked(); }
                 }
             }
         }
@@ -115,9 +588,10 @@ slint::slint! {
         in-out property <string> config_path;
         in-out property <string> schedule_text;
         in-out property <string> status_text;
-        in-out property <string> log_text;
+        in-out property <[[StandardListViewItem]]> log_rows: [];
 
         // Repo model (custom cards)
+        in-out property <bool> repo_loading: true;
         in-out property <[RepoInfo]> repo_model: [];
 
         // Source model (custom cards)
@@ -143,8 +617,8 @@ slint::slint! {
         callback snapshot_sort_descending(/* column */ int);
 
         title: "V'Ger";
-        width: 1100px;
-        height: 760px;
+        preferred-width: 1100px;
+        preferred-height: 760px;
 
         VerticalBox {
             padding: 0px;
@@ -160,13 +634,13 @@ slint::slint! {
 
                 HorizontalBox {
                     spacing: 8px;
-                    Text { text: "Config:"; vertical-alignment: center; width: 65px; }
+                    Text { text: "Config:"; vertical-alignment: center; width: 65px; font-weight: 700; }
                     TouchArea {
-                        horizontal-stretch: 1;
                         mouse-cursor: pointer;
                         clicked => { root.open_config_clicked(); }
                         Text { text: root.config_path; color: #4a90d9; vertical-alignment: center; }
                     }
+                    Rectangle { horizontal-stretch: 1; }
                     Button {
                         text: "Reload";
                         clicked => { root.reload_config_clicked(); }
@@ -178,7 +652,7 @@ slint::slint! {
                 }
                 HorizontalBox {
                     spacing: 8px;
-                    Text { text: "Schedule:"; vertical-alignment: center; width: 65px; }
+                    Text { text: "Schedule:"; vertical-alignment: center; width: 65px; font-weight: 700; }
                     Text { text: root.schedule_text; vertical-alignment: center; }
                 }
             }
@@ -193,7 +667,14 @@ slint::slint! {
                     VerticalBox {
                         spacing: 8px;
                         padding: 8px;
-                        ListView {
+                        if root.repo_loading: Text {
+                            text: "Loading repository data\u{2026}";
+                            horizontal-alignment: center;
+                            vertical-alignment: center;
+                            vertical-stretch: 1;
+                            color: #888888;
+                        }
+                        if !root.repo_loading: ListView {
                             vertical-stretch: 1;
                             for repo[idx] in root.repo_model: Rectangle {
                                 height: 56px;
@@ -320,17 +801,13 @@ slint::slint! {
                     title: "Log";
                     VerticalBox {
                         padding: 8px;
-                        ScrollView {
+                        StandardTableView {
                             vertical-stretch: 1;
-                            Rectangle {
-                                background: #f4f4f4;
-                                border-color: #dcdcdc;
-                                border-width: 1px;
-                                Text {
-                                    text: root.log_text;
-                                    wrap: word-wrap;
-                                }
-                            }
+                            columns: [
+                                { title: "Time", width: 90px },
+                                { title: "Event", horizontal-stretch: 1 },
+                            ];
+                            rows: root.log_rows;
                         }
                     }
                 }
@@ -377,11 +854,11 @@ enum AppCommand {
         repo_name: String,
         snapshot_name: String,
     },
-    Extract {
+    ExtractSelected {
         repo_name: String,
         snapshot: String,
         dest: String,
-        pattern: Option<String>,
+        paths: Vec<String>,
     },
     CheckRepo {
         repo_name: String,
@@ -429,7 +906,7 @@ struct SourceInfoData {
 #[derive(Debug, Clone)]
 enum UiEvent {
     Status(String),
-    Log(String),
+    LogEntry { timestamp: String, message: String },
     ConfigInfo {
         path: String,
         schedule: String,
@@ -447,8 +924,9 @@ enum UiEvent {
         data: Vec<SnapshotRowData>,
     },
     SnapshotContentsData {
-        rows: Vec<Vec<String>>,
+        items: Vec<Item>,
     },
+    RestoreStatus(String),
     Quit,
     ShowWindow,
 }
@@ -808,7 +1286,11 @@ fn find_repo_for_snapshot<'a>(
 }
 
 fn send_log(ui_tx: &Sender<UiEvent>, message: impl Into<String>) {
-    let _ = ui_tx.send(UiEvent::Log(message.into()));
+    let timestamp = Local::now().format("%H:%M:%S").to_string();
+    let _ = ui_tx.send(UiEvent::LogEntry {
+        timestamp,
+        message: message.into(),
+    });
 }
 
 fn log_backup_report(
@@ -872,9 +1354,10 @@ fn run_worker(
     let _ = app_tx.send(AppCommand::FetchAllRepoInfo);
 
     if schedule.enabled && schedule.on_startup {
-        let _ = ui_tx.send(UiEvent::Log(
-            "Scheduled on-startup backup requested by configuration.".to_string(),
-        ));
+        send_log(
+            &ui_tx,
+            "Scheduled on-startup backup requested by configuration.",
+        );
         let _ = app_tx.send(AppCommand::RunBackupAll { scheduled: true });
     }
 
@@ -1182,36 +1665,17 @@ fn run_worker(
                             &snapshot_name,
                         ) {
                             Ok(items) => {
-                                let rows: Vec<Vec<String>> = items
-                                    .iter()
-                                    .map(|item| {
-                                        let type_str = match item.entry_type {
-                                            vger_core::snapshot::item::ItemType::Directory => "dir",
-                                            vger_core::snapshot::item::ItemType::RegularFile => {
-                                                "file"
-                                            }
-                                            vger_core::snapshot::item::ItemType::Symlink => "link",
-                                        };
-                                        vec![
-                                            item.path.clone(),
-                                            type_str.to_string(),
-                                            format!("{:o}", item.mode & 0o7777),
-                                            format_bytes(item.size),
-                                        ]
-                                    })
-                                    .collect();
-
                                 send_log(
                                     &ui_tx,
                                     format!(
                                         "Loaded {} item(s) from snapshot {} in [{}]",
-                                        rows.len(),
+                                        items.len(),
                                         snapshot_name,
                                         format_repo_name(repo)
                                     ),
                                 );
 
-                                let _ = ui_tx.send(UiEvent::SnapshotContentsData { rows });
+                                let _ = ui_tx.send(UiEvent::SnapshotContentsData { items });
                             }
                             Err(e) => {
                                 send_log(&ui_tx, format!("Failed to load snapshot items: {e}"));
@@ -1225,23 +1689,13 @@ fn run_worker(
 
                 let _ = ui_tx.send(UiEvent::Status("Idle".to_string()));
             }
-            AppCommand::Extract {
+            AppCommand::ExtractSelected {
                 repo_name,
                 snapshot,
                 dest,
-                pattern,
+                paths,
             } => {
-                if snapshot.trim().is_empty() {
-                    send_log(&ui_tx, "Snapshot ID is required for extract.");
-                    continue;
-                }
-
-                if dest.trim().is_empty() {
-                    send_log(&ui_tx, "Destination path is required for extract.");
-                    continue;
-                }
-
-                let _ = ui_tx.send(UiEvent::Status("Extracting snapshot...".to_string()));
+                let _ = ui_tx.send(UiEvent::Status("Extracting selected items...".to_string()));
 
                 match find_repo_for_snapshot(
                     &runtime.repos,
@@ -1250,29 +1704,40 @@ fn run_worker(
                     &mut passphrases,
                 ) {
                     Ok((repo, passphrase)) => {
-                        let req = operations::ExtractRequest {
-                            snapshot_name: snapshot.clone(),
-                            destination: dest.clone(),
-                            pattern: pattern.clone(),
-                        };
-                        match operations::extract_snapshot(&repo.config, passphrase.as_deref(), &req)
-                        {
-                            Ok(stats) => send_log(
-                                &ui_tx,
-                                format!(
-                                    "Extracted snapshot {} -> {} (files={}, dirs={}, symlinks={}, bytes={})",
-                                    snapshot,
-                                    dest,
-                                    stats.files,
-                                    stats.dirs,
-                                    stats.symlinks,
-                                    format_bytes(stats.total_bytes),
-                                ),
-                            ),
-                            Err(e) => send_log(&ui_tx, format!("Extract failed: {e}")),
+                        let path_set: std::collections::HashSet<String> =
+                            paths.into_iter().collect();
+                        match operations::extract_selected(
+                            &repo.config,
+                            passphrase.as_deref(),
+                            &snapshot,
+                            &dest,
+                            &path_set,
+                        ) {
+                            Ok(stats) => {
+                                send_log(
+                                    &ui_tx,
+                                    format!(
+                                        "Extracted selected items from {} -> {} (files={}, dirs={}, symlinks={}, bytes={})",
+                                        snapshot,
+                                        dest,
+                                        stats.files,
+                                        stats.dirs,
+                                        stats.symlinks,
+                                        format_bytes(stats.total_bytes),
+                                    ),
+                                );
+                                let _ = ui_tx.send(UiEvent::RestoreStatus("Restore complete.".to_string()));
+                            }
+                            Err(e) => {
+                                send_log(&ui_tx, format!("Extract failed: {e}"));
+                                let _ = ui_tx.send(UiEvent::RestoreStatus("Restore failed.".to_string()));
+                            }
                         }
                     }
-                    Err(e) => send_log(&ui_tx, format!("Failed to resolve snapshot: {e}")),
+                    Err(e) => {
+                        send_log(&ui_tx, format!("Failed to resolve snapshot: {e}"));
+                        let _ = ui_tx.send(UiEvent::RestoreStatus("Restore failed.".to_string()));
+                    }
                 }
 
                 let _ = ui_tx.send(UiEvent::Status("Idle".to_string()));
@@ -1517,19 +1982,47 @@ fn run_worker(
 
 // ── Main ──
 
-fn append_log(ui: &MainWindow, line: &str) {
-    let current = ui.get_log_text();
-    let mut next = current.to_string();
-    if !next.is_empty() {
-        next.push('\n');
-    }
-    next.push_str(line);
-    ui.set_log_text(next.into());
+thread_local! {
+    static LOG_MODEL: RefCell<Option<Rc<VecModel<ModelRc<StandardListViewItem>>>>> = const { RefCell::new(None) };
+    static FILE_TREE: RefCell<Option<FileTree>> = const { RefCell::new(None) };
+}
+
+fn ensure_log_model(ui: &MainWindow) -> Rc<VecModel<ModelRc<StandardListViewItem>>> {
+    LOG_MODEL.with(|cell| {
+        let mut borrow = cell.borrow_mut();
+        if borrow.is_none() {
+            let model = Rc::new(VecModel::<ModelRc<StandardListViewItem>>::default());
+            ui.set_log_rows(ModelRc::from(model.clone()));
+            *borrow = Some(model);
+        }
+        borrow.as_ref().unwrap().clone()
+    })
+}
+
+fn append_log_row(ui: &MainWindow, timestamp: &str, message: &str) {
+    let model = ensure_log_model(ui);
+    let row: Vec<StandardListViewItem> = vec![
+        StandardListViewItem::from(SharedString::from(timestamp)),
+        StandardListViewItem::from(SharedString::from(message)),
+    ];
+    model.push(ModelRc::new(VecModel::from(row)));
+}
+
+fn refresh_tree_view(rw: &RestoreWindow) {
+    FILE_TREE.with(|cell| {
+        if let Some(ref tree) = *cell.borrow() {
+            let rows = tree.to_slint_model();
+            let selection = tree.selection_text();
+            rw.set_tree_rows(ModelRc::new(VecModel::from(rows)));
+            rw.set_selection_text(selection.into());
+        }
+    });
 }
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let runtime = app::load_runtime_config(None)?;
-    let config_path = runtime.source.path().to_path_buf();
+    let config_path = std::fs::canonicalize(runtime.source.path())
+        .unwrap_or_else(|_| runtime.source.path().to_path_buf());
 
     let (app_tx, app_rx) = crossbeam_channel::unbounded::<AppCommand>();
     let (ui_tx, ui_rx) = crossbeam_channel::unbounded::<UiEvent>();
@@ -1591,7 +2084,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
                 match event {
                     UiEvent::Status(status) => ui.set_status_text(status.into()),
-                    UiEvent::Log(line) => append_log(&ui, &line),
+                    UiEvent::LogEntry { timestamp, message } => {
+                        append_log_row(&ui, &timestamp, &message);
+                    }
                     UiEvent::ConfigInfo { path, schedule } => {
                         ui.set_config_path(path.into());
                         ui.set_schedule_text(schedule.into());
@@ -1611,6 +2106,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         items,
                         labels,
                     } => {
+                        ui.set_repo_loading(false);
                         if let Ok(mut rl) = repo_labels.lock() {
                             *rl = labels;
                         }
@@ -1659,10 +2155,22 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         }
                         ui.set_snapshot_rows(to_table_model(rows));
                     }
-                    UiEvent::SnapshotContentsData { rows } => {
+                    UiEvent::SnapshotContentsData { items } => {
                         if let Some(rw) = restore_weak.upgrade() {
-                            rw.set_contents_rows(to_table_model(rows));
+                            let tree = FileTree::build_from_items(&items);
+                            let selection = tree.selection_text();
+                            let rows = tree.to_slint_model();
+                            rw.set_tree_rows(ModelRc::new(VecModel::from(rows)));
+                            rw.set_selection_text(selection.into());
                             rw.set_status_text("Ready".into());
+                            FILE_TREE.with(|cell| {
+                                *cell.borrow_mut() = Some(tree);
+                            });
+                        }
+                    }
+                    UiEvent::RestoreStatus(status) => {
+                        if let Some(rw) = restore_weak.upgrade() {
+                            rw.set_status_text(status.into());
                         }
                     }
                     UiEvent::Quit => {
@@ -1689,7 +2197,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     });
 
     let tx = app_tx.clone();
+    let ui_weak = ui.as_weak();
     ui.on_reload_config_clicked(move || {
+        if let Some(u) = ui_weak.upgrade() {
+            u.set_repo_loading(true);
+        }
         let _ = tx.send(AppCommand::ReloadConfig);
     });
 
@@ -1815,7 +2327,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             rw.set_snapshot_name(snap_name.clone().into());
             rw.set_repo_name(rname.clone().into());
             rw.set_status_text("Loading contents...".into());
-            rw.set_contents_rows(to_table_model(vec![]));
+            rw.set_tree_rows(ModelRc::new(VecModel::<TreeRowData>::default()));
+            rw.set_selection_text("".into());
             let _ = rw.show();
         }
 
@@ -1849,39 +2362,147 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // ── Callback wiring: RestoreWindow ──
 
-    let tx = app_tx.clone();
-    let rw_weak = restore_win.as_weak();
-    restore_win.on_restore_all_clicked(move || {
-        let Some(rw) = rw_weak.upgrade() else {
-            return;
-        };
-        let _ = tx.send(AppCommand::Extract {
-            repo_name: rw.get_repo_name().to_string(),
-            snapshot: rw.get_snapshot_name().to_string(),
-            dest: rw.get_extract_dest().to_string(),
-            pattern: None,
+    // Tree: toggle expanded
+    {
+        let rw_weak = restore_win.as_weak();
+        restore_win.on_toggle_expanded(move |node_index| {
+            let Some(rw) = rw_weak.upgrade() else {
+                return;
+            };
+            FILE_TREE.with(|cell| {
+                if let Some(ref mut tree) = *cell.borrow_mut() {
+                    tree.toggle_expanded(node_index as usize);
+                }
+            });
+            refresh_tree_view(&rw);
         });
-    });
+    }
 
-    let tx = app_tx.clone();
-    let rw_weak = restore_win.as_weak();
-    restore_win.on_restore_filtered_clicked(move || {
-        let Some(rw) = rw_weak.upgrade() else {
-            return;
-        };
-        let pattern_raw = rw.get_extract_pattern().to_string();
-        let pattern = if pattern_raw.trim().is_empty() {
-            None
-        } else {
-            Some(pattern_raw)
-        };
-        let _ = tx.send(AppCommand::Extract {
-            repo_name: rw.get_repo_name().to_string(),
-            snapshot: rw.get_snapshot_name().to_string(),
-            dest: rw.get_extract_dest().to_string(),
-            pattern,
+    // Tree: toggle checked
+    {
+        let rw_weak = restore_win.as_weak();
+        restore_win.on_toggle_checked(move |node_index| {
+            let Some(rw) = rw_weak.upgrade() else {
+                return;
+            };
+            FILE_TREE.with(|cell| {
+                if let Some(ref mut tree) = *cell.borrow_mut() {
+                    tree.toggle_check(node_index as usize);
+                }
+            });
+            refresh_tree_view(&rw);
         });
-    });
+    }
+
+    // Expand All
+    {
+        let rw_weak = restore_win.as_weak();
+        restore_win.on_expand_all_clicked(move || {
+            let Some(rw) = rw_weak.upgrade() else {
+                return;
+            };
+            FILE_TREE.with(|cell| {
+                if let Some(ref mut tree) = *cell.borrow_mut() {
+                    tree.expand_all();
+                }
+            });
+            refresh_tree_view(&rw);
+        });
+    }
+
+    // Collapse All
+    {
+        let rw_weak = restore_win.as_weak();
+        restore_win.on_collapse_all_clicked(move || {
+            let Some(rw) = rw_weak.upgrade() else {
+                return;
+            };
+            FILE_TREE.with(|cell| {
+                if let Some(ref mut tree) = *cell.borrow_mut() {
+                    tree.collapse_all();
+                }
+            });
+            refresh_tree_view(&rw);
+        });
+    }
+
+    // Select All
+    {
+        let rw_weak = restore_win.as_weak();
+        restore_win.on_select_all_clicked(move || {
+            let Some(rw) = rw_weak.upgrade() else {
+                return;
+            };
+            FILE_TREE.with(|cell| {
+                if let Some(ref mut tree) = *cell.borrow_mut() {
+                    tree.select_all();
+                }
+            });
+            refresh_tree_view(&rw);
+        });
+    }
+
+    // Deselect All
+    {
+        let rw_weak = restore_win.as_weak();
+        restore_win.on_deselect_all_clicked(move || {
+            let Some(rw) = rw_weak.upgrade() else {
+                return;
+            };
+            FILE_TREE.with(|cell| {
+                if let Some(ref mut tree) = *cell.borrow_mut() {
+                    tree.deselect_all();
+                }
+            });
+            refresh_tree_view(&rw);
+        });
+    }
+
+    // Restore Selected — opens folder picker, then sends command
+    {
+        let tx = app_tx.clone();
+        let rw_weak = restore_win.as_weak();
+        restore_win.on_restore_selected_clicked(move || {
+            let Some(rw) = rw_weak.upgrade() else {
+                return;
+            };
+
+            let paths = FILE_TREE.with(|cell| {
+                cell.borrow()
+                    .as_ref()
+                    .map(|tree| tree.collect_checked_paths())
+                    .unwrap_or_default()
+            });
+
+            if paths.is_empty() {
+                rw.set_status_text("No items selected.".into());
+                return;
+            }
+
+            let dest = tinyfiledialogs::select_folder_dialog("Select restore destination", ".");
+            let Some(dest) = dest else {
+                return;
+            };
+
+            rw.set_status_text("Restoring...".into());
+            let _ = tx.send(AppCommand::ExtractSelected {
+                repo_name: rw.get_repo_name().to_string(),
+                snapshot: rw.get_snapshot_name().to_string(),
+                dest,
+                paths,
+            });
+        });
+    }
+
+    // Cancel — hides restore window
+    {
+        let rw_weak = restore_win.as_weak();
+        restore_win.on_cancel_clicked(move || {
+            if let Some(rw) = rw_weak.upgrade() {
+                let _ = rw.hide();
+            }
+        });
+    }
 
     // ── Close-to-tray behavior ──
 

@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::{Component, Path, PathBuf};
 
 use tracing::info;
@@ -136,6 +136,136 @@ pub fn run(
     );
 
     Ok(stats)
+}
+
+/// Run `vger extract` for a selected set of paths.
+///
+/// An item is included if its path exactly matches an entry in `selected_paths`,
+/// or if any prefix of its path matches (i.e. a parent directory was selected).
+pub fn run_selected(
+    config: &VgerConfig,
+    passphrase: Option<&str>,
+    snapshot_name: &str,
+    dest: &str,
+    selected_paths: &HashSet<String>,
+    xattrs_enabled: bool,
+) -> Result<ExtractStats> {
+    let backend = crate::storage::backend_from_config(&config.repository, None)?;
+    let repo = Repository::open(backend, passphrase)?;
+    let xattrs_enabled = if xattrs_enabled && !fs::xattrs_supported() {
+        tracing::warn!(
+            "xattrs requested but not supported on this platform; continuing without xattrs"
+        );
+        false
+    } else {
+        xattrs_enabled
+    };
+
+    let items = super::list::load_snapshot_items(&repo, snapshot_name)?;
+
+    let dest_path = Path::new(dest);
+    std::fs::create_dir_all(dest_path)?;
+    let dest_root = dest_path
+        .canonicalize()
+        .map_err(|e| VgerError::Other(format!("invalid destination '{}': {e}", dest)))?;
+
+    let mut stats = ExtractStats::default();
+
+    // Sort: directories first so parents exist before children
+    let mut sorted_items = items;
+    sorted_items.sort_by(|a, b| {
+        let type_ord = |t: &ItemType| match t {
+            ItemType::Directory => 0,
+            ItemType::Symlink => 1,
+            ItemType::RegularFile => 2,
+        };
+        type_ord(&a.entry_type)
+            .cmp(&type_ord(&b.entry_type))
+            .then_with(|| a.path.cmp(&b.path))
+    });
+
+    for item in &sorted_items {
+        // Check if this item is selected or under a selected parent
+        if !path_matches_selection(&item.path, selected_paths) {
+            continue;
+        }
+
+        let rel = sanitize_item_path(&item.path)?;
+        let target = dest_root.join(&rel);
+
+        match item.entry_type {
+            ItemType::Directory => {
+                ensure_path_within_root(&target, &dest_root)?;
+                std::fs::create_dir_all(&target)?;
+                ensure_path_within_root(&target, &dest_root)?;
+                let _ = fs::apply_mode(&target, item.mode);
+                if xattrs_enabled {
+                    apply_item_xattrs(&target, item.xattrs.as_ref());
+                }
+                stats.dirs += 1;
+            }
+            ItemType::Symlink => {
+                if let Some(ref link_target) = item.link_target {
+                    ensure_parent_exists_within_root(&target, &dest_root)?;
+                    let _ = std::fs::remove_file(&target);
+                    fs::create_symlink(Path::new(link_target), &target)?;
+                    if xattrs_enabled {
+                        apply_item_xattrs(&target, item.xattrs.as_ref());
+                    }
+                    stats.symlinks += 1;
+                }
+            }
+            ItemType::RegularFile => {
+                ensure_parent_exists_within_root(&target, &dest_root)?;
+
+                let mut file = std::fs::File::create(&target)?;
+                let mut total_bytes: u64 = 0;
+
+                for chunk_ref in &item.chunks {
+                    let chunk_data = repo.read_chunk(&chunk_ref.id)?;
+                    std::io::Write::write_all(&mut file, &chunk_data)?;
+                    total_bytes += chunk_data.len() as u64;
+                }
+
+                let _ = fs::apply_mode(&target, item.mode);
+                if xattrs_enabled {
+                    apply_item_xattrs(&target, item.xattrs.as_ref());
+                }
+
+                let mtime_secs = item.mtime / 1_000_000_000;
+                let mtime_nanos = (item.mtime % 1_000_000_000) as u32;
+                let mtime = filetime::FileTime::from_unix_time(mtime_secs, mtime_nanos);
+                let _ = filetime::set_file_mtime(&target, mtime);
+
+                stats.files += 1;
+                stats.total_bytes += total_bytes;
+            }
+        }
+    }
+
+    info!(
+        "Extracted {} files, {} dirs, {} symlinks ({} bytes) [selected]",
+        stats.files, stats.dirs, stats.symlinks, stats.total_bytes
+    );
+
+    Ok(stats)
+}
+
+/// Check if a path matches the selection set.
+/// A path matches if it's exactly in the set, or any prefix (ancestor) is in the set.
+fn path_matches_selection(path: &str, selected: &HashSet<String>) -> bool {
+    if selected.contains(path) {
+        return true;
+    }
+    // Check if any ancestor is selected
+    let mut current = path;
+    while let Some(slash_idx) = current.rfind('/') {
+        current = &current[..slash_idx];
+        if selected.contains(current) {
+            return true;
+        }
+    }
+    false
 }
 
 fn apply_item_xattrs(target: &Path, xattrs: Option<&HashMap<String, Vec<u8>>>) {

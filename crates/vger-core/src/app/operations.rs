@@ -149,6 +149,23 @@ pub fn extract_snapshot(
     )
 }
 
+pub fn extract_selected(
+    config: &VgerConfig,
+    passphrase: Option<&str>,
+    snapshot_name: &str,
+    destination: &str,
+    selected_paths: &std::collections::HashSet<String>,
+) -> Result<commands::extract::ExtractStats> {
+    commands::extract::run_selected(
+        config,
+        passphrase,
+        snapshot_name,
+        destination,
+        selected_paths,
+        config.xattrs.enabled,
+    )
+}
+
 pub fn check_repo(
     config: &VgerConfig,
     passphrase: Option<&str>,
