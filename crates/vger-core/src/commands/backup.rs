@@ -923,6 +923,10 @@ fn process_source_path(
 
 /// Consumer side of the pipeline: processes messages from the I/O producer thread.
 /// Handles dedup checks, compress+encrypt, packing, and item stream building.
+///
+/// Files are received as a streaming protocol: `FileStart` → N × `FileChunk` → `FileEnd`.
+/// Each `FileChunk` carries one chunk's data which is moved (not cloned) into transform jobs.
+/// The `byte_budget` is released after each chunk is consumed, providing backpressure.
 #[allow(clippy::too_many_arguments)]
 fn run_pipeline_backup(
     rx: &crossbeam_channel::Receiver<super::pipeline::FileMessage>,
@@ -937,8 +941,22 @@ fn run_pipeline_backup(
     progress: &mut Option<&mut dyn FnMut(BackupProgressEvent)>,
     max_pending_transform_bytes: usize,
     max_pending_file_actions: usize,
+    byte_budget: &super::pipeline::ByteBudget,
 ) -> Result<()> {
     use super::pipeline::FileMessage;
+
+    // Per-file streaming state, initialized on FileStart, consumed on FileEnd.
+    struct StreamingFile {
+        item: Item,
+        metadata_summary: fs::MetadataSummary,
+        abs_path: String,
+        actions: Vec<FileChunkAction>,
+        transform_jobs: Vec<TransformJob>,
+        pending_new: HashMap<ChunkId, usize>,
+        pending_transform_bytes: usize,
+    }
+
+    let mut current_file: Option<StreamingFile> = None;
 
     for msg in rx.iter() {
         match msg {
@@ -1003,9 +1021,8 @@ fn run_pipeline_backup(
                 )?;
             }
 
-            FileMessage::ChunkedFile {
-                mut item,
-                chunks,
+            FileMessage::FileStart {
+                item,
                 metadata_summary,
                 abs_path,
             } => {
@@ -1016,90 +1033,110 @@ fn run_pipeline_backup(
                     },
                 );
 
-                let mut actions: Vec<FileChunkAction> = Vec::new();
-                let mut transform_jobs: Vec<TransformJob> = Vec::new();
-                let mut pending_new: HashMap<ChunkId, usize> = HashMap::new();
-                let mut pending_transform_bytes: usize = 0;
+                current_file = Some(StreamingFile {
+                    item,
+                    metadata_summary,
+                    abs_path,
+                    actions: Vec::new(),
+                    transform_jobs: Vec::new(),
+                    pending_new: HashMap::new(),
+                    pending_transform_bytes: 0,
+                });
+            }
 
-                for produced in &chunks {
-                    let chunk_id = produced.chunk_id;
-                    let size = produced.data.len() as u32;
+            FileMessage::FileChunk { chunk_id, data } => {
+                let sf = current_file
+                    .as_mut()
+                    .expect("FileChunk without preceding FileStart");
 
-                    if let Some(csize) = repo.bump_ref_if_exists(&chunk_id) {
-                        actions.push(FileChunkAction::Existing {
-                            chunk_id,
-                            size,
-                            csize,
-                        });
-                    } else {
-                        match pending_new.entry(chunk_id) {
-                            std::collections::hash_map::Entry::Occupied(_) => {
-                                actions.push(FileChunkAction::NewDuplicate { chunk_id, size });
-                            }
-                            std::collections::hash_map::Entry::Vacant(entry) => {
-                                let job_idx = transform_jobs.len();
-                                entry.insert(job_idx);
-                                pending_transform_bytes =
-                                    pending_transform_bytes.saturating_add(produced.data.len());
-                                transform_jobs.push(TransformJob {
-                                    chunk_id,
-                                    data: produced.data.clone(),
-                                });
-                                actions.push(FileChunkAction::NewPrimary {
-                                    chunk_id,
-                                    size,
-                                    job_idx,
-                                });
-                            }
+                let data_len = data.len();
+                let size = data_len as u32;
+
+                if let Some(csize) = repo.bump_ref_if_exists(&chunk_id) {
+                    sf.actions.push(FileChunkAction::Existing {
+                        chunk_id,
+                        size,
+                        csize,
+                    });
+                } else {
+                    match sf.pending_new.entry(chunk_id) {
+                        Entry::Occupied(_) => {
+                            sf.actions
+                                .push(FileChunkAction::NewDuplicate { chunk_id, size });
+                        }
+                        Entry::Vacant(entry) => {
+                            let job_idx = sf.transform_jobs.len();
+                            entry.insert(job_idx);
+                            sf.pending_transform_bytes = sf
+                                .pending_transform_bytes
+                                .saturating_add(data_len);
+                            sf.transform_jobs.push(TransformJob {
+                                chunk_id,
+                                data, // moved, not cloned
+                            });
+                            sf.actions.push(FileChunkAction::NewPrimary {
+                                chunk_id,
+                                size,
+                                job_idx,
+                            });
                         }
                     }
-
-                    if pending_transform_bytes >= max_pending_transform_bytes
-                        || actions.len() >= max_pending_file_actions
-                    {
-                        flush_regular_file_batch(
-                            repo,
-                            compression,
-                            transform_pool,
-                            &mut actions,
-                            &mut transform_jobs,
-                            &mut item,
-                            stats,
-                        )?;
-                        pending_new.clear();
-                        pending_transform_bytes = 0;
-                    }
                 }
+
+                // Release byte budget now that we've consumed the chunk data.
+                byte_budget.release(data_len);
+
+                if sf.pending_transform_bytes >= max_pending_transform_bytes
+                    || sf.actions.len() >= max_pending_file_actions
+                {
+                    flush_regular_file_batch(
+                        repo,
+                        compression,
+                        transform_pool,
+                        &mut sf.actions,
+                        &mut sf.transform_jobs,
+                        &mut sf.item,
+                        stats,
+                    )?;
+                    sf.pending_new.clear();
+                    sf.pending_transform_bytes = 0;
+                }
+            }
+
+            FileMessage::FileEnd => {
+                let mut sf = current_file
+                    .take()
+                    .expect("FileEnd without preceding FileStart");
 
                 flush_regular_file_batch(
                     repo,
                     compression,
                     transform_pool,
-                    &mut actions,
-                    &mut transform_jobs,
-                    &mut item,
+                    &mut sf.actions,
+                    &mut sf.transform_jobs,
+                    &mut sf.item,
                     stats,
                 )?;
 
                 stats.nfiles += 1;
 
                 new_file_cache.insert(
-                    abs_path,
-                    metadata_summary.device,
-                    metadata_summary.inode,
-                    metadata_summary.mtime_ns,
-                    metadata_summary.ctime_ns,
-                    metadata_summary.size,
-                    item.chunks.clone(),
+                    sf.abs_path,
+                    sf.metadata_summary.device,
+                    sf.metadata_summary.inode,
+                    sf.metadata_summary.mtime_ns,
+                    sf.metadata_summary.ctime_ns,
+                    sf.metadata_summary.size,
+                    sf.item.chunks.clone(),
                 );
 
-                emit_stats_progress(progress, stats, Some(item.path.clone()));
+                emit_stats_progress(progress, stats, Some(sf.item.path.clone()));
 
                 append_item_to_stream(
                     repo,
                     item_stream,
                     item_ptrs,
-                    &item,
+                    &sf.item,
                     items_config,
                     compression,
                 )?;
@@ -1231,6 +1268,8 @@ pub fn run_with_progress(
         // Apply configurable upload concurrency.
         repo.set_max_in_flight_uploads(upload_concurrency);
 
+        let pipeline_buffer_bytes = config.limits.cpu.pipeline_buffer_bytes();
+
         if pipeline_depth > 0 && !source_paths.is_empty() {
             // Pipeline mode: overlap I/O (producer) with CPU work (consumer).
             // Extract file_cache before the scope so we can lend it immutably
@@ -1238,9 +1277,13 @@ pub fn run_with_progress(
             let file_cache_snapshot = std::mem::take(&mut repo.file_cache);
             let chunk_id_key = *repo.crypto.chunk_id_key();
             let chunker_config = repo.config.chunker_params.clone();
+            let byte_budget = std::sync::Arc::new(
+                super::pipeline::ByteBudget::new(pipeline_buffer_bytes),
+            );
 
             let pipeline_result: Result<()> = std::thread::scope(|s| {
                 let (tx, rx) = crossbeam_channel::bounded(pipeline_depth);
+                let producer_budget = std::sync::Arc::clone(&byte_budget);
 
                 s.spawn(move || {
                     super::pipeline::run_producer(
@@ -1256,6 +1299,7 @@ pub fn run_with_progress(
                         &chunk_id_key,
                         &file_cache_snapshot,
                         read_limiter.as_deref(),
+                        &producer_budget,
                     );
                 });
 
@@ -1272,6 +1316,7 @@ pub fn run_with_progress(
                     &mut progress,
                     max_pending_transform_bytes,
                     max_pending_file_actions,
+                    &byte_budget,
                 )
             });
             pipeline_result?;

@@ -119,9 +119,12 @@ pub struct CpuLimitsConfig {
     /// Max pending chunk actions before flush (default: 8192, range: 64-65536).
     #[serde(default)]
     pub transform_batch_chunks: Option<usize>,
-    /// Depth of the pipeline channel buffer (default: 8, 0 = disable pipeline).
+    /// Depth of the pipeline channel buffer (default: 4, 0 = disable pipeline).
     #[serde(default)]
     pub pipeline_depth: Option<usize>,
+    /// Max in-flight chunk bytes in the pipeline channel (default: 256 MiB, range: 32-1024).
+    #[serde(default)]
+    pub pipeline_buffer_mib: Option<usize>,
 }
 
 impl CpuLimitsConfig {
@@ -160,6 +163,13 @@ impl CpuLimitsConfig {
                 )));
             }
         }
+        if let Some(n) = self.pipeline_buffer_mib {
+            if !(32..=1024).contains(&n) {
+                return Err(crate::error::VgerError::Config(format!(
+                    "limits.cpu.pipeline_buffer_mib must be in [32, 1024], got {n}"
+                )));
+            }
+        }
         Ok(())
     }
 
@@ -180,7 +190,12 @@ impl CpuLimitsConfig {
 
     /// Effective pipeline depth (0 = disabled).
     pub fn effective_pipeline_depth(&self) -> usize {
-        self.pipeline_depth.unwrap_or(8)
+        self.pipeline_depth.unwrap_or(4)
+    }
+
+    /// Effective pipeline buffer size in bytes.
+    pub fn pipeline_buffer_bytes(&self) -> usize {
+        self.pipeline_buffer_mib.unwrap_or(256) * 1024 * 1024
     }
 }
 

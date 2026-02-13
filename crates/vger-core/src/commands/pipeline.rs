@@ -1,6 +1,8 @@
 use std::collections::HashMap;
 use std::fs::File;
 use std::path::Path;
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::Arc;
 
 use crossbeam_channel::Sender;
 use ignore::WalkBuilder;
@@ -17,10 +19,55 @@ use crate::snapshot::item::{ChunkRef, Item, ItemType};
 
 use super::backup::{build_explicit_excludes, should_skip_for_device};
 
-/// A chunk produced by the I/O producer thread.
-pub struct ProducedChunk {
-    pub chunk_id: ChunkId,
-    pub data: Vec<u8>,
+/// Byte-level backpressure for the pipeline channel.
+///
+/// Tracks total in-flight chunk bytes. The producer blocks when the budget
+/// is exceeded; the consumer releases bytes after processing each chunk.
+pub struct ByteBudget {
+    in_flight: AtomicUsize,
+    max_bytes: usize,
+}
+
+impl ByteBudget {
+    pub fn new(max_bytes: usize) -> Self {
+        Self {
+            in_flight: AtomicUsize::new(0),
+            max_bytes,
+        }
+    }
+
+    /// Acquire `n` bytes of budget. Spins with parking when over budget.
+    pub fn acquire(&self, n: usize) {
+        loop {
+            let current = self.in_flight.load(Ordering::Acquire);
+            // Allow the send if we're under budget OR if nothing is in flight
+            // (ensures progress even for chunks larger than the budget).
+            if current == 0 || current + n <= self.max_bytes {
+                // Try to claim the bytes atomically.
+                if self
+                    .in_flight
+                    .compare_exchange_weak(
+                        current,
+                        current + n,
+                        Ordering::AcqRel,
+                        Ordering::Acquire,
+                    )
+                    .is_ok()
+                {
+                    return;
+                }
+                // CAS failed, retry immediately.
+                continue;
+            }
+            // Over budget — yield then retry.
+            std::thread::park_timeout(std::time::Duration::from_micros(100));
+        }
+    }
+
+    /// Release `n` bytes of budget after the consumer has processed a chunk.
+    pub fn release(&self, n: usize) {
+        self.in_flight.fetch_sub(n, Ordering::Release);
+    }
 }
 
 /// Messages sent from the I/O producer to the consumer.
@@ -32,13 +79,19 @@ pub enum FileMessage {
         metadata_summary: fs::MetadataSummary,
         abs_path: String,
     },
-    /// A file that was read and chunked by the producer.
-    ChunkedFile {
+    /// Start of a new file being streamed chunk-by-chunk.
+    FileStart {
         item: Item,
-        chunks: Vec<ProducedChunk>,
         metadata_summary: fs::MetadataSummary,
         abs_path: String,
     },
+    /// A single chunk from the file currently being streamed.
+    FileChunk {
+        chunk_id: ChunkId,
+        data: Vec<u8>,
+    },
+    /// End of the file currently being streamed.
+    FileEnd,
     /// A non-file item (directory, symlink) — just needs to be appended to the item stream.
     NonFileItem { item: Item },
     /// Signals the start of processing a source path.
@@ -112,6 +165,9 @@ fn read_item_xattrs(_path: &Path) -> Option<HashMap<String, Vec<u8>>> {
 ///
 /// Runs on a dedicated I/O thread. The `file_cache` is borrowed read-only for
 /// cache-hit detection. The consumer is responsible for all mutable repo operations.
+///
+/// Chunks are streamed one at a time via `FileStart`/`FileChunk`/`FileEnd` messages.
+/// The `byte_budget` provides backpressure to cap total in-flight chunk data.
 #[allow(clippy::too_many_arguments)]
 pub fn run_producer(
     tx: &Sender<FileMessage>,
@@ -126,6 +182,7 @@ pub fn run_producer(
     chunk_id_key: &[u8; 32],
     file_cache: &FileCache,
     read_limiter: Option<&ByteRateLimiter>,
+    byte_budget: &Arc<ByteBudget>,
 ) {
     for source_path in source_paths {
         if tx
@@ -150,6 +207,7 @@ pub fn run_producer(
             chunk_id_key,
             file_cache,
             read_limiter,
+            byte_budget,
         ) {
             let _ = tx.send(FileMessage::Error(e));
             return;
@@ -182,6 +240,7 @@ fn produce_source(
     chunk_id_key: &[u8; 32],
     file_cache: &FileCache,
     read_limiter: Option<&ByteRateLimiter>,
+    byte_budget: &Arc<ByteBudget>,
 ) -> crate::error::Result<()> {
     let source = Path::new(source_path);
     if !source.exists() {
@@ -366,14 +425,24 @@ fn produce_source(
                 continue;
             }
 
-            // Cache miss: read and chunk the file.
+            // Cache miss: stream chunks one at a time.
+            if tx
+                .send(FileMessage::FileStart {
+                    item,
+                    metadata_summary,
+                    abs_path,
+                })
+                .is_err()
+            {
+                return Ok(());
+            }
+
             let file = File::open(entry.path()).map_err(VgerError::Io)?;
             let chunk_stream = chunker::chunk_stream(
                 limits::LimitedReader::new(file, read_limiter),
                 chunker_config,
             );
 
-            let mut chunks = Vec::new();
             for chunk_result in chunk_stream {
                 let chunk = chunk_result.map_err(|e| {
                     VgerError::Other(format!(
@@ -382,21 +451,23 @@ fn produce_source(
                     ))
                 })?;
                 let chunk_id = ChunkId::compute(chunk_id_key, &chunk.data);
-                chunks.push(ProducedChunk {
-                    chunk_id,
-                    data: chunk.data,
-                });
+                let data_len = chunk.data.len();
+
+                // Block until we have budget for this chunk's bytes.
+                byte_budget.acquire(data_len);
+
+                if tx
+                    .send(FileMessage::FileChunk {
+                        chunk_id,
+                        data: chunk.data,
+                    })
+                    .is_err()
+                {
+                    return Ok(());
+                }
             }
 
-            if tx
-                .send(FileMessage::ChunkedFile {
-                    item,
-                    chunks,
-                    metadata_summary,
-                    abs_path,
-                })
-                .is_err()
-            {
+            if tx.send(FileMessage::FileEnd).is_err() {
                 return Ok(());
             }
         } else {
