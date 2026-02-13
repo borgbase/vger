@@ -20,24 +20,19 @@ permissions:
 
 jobs:
   build-linux:
-    name: linux-${{ matrix.target }}
+    name: linux-x86_64-unknown-linux-gnu
     runs-on: ubuntu-latest
-    strategy:
-      fail-fast: false
-      matrix:
-        target:
-          - x86_64-unknown-linux-gnu
-          - aarch64-unknown-linux-gnu
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
-        with:
-          targets: ${{ matrix.target }}
-      - uses: mlugg/setup-zig@v2
-      - name: Install cargo-zigbuild
-        run: cargo install cargo-zigbuild --locked
+      - name: Install Linux GUI deps
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libglib2.0-dev libgtk-3-dev libxdo-dev \
+            libxkbcommon-dev libayatana-appindicator3-dev || \
+          sudo apt-get install -y libappindicator3-dev
       - name: Build
-        run: cargo zigbuild --release --target "${{ matrix.target }}" -p vger-cli -p vger-server
+        run: cargo build --release -p vger-cli -p vger-server -p vger-gui
       - name: Package
         run: |
           if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
@@ -45,12 +40,12 @@ jobs:
           else
             VERSION="${GITHUB_REF_NAME}"
           fi
-          ARCHIVE="vger-${VERSION}-${{ matrix.target }}.tar.gz"
-          tar -czf "${ARCHIVE}" -C "target/${{ matrix.target }}/release" vger vger-server
+          ARCHIVE="vger-${VERSION}-x86_64-unknown-linux-gnu.tar.gz"
+          tar -czf "${ARCHIVE}" -C target/release vger vger-server vger-gui
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
-          name: linux-${{ matrix.target }}
+          name: linux-x86_64-unknown-linux-gnu
           path: vger-*.tar.gz
 
   build-macos:
