@@ -11,7 +11,7 @@ use tracing::{debug, info, warn};
 use super::util::with_repo_lock;
 use crate::chunker;
 use crate::compress::Compression;
-use crate::config::{ChunkerConfig, VgerConfig};
+use crate::config::{ChunkerConfig, CommandDump, VgerConfig};
 use crate::crypto::chunk_id::ChunkId;
 use crate::error::{Result, VgerError};
 use crate::limits::{self, ByteRateLimiter};
@@ -184,6 +184,7 @@ pub struct BackupRequest<'a> {
     pub xattrs_enabled: bool,
     pub compression: Compression,
     pub label: &'a str,
+    pub command_dumps: &'a [CommandDump],
 }
 
 pub fn run(config: &VgerConfig, req: BackupRequest<'_>) -> Result<SnapshotStats> {
@@ -200,6 +201,39 @@ fn build_transform_pool(max_threads: usize) -> Result<Option<rayon::ThreadPool>>
         .build()
         .map(Some)
         .map_err(|e| VgerError::Other(format!("failed to create rayon thread pool: {e}")))
+}
+
+/// Execute a shell command and capture its stdout.
+fn execute_dump_command(dump: &CommandDump) -> Result<Vec<u8>> {
+    let output = std::process::Command::new("sh")
+        .arg("-c")
+        .arg(&dump.command)
+        .output()
+        .map_err(|e| {
+            VgerError::Other(format!(
+                "failed to execute command_dump '{}': {}",
+                dump.name, e
+            ))
+        })?;
+
+    if !output.status.success() {
+        let code = output
+            .status
+            .code()
+            .map(|c| c.to_string())
+            .unwrap_or_else(|| "unknown".to_string());
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        return Err(VgerError::Other(format!(
+            "command_dump '{}' failed (exit code {code}): {stderr}",
+            dump.name
+        )));
+    }
+
+    if output.stdout.is_empty() {
+        warn!(name = %dump.name, "command_dump produced empty output");
+    }
+
+    Ok(output.stdout)
 }
 
 pub fn run_with_progress(
@@ -219,8 +253,12 @@ pub fn run_with_progress(
     let compression = req.compression;
     let label = req.label;
 
-    if source_paths.is_empty() {
-        return Err(VgerError::Other("no source paths specified".into()));
+    let command_dumps = req.command_dumps;
+
+    if source_paths.is_empty() && command_dumps.is_empty() {
+        return Err(VgerError::Other(
+            "no source paths or command dumps specified".into(),
+        ));
     }
 
     let multi_path = source_paths.len() > 1;
@@ -256,6 +294,109 @@ pub fn run_with_progress(
         let mut item_ptrs: Vec<ChunkId> = Vec::new();
         let items_config = items_chunker_config();
         let mut new_file_cache = FileCache::new();
+
+        // Execute command dumps before walking filesystem
+        if !command_dumps.is_empty() {
+            // Emit a directory item for .vger-dumps/
+            let dumps_dir_item = Item {
+                path: ".vger-dumps".to_string(),
+                entry_type: ItemType::Directory,
+                mode: 0o755,
+                uid: 0,
+                gid: 0,
+                user: None,
+                group: None,
+                mtime: 0,
+                atime: None,
+                ctime: None,
+                size: 0,
+                chunks: Vec::new(),
+                link_target: None,
+                xattrs: None,
+            };
+            let item_bytes = rmp_serde::to_vec(&dumps_dir_item)?;
+            item_stream.extend_from_slice(&item_bytes);
+            if item_stream.len() >= items_config.avg_size as usize {
+                flush_item_stream_chunk(repo, &mut item_stream, &mut item_ptrs, compression)?;
+            }
+
+            for dump in command_dumps {
+                info!(name = %dump.name, command = %dump.command, "executing command dump");
+                let data = execute_dump_command(dump)?;
+                let data_len = data.len() as u64;
+
+                let chunk_ranges = chunker::chunk_data(&data, &repo.config.chunker_params);
+                let chunk_id_key = *repo.crypto.chunk_id_key();
+
+                let mut chunk_refs = Vec::new();
+                for (offset, length) in chunk_ranges {
+                    let chunk_data = &data[offset..offset + length];
+                    let chunk_id = ChunkId::compute(&chunk_id_key, chunk_data);
+                    let size = length as u32;
+
+                    if let Some(csize) = repo.bump_ref_if_exists(&chunk_id) {
+                        stats.original_size += size as u64;
+                        stats.compressed_size += csize as u64;
+                        chunk_refs.push(ChunkRef {
+                            id: chunk_id,
+                            size,
+                            csize,
+                        });
+                    } else {
+                        let (chunk_id, csize, _is_new) =
+                            repo.store_chunk(chunk_data, compression, PackType::Data)?;
+                        stats.original_size += size as u64;
+                        stats.compressed_size += csize as u64;
+                        stats.deduplicated_size += csize as u64;
+                        chunk_refs.push(ChunkRef {
+                            id: chunk_id,
+                            size,
+                            csize,
+                        });
+                    }
+                }
+
+                stats.nfiles += 1;
+
+                let dump_item = Item {
+                    path: format!(".vger-dumps/{}", dump.name),
+                    entry_type: ItemType::RegularFile,
+                    mode: 0o644,
+                    uid: 0,
+                    gid: 0,
+                    user: None,
+                    group: None,
+                    mtime: time_start.timestamp_nanos_opt().unwrap_or(0),
+                    atime: None,
+                    ctime: None,
+                    size: data_len,
+                    chunks: chunk_refs,
+                    link_target: None,
+                    xattrs: None,
+                };
+                let item_bytes = rmp_serde::to_vec(&dump_item)?;
+                item_stream.extend_from_slice(&item_bytes);
+                if item_stream.len() >= items_config.avg_size as usize {
+                    flush_item_stream_chunk(
+                        repo,
+                        &mut item_stream,
+                        &mut item_ptrs,
+                        compression,
+                    )?;
+                }
+
+                emit_progress(
+                    &mut progress,
+                    BackupProgressEvent::StatsUpdated {
+                        nfiles: stats.nfiles,
+                        original_size: stats.original_size,
+                        compressed_size: stats.compressed_size,
+                        deduplicated_size: stats.deduplicated_size,
+                        current_file: Some(format!(".vger-dumps/{}", dump.name)),
+                    },
+                );
+            }
+        }
 
         // Walk each source directory
         for source_path in source_paths {
@@ -782,12 +923,44 @@ pub fn run_with_progress(
 
 #[cfg(test)]
 mod tests {
-    use super::should_skip_for_device;
+    use super::*;
 
     #[test]
     fn one_file_system_device_filter_logic() {
         assert!(should_skip_for_device(true, 42, 43));
         assert!(!should_skip_for_device(true, 42, 42));
         assert!(!should_skip_for_device(false, 42, 43));
+    }
+
+    #[test]
+    fn execute_dump_command_captures_stdout() {
+        let dump = CommandDump {
+            name: "test.txt".to_string(),
+            command: "echo hello".to_string(),
+        };
+        let result = execute_dump_command(&dump).unwrap();
+        assert_eq!(result, b"hello\n");
+    }
+
+    #[test]
+    fn execute_dump_command_fails_on_nonzero_exit() {
+        let dump = CommandDump {
+            name: "fail.txt".to_string(),
+            command: "false".to_string(),
+        };
+        let result = execute_dump_command(&dump);
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(err.contains("command_dump 'fail.txt' failed"));
+    }
+
+    #[test]
+    fn execute_dump_command_empty_stdout_succeeds() {
+        let dump = CommandDump {
+            name: "empty.txt".to_string(),
+            command: "true".to_string(),
+        };
+        let result = execute_dump_command(&dump).unwrap();
+        assert!(result.is_empty());
     }
 }

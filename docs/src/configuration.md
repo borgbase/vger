@@ -227,7 +227,7 @@ sources:
       after: "echo photos backed up"
 ```
 
-Per-source fields that override globals: `exclude`, `exclude_if_present`, `one_file_system`, `git_ignore`, `repos`, `retention`, `hooks`.
+Per-source fields that override globals: `exclude`, `exclude_if_present`, `one_file_system`, `git_ignore`, `repos`, `retention`, `hooks`, `command_dumps`.
 
 ## Multiple repositories
 

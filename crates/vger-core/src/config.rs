@@ -294,6 +294,15 @@ where
     deserializer.deserialize_any(StringOrVec)
 }
 
+/// A command whose stdout is captured and stored as a virtual file in the backup.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CommandDump {
+    /// Virtual filename (e.g. "mydb.sql"). Must not contain `/` or `\`.
+    pub name: String,
+    /// Shell command whose stdout is captured (run via `sh -c`).
+    pub command: String,
+}
+
 /// YAML input for a source entry — either a plain path or a rich object.
 #[derive(Debug, Clone, Deserialize)]
 #[serde(untagged)]
@@ -314,6 +323,8 @@ pub enum SourceInput {
         retention: Option<RetentionConfig>,
         #[serde(default)]
         repos: Vec<String>,
+        #[serde(default)]
+        command_dumps: Vec<CommandDump>,
     },
 }
 
@@ -330,6 +341,7 @@ pub struct SourceEntry {
     pub hooks: SourceHooksConfig,
     pub retention: Option<RetentionConfig>,
     pub repos: Vec<String>,
+    pub command_dumps: Vec<CommandDump>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -867,7 +879,41 @@ fn normalize_sources(
                 hooks,
                 retention,
                 repos,
+                command_dumps,
             } => {
+                // Validate command_dumps
+                for dump in &command_dumps {
+                    if dump.name.is_empty() {
+                        return Err(crate::error::VgerError::Config(
+                            "command_dumps: 'name' must not be empty".into(),
+                        ));
+                    }
+                    if dump.name.contains('/') || dump.name.contains('\\') {
+                        return Err(crate::error::VgerError::Config(format!(
+                            "command_dumps: name '{}' must not contain '/' or '\\'",
+                            dump.name
+                        )));
+                    }
+                    if dump.command.is_empty() {
+                        return Err(crate::error::VgerError::Config(format!(
+                            "command_dumps: command for '{}' must not be empty",
+                            dump.name
+                        )));
+                    }
+                }
+                // Check for duplicate dump names
+                {
+                    let mut seen_names = std::collections::HashSet::new();
+                    for dump in &command_dumps {
+                        if !seen_names.insert(&dump.name) {
+                            return Err(crate::error::VgerError::Config(format!(
+                                "command_dumps: duplicate name '{}'",
+                                dump.name
+                            )));
+                        }
+                    }
+                }
+
                 let resolved_paths = match (path, paths) {
                     (Some(p), None) => vec![expand_tilde(&p)],
                     (None, Some(ps)) => {
@@ -884,9 +930,12 @@ fn normalize_sources(
                         ));
                     }
                     (None, None) => {
-                        return Err(crate::error::VgerError::Config(
-                            "source entry must have 'path' or 'paths'".into(),
-                        ));
+                        if command_dumps.is_empty() {
+                            return Err(crate::error::VgerError::Config(
+                                "source entry must have 'path', 'paths', or 'command_dumps'".into(),
+                            ));
+                        }
+                        Vec::new()
                     }
                 };
 
@@ -897,7 +946,18 @@ fn normalize_sources(
                     ));
                 }
 
-                let label = label.unwrap_or_else(|| label_from_path(&resolved_paths[0]));
+                // Dump-only sources (no paths) require an explicit label
+                if resolved_paths.is_empty() && label.is_none() {
+                    return Err(crate::error::VgerError::Config(
+                        "dump-only source entries require an explicit 'label'".into(),
+                    ));
+                }
+
+                let label = if resolved_paths.is_empty() {
+                    label.unwrap()
+                } else {
+                    label.unwrap_or_else(|| label_from_path(&resolved_paths[0]))
+                };
 
                 // Validate no duplicate basenames within a multi-path entry
                 if resolved_paths.len() > 1 {
@@ -926,6 +986,7 @@ fn normalize_sources(
                     hooks,
                     retention,
                     repos,
+                    command_dumps,
                 });
             }
         }
@@ -961,6 +1022,7 @@ fn normalize_sources(
             hooks: SourceHooksConfig::default(),
             retention: None,
             repos: Vec::new(),
+            command_dumps: Vec::new(),
         });
     }
 
@@ -1091,6 +1153,7 @@ fn resolve_document(raw: ConfigDocument) -> crate::error::Result<Vec<ResolvedRep
                         hooks: src.hooks.clone(),
                         retention: src.retention.clone(),
                         repos: src.repos.clone(),
+                        command_dumps: src.command_dumps.clone(),
                     }
                 })
                 .collect();
@@ -1871,6 +1934,7 @@ repositories:
             hooks: SourceHooksConfig::default(),
             retention: None,
             repos: Vec::new(),
+            command_dumps: Vec::new(),
         }
     }
 
@@ -2593,7 +2657,7 @@ sources:
         let err = load_and_resolve(&path).unwrap_err();
         let msg = err.to_string();
         assert!(
-            msg.contains("must have 'path' or 'paths'"),
+            msg.contains("must have 'path', 'paths', or 'command_dumps'"),
             "unexpected: {msg}"
         );
     }
@@ -2705,5 +2769,144 @@ sources:
         assert!(parse_human_duration("").is_err());
         assert!(parse_human_duration("0h").is_err());
         assert!(parse_human_duration("5w").is_err());
+    }
+
+    // --- command_dumps tests ---
+
+    #[test]
+    fn test_command_dumps_parse() {
+        let yaml = r#"
+repositories:
+  - url: /tmp/repo
+sources:
+  - path: /home/user
+    command_dumps:
+      - name: mydb.sql
+        command: pg_dump mydb
+      - name: other.sql
+        command: pg_dumpall
+"#;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.yaml");
+        fs::write(&path, yaml).unwrap();
+
+        let repos = load_and_resolve(&path).unwrap();
+        let source = &repos[0].sources[0];
+        assert_eq!(source.command_dumps.len(), 2);
+        assert_eq!(source.command_dumps[0].name, "mydb.sql");
+        assert_eq!(source.command_dumps[0].command, "pg_dump mydb");
+        assert_eq!(source.command_dumps[1].name, "other.sql");
+    }
+
+    #[test]
+    fn test_command_dumps_empty_name_rejected() {
+        let yaml = r#"
+repositories:
+  - url: /tmp/repo
+sources:
+  - path: /home/user
+    command_dumps:
+      - name: ""
+        command: echo hi
+"#;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.yaml");
+        fs::write(&path, yaml).unwrap();
+
+        let err = load_and_resolve(&path).unwrap_err();
+        assert!(
+            err.to_string().contains("'name' must not be empty"),
+            "unexpected: {err}"
+        );
+    }
+
+    #[test]
+    fn test_command_dumps_slash_in_name_rejected() {
+        let yaml = r#"
+repositories:
+  - url: /tmp/repo
+sources:
+  - path: /home/user
+    command_dumps:
+      - name: sub/dir.sql
+        command: echo hi
+"#;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.yaml");
+        fs::write(&path, yaml).unwrap();
+
+        let err = load_and_resolve(&path).unwrap_err();
+        assert!(
+            err.to_string().contains("must not contain '/' or '\\'"),
+            "unexpected: {err}"
+        );
+    }
+
+    #[test]
+    fn test_command_dumps_duplicate_names_rejected() {
+        let yaml = r#"
+repositories:
+  - url: /tmp/repo
+sources:
+  - path: /home/user
+    command_dumps:
+      - name: dump.sql
+        command: echo a
+      - name: dump.sql
+        command: echo b
+"#;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.yaml");
+        fs::write(&path, yaml).unwrap();
+
+        let err = load_and_resolve(&path).unwrap_err();
+        assert!(
+            err.to_string().contains("duplicate name 'dump.sql'"),
+            "unexpected: {err}"
+        );
+    }
+
+    #[test]
+    fn test_command_dumps_only_source_no_paths() {
+        let yaml = r#"
+repositories:
+  - url: /tmp/repo
+sources:
+  - label: databases
+    command_dumps:
+      - name: all.sql
+        command: pg_dumpall
+"#;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.yaml");
+        fs::write(&path, yaml).unwrap();
+
+        let repos = load_and_resolve(&path).unwrap();
+        let source = &repos[0].sources[0];
+        assert!(source.paths.is_empty());
+        assert_eq!(source.label, "databases");
+        assert_eq!(source.command_dumps.len(), 1);
+    }
+
+    #[test]
+    fn test_command_dumps_only_source_requires_label() {
+        let yaml = r#"
+repositories:
+  - url: /tmp/repo
+sources:
+  - command_dumps:
+      - name: all.sql
+        command: pg_dumpall
+"#;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.yaml");
+        fs::write(&path, yaml).unwrap();
+
+        let err = load_and_resolve(&path).unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("dump-only source entries require an explicit 'label'"),
+            "unexpected: {err}"
+        );
     }
 }

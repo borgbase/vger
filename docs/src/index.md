@@ -2,7 +2,7 @@
   <img src="images/vger-color-rounded.webp" alt="V'Ger Backup Logo" width="350">
 </p>
 
-V'Ger is a fast, encrypted, deduplicated backup tool written in Rust. It's based on a simple YAML config format and includes a desktop GUI and webDAV server to view snapshots.
+V'Ger is a fast, encrypted, deduplicated backup tool written in Rust. It's centered around a simple YAML config format and includes a desktop GUI and webDAV server to browse snapshots.
 
 ## Features
 
@@ -14,13 +14,14 @@ V'Ger is a fast, encrypted, deduplicated backup tool written in Rust. It's based
 - **Dedicated REST server** with append-only enforcement, quotas, and server-side compaction
 - **Built-in web interface** (WebDAV) to browse and restore snapshots
 - **Rate limiting** for CPU, disk I/O, and network bandwidth
-- **Hooks** for monitoring, database backups, and custom scripts
-- **Desktop GUI** (work in progress)
+- **Command dumps** to capture database exports and other command output directly into backups
+- **Hooks** for monitoring and custom scripts
+- **Desktop GUI** (run, view and restore backups)
 
 ## Inspired by
 
 - [BorgBackup](https://github.com/borgbackup/borg/): architecture, chunking strategy, repository concept, and overall backup pipeline.
-- [Borgmatic](https://torsion.org/borgmatic/): YAML configuration approach.
+- [Borgmatic](https://torsion.org/borgmatic/): YAML configuration approach, pipe-based database dumps.
 - [Rustic](https://github.com/rustic-rs/rustic): storage backend abstraction via Apache OpenDAL, pack file design, and architectural references from a mature Rust backup tool.
 - [V'Ger](https://memory-alpha.fandom.com/wiki/V%27Ger) from *Star Trek: The Motion Picture* — a probe that assimilated everything it encountered and returned as something far more powerful.
 
@@ -30,6 +31,7 @@ V'Ger is a fast, encrypted, deduplicated backup tool written in Rust. It's based
 |--------|------|--------|--------|------|
 | Configuration | CLI (YAML via Borgmatic) | CLI (YAML via ResticProfile) | TOML config file | YAML config with env-var expansion |
 | Browse snapshots | FUSE mount | FUSE mount | FUSE mount | Built-in WebDAV + web UI |
+| Command dumps | Via Borgmatic (database-specific) | None | None | Native (generic command capture) |
 | Hooks | Via Borgmatic | Via ResticProfile | Native | Native (per-command before/after) |
 | Rate limiting | None | Upload/download bandwidth | — | CPU, disk I/O, and network bandwidth |
 | Dedicated server | SSH (`borg serve`) | rest-server (append-only) | rustic_server | REST server with append-only, quotas, server-side compaction |

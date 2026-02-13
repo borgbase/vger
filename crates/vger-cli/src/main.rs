@@ -883,6 +883,7 @@ fn run_backup(
                     xattrs_enabled: config.xattrs.enabled,
                     compression,
                     label: user_label_str,
+                    command_dumps: &[],
                 },
                 show_progress,
             )?;
@@ -934,6 +935,7 @@ fn run_backup(
                             xattrs_enabled: source.xattrs_enabled,
                             compression,
                             label: user_label_str,
+                            command_dumps: &source.command_dumps,
                         },
                         show_progress,
                     )?;

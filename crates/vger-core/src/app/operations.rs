@@ -74,6 +74,7 @@ pub fn run_backup_for_repo(
                 xattrs_enabled: source.xattrs_enabled,
                 compression,
                 label,
+                command_dumps: &source.command_dumps,
             },
         )?;
 

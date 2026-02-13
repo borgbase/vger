@@ -189,6 +189,7 @@ fn backup_exclude_if_present_skips_marked_directories() {
             xattrs_enabled: config.xattrs.enabled,
             compression: Compression::None,
             label: "",
+            command_dumps: &[],
         },
     )
     .unwrap();
@@ -228,6 +229,7 @@ fn backup_git_ignore_respected_when_enabled() {
             xattrs_enabled: config.xattrs.enabled,
             compression: Compression::None,
             label: "",
+            command_dumps: &[],
         },
     )
     .unwrap();
@@ -246,6 +248,7 @@ fn backup_git_ignore_respected_when_enabled() {
             xattrs_enabled: config.xattrs.enabled,
             compression: Compression::None,
             label: "",
+            command_dumps: &[],
         },
     )
     .unwrap();
@@ -292,6 +295,7 @@ fn backup_deduplicates_identical_files_and_extracts_correctly() {
             xattrs_enabled: config.xattrs.enabled,
             compression: Compression::None,
             label: "",
+            command_dumps: &[],
         },
     )
     .unwrap();
@@ -368,6 +372,7 @@ fn backup_run_with_progress_emits_events_and_final_stats() {
             xattrs_enabled: config.xattrs.enabled,
             compression: Compression::None,
             label: "",
+            command_dumps: &[],
         },
         Some(&mut on_progress),
     )
@@ -450,6 +455,7 @@ fn backup_and_restore_preserves_file_xattrs_when_enabled() {
             xattrs_enabled: true,
             compression: Compression::None,
             label: "",
+            command_dumps: &[],
         },
     )
     .unwrap();
@@ -519,6 +525,7 @@ fn backup_skips_xattrs_when_disabled() {
             xattrs_enabled: false,
             compression: Compression::None,
             label: "",
+            command_dumps: &[],
         },
     )
     .unwrap();
@@ -569,6 +576,7 @@ fn file_cache_persists_and_matches_snapshot_items() {
             xattrs_enabled: config.xattrs.enabled,
             compression: Compression::None,
             label: "",
+            command_dumps: &[],
         },
     )
     .unwrap();
@@ -620,6 +628,7 @@ fn file_cache_persists_and_matches_snapshot_items() {
             xattrs_enabled: config.xattrs.enabled,
             compression: Compression::None,
             label: "",
+            command_dumps: &[],
         },
     )
     .unwrap();
@@ -694,6 +703,7 @@ fn file_cache_misses_on_modified_file() {
             xattrs_enabled: config.xattrs.enabled,
             compression: Compression::None,
             label: "",
+            command_dumps: &[],
         },
     )
     .unwrap();
@@ -728,6 +738,7 @@ fn file_cache_misses_on_modified_file() {
             xattrs_enabled: config.xattrs.enabled,
             compression: Compression::None,
             label: "",
+            command_dumps: &[],
         },
     )
     .unwrap();
@@ -813,6 +824,7 @@ fn info_reports_repository_statistics() {
             xattrs_enabled: config.xattrs.enabled,
             compression: Compression::None,
             label: "",
+            command_dumps: &[],
         },
     )
     .unwrap();
@@ -826,4 +838,189 @@ fn info_reports_repository_statistics() {
     assert!(info.unique_chunks > 0);
     assert!(info.unique_stored_size > 0);
     assert!(info.referenced_stored_size >= info.unique_stored_size);
+}
+
+#[test]
+fn command_dump_backup_and_extract() {
+    let repo_dir = tempfile::tempdir().unwrap();
+    init_local_repo(repo_dir.path());
+    let config = make_test_config(repo_dir.path());
+
+    let dumps = vec![vger_core::config::CommandDump {
+        name: "hello.txt".to_string(),
+        command: "echo hello world".to_string(),
+    }];
+
+    // Backup with command dumps only (no source paths)
+    let source_paths: Vec<String> = Vec::new();
+    let exclude_if_present: Vec<String> = Vec::new();
+    let exclude_patterns: Vec<String> = Vec::new();
+
+    let stats = commands::backup::run(
+        &config,
+        commands::backup::BackupRequest {
+            snapshot_name: "snap-dumps",
+            passphrase: None,
+            source_paths: &source_paths,
+            source_label: "dumps",
+            exclude_patterns: &exclude_patterns,
+            exclude_if_present: &exclude_if_present,
+            one_file_system: true,
+            git_ignore: false,
+            xattrs_enabled: false,
+            compression: Compression::None,
+            label: "",
+            command_dumps: &dumps,
+        },
+    )
+    .unwrap();
+
+    assert_eq!(stats.nfiles, 1);
+    assert!(stats.original_size > 0);
+
+    // List snapshot contents — verify .vger-dumps/hello.txt appears
+    let repo = open_local_repo(repo_dir.path());
+    let items = commands::list::load_snapshot_items(&repo, "snap-dumps").unwrap();
+    let dump_items: Vec<_> = items
+        .iter()
+        .filter(|i| i.path == ".vger-dumps/hello.txt")
+        .collect();
+    assert_eq!(dump_items.len(), 1);
+    assert_eq!(dump_items[0].entry_type, ItemType::RegularFile);
+    assert_eq!(dump_items[0].size, 12); // "hello world\n"
+
+    // Verify the .vger-dumps directory item exists
+    let dir_items: Vec<_> = items
+        .iter()
+        .filter(|i| i.path == ".vger-dumps")
+        .collect();
+    assert_eq!(dir_items.len(), 1);
+    assert_eq!(dir_items[0].entry_type, ItemType::Directory);
+
+    // Extract and verify file contents
+    let extract_dir = tempfile::tempdir().unwrap();
+    commands::extract::run(
+        &config,
+        None,
+        "snap-dumps",
+        extract_dir.path().to_str().unwrap(),
+        None,
+        false,
+    )
+    .unwrap();
+
+    let dump_file = extract_dir.path().join(".vger-dumps/hello.txt");
+    assert!(dump_file.exists(), "dump file should exist after extract");
+    let contents = std::fs::read_to_string(&dump_file).unwrap();
+    assert_eq!(contents, "hello world\n");
+}
+
+#[test]
+fn command_dump_failing_command_aborts_backup() {
+    let repo_dir = tempfile::tempdir().unwrap();
+    init_local_repo(repo_dir.path());
+    let config = make_test_config(repo_dir.path());
+
+    let dumps = vec![vger_core::config::CommandDump {
+        name: "fail.txt".to_string(),
+        command: "false".to_string(),
+    }];
+
+    let source_paths: Vec<String> = Vec::new();
+    let exclude_if_present: Vec<String> = Vec::new();
+    let exclude_patterns: Vec<String> = Vec::new();
+
+    let result = commands::backup::run(
+        &config,
+        commands::backup::BackupRequest {
+            snapshot_name: "snap-fail",
+            passphrase: None,
+            source_paths: &source_paths,
+            source_label: "dumps",
+            exclude_patterns: &exclude_patterns,
+            exclude_if_present: &exclude_if_present,
+            one_file_system: true,
+            git_ignore: false,
+            xattrs_enabled: false,
+            compression: Compression::None,
+            label: "",
+            command_dumps: &dumps,
+        },
+    );
+
+    assert!(result.is_err());
+    let err_msg = result.unwrap_err().to_string();
+    assert!(
+        err_msg.contains("command_dump 'fail.txt' failed"),
+        "unexpected error: {err_msg}"
+    );
+}
+
+#[test]
+fn command_dump_mixed_with_files() {
+    let repo_dir = tempfile::tempdir().unwrap();
+    init_local_repo(repo_dir.path());
+    let config = make_test_config(repo_dir.path());
+
+    // Create a source directory with a regular file
+    let source_dir = tempfile::tempdir().unwrap();
+    std::fs::write(source_dir.path().join("real.txt"), "real file\n").unwrap();
+
+    let dumps = vec![vger_core::config::CommandDump {
+        name: "dump.txt".to_string(),
+        command: "echo dump output".to_string(),
+    }];
+
+    let source_paths = vec![source_dir.path().to_string_lossy().to_string()];
+    let exclude_if_present: Vec<String> = Vec::new();
+    let exclude_patterns: Vec<String> = Vec::new();
+
+    let stats = commands::backup::run(
+        &config,
+        commands::backup::BackupRequest {
+            snapshot_name: "snap-mixed",
+            passphrase: None,
+            source_paths: &source_paths,
+            source_label: "mixed",
+            exclude_patterns: &exclude_patterns,
+            exclude_if_present: &exclude_if_present,
+            one_file_system: true,
+            git_ignore: false,
+            xattrs_enabled: false,
+            compression: Compression::None,
+            label: "",
+            command_dumps: &dumps,
+        },
+    )
+    .unwrap();
+
+    // Should have both the real file and the dump
+    assert_eq!(stats.nfiles, 2);
+
+    let repo = open_local_repo(repo_dir.path());
+    let items = commands::list::load_snapshot_items(&repo, "snap-mixed").unwrap();
+    let has_real = items.iter().any(|i| i.path == "real.txt");
+    let has_dump = items.iter().any(|i| i.path == ".vger-dumps/dump.txt");
+    assert!(has_real, "should contain real.txt");
+    assert!(has_dump, "should contain .vger-dumps/dump.txt");
+
+    // Extract and verify both files
+    let extract_dir = tempfile::tempdir().unwrap();
+    commands::extract::run(
+        &config,
+        None,
+        "snap-mixed",
+        extract_dir.path().to_str().unwrap(),
+        None,
+        false,
+    )
+    .unwrap();
+
+    let real_contents =
+        std::fs::read_to_string(extract_dir.path().join("real.txt")).unwrap();
+    assert_eq!(real_contents, "real file\n");
+
+    let dump_contents =
+        std::fs::read_to_string(extract_dir.path().join(".vger-dumps/dump.txt")).unwrap();
+    assert_eq!(dump_contents, "dump output\n");
 }

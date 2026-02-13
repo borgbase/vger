@@ -17,8 +17,9 @@ Inspired by [BorgBackup](https://github.com/borgbackup/borg/), [Borgmatic](https
 - Dedicated REST server (`vger-server`) for append-only enforcement, quotas, lock TTLs, and server-side compaction
 - Built-in web interface (webDAV) to browse snapshots and restore files
 - Rate limiting for CPU, disk I/O, and network bandwidth
+- Command dumps to capture database exports and other command output directly into backups
 - Hooks for monitoring, database backups, and custom scripts
-- Basic GUI (work in progress)
+- Desktop GUI (run, view and restore backups)
 
 ## Quick start
 

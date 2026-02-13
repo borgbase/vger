@@ -62,6 +62,40 @@ vger list --source docs
 vger list --snapshot a1b2c3d4
 ```
 
+## Command dumps
+
+You can capture the stdout of shell commands directly into your backup using `command_dumps`. This is useful for database dumps, API exports, or any generated data that doesn't live as a regular file on disk:
+
+```yaml
+sources:
+  - path: /var/www/myapp
+    label: myapp
+    command_dumps:
+      - name: postgres.sql
+        command: pg_dump -U myuser mydb
+      - name: redis.rdb
+        command: redis-cli --rdb -
+```
+
+Each command runs via `sh -c` and the captured output is stored as a virtual file under `.vger-dumps/` in the snapshot. On extract, these appear as regular files:
+
+```
+.vger-dumps/postgres.sql
+.vger-dumps/redis.rdb
+```
+
+You can also create dump-only sources with no filesystem paths:
+
+```yaml
+sources:
+  - label: databases
+    command_dumps:
+      - name: all-databases.sql
+        command: pg_dumpall -U postgres
+```
+
+Dump-only sources require an explicit `label`. If any command exits with a non-zero status, the backup is aborted.
+
 ## Related pages
 
 - [Quick Start](quickstart.md)
