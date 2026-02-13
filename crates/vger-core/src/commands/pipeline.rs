@@ -40,17 +40,11 @@ pub enum FileMessage {
         abs_path: String,
     },
     /// A non-file item (directory, symlink) — just needs to be appended to the item stream.
-    NonFileItem {
-        item: Item,
-    },
+    NonFileItem { item: Item },
     /// Signals the start of processing a source path.
-    SourceStarted {
-        source_path: String,
-    },
+    SourceStarted { source_path: String },
     /// Signals the end of processing a source path.
-    SourceFinished {
-        source_path: String,
-    },
+    SourceFinished { source_path: String },
     /// All sources have been processed.
     Done,
     /// An error occurred during production.
@@ -221,7 +215,10 @@ fn produce_source(
             link_target: None,
             xattrs: None,
         };
-        if tx.send(FileMessage::NonFileItem { item: dir_item }).is_err() {
+        if tx
+            .send(FileMessage::NonFileItem { item: dir_item })
+            .is_err()
+        {
             return Ok(());
         }
         Some(base)
@@ -371,8 +368,10 @@ fn produce_source(
 
             // Cache miss: read and chunk the file.
             let file = File::open(entry.path()).map_err(VgerError::Io)?;
-            let chunk_stream =
-                chunker::chunk_stream(limits::LimitedReader::new(file, read_limiter), chunker_config);
+            let chunk_stream = chunker::chunk_stream(
+                limits::LimitedReader::new(file, read_limiter),
+                chunker_config,
+            );
 
             let mut chunks = Vec::new();
             for chunk_result in chunk_stream {

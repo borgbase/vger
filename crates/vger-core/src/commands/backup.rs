@@ -77,7 +77,11 @@ pub(crate) fn build_explicit_excludes(source: &Path, patterns: &[String]) -> Res
         .map_err(|e| VgerError::Config(format!("exclude matcher build failed: {e}")))
 }
 
-pub(crate) fn should_skip_for_device(one_file_system: bool, source_dev: u64, entry_dev: u64) -> bool {
+pub(crate) fn should_skip_for_device(
+    one_file_system: bool,
+    source_dev: u64,
+    entry_dev: u64,
+) -> bool {
     one_file_system && source_dev != entry_dev
 }
 
@@ -1113,10 +1117,7 @@ fn run_pipeline_backup(
             }
 
             FileMessage::SourceStarted { source_path } => {
-                emit_progress(
-                    progress,
-                    BackupProgressEvent::SourceStarted { source_path },
-                );
+                emit_progress(progress, BackupProgressEvent::SourceStarted { source_path });
             }
 
             FileMessage::SourceFinished { source_path } => {

@@ -12,7 +12,12 @@
       "Bash(test:*)",
       "Bash(make docs-build:*)",
       "Bash(mdbook build:*)",
-      "Bash(bash:*)"
+      "Bash(bash:*)",
+      "Bash(rustup target add:*)",
+      "Bash(rustup show:*)",
+      "Bash(rustup target list:*)",
+      "Bash(RUSTUP_TOOLCHAIN=stable cargo zigbuild:*)",
+      "Bash(brew list:*)"
     ]
   }
 }
