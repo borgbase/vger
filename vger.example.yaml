@@ -192,6 +192,23 @@ compression:
 #     - "rm -f /tmp/db.sql"
 #   failed:
 #     - "notify-send 'vger {command} failed: {error}'"
+#
+# Apprise notifications (requires `pip install apprise`)
+# Apprise supports 100+ notification services via URL schemes.
+# See https://github.com/caronc/apprise/wiki for all supported URLs.
+#
+# hooks:
+#   after_backup:
+#     - >-
+#       apprise -t "Backup complete"
+#       -b "vger {command} finished for {repository}"
+#       "gotify://hostname/token"
+#       "slack://tokenA/tokenB/tokenC"
+#   failed:
+#     - >-
+#       apprise -t "Backup failed"
+#       -b "vger {command} failed for {repository}: {error}"
+#       "gotify://hostname/token"
 
 # Retention policy for `vger prune`
 # At least one keep_* option must be set for prune to run.

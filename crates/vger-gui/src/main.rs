@@ -25,6 +25,13 @@ slint::slint! {
         last_snapshot: string,
     }
 
+    struct SourceInfo {
+        label: string,
+        paths: string,
+        excludes: string,
+        target_repos: string,
+    }
+
     export component RestoreWindow inherits Window {
         in-out property <string> snapshot_name;
         in-out property <string> repo_name;
@@ -113,8 +120,8 @@ slint::slint! {
         // Repo model (custom cards)
         in-out property <[RepoInfo]> repo_model: [];
 
-        // Source table
-        in-out property <[[StandardListViewItem]]> source_rows: [];
+        // Source model (custom cards)
+        in-out property <[SourceInfo]> source_model: [];
 
         // Snapshot table
         in-out property <[string]> repo_names: [];
@@ -126,11 +133,14 @@ slint::slint! {
         callback reload_config_clicked();
         callback backup_repo_clicked(/* index */ int);
         callback check_repo_clicked(/* index */ int);
-        callback backup_selected_source_clicked(/* row */ int);
+        callback compact_repo_clicked(/* index */ int);
+        callback backup_source_clicked(/* index */ int);
         callback refresh_snapshots_clicked();
         callback restore_selected_snapshot_clicked(/* row */ int);
         callback delete_selected_snapshot_clicked(/* row */ int);
         callback snapshots_repo_changed(/* value */ string);
+        callback snapshot_sort_ascending(/* column */ int);
+        callback snapshot_sort_descending(/* column */ int);
 
         title: "V'Ger";
         width: 1100px;
@@ -149,17 +159,26 @@ slint::slint! {
                 spacing: 4px;
 
                 HorizontalBox {
-                    spacing: 4px;
-                    Text { text: "Edit your backup configuration:"; vertical-alignment: center; }
+                    spacing: 8px;
+                    Text { text: "Config:"; vertical-alignment: center; width: 65px; }
                     TouchArea {
+                        horizontal-stretch: 1;
                         mouse-cursor: pointer;
                         clicked => { root.open_config_clicked(); }
                         Text { text: root.config_path; color: #4a90d9; vertical-alignment: center; }
                     }
+                    Button {
+                        text: "Reload";
+                        clicked => { root.reload_config_clicked(); }
+                    }
+                    Button {
+                        text: "Backup All";
+                        clicked => { root.backup_all_clicked(); }
+                    }
                 }
                 HorizontalBox {
-                    spacing: 16px;
-                    Text { text: "Schedule:"; vertical-alignment: center; }
+                    spacing: 8px;
+                    Text { text: "Schedule:"; vertical-alignment: center; width: 65px; }
                     Text { text: root.schedule_text; vertical-alignment: center; }
                 }
             }
@@ -183,11 +202,13 @@ slint::slint! {
                                     spacing: 16px;
                                     VerticalLayout {
                                         horizontal-stretch: 1;
+                                        min-width: 350px;
                                         Text { text: repo.name; font-weight: 700; }
                                         Text { text: repo.url; color: #888888; font-size: 11px; }
                                     }
                                     VerticalLayout {
-                                        horizontal-stretch: 1;
+                                        horizontal-stretch: 0;
+                                        min-width: 250px;
                                         Text { text: "Snapshots: " + repo.snapshots; }
                                         Text { text: "Latest: " + repo.last_snapshot; font-size: 11px; color: #888888; }
                                     }
@@ -197,6 +218,7 @@ slint::slint! {
                                             spacing: 8px;
                                             Button { text: "Backup"; clicked => { root.backup_repo_clicked(idx); } }
                                             Button { text: "Check"; clicked => { root.check_repo_clicked(idx); } }
+                                            Button { text: "Compact"; clicked => { root.compact_repo_clicked(idx); } }
                                         }
                                     }
                                 }
@@ -211,25 +233,31 @@ slint::slint! {
                     VerticalBox {
                         spacing: 8px;
                         padding: 8px;
-
-                        source-table := StandardTableView {
+                        ListView {
                             vertical-stretch: 1;
-                            columns: [
-                                { title: "Label" },
-                                { title: "Paths" },
-                                { title: "Excludes" },
-                                { title: "Target Repos" },
-                            ];
-                            rows: root.source_rows;
-                        }
-
-                        HorizontalBox {
-                            spacing: 8px;
-                            Button {
-                                text: "Backup Selected Source";
-                                clicked => {
-                                    root.backup-selected-source-clicked(source-table.current-row);
+                            for source[idx] in root.source_model: Rectangle {
+                                height: 56px;
+                                HorizontalLayout {
+                                    padding: 8px;
+                                    spacing: 16px;
+                                    VerticalLayout {
+                                        horizontal-stretch: 1;
+                                        min-width: 350px;
+                                        Text { text: source.label; font-weight: 700; }
+                                        Text { text: source.paths; color: #888888; font-size: 11px; overflow: elide; }
+                                    }
+                                    VerticalLayout {
+                                        horizontal-stretch: 0;
+                                        min-width: 250px;
+                                        Text { text: "Excludes: " + source.excludes; font-size: 11px; overflow: elide; }
+                                        Text { text: "Repos: " + source.target_repos; font-size: 11px; color: #888888; }
+                                    }
+                                    VerticalLayout {
+                                        alignment: center;
+                                        Button { text: "Backup"; clicked => { root.backup_source_clicked(idx); } }
+                                    }
                                 }
+                                Rectangle { y: parent.height - 1px; height: 1px; background: #d5d5d5; width: 100%; }
                             }
                         }
                     }
@@ -261,11 +289,13 @@ slint::slint! {
                             vertical-stretch: 1;
                             columns: [
                                 { title: "ID" },
+                                { title: "Time" },
                                 { title: "Source" },
                                 { title: "Label" },
-                                { title: "Time" },
                             ];
                             rows: root.snapshot_rows;
+                            sort-ascending(col-idx) => { root.snapshot_sort_ascending(col-idx); }
+                            sort-descending(col-idx) => { root.snapshot_sort_descending(col-idx); }
                         }
 
                         HorizontalBox {
@@ -319,19 +349,8 @@ slint::slint! {
                 padding-bottom: 6px;
                 spacing: 8px;
 
-                Text { text: "Config:"; vertical-alignment: center; }
-                Text { text: root.config_path; vertical-alignment: center; horizontal-stretch: 1; }
                 Text { text: "Status:"; vertical-alignment: center; }
-                Text { text: root.status_text; vertical-alignment: center; }
-
-                Button {
-                    text: "Backup All";
-                    clicked => { root.backup_all_clicked(); }
-                }
-                Button {
-                    text: "Reload";
-                    clicked => { root.reload_config_clicked(); }
-                }
+                Text { text: root.status_text; vertical-alignment: center; horizontal-stretch: 1; }
             }
         }
     }
@@ -367,6 +386,9 @@ enum AppCommand {
     CheckRepo {
         repo_name: String,
     },
+    CompactRepo {
+        repo_name: String,
+    },
     DeleteSnapshot {
         repo_name: String,
         snapshot_name: String,
@@ -387,6 +409,24 @@ struct RepoInfoData {
 }
 
 #[derive(Debug, Clone)]
+struct SnapshotRowData {
+    id: String,
+    time_str: String,
+    source: String,
+    label: String,
+    time_epoch: i64,
+    repo_name: String,
+}
+
+#[derive(Debug, Clone)]
+struct SourceInfoData {
+    label: String,
+    paths: String,
+    excludes: String,
+    target_repos: String,
+}
+
+#[derive(Debug, Clone)]
 enum UiEvent {
     Status(String),
     Log(String),
@@ -399,14 +439,12 @@ enum UiEvent {
         items: Vec<RepoInfoData>,
         labels: Vec<String>,
     },
-    SourceTableData {
-        rows: Vec<Vec<String>>,
-        source_labels: Vec<String>,
+    SourceModelData {
+        items: Vec<SourceInfoData>,
+        labels: Vec<String>,
     },
     SnapshotTableData {
-        rows: Vec<Vec<String>>,
-        snapshot_ids: Vec<String>,
-        repo_names: Vec<String>,
+        data: Vec<SnapshotRowData>,
     },
     SnapshotContentsData {
         rows: Vec<Vec<String>>,
@@ -607,6 +645,47 @@ fn to_table_model(rows: Vec<Vec<String>>) -> ModelRc<ModelRc<StandardListViewIte
     ModelRc::new(VecModel::from(outer))
 }
 
+fn sort_snapshot_table(
+    sd: &Arc<Mutex<Vec<SnapshotRowData>>>,
+    si: &Arc<Mutex<Vec<String>>>,
+    sr: &Arc<Mutex<Vec<String>>>,
+    ui_weak: &slint::Weak<MainWindow>,
+    col_idx: i32,
+    ascending: bool,
+) {
+    let Some(ui) = ui_weak.upgrade() else {
+        return;
+    };
+    let Ok(mut data) = sd.lock() else {
+        return;
+    };
+
+    // Columns: 0=ID, 1=Time, 2=Source, 3=Label
+    match col_idx {
+        0 => data.sort_by(|a, b| a.id.cmp(&b.id)),
+        1 => data.sort_by(|a, b| a.time_epoch.cmp(&b.time_epoch)),
+        2 => data.sort_by(|a, b| a.source.cmp(&b.source)),
+        3 => data.sort_by(|a, b| a.label.cmp(&b.label)),
+        _ => return,
+    }
+    if !ascending {
+        data.reverse();
+    }
+
+    if let Ok(mut ids) = si.lock() {
+        *ids = data.iter().map(|d| d.id.clone()).collect();
+    }
+    if let Ok(mut rnames) = sr.lock() {
+        *rnames = data.iter().map(|d| d.repo_name.clone()).collect();
+    }
+
+    let rows: Vec<Vec<String>> = data
+        .iter()
+        .map(|d| vec![d.id.clone(), d.time_str.clone(), d.source.clone(), d.label.clone()])
+        .collect();
+    ui.set_snapshot_rows(to_table_model(rows));
+}
+
 fn to_string_model(items: Vec<String>) -> ModelRc<SharedString> {
     let shared: Vec<SharedString> = items.into_iter().map(SharedString::from).collect();
     ModelRc::new(VecModel::from(shared))
@@ -616,9 +695,9 @@ fn collect_repo_names(repos: &[ResolvedRepo]) -> Vec<String> {
     repos.iter().map(|r| format_repo_name(r)).collect()
 }
 
-fn build_source_table_data(repos: &[ResolvedRepo]) -> (Vec<Vec<String>>, Vec<String>) {
+fn build_source_model_data(repos: &[ResolvedRepo]) -> (Vec<SourceInfoData>, Vec<String>) {
     let mut seen = std::collections::HashSet::new();
-    let mut rows = Vec::new();
+    let mut items = Vec::new();
     let mut labels = Vec::new();
 
     for repo in repos {
@@ -631,26 +710,26 @@ fn build_source_table_data(repos: &[ResolvedRepo]) -> (Vec<Vec<String>>, Vec<Str
             } else {
                 source.repos.join(", ")
             };
-            rows.push(vec![
-                source.label.clone(),
-                source.paths.join("\n"),
-                source.exclude.join(", "),
-                target,
-            ]);
+            items.push(SourceInfoData {
+                label: source.label.clone(),
+                paths: source.paths.join(", "),
+                excludes: source.exclude.join(", "),
+                target_repos: target,
+            });
             labels.push(source.label.clone());
         }
     }
 
-    (rows, labels)
+    (items, labels)
 }
 
 fn send_structured_data(ui_tx: &Sender<UiEvent>, repos: &[ResolvedRepo]) {
     let _ = ui_tx.send(UiEvent::RepoNames(collect_repo_names(repos)));
 
-    let (rows, labels) = build_source_table_data(repos);
-    let _ = ui_tx.send(UiEvent::SourceTableData {
-        rows,
-        source_labels: labels,
+    let (items, labels) = build_source_model_data(repos);
+    let _ = ui_tx.send(UiEvent::SourceModelData {
+        items,
+        labels,
     });
 }
 
@@ -1031,9 +1110,7 @@ fn run_worker(
                     }
                 };
 
-                let mut rows = Vec::new();
-                let mut snapshot_ids = Vec::new();
-                let mut repo_names = Vec::new();
+                let mut data = Vec::new();
 
                 for repo in repos_to_scan {
                     let repo_name = format_repo_name(repo);
@@ -1050,7 +1127,6 @@ fn run_worker(
                             snapshots.sort_by_key(|s| s.time);
                             for s in snapshots {
                                 let ts: DateTime<Local> = s.time.with_timezone(&Local);
-                                // Source column: show actual paths, fallback to source_label
                                 let sources = if s.source_paths.is_empty() {
                                     if s.source_label.is_empty() {
                                         "-".to_string()
@@ -1060,20 +1136,19 @@ fn run_worker(
                                 } else {
                                     s.source_paths.join("\n")
                                 };
-                                // Label column: show source_label
                                 let label = if s.source_label.is_empty() {
                                     "-".to_string()
                                 } else {
                                     s.source_label.clone()
                                 };
-                                rows.push(vec![
-                                    s.name.clone(),
-                                    sources,
+                                data.push(SnapshotRowData {
+                                    id: s.name.clone(),
+                                    time_str: ts.format("%Y-%m-%d %H:%M:%S").to_string(),
+                                    source: sources,
                                     label,
-                                    ts.format("%Y-%m-%d %H:%M:%S").to_string(),
-                                ]);
-                                snapshot_ids.push(s.name.clone());
-                                repo_names.push(repo_name.clone());
+                                    time_epoch: s.time.timestamp(),
+                                    repo_name: repo_name.clone(),
+                                });
                             }
                         }
                         Err(e) => {
@@ -1085,11 +1160,7 @@ fn run_worker(
                     }
                 }
 
-                let _ = ui_tx.send(UiEvent::SnapshotTableData {
-                    rows,
-                    snapshot_ids,
-                    repo_names,
-                });
+                let _ = ui_tx.send(UiEvent::SnapshotTableData { data });
                 let _ = ui_tx.send(UiEvent::Status("Idle".to_string()));
             }
             AppCommand::FetchSnapshotContents {
@@ -1244,6 +1315,49 @@ fn run_worker(
                         }
                     }
                     Err(e) => send_log(&ui_tx, format!("[{repo_name}] check failed: {e}")),
+                }
+                let _ = ui_tx.send(UiEvent::Status("Idle".to_string()));
+            }
+            AppCommand::CompactRepo { repo_name } => {
+                let _ = ui_tx.send(UiEvent::Status("Compacting repository...".to_string()));
+
+                let repo = match config::select_repo(&runtime.repos, &repo_name) {
+                    Some(r) => r,
+                    None => {
+                        send_log(&ui_tx, format!("No repository matching '{repo_name}'."));
+                        let _ = ui_tx.send(UiEvent::Status("Idle".to_string()));
+                        continue;
+                    }
+                };
+
+                let passphrase = match get_or_resolve_passphrase(repo, &mut passphrases) {
+                    Ok(p) => p,
+                    Err(e) => {
+                        send_log(&ui_tx, format!("[{repo_name}] passphrase error: {e}"));
+                        let _ = ui_tx.send(UiEvent::Status("Idle".to_string()));
+                        continue;
+                    }
+                };
+
+                match vger_core::commands::compact::run(
+                    &repo.config,
+                    passphrase.as_deref(),
+                    10.0,
+                    None,
+                    false,
+                ) {
+                    Ok(stats) => {
+                        send_log(
+                            &ui_tx,
+                            format!(
+                                "[{repo_name}] Compact complete: {} packs repacked, {} empty deleted, {} freed",
+                                stats.packs_repacked,
+                                stats.packs_deleted_empty,
+                                format_bytes(stats.space_freed),
+                            ),
+                        );
+                    }
+                    Err(e) => send_log(&ui_tx, format!("[{repo_name}] compact failed: {e}")),
                 }
                 let _ = ui_tx.send(UiEvent::Status("Idle".to_string()));
             }
@@ -1446,6 +1560,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let source_labels: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
     let snapshot_ids: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
     let snapshot_repo_names: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+    let snapshot_data: Arc<Mutex<Vec<SnapshotRowData>>> = Arc::new(Mutex::new(Vec::new()));
 
     // ── Event loop consumer ──
 
@@ -1455,6 +1570,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let source_labels_for_events = source_labels.clone();
     let snapshot_ids_for_events = snapshot_ids.clone();
     let snapshot_repo_names_for_events = snapshot_repo_names.clone();
+    let snapshot_data_for_events = snapshot_data.clone();
+    let app_tx_for_events = app_tx.clone();
 
     thread::spawn(move || {
         while let Ok(event) = ui_rx.recv() {
@@ -1464,6 +1581,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             let source_labels = source_labels_for_events.clone();
             let snapshot_ids = snapshot_ids_for_events.clone();
             let snapshot_repo_names = snapshot_repo_names_for_events.clone();
+            let snapshot_data = snapshot_data_for_events.clone();
+            let app_tx = app_tx_for_events.clone();
 
             let _ = slint::invoke_from_event_loop(move || {
                 let Some(ui) = ui_weak.upgrade() else {
@@ -1480,9 +1599,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     UiEvent::RepoNames(names) => {
                         let first = names.first().cloned().unwrap_or_default();
                         ui.set_repo_names(to_string_model(names));
-                        // Pre-select first repo in snapshots combo
-                        if ui.get_snapshots_repo_combo_value().is_empty() {
-                            ui.set_snapshots_repo_combo_value(first.into());
+                        // Pre-select first repo in snapshots combo and auto-load
+                        if ui.get_snapshots_repo_combo_value().is_empty() && !first.is_empty() {
+                            ui.set_snapshots_repo_combo_value(first.clone().into());
+                            let _ = app_tx.send(AppCommand::RefreshSnapshots {
+                                repo_selector: first,
+                            });
                         }
                     }
                     UiEvent::RepoModelData {
@@ -1503,25 +1625,37 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                             .collect();
                         ui.set_repo_model(ModelRc::new(VecModel::from(model)));
                     }
-                    UiEvent::SourceTableData {
-                        rows,
-                        source_labels: labels,
+                    UiEvent::SourceModelData {
+                        items,
+                        labels,
                     } => {
                         if let Ok(mut sl) = source_labels.lock() {
                             *sl = labels;
                         }
-                        ui.set_source_rows(to_table_model(rows));
+                        let model: Vec<SourceInfo> = items
+                            .into_iter()
+                            .map(|d| SourceInfo {
+                                label: d.label.into(),
+                                paths: d.paths.into(),
+                                excludes: d.excludes.into(),
+                                target_repos: d.target_repos.into(),
+                            })
+                            .collect();
+                        ui.set_source_model(ModelRc::new(VecModel::from(model)));
                     }
-                    UiEvent::SnapshotTableData {
-                        rows,
-                        snapshot_ids: ids,
-                        repo_names: rnames,
-                    } => {
+                    UiEvent::SnapshotTableData { data } => {
                         if let Ok(mut si) = snapshot_ids.lock() {
-                            *si = ids;
+                            *si = data.iter().map(|d| d.id.clone()).collect();
                         }
                         if let Ok(mut sr) = snapshot_repo_names.lock() {
-                            *sr = rnames;
+                            *sr = data.iter().map(|d| d.repo_name.clone()).collect();
+                        }
+                        let rows: Vec<Vec<String>> = data
+                            .iter()
+                            .map(|d| vec![d.id.clone(), d.time_str.clone(), d.source.clone(), d.label.clone()])
+                            .collect();
+                        if let Ok(mut sd) = snapshot_data.lock() {
+                            *sd = data;
                         }
                         ui.set_snapshot_rows(to_table_model(rows));
                     }
@@ -1590,13 +1724,28 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     });
 
     let tx = app_tx.clone();
+    let rl = repo_labels.clone();
+    ui.on_compact_repo_clicked(move |idx| {
+        if idx < 0 {
+            return;
+        }
+        if let Ok(labels) = rl.lock() {
+            if let Some(name) = labels.get(idx as usize) {
+                let _ = tx.send(AppCommand::CompactRepo {
+                    repo_name: name.clone(),
+                });
+            }
+        }
+    });
+
+    let tx = app_tx.clone();
     let sl = source_labels.clone();
-    ui.on_backup_selected_source_clicked(move |row| {
-        if row < 0 {
+    ui.on_backup_source_clicked(move |idx| {
+        if idx < 0 {
             return;
         }
         if let Ok(labels) = sl.lock() {
-            if let Some(label) = labels.get(row as usize) {
+            if let Some(label) = labels.get(idx as usize) {
                 let _ = tx.send(AppCommand::RunBackupSource {
                     source_label: label.clone(),
                 });
@@ -1624,6 +1773,26 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             });
         }
     });
+
+    // Snapshot sorting callbacks
+    {
+        let sd = snapshot_data.clone();
+        let si = snapshot_ids.clone();
+        let sr = snapshot_repo_names.clone();
+        let ui_weak = ui.as_weak();
+        ui.on_snapshot_sort_ascending(move |col_idx| {
+            sort_snapshot_table(&sd, &si, &sr, &ui_weak, col_idx, true);
+        });
+    }
+    {
+        let sd = snapshot_data.clone();
+        let si = snapshot_ids.clone();
+        let sr = snapshot_repo_names.clone();
+        let ui_weak = ui.as_weak();
+        ui.on_snapshot_sort_descending(move |col_idx| {
+            sort_snapshot_table(&sd, &si, &sr, &ui_weak, col_idx, false);
+        });
+    }
 
     let tx = app_tx.clone();
     let si = snapshot_ids.clone();
