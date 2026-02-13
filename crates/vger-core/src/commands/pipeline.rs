@@ -10,7 +10,6 @@ use tracing::warn;
 
 use crate::chunker;
 use crate::config::ChunkerConfig;
-use crate::crypto::chunk_id::ChunkId;
 use crate::error::VgerError;
 use crate::limits::{self, ByteRateLimiter};
 use crate::platform::fs;
@@ -86,7 +85,7 @@ pub enum FileMessage {
         abs_path: String,
     },
     /// A single chunk from the file currently being streamed.
-    FileChunk { chunk_id: ChunkId, data: Vec<u8> },
+    FileChunk { data: Vec<u8> },
     /// End of the file currently being streamed.
     FileEnd,
     /// A non-file item (directory, symlink) — just needs to be appended to the item stream.
@@ -176,7 +175,6 @@ pub fn run_producer(
     git_ignore: bool,
     xattrs_enabled: bool,
     chunker_config: &ChunkerConfig,
-    chunk_id_key: &[u8; 32],
     file_cache: &FileCache,
     read_limiter: Option<&ByteRateLimiter>,
     byte_budget: &Arc<ByteBudget>,
@@ -201,7 +199,6 @@ pub fn run_producer(
             git_ignore,
             xattrs_enabled,
             chunker_config,
-            chunk_id_key,
             file_cache,
             read_limiter,
             byte_budget,
@@ -234,7 +231,6 @@ fn produce_source(
     git_ignore: bool,
     xattrs_enabled: bool,
     chunker_config: &ChunkerConfig,
-    chunk_id_key: &[u8; 32],
     file_cache: &FileCache,
     read_limiter: Option<&ByteRateLimiter>,
     byte_budget: &Arc<ByteBudget>,
@@ -447,17 +443,13 @@ fn produce_source(
                         entry.path().display()
                     ))
                 })?;
-                let chunk_id = ChunkId::compute(chunk_id_key, &chunk.data);
                 let data_len = chunk.data.len();
 
                 // Block until we have budget for this chunk's bytes.
                 byte_budget.acquire(data_len);
 
                 if tx
-                    .send(FileMessage::FileChunk {
-                        chunk_id,
-                        data: chunk.data,
-                    })
+                    .send(FileMessage::FileChunk { data: chunk.data })
                     .is_err()
                 {
                     return Ok(());

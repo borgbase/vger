@@ -1,4 +1,4 @@
-use std::collections::{hash_map::Entry, HashMap};
+use std::collections::HashMap;
 use std::fs::File;
 use std::path::Path;
 
@@ -141,154 +141,77 @@ fn read_item_xattrs(_path: &Path) -> Option<HashMap<String, Vec<u8>>> {
     None
 }
 
-struct TransformJob {
-    chunk_id: ChunkId,
-    data: Vec<u8>,
-}
-
 struct PreparedChunk {
     chunk_id: ChunkId,
     uncompressed_size: u32,
     packed: Vec<u8>,
 }
 
-enum FileChunkAction {
-    Existing {
-        chunk_id: ChunkId,
-        size: u32,
-        csize: u32,
-    },
-    NewPrimary {
-        chunk_id: ChunkId,
-        size: u32,
-        job_idx: usize,
-    },
-    NewDuplicate {
-        chunk_id: ChunkId,
-        size: u32,
-    },
-}
-
 fn flush_regular_file_batch(
     repo: &mut Repository,
     compression: Compression,
+    chunk_id_key: &[u8; 32],
     transform_pool: Option<&rayon::ThreadPool>,
-    actions: &mut Vec<FileChunkAction>,
-    transform_jobs: &mut Vec<TransformJob>,
+    raw_chunks: &mut Vec<Vec<u8>>,
     item: &mut Item,
     stats: &mut SnapshotStats,
 ) -> Result<()> {
-    if actions.is_empty() {
+    if raw_chunks.is_empty() {
         return Ok(());
     }
 
-    let mut prepared_chunks: Vec<Option<PreparedChunk>> = if transform_jobs.is_empty() {
-        Vec::new()
-    } else {
-        let prepared_results: Vec<Result<PreparedChunk>> = {
-            let crypto = repo.crypto.as_ref();
-            if let Some(pool) = transform_pool {
-                pool.install(|| {
-                    transform_jobs
-                        .par_iter()
-                        .map(|job| {
-                            let compressed = crate::compress::compress(compression, &job.data)?;
-                            let packed = pack_object(ObjectType::ChunkData, &compressed, crypto)?;
-                            Ok(PreparedChunk {
-                                chunk_id: job.chunk_id,
-                                uncompressed_size: job.data.len() as u32,
-                                packed,
-                            })
-                        })
-                        .collect()
-                })
-            } else {
-                transform_jobs
-                    .iter()
-                    .map(|job| {
-                        let compressed = crate::compress::compress(compression, &job.data)?;
-                        let packed = pack_object(ObjectType::ChunkData, &compressed, crypto)?;
-                        Ok(PreparedChunk {
-                            chunk_id: job.chunk_id,
-                            uncompressed_size: job.data.len() as u32,
-                            packed,
-                        })
-                    })
-                    .collect()
-            }
+    // Parallel phase: compute ChunkId + compress + encrypt for every chunk.
+    let prepared_results: Vec<Result<PreparedChunk>> = {
+        let crypto = repo.crypto.as_ref();
+        let do_work = |data: &Vec<u8>| -> Result<PreparedChunk> {
+            let chunk_id = ChunkId::compute(chunk_id_key, data);
+            let compressed = crate::compress::compress(compression, data)?;
+            let packed = pack_object(ObjectType::ChunkData, &compressed, crypto)?;
+            Ok(PreparedChunk {
+                chunk_id,
+                uncompressed_size: data.len() as u32,
+                packed,
+            })
         };
-
-        prepared_results
-            .into_iter()
-            .collect::<Result<Vec<_>>>()?
-            .into_iter()
-            .map(Some)
-            .collect()
+        if let Some(pool) = transform_pool {
+            pool.install(|| raw_chunks.par_iter().map(do_work).collect())
+        } else {
+            raw_chunks.iter().map(do_work).collect()
+        }
     };
 
-    transform_jobs.clear();
+    raw_chunks.clear();
 
-    for action in actions.drain(..) {
-        match action {
-            FileChunkAction::Existing {
-                chunk_id,
+    // Sequential phase: dedup check and commit.
+    for result in prepared_results {
+        let prepared = result?;
+        let size = prepared.uncompressed_size;
+
+        if let Some(csize) = repo.bump_ref_if_exists(&prepared.chunk_id) {
+            // Duplicate — already in index (or committed earlier in this batch).
+            stats.original_size += size as u64;
+            stats.compressed_size += csize as u64;
+            item.chunks.push(ChunkRef {
+                id: prepared.chunk_id,
                 size,
                 csize,
-            } => {
-                stats.original_size += size as u64;
-                stats.compressed_size += csize as u64;
-                item.chunks.push(ChunkRef {
-                    id: chunk_id,
-                    size,
-                    csize,
-                });
-            }
-            FileChunkAction::NewPrimary {
-                chunk_id,
+            });
+        } else {
+            // New chunk — commit packed data into pack writer.
+            let csize = repo.commit_prepacked_chunk(
+                prepared.chunk_id,
+                prepared.packed,
+                prepared.uncompressed_size,
+                PackType::Data,
+            )?;
+            stats.original_size += size as u64;
+            stats.compressed_size += csize as u64;
+            stats.deduplicated_size += csize as u64;
+            item.chunks.push(ChunkRef {
+                id: prepared.chunk_id,
                 size,
-                job_idx,
-            } => {
-                let prepared = prepared_chunks
-                    .get_mut(job_idx)
-                    .and_then(Option::take)
-                    .ok_or_else(|| {
-                        VgerError::Other(format!("missing prepared chunk at index {job_idx}"))
-                    })?;
-                if prepared.chunk_id != chunk_id {
-                    return Err(VgerError::Other(format!(
-                        "prepared chunk mismatch at index {job_idx}"
-                    )));
-                }
-
-                let csize = repo.commit_prepacked_chunk(
-                    chunk_id,
-                    prepared.packed,
-                    prepared.uncompressed_size,
-                    PackType::Data,
-                )?;
-
-                stats.original_size += size as u64;
-                stats.compressed_size += csize as u64;
-                stats.deduplicated_size += csize as u64;
-                item.chunks.push(ChunkRef {
-                    id: chunk_id,
-                    size,
-                    csize,
-                });
-            }
-            FileChunkAction::NewDuplicate { chunk_id, size } => {
-                let csize = repo.bump_ref_if_exists(&chunk_id).ok_or_else(|| {
-                    VgerError::Other(format!("dedup invariant violated for chunk {chunk_id}"))
-                })?;
-
-                stats.original_size += size as u64;
-                stats.compressed_size += csize as u64;
-                item.chunks.push(ChunkRef {
-                    id: chunk_id,
-                    size,
-                    csize,
-                });
-            }
+                csize,
+            });
         }
     }
 
@@ -602,72 +525,40 @@ fn process_regular_file_item(
         &repo.config.chunker_params,
     );
 
-    let mut actions: Vec<FileChunkAction> = Vec::new();
-    let mut transform_jobs: Vec<TransformJob> = Vec::new();
-    let mut pending_new: HashMap<ChunkId, usize> = HashMap::new();
-    let mut pending_transform_bytes: usize = 0;
+    let mut raw_chunks: Vec<Vec<u8>> = Vec::new();
+    let mut pending_bytes: usize = 0;
 
     for chunk_result in chunk_stream {
         let chunk = chunk_result.map_err(|e| {
             VgerError::Other(format!("chunking failed for {}: {e}", entry_path.display()))
         })?;
 
-        let chunk_data = chunk.data;
-        let chunk_id = ChunkId::compute(&chunk_id_key, &chunk_data);
-        let size = chunk_data.len() as u32;
+        let data_len = chunk.data.len();
+        pending_bytes = pending_bytes.saturating_add(data_len);
+        raw_chunks.push(chunk.data);
 
-        if let Some(csize) = repo.bump_ref_if_exists(&chunk_id) {
-            actions.push(FileChunkAction::Existing {
-                chunk_id,
-                size,
-                csize,
-            });
-        } else {
-            match pending_new.entry(chunk_id) {
-                Entry::Occupied(_) => {
-                    actions.push(FileChunkAction::NewDuplicate { chunk_id, size });
-                }
-                Entry::Vacant(entry) => {
-                    let job_idx = transform_jobs.len();
-                    entry.insert(job_idx);
-                    pending_transform_bytes =
-                        pending_transform_bytes.saturating_add(chunk_data.len());
-                    transform_jobs.push(TransformJob {
-                        chunk_id,
-                        data: chunk_data,
-                    });
-                    actions.push(FileChunkAction::NewPrimary {
-                        chunk_id,
-                        size,
-                        job_idx,
-                    });
-                }
-            }
-        }
-
-        if pending_transform_bytes >= max_pending_transform_bytes
-            || actions.len() >= max_pending_file_actions
+        if pending_bytes >= max_pending_transform_bytes
+            || raw_chunks.len() >= max_pending_file_actions
         {
             flush_regular_file_batch(
                 repo,
                 compression,
+                &chunk_id_key,
                 transform_pool,
-                &mut actions,
-                &mut transform_jobs,
+                &mut raw_chunks,
                 item,
                 stats,
             )?;
-            pending_new.clear();
-            pending_transform_bytes = 0;
+            pending_bytes = 0;
         }
     }
 
     flush_regular_file_batch(
         repo,
         compression,
+        &chunk_id_key,
         transform_pool,
-        &mut actions,
-        &mut transform_jobs,
+        &mut raw_chunks,
         item,
         stats,
     )?;
@@ -950,12 +841,11 @@ fn run_pipeline_backup(
         item: Item,
         metadata_summary: fs::MetadataSummary,
         abs_path: String,
-        actions: Vec<FileChunkAction>,
-        transform_jobs: Vec<TransformJob>,
-        pending_new: HashMap<ChunkId, usize>,
-        pending_transform_bytes: usize,
+        raw_chunks: Vec<Vec<u8>>,
+        pending_bytes: usize,
     }
 
+    let chunk_id_key = *repo.crypto.chunk_id_key();
     let mut current_file: Option<StreamingFile> = None;
 
     for msg in rx.iter() {
@@ -1037,68 +927,36 @@ fn run_pipeline_backup(
                     item,
                     metadata_summary,
                     abs_path,
-                    actions: Vec::new(),
-                    transform_jobs: Vec::new(),
-                    pending_new: HashMap::new(),
-                    pending_transform_bytes: 0,
+                    raw_chunks: Vec::new(),
+                    pending_bytes: 0,
                 });
             }
 
-            FileMessage::FileChunk { chunk_id, data } => {
+            FileMessage::FileChunk { data } => {
                 let sf = current_file
                     .as_mut()
                     .expect("FileChunk without preceding FileStart");
 
                 let data_len = data.len();
-                let size = data_len as u32;
-
-                if let Some(csize) = repo.bump_ref_if_exists(&chunk_id) {
-                    sf.actions.push(FileChunkAction::Existing {
-                        chunk_id,
-                        size,
-                        csize,
-                    });
-                } else {
-                    match sf.pending_new.entry(chunk_id) {
-                        Entry::Occupied(_) => {
-                            sf.actions
-                                .push(FileChunkAction::NewDuplicate { chunk_id, size });
-                        }
-                        Entry::Vacant(entry) => {
-                            let job_idx = sf.transform_jobs.len();
-                            entry.insert(job_idx);
-                            sf.pending_transform_bytes =
-                                sf.pending_transform_bytes.saturating_add(data_len);
-                            sf.transform_jobs.push(TransformJob {
-                                chunk_id,
-                                data, // moved, not cloned
-                            });
-                            sf.actions.push(FileChunkAction::NewPrimary {
-                                chunk_id,
-                                size,
-                                job_idx,
-                            });
-                        }
-                    }
-                }
+                sf.pending_bytes = sf.pending_bytes.saturating_add(data_len);
+                sf.raw_chunks.push(data);
 
                 // Release byte budget now that we've consumed the chunk data.
                 byte_budget.release(data_len);
 
-                if sf.pending_transform_bytes >= max_pending_transform_bytes
-                    || sf.actions.len() >= max_pending_file_actions
+                if sf.pending_bytes >= max_pending_transform_bytes
+                    || sf.raw_chunks.len() >= max_pending_file_actions
                 {
                     flush_regular_file_batch(
                         repo,
                         compression,
+                        &chunk_id_key,
                         transform_pool,
-                        &mut sf.actions,
-                        &mut sf.transform_jobs,
+                        &mut sf.raw_chunks,
                         &mut sf.item,
                         stats,
                     )?;
-                    sf.pending_new.clear();
-                    sf.pending_transform_bytes = 0;
+                    sf.pending_bytes = 0;
                 }
             }
 
@@ -1110,9 +968,9 @@ fn run_pipeline_backup(
                 flush_regular_file_batch(
                     repo,
                     compression,
+                    &chunk_id_key,
                     transform_pool,
-                    &mut sf.actions,
-                    &mut sf.transform_jobs,
+                    &mut sf.raw_chunks,
                     &mut sf.item,
                     stats,
                 )?;
@@ -1274,7 +1132,6 @@ pub fn run_with_progress(
             // Extract file_cache before the scope so we can lend it immutably
             // to the producer while the consumer mutates repo.
             let file_cache_snapshot = std::mem::take(&mut repo.file_cache);
-            let chunk_id_key = *repo.crypto.chunk_id_key();
             let chunker_config = repo.config.chunker_params.clone();
             let byte_budget =
                 std::sync::Arc::new(super::pipeline::ByteBudget::new(pipeline_buffer_bytes));
@@ -1294,7 +1151,6 @@ pub fn run_with_progress(
                         git_ignore,
                         xattrs_enabled,
                         &chunker_config,
-                        &chunk_id_key,
                         &file_cache_snapshot,
                         read_limiter.as_deref(),
                         &producer_budget,
