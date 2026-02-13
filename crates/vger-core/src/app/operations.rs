@@ -148,3 +148,19 @@ pub fn extract_snapshot(
         config.xattrs.enabled,
     )
 }
+
+pub fn check_repo(
+    config: &VgerConfig,
+    passphrase: Option<&str>,
+    verify_data: bool,
+) -> Result<commands::check::CheckResult> {
+    commands::check::run(config, passphrase, verify_data)
+}
+
+pub fn delete_snapshot(
+    config: &VgerConfig,
+    passphrase: Option<&str>,
+    snapshot_name: &str,
+) -> Result<commands::delete::DeleteStats> {
+    commands::delete::run(config, passphrase, snapshot_name, false)
+}

@@ -4,7 +4,7 @@
   <img src="docs/src/images/vger-color-rounded.webp" alt="V'Ger Backup Logo" width="350">
 </p>
 
-A fast, encrypted, deduplicated backup tool written in Rust.
+A fast, encrypted, deduplicated backup tool written in Rust centered around a friendly YAML config file.
 
 Inspired by [BorgBackup](https://github.com/borgbackup/borg/), [Borgmatic](https://torsion.org/borgmatic/), [Restic](https://github.com/restic/restic), and [Rustic](https://github.com/rustic-rs/rustic). V'Ger uses its own on-disk format and is not compatible with Borg or Restic repositories.
 

@@ -11,7 +11,8 @@
       "Bash(./target/release/vger:*)",
       "Bash(test:*)",
       "Bash(make docs-build:*)",
-      "Bash(mdbook build:*)"
+      "Bash(mdbook build:*)",
+      "Bash(bash:*)"
     ]
   }
 }

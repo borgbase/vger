@@ -16,7 +16,14 @@ use vger_core::config::{self, ResolvedRepo, ScheduleConfig};
 use vger_core::error::VgerError;
 
 slint::slint! {
-    import { VerticalBox, HorizontalBox, Button, LineEdit, ScrollView, TabWidget, ComboBox, StandardTableView } from "std-widgets.slint";
+    import { VerticalBox, HorizontalBox, Button, LineEdit, ScrollView, TabWidget, ComboBox, StandardTableView, ListView } from "std-widgets.slint";
+
+    struct RepoInfo {
+        name: string,
+        url: string,
+        snapshots: string,
+        last_snapshot: string,
+    }
 
     export component RestoreWindow inherits Window {
         in-out property <string> snapshot_name;
@@ -103,8 +110,8 @@ slint::slint! {
         in-out property <string> status_text;
         in-out property <string> log_text;
 
-        // Repo table
-        in-out property <[[StandardListViewItem]]> repo_rows: [];
+        // Repo model (custom cards)
+        in-out property <[RepoInfo]> repo_model: [];
 
         // Source table
         in-out property <[[StandardListViewItem]]> source_rows: [];
@@ -114,14 +121,15 @@ slint::slint! {
         in-out property <string> snapshots_repo_combo_value;
         in-out property <[[StandardListViewItem]]> snapshot_rows: [];
 
+        callback open_config_clicked();
         callback backup_all_clicked();
         callback reload_config_clicked();
-        callback pause_schedule_clicked();
-        callback quit_clicked();
-        callback backup_selected_repo_clicked(/* row */ int);
+        callback backup_repo_clicked(/* index */ int);
+        callback check_repo_clicked(/* index */ int);
         callback backup_selected_source_clicked(/* row */ int);
         callback refresh_snapshots_clicked();
         callback restore_selected_snapshot_clicked(/* row */ int);
+        callback delete_selected_snapshot_clicked(/* row */ int);
         callback snapshots_repo_changed(/* value */ string);
 
         title: "V'Ger";
@@ -132,6 +140,31 @@ slint::slint! {
             padding: 0px;
             spacing: 0px;
 
+            // ── Header ──
+            VerticalBox {
+                padding-left: 12px;
+                padding-right: 12px;
+                padding-top: 10px;
+                padding-bottom: 6px;
+                spacing: 4px;
+
+                HorizontalBox {
+                    spacing: 4px;
+                    Text { text: "Edit your backup configuration:"; vertical-alignment: center; }
+                    TouchArea {
+                        mouse-cursor: pointer;
+                        clicked => { root.open_config_clicked(); }
+                        Text { text: root.config_path; color: #4a90d9; vertical-alignment: center; }
+                    }
+                }
+                HorizontalBox {
+                    spacing: 16px;
+                    Text { text: "Schedule:"; vertical-alignment: center; }
+                    Text { text: root.schedule_text; vertical-alignment: center; }
+                }
+            }
+            Rectangle { height: 1px; background: #d5d5d5; }
+
             // ── Tabs ──
             TabWidget {
                 vertical-stretch: 1;
@@ -141,27 +174,33 @@ slint::slint! {
                     VerticalBox {
                         spacing: 8px;
                         padding: 8px;
-
-                        repo-table := StandardTableView {
+                        ListView {
                             vertical-stretch: 1;
-                            columns: [
-                                { title: "Name" },
-                                { title: "Encryption" },
-                                { title: "Snapshots" },
-                                { title: "Last Snapshot" },
-                                { title: "Raw Size" },
-                                { title: "Dedup Size" },
-                            ];
-                            rows: root.repo_rows;
-                        }
-
-                        HorizontalBox {
-                            spacing: 8px;
-                            Button {
-                                text: "Backup Selected Repo";
-                                clicked => {
-                                    root.backup-selected-repo-clicked(repo-table.current-row);
+                            for repo[idx] in root.repo_model: Rectangle {
+                                height: 56px;
+                                HorizontalLayout {
+                                    padding: 8px;
+                                    spacing: 16px;
+                                    VerticalLayout {
+                                        horizontal-stretch: 1;
+                                        Text { text: repo.name; font-weight: 700; }
+                                        Text { text: repo.url; color: #888888; font-size: 11px; }
+                                    }
+                                    VerticalLayout {
+                                        horizontal-stretch: 1;
+                                        Text { text: "Snapshots: " + repo.snapshots; }
+                                        Text { text: "Latest: " + repo.last_snapshot; font-size: 11px; color: #888888; }
+                                    }
+                                    VerticalLayout {
+                                        alignment: center;
+                                        HorizontalLayout {
+                                            spacing: 8px;
+                                            Button { text: "Backup"; clicked => { root.backup_repo_clicked(idx); } }
+                                            Button { text: "Check"; clicked => { root.check_repo_clicked(idx); } }
+                                        }
+                                    }
                                 }
+                                Rectangle { y: parent.height - 1px; height: 1px; background: #d5d5d5; width: 100%; }
                             }
                         }
                     }
@@ -237,6 +276,12 @@ slint::slint! {
                                     root.restore-selected-snapshot-clicked(snapshot-table.current-row);
                                 }
                             }
+                            Button {
+                                text: "Delete Selected Snapshot";
+                                clicked => {
+                                    root.delete-selected-snapshot-clicked(snapshot-table.current-row);
+                                }
+                            }
                         }
                     }
                 }
@@ -261,26 +306,7 @@ slint::slint! {
                 }
             }
 
-            // ── Status bar ──
-            Rectangle {
-                height: 1px;
-                background: #d5d5d5;
-            }
-
-            HorizontalBox {
-                padding-left: 12px;
-                padding-right: 12px;
-                padding-top: 6px;
-                padding-bottom: 6px;
-                spacing: 16px;
-
-                Text { text: "Schedule:"; vertical-alignment: center; }
-                Text { text: root.schedule_text; vertical-alignment: center; horizontal-stretch: 1; }
-                Text { text: "Status:"; vertical-alignment: center; }
-                Text { text: root.status_text; vertical-alignment: center; }
-            }
-
-            // ── Bottom bar ──
+            // ── Footer ──
             Rectangle {
                 height: 1px;
                 background: #d5d5d5;
@@ -295,6 +321,8 @@ slint::slint! {
 
                 Text { text: "Config:"; vertical-alignment: center; }
                 Text { text: root.config_path; vertical-alignment: center; horizontal-stretch: 1; }
+                Text { text: "Status:"; vertical-alignment: center; }
+                Text { text: root.status_text; vertical-alignment: center; }
 
                 Button {
                     text: "Backup All";
@@ -303,14 +331,6 @@ slint::slint! {
                 Button {
                     text: "Reload";
                     clicked => { root.reload_config_clicked(); }
-                }
-                Button {
-                    text: "Pause/Resume";
-                    clicked => { root.pause_schedule_clicked(); }
-                }
-                Button {
-                    text: "Quit";
-                    clicked => { root.quit_clicked(); }
                 }
             }
         }
@@ -344,10 +364,26 @@ enum AppCommand {
         dest: String,
         pattern: Option<String>,
     },
+    CheckRepo {
+        repo_name: String,
+    },
+    DeleteSnapshot {
+        repo_name: String,
+        snapshot_name: String,
+    },
+    OpenConfigFile,
     ReloadConfig,
     ToggleSchedulePause,
     ShowWindow,
     Quit,
+}
+
+#[derive(Debug, Clone)]
+struct RepoInfoData {
+    name: String,
+    url: String,
+    snapshots: String,
+    last_snapshot: String,
 }
 
 #[derive(Debug, Clone)]
@@ -359,9 +395,9 @@ enum UiEvent {
         schedule: String,
     },
     RepoNames(Vec<String>),
-    RepoTableData {
-        rows: Vec<Vec<String>>,
-        repo_labels: Vec<String>,
+    RepoModelData {
+        items: Vec<RepoInfoData>,
+        labels: Vec<String>,
     },
     SourceTableData {
         rows: Vec<Vec<String>>,
@@ -597,7 +633,7 @@ fn build_source_table_data(repos: &[ResolvedRepo]) -> (Vec<Vec<String>>, Vec<Str
             };
             rows.push(vec![
                 source.label.clone(),
-                source.paths.join(", "),
+                source.paths.join("\n"),
                 source.exclude.join(", "),
                 target,
             ]);
@@ -942,11 +978,12 @@ fn run_worker(
             AppCommand::FetchAllRepoInfo => {
                 let _ = ui_tx.send(UiEvent::Status("Fetching repository info...".to_string()));
 
-                let mut rows = Vec::new();
+                let mut items = Vec::new();
                 let mut labels = Vec::new();
 
                 for repo in &runtime.repos {
                     let repo_name = format_repo_name(repo);
+                    let url = repo.config.repository.url.clone();
                     let passphrase = match get_or_resolve_passphrase(repo, &mut passphrases) {
                         Ok(p) => p,
                         Err(e) => {
@@ -957,7 +994,6 @@ fn run_worker(
 
                     match vger_core::commands::info::run(&repo.config, passphrase.as_deref()) {
                         Ok(stats) => {
-                            let encryption = format!("{:?}", stats.encryption);
                             let last_snapshot = stats
                                 .last_snapshot_time
                                 .map(|t| {
@@ -966,14 +1002,12 @@ fn run_worker(
                                 })
                                 .unwrap_or_else(|| "N/A".to_string());
 
-                            rows.push(vec![
-                                repo_name.clone(),
-                                encryption,
-                                stats.snapshot_count.to_string(),
+                            items.push(RepoInfoData {
+                                name: repo_name.clone(),
+                                url,
+                                snapshots: stats.snapshot_count.to_string(),
                                 last_snapshot,
-                                format_bytes(stats.raw_size),
-                                format_bytes(stats.deduplicated_size),
-                            ]);
+                            });
                             labels.push(repo_name);
                         }
                         Err(e) => {
@@ -982,10 +1016,7 @@ fn run_worker(
                     }
                 }
 
-                let _ = ui_tx.send(UiEvent::RepoTableData {
-                    rows,
-                    repo_labels: labels,
-                });
+                let _ = ui_tx.send(UiEvent::RepoModelData { items, labels });
                 let _ = ui_tx.send(UiEvent::Status("Idle".to_string()));
             }
             AppCommand::RefreshSnapshots { repo_selector } => {
@@ -1019,19 +1050,25 @@ fn run_worker(
                             snapshots.sort_by_key(|s| s.time);
                             for s in snapshots {
                                 let ts: DateTime<Local> = s.time.with_timezone(&Local);
-                                let label = if s.label.is_empty() {
-                                    "-".to_string()
+                                // Source column: show actual paths, fallback to source_label
+                                let sources = if s.source_paths.is_empty() {
+                                    if s.source_label.is_empty() {
+                                        "-".to_string()
+                                    } else {
+                                        s.source_label.clone()
+                                    }
                                 } else {
-                                    s.label.clone()
+                                    s.source_paths.join("\n")
                                 };
-                                let source = if s.source_label.is_empty() {
+                                // Label column: show source_label
+                                let label = if s.source_label.is_empty() {
                                     "-".to_string()
                                 } else {
                                     s.source_label.clone()
                                 };
                                 rows.push(vec![
                                     s.name.clone(),
-                                    source,
+                                    sources,
                                     label,
                                     ts.format("%Y-%m-%d %H:%M:%S").to_string(),
                                 ]);
@@ -1168,6 +1205,120 @@ fn run_worker(
                 }
 
                 let _ = ui_tx.send(UiEvent::Status("Idle".to_string()));
+            }
+            AppCommand::CheckRepo { repo_name } => {
+                let _ = ui_tx.send(UiEvent::Status("Checking repository...".to_string()));
+
+                let repo = match config::select_repo(&runtime.repos, &repo_name) {
+                    Some(r) => r,
+                    None => {
+                        send_log(&ui_tx, format!("No repository matching '{repo_name}'."));
+                        let _ = ui_tx.send(UiEvent::Status("Idle".to_string()));
+                        continue;
+                    }
+                };
+
+                let passphrase = match get_or_resolve_passphrase(repo, &mut passphrases) {
+                    Ok(p) => p,
+                    Err(e) => {
+                        send_log(&ui_tx, format!("[{repo_name}] passphrase error: {e}"));
+                        let _ = ui_tx.send(UiEvent::Status("Idle".to_string()));
+                        continue;
+                    }
+                };
+
+                match operations::check_repo(&repo.config, passphrase.as_deref(), false) {
+                    Ok(result) => {
+                        send_log(
+                            &ui_tx,
+                            format!(
+                                "[{repo_name}] Check complete: {} snapshots, {} items checked, {} errors",
+                                result.snapshots_checked, result.items_checked, result.errors.len()
+                            ),
+                        );
+                        for err in &result.errors {
+                            send_log(
+                                &ui_tx,
+                                format!("  [{repo_name}] {}: {}", err.context, err.message),
+                            );
+                        }
+                    }
+                    Err(e) => send_log(&ui_tx, format!("[{repo_name}] check failed: {e}")),
+                }
+                let _ = ui_tx.send(UiEvent::Status("Idle".to_string()));
+            }
+            AppCommand::DeleteSnapshot {
+                repo_name,
+                snapshot_name,
+            } => {
+                // Confirm with user
+                let confirmed = tinyfiledialogs::message_box_yes_no(
+                    "Delete Snapshot",
+                    &format!(
+                        "Are you sure you want to delete snapshot '{snapshot_name}' from [{repo_name}]?"
+                    ),
+                    tinyfiledialogs::MessageBoxIcon::Question,
+                    tinyfiledialogs::YesNo::No,
+                );
+
+                if confirmed == tinyfiledialogs::YesNo::No {
+                    send_log(&ui_tx, "Snapshot deletion cancelled.");
+                    continue;
+                }
+
+                let _ = ui_tx.send(UiEvent::Status("Deleting snapshot...".to_string()));
+
+                let repo = match config::select_repo(&runtime.repos, &repo_name) {
+                    Some(r) => r,
+                    None => {
+                        send_log(&ui_tx, format!("No repository matching '{repo_name}'."));
+                        let _ = ui_tx.send(UiEvent::Status("Idle".to_string()));
+                        continue;
+                    }
+                };
+
+                let passphrase = match get_or_resolve_passphrase(repo, &mut passphrases) {
+                    Ok(p) => p,
+                    Err(e) => {
+                        send_log(&ui_tx, format!("[{repo_name}] passphrase error: {e}"));
+                        let _ = ui_tx.send(UiEvent::Status("Idle".to_string()));
+                        continue;
+                    }
+                };
+
+                match operations::delete_snapshot(
+                    &repo.config,
+                    passphrase.as_deref(),
+                    &snapshot_name,
+                ) {
+                    Ok(stats) => {
+                        send_log(
+                            &ui_tx,
+                            format!(
+                                "[{repo_name}] Deleted snapshot '{}': {} chunks freed, {} reclaimed",
+                                stats.snapshot_name,
+                                stats.chunks_deleted,
+                                format_bytes(stats.space_freed),
+                            ),
+                        );
+                        // Auto-refresh snapshots
+                        let _ = app_tx.send(AppCommand::RefreshSnapshots {
+                            repo_selector: repo_name,
+                        });
+                    }
+                    Err(e) => {
+                        send_log(
+                            &ui_tx,
+                            format!("[{repo_name}] delete failed: {e}"),
+                        );
+                    }
+                }
+                let _ = ui_tx.send(UiEvent::Status("Idle".to_string()));
+            }
+            AppCommand::OpenConfigFile => {
+                let path = runtime.source.path().display().to_string();
+                send_log(&ui_tx, format!("Opening config file: {path}"));
+                let _ = std::process::Command::new("open").arg(&path).spawn();
             }
             AppCommand::ReloadConfig => {
                 let config_path = runtime.source.path().to_path_buf();
@@ -1334,14 +1485,23 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                             ui.set_snapshots_repo_combo_value(first.into());
                         }
                     }
-                    UiEvent::RepoTableData {
-                        rows,
-                        repo_labels: labels,
+                    UiEvent::RepoModelData {
+                        items,
+                        labels,
                     } => {
                         if let Ok(mut rl) = repo_labels.lock() {
                             *rl = labels;
                         }
-                        ui.set_repo_rows(to_table_model(rows));
+                        let model: Vec<RepoInfo> = items
+                            .into_iter()
+                            .map(|d| RepoInfo {
+                                name: d.name.into(),
+                                url: d.url.into(),
+                                snapshots: d.snapshots.into(),
+                                last_snapshot: d.last_snapshot.into(),
+                            })
+                            .collect();
+                        ui.set_repo_model(ModelRc::new(VecModel::from(model)));
                     }
                     UiEvent::SourceTableData {
                         rows,
@@ -1385,6 +1545,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // ── Callback wiring: MainWindow ──
 
     let tx = app_tx.clone();
+    ui.on_open_config_clicked(move || {
+        let _ = tx.send(AppCommand::OpenConfigFile);
+    });
+
+    let tx = app_tx.clone();
     ui.on_backup_all_clicked(move || {
         let _ = tx.send(AppCommand::RunBackupAll { scheduled: false });
     });
@@ -1395,24 +1560,29 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     });
 
     let tx = app_tx.clone();
-    ui.on_pause_schedule_clicked(move || {
-        let _ = tx.send(AppCommand::ToggleSchedulePause);
-    });
-
-    let tx = app_tx.clone();
-    ui.on_quit_clicked(move || {
-        let _ = tx.send(AppCommand::Quit);
+    let rl = repo_labels.clone();
+    ui.on_backup_repo_clicked(move |idx| {
+        if idx < 0 {
+            return;
+        }
+        if let Ok(labels) = rl.lock() {
+            if let Some(name) = labels.get(idx as usize) {
+                let _ = tx.send(AppCommand::RunBackupRepo {
+                    repo_name: name.clone(),
+                });
+            }
+        }
     });
 
     let tx = app_tx.clone();
     let rl = repo_labels.clone();
-    ui.on_backup_selected_repo_clicked(move |row| {
-        if row < 0 {
+    ui.on_check_repo_clicked(move |idx| {
+        if idx < 0 {
             return;
         }
         if let Ok(labels) = rl.lock() {
-            if let Some(name) = labels.get(row as usize) {
-                let _ = tx.send(AppCommand::RunBackupRepo {
+            if let Some(name) = labels.get(idx as usize) {
+                let _ = tx.send(AppCommand::CheckRepo {
                     repo_name: name.clone(),
                 });
             }
@@ -1481,6 +1651,28 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
 
         let _ = tx.send(AppCommand::FetchSnapshotContents {
+            repo_name: rname,
+            snapshot_name: snap_name,
+        });
+    });
+
+    let tx = app_tx.clone();
+    let si = snapshot_ids.clone();
+    let sr = snapshot_repo_names.clone();
+    ui.on_delete_selected_snapshot_clicked(move |row| {
+        if row < 0 {
+            return;
+        }
+        let (snap_name, rname) = {
+            let ids = si.lock().unwrap_or_else(|e| e.into_inner());
+            let rnames = sr.lock().unwrap_or_else(|e| e.into_inner());
+            match (ids.get(row as usize), rnames.get(row as usize)) {
+                (Some(id), Some(rn)) => (id.clone(), rn.clone()),
+                _ => return,
+            }
+        };
+
+        let _ = tx.send(AppCommand::DeleteSnapshot {
             repo_name: rname,
             snapshot_name: snap_name,
         });
