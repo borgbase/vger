@@ -891,14 +891,69 @@ fn run_pipeline_backup(
                     debug!(path = %item.path, "file cache hit (pipeline)");
                     emit_stats_progress(progress, stats, Some(item.path.clone()));
                 } else {
-                    // Cache hit but chunks missing — can't re-chunk here (no file data).
-                    // Treat as zero-content file to avoid data loss. This is a rare edge case
-                    // (chunks pruned between cache load and backup) and will be fixed on next backup.
+                    // Cache hit but chunks were pruned — re-read and re-chunk the file.
                     warn!(
                         path = %item.path,
-                        "file cache hit but chunks missing from index; skipping content"
+                        "file cache hit but chunks missing from index; re-reading file"
                     );
+
+                    let file = File::open(&abs_path).map_err(VgerError::Io)?;
+                    let chunk_stream = chunker::chunk_stream(
+                        limits::LimitedReader::new(file, None),
+                        &repo.config.chunker_params,
+                    );
+
+                    let mut raw_chunks: Vec<Vec<u8>> = Vec::new();
+                    let mut pending_bytes: usize = 0;
+
+                    for chunk_result in chunk_stream {
+                        let chunk = chunk_result.map_err(|e| {
+                            VgerError::Other(format!("chunking failed for {}: {e}", abs_path))
+                        })?;
+
+                        let data_len = chunk.data.len();
+                        pending_bytes = pending_bytes.saturating_add(data_len);
+                        raw_chunks.push(chunk.data);
+
+                        if pending_bytes >= max_pending_transform_bytes
+                            || raw_chunks.len() >= max_pending_file_actions
+                        {
+                            flush_regular_file_batch(
+                                repo,
+                                compression,
+                                &chunk_id_key,
+                                transform_pool,
+                                &mut raw_chunks,
+                                &mut item,
+                                stats,
+                            )?;
+                            pending_bytes = 0;
+                        }
+                    }
+
+                    flush_regular_file_batch(
+                        repo,
+                        compression,
+                        &chunk_id_key,
+                        transform_pool,
+                        &mut raw_chunks,
+                        &mut item,
+                        stats,
+                    )?;
+
                     stats.nfiles += 1;
+
+                    new_file_cache.insert(
+                        abs_path,
+                        metadata_summary.device,
+                        metadata_summary.inode,
+                        metadata_summary.mtime_ns,
+                        metadata_summary.ctime_ns,
+                        metadata_summary.size,
+                        item.chunks.clone(),
+                    );
+
+                    emit_stats_progress(progress, stats, Some(item.path.clone()));
                 }
 
                 append_item_to_stream(

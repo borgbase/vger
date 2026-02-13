@@ -14,8 +14,11 @@ Run an autonomous vger stress test from a single folder layout:
   ./vger         vger CLI binary (or set --vger-bin)
   ./stress-cli.sh
 
-The script creates ./repository and ./restore while running, then always deletes
-both (plus all temp artifacts) before exit. Only corpus, script, and CLI remain.
+The script creates ./repository and ./restore while running, then deletes
+both (plus all temp artifacts) on success. On failure, artifacts are preserved by
+default for debugging unless --no-preserve-on-failure is set.
+Corpus fingerprint baseline is cached at $SCRIPT_DIR/.stress-cache/corpus.fp;
+delete this file manually if corpus content changes.
 
 Options:
   --iterations N           Loop count (default: 1000)
@@ -29,6 +32,10 @@ Options:
   --repo-label LABEL       repository label in config (default: stress)
   --vger-bin PATH          vger binary path (default: ./vger next to script)
   --corpus-dir PATH        corpus path (default: ./corpus next to script)
+  --preserve-on-failure    keep repository/restore/.stress-runtime on failure (default)
+  --no-preserve-on-failure always clean up, even on failure
+  --verify-diff-preview-lines N
+                           mismatch diff preview lines to stderr (default: 80)
   --help                   Show help
 USAGE
 }
@@ -141,6 +148,9 @@ COMPRESSION="zstd"
 ZSTD_LEVEL=6
 KEEP_LAST=1
 REPO_LABEL="stress"
+PRESERVE_ON_FAILURE=1
+VERIFY_DIFF_PREVIEW_LINES=80
+ORIGINAL_ARGS=("$@")
 
 DEFAULT_VGER="$SCRIPT_DIR/vger"
 if [[ -x "$DEFAULT_VGER" ]]; then
@@ -197,6 +207,18 @@ while [[ $# -gt 0 ]]; do
       CORPUS_DIR="${2:-}"
       shift 2
       ;;
+    --preserve-on-failure)
+      PRESERVE_ON_FAILURE=1
+      shift
+      ;;
+    --no-preserve-on-failure)
+      PRESERVE_ON_FAILURE=0
+      shift
+      ;;
+    --verify-diff-preview-lines)
+      VERIFY_DIFF_PREVIEW_LINES="${2:-}"
+      shift 2
+      ;;
     --help|-h)
       usage
       exit 0
@@ -213,6 +235,8 @@ done
 [[ "$DELETE_EVERY" =~ ^[0-9]+$ ]] || die "--delete-every must be a non-negative integer"
 [[ "$KEEP_LAST" =~ ^[0-9]+$ ]] || die "--keep-last must be a non-negative integer"
 [[ "$ZSTD_LEVEL" =~ ^-?[0-9]+$ ]] || die "--zstd-level must be an integer"
+[[ "$VERIFY_DIFF_PREVIEW_LINES" =~ ^[0-9]+$ ]] || die "--verify-diff-preview-lines must be a non-negative integer"
+[[ "$PRESERVE_ON_FAILURE" == "0" || "$PRESERVE_ON_FAILURE" == "1" ]] || die "internal error: invalid preserve-on-failure setting"
 (( DELETE_EVERY > 0 )) || die "--delete-every must be > 0"
 
 case "$COMPRESSION" in
@@ -230,16 +254,83 @@ CONFIG_PATH="$RUNTIME_DIR/vger.stress.yaml"
 LOG_DIR="$RUNTIME_DIR/logs"
 HOME_DIR="$RUNTIME_DIR/home"
 XDG_CACHE_DIR="$RUNTIME_DIR/xdg-cache"
+CACHE_DIR="$SCRIPT_DIR/.stress-cache"
+CORPUS_CACHE_FILE="$CACHE_DIR/corpus.fp"
+
+RUN_OK=0
+CURRENT_ITER=0
+CURRENT_STEP="startup"
+CURRENT_SNAPSHOT=""
+LAST_BACKUP_LOG=""
+LAST_LIST_LOG=""
+LAST_RESTORE_LOG=""
+LAST_DELETE_LOG=""
+LAST_COMPACT_LOG=""
+LAST_PRUNE_LOG=""
+LAST_CHECK_LOG=""
+LAST_VERIFY_CHECK_LOG=""
+LAST_VERIFY_DIFF=""
 
 cleanup() {
   rm -rf "$REPO_DIR" "$RESTORE_DIR" "$RUNTIME_DIR"
 }
 
-trap cleanup EXIT INT TERM
+print_failure_context() {
+  local exit_code="$1"
+  local rerun_cmd
+
+  rerun_cmd="$(printf '%q ' "$SCRIPT_DIR/$SCRIPT_NAME" "${ORIGINAL_ARGS[@]}")"
+  rerun_cmd="${rerun_cmd% }"
+
+  printf 'Failure context:\n' >&2
+  printf '  exit_code:           %s\n' "$exit_code" >&2
+  printf '  iteration:           %s\n' "$CURRENT_ITER" >&2
+  printf '  step:                %s\n' "$CURRENT_STEP" >&2
+  printf '  snapshot:            %s\n' "${CURRENT_SNAPSHOT:-<none>}" >&2
+  printf '  preserve_on_failure: %s\n' "$PRESERVE_ON_FAILURE" >&2
+  printf '  repository_dir:      %s\n' "$REPO_DIR" >&2
+  printf '  restore_dir:         %s\n' "$RESTORE_DIR" >&2
+  printf '  runtime_dir:         %s\n' "$RUNTIME_DIR" >&2
+  printf '  corpus_cache_file:   %s\n' "$CORPUS_CACHE_FILE" >&2
+
+  [[ -n "$LAST_VERIFY_DIFF" ]] && printf '  verify_diff:         %s\n' "$LAST_VERIFY_DIFF" >&2
+  [[ -n "$LAST_BACKUP_LOG" ]] && printf '  backup_log:          %s\n' "$LAST_BACKUP_LOG" >&2
+  [[ -n "$LAST_LIST_LOG" ]] && printf '  list_log:            %s\n' "$LAST_LIST_LOG" >&2
+  [[ -n "$LAST_RESTORE_LOG" ]] && printf '  restore_log:         %s\n' "$LAST_RESTORE_LOG" >&2
+  [[ -n "$LAST_DELETE_LOG" ]] && printf '  delete_log:          %s\n' "$LAST_DELETE_LOG" >&2
+  [[ -n "$LAST_COMPACT_LOG" ]] && printf '  compact_log:         %s\n' "$LAST_COMPACT_LOG" >&2
+  [[ -n "$LAST_PRUNE_LOG" ]] && printf '  prune_log:           %s\n' "$LAST_PRUNE_LOG" >&2
+  [[ -n "$LAST_CHECK_LOG" ]] && printf '  check_log:           %s\n' "$LAST_CHECK_LOG" >&2
+  [[ -n "$LAST_VERIFY_CHECK_LOG" ]] && printf '  check_verify_log:    %s\n' "$LAST_VERIFY_CHECK_LOG" >&2
+  printf '  rerun:               %s\n' "$rerun_cmd" >&2
+}
+
+on_exit() {
+  local exit_code="$?"
+
+  if [[ "$RUN_OK" == "1" ]]; then
+    cleanup
+    return
+  fi
+
+  print_failure_context "$exit_code"
+
+  if [[ "$PRESERVE_ON_FAILURE" == "1" ]]; then
+    log "Run failed; preserving artifacts for debugging"
+    return
+  fi
+
+  log "Run failed; cleaning artifacts (--no-preserve-on-failure)"
+  cleanup
+}
+
+trap on_exit EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
 
 # Start from clean ephemeral state every run.
 cleanup
-mkdir -p "$REPO_DIR" "$RESTORE_DIR" "$LOG_DIR" "$HOME_DIR" "$XDG_CACHE_DIR"
+mkdir -p "$REPO_DIR" "$RESTORE_DIR" "$LOG_DIR" "$HOME_DIR" "$XDG_CACHE_DIR" "$CACHE_DIR"
 
 require_cmd awk
 require_cmd sed
@@ -267,7 +358,8 @@ run_vger() {
   local log_file="$LOG_DIR/iter-$(printf '%06d' "$iter")-$name.log"
   if ! HOME="$HOME_DIR" XDG_CACHE_HOME="$XDG_CACHE_DIR" \
     "$VGER_BIN" --config "$CONFIG_PATH" --repo "$REPO_LABEL" "$@" >"$log_file" 2>&1; then
-    printf 'FAILED iteration=%s command=%s\n' "$iter" "$*" >&2
+    printf 'FAILED iteration=%s step=%s snapshot=%s command=%s log=%s\n' \
+      "$iter" "$name" "${CURRENT_SNAPSHOT:-<none>}" "$*" "$log_file" >&2
     tail -n 120 "$log_file" >&2 || true
     return 1
   fi
@@ -313,6 +405,14 @@ check_locks_clear() {
   [[ "$count" == "0" ]] || die "stale lock file(s) detected in $locks_dir"
 }
 
+clear_vger_file_cache() {
+  local cache_root="$XDG_CACHE_DIR/vger"
+  if [[ -d "$cache_root" ]]; then
+    rm -rf "$cache_root"
+    log "Cleared vger local file cache: $cache_root"
+  fi
+}
+
 fingerprint_tree() {
   local root="$1"
   local out_file="$2"
@@ -340,24 +440,109 @@ fingerprint_tree() {
   ) >"$out_file"
 }
 
+cache_is_valid() {
+  local cache_file="$1"
+  [[ -s "$cache_file" ]] || return 1
+  [[ "$(sed -n '1p' "$cache_file")" == "# vger-stress-corpus-fp v1" ]] || return 1
+  [[ "$(sed -n '2p' "$cache_file")" == "# corpus_dir=$CORPUS_DIR" ]] || return 1
+  [[ "$(sed -n '3p' "$cache_file")" == "# stat_style=$STAT_STYLE" ]] || return 1
+  [[ "$(sed -n '4p' "$cache_file")" == "# sha_tool=$SHA_TOOL" ]] || return 1
+}
+
+write_corpus_cache() {
+  local fp_file="$1"
+  local tmp_cache="$CORPUS_CACHE_FILE.tmp.$$"
+
+  if ! {
+    printf '# vger-stress-corpus-fp v1\n'
+    printf '# corpus_dir=%s\n' "$CORPUS_DIR"
+    printf '# stat_style=%s\n' "$STAT_STYLE"
+    printf '# sha_tool=%s\n' "$SHA_TOOL"
+    cat "$fp_file"
+  } >"$tmp_cache"; then
+    rm -f "$tmp_cache"
+    return 1
+  fi
+
+  mv "$tmp_cache" "$CORPUS_CACHE_FILE"
+}
+
+load_or_build_corpus_fp() {
+  local out_fp="$1"
+
+  if cache_is_valid "$CORPUS_CACHE_FILE"; then
+    if tail -n +5 "$CORPUS_CACHE_FILE" >"$out_fp" && [[ -s "$out_fp" ]]; then
+      log "Corpus fingerprint cache hit: $CORPUS_CACHE_FILE"
+      return 0
+    fi
+    log "Corpus fingerprint cache unreadable; rebuilding"
+  else
+    log "Corpus fingerprint cache miss/stale; rebuilding"
+  fi
+
+  fingerprint_tree "$CORPUS_DIR" "$out_fp"
+  write_corpus_cache "$out_fp" || die "failed to write corpus fingerprint cache: $CORPUS_CACHE_FILE"
+  log "Corpus fingerprint cache written: $CORPUS_CACHE_FILE"
+}
+
 verify_restore_matches() {
   local iter="$1"
   local restored="$2"
   local src_fp="$3"
 
   local dst_fp="$RUNTIME_DIR/dst-$iter.fp"
+  local diff_file="$LOG_DIR/iter-$(printf '%06d' "$iter")-verify.diff"
+  LAST_VERIFY_DIFF="$diff_file"
+
   fingerprint_tree "$restored" "$dst_fp"
-  diff -u "$src_fp" "$dst_fp" >/dev/null
+
+  if diff -u "$src_fp" "$dst_fp" >"$diff_file"; then
+    return 0
+  fi
+
+  local src_dirs src_syms src_files dst_dirs dst_syms dst_files
+  read -r src_dirs src_syms src_files <<<"$(awk -F '\t' '
+    BEGIN { d=0; l=0; f=0 }
+    $1 == "D" { d++ }
+    $1 == "L" { l++ }
+    $1 == "F" { f++ }
+    END { printf "%d %d %d", d, l, f }
+  ' "$src_fp")"
+  read -r dst_dirs dst_syms dst_files <<<"$(awk -F '\t' '
+    BEGIN { d=0; l=0; f=0 }
+    $1 == "D" { d++ }
+    $1 == "L" { l++ }
+    $1 == "F" { f++ }
+    END { printf "%d %d %d", d, l, f }
+  ' "$dst_fp")"
+
+  printf 'VERIFY MISMATCH iteration=%s snapshot=%s\n' "$iter" "${CURRENT_SNAPSHOT:-<none>}" >&2
+  printf '  expected_fp:      %s\n' "$src_fp" >&2
+  printf '  restored_fp:      %s\n' "$dst_fp" >&2
+  printf '  diff_file:        %s\n' "$diff_file" >&2
+  printf '  expected counts:  dirs=%s symlinks=%s files=%s\n' \
+    "$src_dirs" "$src_syms" "$src_files" >&2
+  printf '  restored counts:  dirs=%s symlinks=%s files=%s\n' \
+    "$dst_dirs" "$dst_syms" "$dst_files" >&2
+
+  if (( VERIFY_DIFF_PREVIEW_LINES > 0 )); then
+    printf '  diff preview (first %s lines):\n' "$VERIFY_DIFF_PREVIEW_LINES" >&2
+    sed -n "1,${VERIFY_DIFF_PREVIEW_LINES}p" "$diff_file" >&2 || true
+  fi
+
+  return 1
 }
 
 main() {
   write_config
   log "Initializing repository"
+  CURRENT_STEP="init"
   run_vger 0 init init >/dev/null
 
   local corpus_fp="$RUNTIME_DIR/corpus.fp"
-  log "Computing corpus fingerprint (once)"
-  fingerprint_tree "$CORPUS_DIR" "$corpus_fp"
+  log "Corpus fingerprint cache file: $CORPUS_CACHE_FILE"
+  log "Preparing corpus fingerprint baseline"
+  load_or_build_corpus_fp "$corpus_fp"
   log "Corpus fingerprint ready"
 
   log "Starting stress run iterations=$ITERATIONS"
@@ -379,15 +564,23 @@ main() {
   start_ts="$(date +%s)"
 
   for (( i=1; i<=ITERATIONS; i++ )); do
+    CURRENT_ITER="$i"
+    CURRENT_SNAPSHOT=""
+
     log "[$i/$ITERATIONS] backup"
+    CURRENT_STEP="backup"
     backup_log="$(run_vger "$i" backup backup --label "stress-$i")"
+    LAST_BACKUP_LOG="$backup_log"
     snapshot="$(extract_snapshot_id "$backup_log")" || die "failed to parse snapshot ID"
+    CURRENT_SNAPSHOT="$snapshot"
     backups=$((backups + 1))
     check_locks_clear
 
     log "[$i/$ITERATIONS] list (snapshot $snapshot)"
+    CURRENT_STEP="list"
     local list_log
     list_log="$(run_vger "$i" list list --last 20)"
+    LAST_LIST_LOG="$list_log"
     grep -q "$snapshot" "$list_log" || die "snapshot '$snapshot' missing from list output"
     lists=$((lists + 1))
 
@@ -396,38 +589,45 @@ main() {
     mkdir -p "$restore_target"
 
     log "[$i/$ITERATIONS] restore"
-    run_vger "$i" restore restore --snapshot "$snapshot" --dest "$restore_target" >/dev/null
+    CURRENT_STEP="restore"
+    LAST_RESTORE_LOG="$(run_vger "$i" restore restore --snapshot "$snapshot" --dest "$restore_target")"
 
     log "[$i/$ITERATIONS] verify"
+    CURRENT_STEP="verify"
     verify_restore_matches "$i" "$restore_target" "$corpus_fp" || die "restore verification failed (iteration $i)"
     restores=$((restores + 1))
 
     if (( i % DELETE_EVERY == 0 )); then
       log "[$i/$ITERATIONS] delete"
-      run_vger "$i" delete delete "$snapshot" >/dev/null
+      CURRENT_STEP="delete"
+      LAST_DELETE_LOG="$(run_vger "$i" delete delete "$snapshot")"
       deletes=$((deletes + 1))
       check_locks_clear
     fi
 
     log "[$i/$ITERATIONS] compact"
-    run_vger "$i" compact compact --threshold "$COMPACT_THRESHOLD" >/dev/null
+    CURRENT_STEP="compact"
+    LAST_COMPACT_LOG="$(run_vger "$i" compact compact --threshold "$COMPACT_THRESHOLD")"
     compacts=$((compacts + 1))
     check_locks_clear
 
     log "[$i/$ITERATIONS] prune"
-    run_vger "$i" prune prune >/dev/null
+    CURRENT_STEP="prune"
+    LAST_PRUNE_LOG="$(run_vger "$i" prune prune)"
     prunes=$((prunes + 1))
     check_locks_clear
 
     if (( CHECK_EVERY > 0 && i % CHECK_EVERY == 0 )); then
       log "[$i/$ITERATIONS] check"
-      run_vger "$i" check check >/dev/null
+      CURRENT_STEP="check"
+      LAST_CHECK_LOG="$(run_vger "$i" check check)"
       checks=$((checks + 1))
     fi
 
     if (( VERIFY_DATA_EVERY > 0 && i % VERIFY_DATA_EVERY == 0 )); then
       log "[$i/$ITERATIONS] check --verify-data"
-      run_vger "$i" check-data check --verify-data >/dev/null
+      CURRENT_STEP="check-verify-data"
+      LAST_VERIFY_CHECK_LOG="$(run_vger "$i" check-data check --verify-data)"
       verify_checks=$((verify_checks + 1))
     fi
 
@@ -450,6 +650,9 @@ main() {
   printf '  check:                %s\n' "$checks"
   printf '  check --verify-data:  %s\n' "$verify_checks"
   printf '  elapsed_sec:          %s\n' "$elapsed"
+
+  CURRENT_STEP="complete"
+  RUN_OK=1
 }
 
 main

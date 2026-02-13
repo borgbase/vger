@@ -71,7 +71,7 @@ impl ByteBudget {
 
 /// Messages sent from the I/O producer to the consumer.
 pub enum FileMessage {
-    /// A file whose cached chunk refs are still valid (all chunks present).
+    /// A file with a cache hit. Chunk validity is verified by the consumer.
     CacheHit {
         item: Item,
         cached_refs: Vec<ChunkRef>,
