@@ -1,10 +1,31 @@
 use std::collections::HashMap;
 use std::sync::Mutex;
+use std::sync::Once;
 
 use crate::config::ChunkerConfig;
 use crate::error::Result;
 use crate::repo::{EncryptionMode, Repository};
 use crate::storage::StorageBackend;
+
+static TEST_ENV_INIT: Once = Once::new();
+
+fn init_test_environment() {
+    TEST_ENV_INIT.call_once(|| {
+        let base = std::env::temp_dir().join(format!("vger-tests-{}", std::process::id()));
+        let home = base.join("home");
+        let cache = base.join("cache");
+        let _ = std::fs::create_dir_all(&home);
+        let _ = std::fs::create_dir_all(&cache);
+
+        // Rust 2024 marks env mutation as unsafe due process-global races.
+        // We do this once at test process startup to keep file-cache writes
+        // under a writable temp root in sandboxed environments.
+        unsafe {
+            std::env::set_var("HOME", &home);
+            std::env::set_var("XDG_CACHE_HOME", &cache);
+        }
+    });
+}
 
 /// In-memory storage backend for testing. Thread-safe via Mutex.
 pub struct MemoryBackend {
@@ -76,6 +97,7 @@ impl StorageBackend for MemoryBackend {
 
 /// Create a plaintext repository backed by MemoryBackend.
 pub fn test_repo_plaintext() -> Repository {
+    init_test_environment();
     let storage = Box::new(MemoryBackend::new());
     Repository::init(
         storage,

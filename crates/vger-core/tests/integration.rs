@@ -11,7 +11,24 @@ use vger_core::repo::{EncryptionMode, Repository};
 use vger_core::snapshot::item::ItemType;
 use vger_core::storage::opendal_backend::OpendalBackend;
 
+static TEST_ENV_INIT: std::sync::Once = std::sync::Once::new();
+
+fn init_test_environment() {
+    TEST_ENV_INIT.call_once(|| {
+        let base = std::env::temp_dir().join(format!("vger-tests-{}", std::process::id()));
+        let home = base.join("home");
+        let cache = base.join("cache");
+        let _ = std::fs::create_dir_all(&home);
+        let _ = std::fs::create_dir_all(&cache);
+        unsafe {
+            std::env::set_var("HOME", &home);
+            std::env::set_var("XDG_CACHE_HOME", &cache);
+        }
+    });
+}
+
 fn init_local_repo(dir: &std::path::Path) -> Repository {
+    init_test_environment();
     let storage = Box::new(OpendalBackend::local(dir.to_str().unwrap()).unwrap());
     Repository::init(
         storage,
@@ -24,6 +41,7 @@ fn init_local_repo(dir: &std::path::Path) -> Repository {
 }
 
 fn open_local_repo(dir: &std::path::Path) -> Repository {
+    init_test_environment();
     let storage = Box::new(OpendalBackend::local(dir.to_str().unwrap()).unwrap());
     Repository::open(storage, None).unwrap()
 }
@@ -890,10 +908,7 @@ fn command_dump_backup_and_extract() {
     assert_eq!(dump_items[0].size, 12); // "hello world\n"
 
     // Verify the .vger-dumps directory item exists
-    let dir_items: Vec<_> = items
-        .iter()
-        .filter(|i| i.path == ".vger-dumps")
-        .collect();
+    let dir_items: Vec<_> = items.iter().filter(|i| i.path == ".vger-dumps").collect();
     assert_eq!(dir_items.len(), 1);
     assert_eq!(dir_items[0].entry_type, ItemType::Directory);
 
@@ -1016,8 +1031,7 @@ fn command_dump_mixed_with_files() {
     )
     .unwrap();
 
-    let real_contents =
-        std::fs::read_to_string(extract_dir.path().join("real.txt")).unwrap();
+    let real_contents = std::fs::read_to_string(extract_dir.path().join("real.txt")).unwrap();
     assert_eq!(real_contents, "real file\n");
 
     let dump_contents =
