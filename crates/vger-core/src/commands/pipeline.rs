@@ -86,10 +86,7 @@ pub enum FileMessage {
         abs_path: String,
     },
     /// A single chunk from the file currently being streamed.
-    FileChunk {
-        chunk_id: ChunkId,
-        data: Vec<u8>,
-    },
+    FileChunk { chunk_id: ChunkId, data: Vec<u8> },
     /// End of the file currently being streamed.
     FileEnd,
     /// A non-file item (directory, symlink) — just needs to be appended to the item stream.

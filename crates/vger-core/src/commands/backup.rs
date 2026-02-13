@@ -1067,9 +1067,8 @@ fn run_pipeline_backup(
                         Entry::Vacant(entry) => {
                             let job_idx = sf.transform_jobs.len();
                             entry.insert(job_idx);
-                            sf.pending_transform_bytes = sf
-                                .pending_transform_bytes
-                                .saturating_add(data_len);
+                            sf.pending_transform_bytes =
+                                sf.pending_transform_bytes.saturating_add(data_len);
                             sf.transform_jobs.push(TransformJob {
                                 chunk_id,
                                 data, // moved, not cloned
@@ -1277,9 +1276,8 @@ pub fn run_with_progress(
             let file_cache_snapshot = std::mem::take(&mut repo.file_cache);
             let chunk_id_key = *repo.crypto.chunk_id_key();
             let chunker_config = repo.config.chunker_params.clone();
-            let byte_budget = std::sync::Arc::new(
-                super::pipeline::ByteBudget::new(pipeline_buffer_bytes),
-            );
+            let byte_budget =
+                std::sync::Arc::new(super::pipeline::ByteBudget::new(pipeline_buffer_bytes));
 
             let pipeline_result: Result<()> = std::thread::scope(|s| {
                 let (tx, rx) = crossbeam_channel::bounded(pipeline_depth);

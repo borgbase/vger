@@ -10,6 +10,8 @@ A fast, encrypted, deduplicated backup tool written in Rust. YAML config inspire
 cargo build --release        # binary at target/release/vger
 cargo check                  # fast type-check
 cargo test                   # run unit + integration tests
+make fmt                     # apply rustfmt across workspace
+make pre-commit              # local CI gate: fmt-check + clippy -D warnings + tests
 ```
 
 Minimum Rust version: 1.88 (some deps require it). Tested on macOS (aarch64).
@@ -129,6 +131,14 @@ The type tag byte is used as AAD (authenticated additional data) in AES-GCM.
 | Serialization | `rmp-serde` 1, `serde_json` 1 |
 | CLI | `clap` 4 (derive), `serde_yaml` 0.9 |
 | Filesystem | `walkdir` 2, `globset` 0.4, `filetime` 0.2, `xattr` 1 |
+
+## Release
+
+```bash
+gh workflow run release.yml                              # trigger release build
+gh run watch                                             # wait for it to finish
+gh run download --name linux-x86_64-unknown-linux-gnu    # download Linux binary
+```
 
 ## What's not implemented yet
 
