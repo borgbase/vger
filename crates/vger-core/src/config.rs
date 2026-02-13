@@ -695,9 +695,14 @@ type RawConfig = ConfigDocument;
 
 /// Expand a leading `~` or `~/` to the user's home directory.
 pub fn expand_tilde(path: &str) -> String {
-    if path == "~" || path.starts_with("~/") {
+    if path == "~" {
         if let Some(home) = dirs::home_dir() {
-            return home.join(&path[2..]).to_string_lossy().to_string();
+            return home.to_string_lossy().to_string();
+        }
+    }
+    if let Some(suffix) = path.strip_prefix("~/") {
+        if let Some(home) = dirs::home_dir() {
+            return home.join(suffix).to_string_lossy().to_string();
         }
     }
     path.to_string()
@@ -2441,6 +2446,12 @@ sources:
             "rich source path not expanded: {}",
             repos[0].sources[1].paths[0]
         );
+    }
+
+    #[test]
+    fn test_expand_tilde_home_only() {
+        let home = dirs::home_dir().unwrap();
+        assert_eq!(expand_tilde("~"), home.to_string_lossy().to_string());
     }
 
     #[test]

@@ -6,8 +6,9 @@ use tracing::info;
 use crate::config::VgerConfig;
 use crate::error::{Result, VgerError};
 use crate::platform::fs;
-use crate::repo::Repository;
 use crate::snapshot::item::{Item, ItemType};
+
+use super::util::open_repo;
 
 /// Run `vger extract`.
 pub fn run(
@@ -76,8 +77,7 @@ fn extract_with_filter<F>(
 where
     F: FnMut(&str) -> bool,
 {
-    let backend = crate::storage::backend_from_config(&config.repository, None)?;
-    let repo = Repository::open(backend, passphrase)?;
+    let repo = open_repo(config, passphrase)?;
     let xattrs_enabled = if xattrs_enabled && !fs::xattrs_supported() {
         tracing::warn!(
             "xattrs requested but not supported on this platform; continuing without xattrs"
@@ -147,8 +147,7 @@ where
                     apply_item_xattrs(&target, item.xattrs.as_ref());
                 }
 
-                let mtime_secs = item.mtime / 1_000_000_000;
-                let mtime_nanos = (item.mtime % 1_000_000_000) as u32;
+                let (mtime_secs, mtime_nanos) = split_unix_nanos(item.mtime);
                 let mtime = filetime::FileTime::from_unix_time(mtime_secs, mtime_nanos);
                 let _ = filetime::set_file_mtime(&target, mtime);
 
@@ -292,4 +291,35 @@ fn ensure_path_within_root(path: &Path, root: &Path) -> Result<()> {
         "invalid extraction target path: {}",
         path.display()
     )))
+}
+
+fn split_unix_nanos(total_nanos: i64) -> (i64, u32) {
+    let secs = total_nanos.div_euclid(1_000_000_000);
+    let nanos = total_nanos.rem_euclid(1_000_000_000) as u32;
+    (secs, nanos)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{sanitize_item_path, split_unix_nanos};
+
+    #[test]
+    fn split_unix_nanos_handles_negative_values() {
+        let (secs, nanos) = split_unix_nanos(-1);
+        assert_eq!(secs, -1);
+        assert_eq!(nanos, 999_999_999);
+    }
+
+    #[test]
+    fn split_unix_nanos_handles_positive_values() {
+        let (secs, nanos) = split_unix_nanos(1_500_000_000);
+        assert_eq!(secs, 1);
+        assert_eq!(nanos, 500_000_000);
+    }
+
+    #[test]
+    fn sanitize_rejects_parent_dir_traversal() {
+        let err = sanitize_item_path("../etc/passwd").unwrap_err().to_string();
+        assert!(err.contains("unsafe path"));
+    }
 }

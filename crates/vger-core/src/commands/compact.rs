@@ -2,7 +2,7 @@ use std::collections::{HashMap, HashSet};
 
 use tracing::{info, warn};
 
-use super::util::with_repo_lock;
+use super::util::{open_repo, with_repo_lock};
 use crate::config::VgerConfig;
 use crate::crypto::pack_id::PackId;
 use crate::error::{Result, VgerError};
@@ -10,7 +10,7 @@ use crate::repo::pack::{
     read_blob_from_pack, read_pack_header, PackHeaderEntry, PackType, PackWriter,
 };
 use crate::repo::Repository;
-use crate::storage::{self, RepackBlobRef, RepackOperationRequest, RepackPlanRequest};
+use crate::storage::{RepackBlobRef, RepackOperationRequest, RepackPlanRequest};
 
 /// Statistics returned by the compact command.
 #[derive(Debug, Default)]
@@ -40,8 +40,7 @@ pub fn run(
     max_repack_size: Option<u64>,
     dry_run: bool,
 ) -> Result<CompactStats> {
-    let backend = storage::backend_from_config(&config.repository, None)?;
-    let mut repo = Repository::open(backend, passphrase)?;
+    let mut repo = open_repo(config, passphrase)?;
     with_repo_lock(&mut repo, |repo| {
         compact_repo(repo, threshold, max_repack_size, dry_run)
     })

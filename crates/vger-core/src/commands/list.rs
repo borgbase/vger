@@ -2,12 +2,13 @@ use serde::Deserialize;
 
 use crate::config::VgerConfig;
 use crate::error::{Result, VgerError};
-use crate::repo::format::unpack_object;
+use crate::repo::format::{unpack_object_expect, ObjectType};
 use crate::repo::manifest::SnapshotEntry;
 use crate::repo::Repository;
 use crate::snapshot::item::Item;
 use crate::snapshot::SnapshotMeta;
-use crate::storage;
+
+use super::util::open_repo;
 
 /// Result of a list operation.
 pub enum ListResult {
@@ -23,8 +24,7 @@ pub fn run(
     passphrase: Option<&str>,
     snapshot_name: Option<&str>,
 ) -> Result<ListResult> {
-    let backend = storage::backend_from_config(&config.repository, None)?;
-    let repo = Repository::open(backend, passphrase)?;
+    let repo = open_repo(config, passphrase)?;
 
     match snapshot_name {
         None => {
@@ -52,35 +52,64 @@ pub fn load_snapshot_meta(repo: &Repository, snapshot_name: &str) -> Result<Snap
         .get(&format!("snapshots/{snapshot_id_hex}"))?
         .ok_or_else(|| VgerError::SnapshotNotFound(snapshot_name.into()))?;
 
-    let (_obj_type, meta_bytes) = unpack_object(&meta_data, repo.crypto.as_ref())?;
+    let meta_bytes =
+        unpack_object_expect(&meta_data, ObjectType::SnapshotMeta, repo.crypto.as_ref())?;
     Ok(rmp_serde::from_slice(&meta_bytes)?)
 }
 
 /// Load and deserialize all items from a snapshot.
 pub fn load_snapshot_items(repo: &Repository, snapshot_name: &str) -> Result<Vec<Item>> {
+    let items_stream = load_snapshot_item_stream(repo, snapshot_name)?;
+    decode_items_stream(&items_stream)
+}
+
+/// Load the raw concatenated item stream bytes for a snapshot.
+pub fn load_snapshot_item_stream(repo: &Repository, snapshot_name: &str) -> Result<Vec<u8>> {
     let snapshot_meta = load_snapshot_meta(repo, snapshot_name)?;
 
-    // Reconstruct the item stream from item_ptrs
     let mut items_stream = Vec::new();
     for chunk_id in &snapshot_meta.item_ptrs {
         let chunk_data = repo.read_chunk(chunk_id)?;
         items_stream.extend_from_slice(&chunk_data);
     }
 
-    decode_items_stream(&items_stream)
+    Ok(items_stream)
 }
 
-fn decode_items_stream(items_stream: &[u8]) -> Result<Vec<Item>> {
+/// Decode item stream bytes and call `visit` for each item in stream order.
+pub fn for_each_decoded_item(
+    items_stream: &[u8],
+    mut visit: impl FnMut(Item) -> Result<()>,
+) -> Result<()> {
     if items_stream.is_empty() {
-        return Ok(Vec::new());
+        return Ok(());
     }
 
     // Items are encoded as concatenated MsgPack Item objects.
     let mut de = rmp_serde::Deserializer::new(std::io::Cursor::new(items_stream));
-    let mut items = Vec::new();
     while (de.position() as usize) < items_stream.len() {
-        items.push(Item::deserialize(&mut de)?);
+        let item = Item::deserialize(&mut de)?;
+        visit(item)?;
     }
+    Ok(())
+}
+
+/// Stream items from a snapshot without materializing `Vec<Item>`.
+pub fn for_each_snapshot_item(
+    repo: &Repository,
+    snapshot_name: &str,
+    visit: impl FnMut(Item) -> Result<()>,
+) -> Result<()> {
+    let items_stream = load_snapshot_item_stream(repo, snapshot_name)?;
+    for_each_decoded_item(&items_stream, visit)
+}
+
+fn decode_items_stream(items_stream: &[u8]) -> Result<Vec<Item>> {
+    let mut items = Vec::new();
+    for_each_decoded_item(items_stream, |item| {
+        items.push(item);
+        Ok(())
+    })?;
     Ok(items)
 }
 

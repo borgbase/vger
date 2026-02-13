@@ -1,7 +1,7 @@
 use crate::crypto::aes_gcm::Aes256GcmEngine;
 use crate::crypto::PlaintextEngine;
 use crate::error::VgerError;
-use crate::repo::format::{pack_object, unpack_object, ObjectType};
+use crate::repo::format::{pack_object, unpack_object, unpack_object_expect, ObjectType};
 
 #[test]
 fn roundtrip_plaintext() {
@@ -81,4 +81,14 @@ fn object_type_from_u8_valid() {
 fn object_type_from_u8_invalid() {
     assert!(ObjectType::from_u8(7).is_err());
     assert!(ObjectType::from_u8(255).is_err());
+}
+
+#[test]
+fn unpack_expect_rejects_wrong_object_type() {
+    let engine = PlaintextEngine::new(&[0xAA; 32]);
+    let packed = pack_object(ObjectType::Manifest, b"data", &engine).unwrap();
+
+    let err = unpack_object_expect(&packed, ObjectType::ChunkData, &engine).unwrap_err();
+    assert!(matches!(err, VgerError::InvalidFormat(_)));
+    assert!(err.to_string().contains("unexpected object type"));
 }

@@ -48,6 +48,22 @@ fn flush_item_stream_chunk(
     Ok(())
 }
 
+fn append_item_to_stream(
+    repo: &mut Repository,
+    item_stream: &mut Vec<u8>,
+    item_ptrs: &mut Vec<ChunkId>,
+    item: &Item,
+    items_config: &ChunkerConfig,
+    compression: Compression,
+) -> Result<()> {
+    let item_bytes = rmp_serde::to_vec(item)?;
+    item_stream.extend_from_slice(&item_bytes);
+    if item_stream.len() >= items_config.avg_size as usize {
+        flush_item_stream_chunk(repo, item_stream, item_ptrs, compression)?;
+    }
+    Ok(())
+}
+
 fn build_explicit_excludes(source: &Path, patterns: &[String]) -> Result<Gitignore> {
     let mut builder = ignore::gitignore::GitignoreBuilder::new(source);
     for pat in patterns {
@@ -177,6 +193,23 @@ fn emit_progress(
     }
 }
 
+fn emit_stats_progress(
+    progress: &mut Option<&mut dyn FnMut(BackupProgressEvent)>,
+    stats: &SnapshotStats,
+    current_file: Option<String>,
+) {
+    emit_progress(
+        progress,
+        BackupProgressEvent::StatsUpdated {
+            nfiles: stats.nfiles,
+            original_size: stats.original_size,
+            compressed_size: stats.compressed_size,
+            deduplicated_size: stats.deduplicated_size,
+            current_file,
+        },
+    );
+}
+
 /// Run `vger backup` for one or more source directories.
 pub struct BackupRequest<'a> {
     pub snapshot_name: &'a str,
@@ -236,6 +269,579 @@ fn execute_dump_command(dump: &CommandDump) -> Result<Vec<u8>> {
     }
 
     Ok(output.stdout)
+}
+
+fn process_command_dumps(
+    repo: &mut Repository,
+    command_dumps: &[CommandDump],
+    compression: Compression,
+    items_config: &ChunkerConfig,
+    item_stream: &mut Vec<u8>,
+    item_ptrs: &mut Vec<ChunkId>,
+    stats: &mut SnapshotStats,
+    progress: &mut Option<&mut dyn FnMut(BackupProgressEvent)>,
+    time_start: chrono::DateTime<Utc>,
+) -> Result<()> {
+    if command_dumps.is_empty() {
+        return Ok(());
+    }
+
+    let dumps_dir_item = Item {
+        path: ".vger-dumps".to_string(),
+        entry_type: ItemType::Directory,
+        mode: 0o755,
+        uid: 0,
+        gid: 0,
+        user: None,
+        group: None,
+        mtime: 0,
+        atime: None,
+        ctime: None,
+        size: 0,
+        chunks: Vec::new(),
+        link_target: None,
+        xattrs: None,
+    };
+    append_item_to_stream(
+        repo,
+        item_stream,
+        item_ptrs,
+        &dumps_dir_item,
+        items_config,
+        compression,
+    )?;
+
+    for dump in command_dumps {
+        info!(
+            name = %dump.name,
+            command = %dump.command,
+            "executing command dump"
+        );
+        let data = execute_dump_command(dump)?;
+        let data_len = data.len() as u64;
+
+        let chunk_ranges = chunker::chunk_data(&data, &repo.config.chunker_params);
+        let chunk_id_key = *repo.crypto.chunk_id_key();
+
+        let mut chunk_refs = Vec::new();
+        for (offset, length) in chunk_ranges {
+            let chunk_data = &data[offset..offset + length];
+            let chunk_id = ChunkId::compute(&chunk_id_key, chunk_data);
+            let size = length as u32;
+
+            if let Some(csize) = repo.bump_ref_if_exists(&chunk_id) {
+                stats.original_size += size as u64;
+                stats.compressed_size += csize as u64;
+                chunk_refs.push(ChunkRef {
+                    id: chunk_id,
+                    size,
+                    csize,
+                });
+            } else {
+                let (chunk_id, csize, _is_new) =
+                    repo.store_chunk(chunk_data, compression, PackType::Data)?;
+                stats.original_size += size as u64;
+                stats.compressed_size += csize as u64;
+                stats.deduplicated_size += csize as u64;
+                chunk_refs.push(ChunkRef {
+                    id: chunk_id,
+                    size,
+                    csize,
+                });
+            }
+        }
+
+        stats.nfiles += 1;
+
+        let dump_item = Item {
+            path: format!(".vger-dumps/{}", dump.name),
+            entry_type: ItemType::RegularFile,
+            mode: 0o644,
+            uid: 0,
+            gid: 0,
+            user: None,
+            group: None,
+            mtime: time_start.timestamp_nanos_opt().unwrap_or(0),
+            atime: None,
+            ctime: None,
+            size: data_len,
+            chunks: chunk_refs,
+            link_target: None,
+            xattrs: None,
+        };
+        append_item_to_stream(
+            repo,
+            item_stream,
+            item_ptrs,
+            &dump_item,
+            items_config,
+            compression,
+        )?;
+
+        emit_stats_progress(progress, stats, Some(format!(".vger-dumps/{}", dump.name)));
+    }
+
+    Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
+fn process_regular_file_item(
+    repo: &mut Repository,
+    entry_path: &Path,
+    metadata_summary: fs::MetadataSummary,
+    compression: Compression,
+    transform_pool: Option<&rayon::ThreadPool>,
+    read_limiter: Option<&ByteRateLimiter>,
+    item: &mut Item,
+    stats: &mut SnapshotStats,
+    new_file_cache: &mut FileCache,
+    progress: &mut Option<&mut dyn FnMut(BackupProgressEvent)>,
+) -> Result<()> {
+    emit_progress(
+        progress,
+        BackupProgressEvent::FileStarted {
+            path: item.path.clone(),
+        },
+    );
+
+    // File-level cache: skip read/chunk/compress/encrypt for unchanged files.
+    let abs_path = entry_path.to_string_lossy().to_string();
+    let file_size = metadata_summary.size;
+
+    let cache_hit = repo.file_cache.lookup(
+        &abs_path,
+        metadata_summary.device,
+        metadata_summary.inode,
+        metadata_summary.mtime_ns,
+        metadata_summary.ctime_ns,
+        file_size,
+    );
+
+    if let Some(cached_refs) = cache_hit {
+        // Verify all referenced chunks still exist in the index.
+        let all_present = cached_refs.iter().all(|cr| repo.chunk_index.contains(&cr.id));
+        if all_present {
+            // Bump refcounts for all cached chunks.
+            let mut file_original: u64 = 0;
+            let mut file_compressed: u64 = 0;
+            let refs = cached_refs.clone();
+            for cr in &refs {
+                repo.chunk_index.increment_refcount(&cr.id);
+                file_original += cr.size as u64;
+                file_compressed += cr.csize as u64;
+            }
+            item.chunks = refs.clone();
+
+            stats.nfiles += 1;
+            stats.original_size += file_original;
+            stats.compressed_size += file_compressed;
+            // No deduplicated_size contribution — all chunks already existed.
+
+            new_file_cache.insert(
+                abs_path,
+                metadata_summary.device,
+                metadata_summary.inode,
+                metadata_summary.mtime_ns,
+                metadata_summary.ctime_ns,
+                file_size,
+                refs,
+            );
+
+            debug!(path = %item.path, "file cache hit");
+            emit_stats_progress(progress, stats, Some(item.path.clone()));
+            return Ok(());
+        }
+    }
+
+    let file_data = limits::read_file_with_limiter(entry_path, read_limiter)?;
+    let chunk_ranges = chunker::chunk_data(&file_data, &repo.config.chunker_params);
+    let chunk_id_key = *repo.crypto.chunk_id_key();
+
+    let mut actions = Vec::with_capacity(chunk_ranges.len());
+    let mut transform_jobs: Vec<TransformJob> = Vec::with_capacity(chunk_ranges.len());
+    let mut pending_new: HashMap<ChunkId, usize> = HashMap::new();
+
+    for (offset, length) in chunk_ranges {
+        let chunk_data = &file_data[offset..offset + length];
+        let chunk_id = ChunkId::compute(&chunk_id_key, chunk_data);
+        let size = length as u32;
+
+        if let Some(csize) = repo.bump_ref_if_exists(&chunk_id) {
+            actions.push(FileChunkAction::Existing {
+                chunk_id,
+                size,
+                csize,
+            });
+            continue;
+        }
+
+        if pending_new.contains_key(&chunk_id) {
+            actions.push(FileChunkAction::NewDuplicate { chunk_id, size });
+            continue;
+        }
+
+        let job_idx = transform_jobs.len();
+        pending_new.insert(chunk_id, job_idx);
+        transform_jobs.push(TransformJob {
+            chunk_id,
+            data: chunk_data.to_vec(),
+        });
+        actions.push(FileChunkAction::NewPrimary {
+            chunk_id,
+            size,
+            job_idx,
+        });
+    }
+
+    let mut prepared_chunks: Vec<Option<PreparedChunk>> = if transform_jobs.is_empty() {
+        Vec::new()
+    } else {
+        let prepared_results: Vec<Result<PreparedChunk>> = {
+            let crypto = repo.crypto.as_ref();
+            if let Some(pool) = transform_pool {
+                pool.install(|| {
+                    transform_jobs
+                        .par_iter()
+                        .map(|job| {
+                            let compressed = crate::compress::compress(compression, &job.data)?;
+                            let packed = pack_object(ObjectType::ChunkData, &compressed, crypto)?;
+                            Ok(PreparedChunk {
+                                chunk_id: job.chunk_id,
+                                uncompressed_size: job.data.len() as u32,
+                                packed,
+                            })
+                        })
+                        .collect()
+                })
+            } else {
+                transform_jobs
+                    .par_iter()
+                    .map(|job| {
+                        let compressed = crate::compress::compress(compression, &job.data)?;
+                        let packed = pack_object(ObjectType::ChunkData, &compressed, crypto)?;
+                        Ok(PreparedChunk {
+                            chunk_id: job.chunk_id,
+                            uncompressed_size: job.data.len() as u32,
+                            packed,
+                        })
+                    })
+                    .collect()
+            }
+        };
+
+        prepared_results
+            .into_iter()
+            .collect::<Result<Vec<_>>>()?
+            .into_iter()
+            .map(Some)
+            .collect()
+    };
+
+    for action in actions {
+        match action {
+            FileChunkAction::Existing {
+                chunk_id,
+                size,
+                csize,
+            } => {
+                stats.original_size += size as u64;
+                stats.compressed_size += csize as u64;
+                item.chunks.push(ChunkRef {
+                    id: chunk_id,
+                    size,
+                    csize,
+                });
+            }
+            FileChunkAction::NewPrimary {
+                chunk_id,
+                size,
+                job_idx,
+            } => {
+                let prepared = prepared_chunks
+                    .get_mut(job_idx)
+                    .and_then(Option::take)
+                    .ok_or_else(|| {
+                        VgerError::Other(format!("missing prepared chunk at index {job_idx}"))
+                    })?;
+                if prepared.chunk_id != chunk_id {
+                    return Err(VgerError::Other(format!(
+                        "prepared chunk mismatch at index {job_idx}"
+                    )));
+                }
+                let csize = repo.commit_prepacked_chunk(
+                    chunk_id,
+                    prepared.packed,
+                    prepared.uncompressed_size,
+                    PackType::Data,
+                )?;
+
+                stats.original_size += size as u64;
+                stats.compressed_size += csize as u64;
+                stats.deduplicated_size += csize as u64;
+                item.chunks.push(ChunkRef {
+                    id: chunk_id,
+                    size,
+                    csize,
+                });
+            }
+            FileChunkAction::NewDuplicate { chunk_id, size } => {
+                let csize = repo.bump_ref_if_exists(&chunk_id).ok_or_else(|| {
+                    VgerError::Other(format!("dedup invariant violated for chunk {chunk_id}"))
+                })?;
+
+                stats.original_size += size as u64;
+                stats.compressed_size += csize as u64;
+                item.chunks.push(ChunkRef {
+                    id: chunk_id,
+                    size,
+                    csize,
+                });
+            }
+        }
+    }
+
+    stats.nfiles += 1;
+
+    // Update file cache with the chunks we just stored.
+    new_file_cache.insert(
+        abs_path,
+        metadata_summary.device,
+        metadata_summary.inode,
+        metadata_summary.mtime_ns,
+        metadata_summary.ctime_ns,
+        file_size,
+        item.chunks.clone(),
+    );
+
+    emit_stats_progress(progress, stats, Some(item.path.clone()));
+    Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
+fn process_source_path(
+    repo: &mut Repository,
+    source_path: &str,
+    multi_path: bool,
+    exclude_patterns: &[String],
+    exclude_if_present: &[String],
+    one_file_system: bool,
+    git_ignore: bool,
+    xattrs_enabled: bool,
+    compression: Compression,
+    items_config: &ChunkerConfig,
+    item_stream: &mut Vec<u8>,
+    item_ptrs: &mut Vec<ChunkId>,
+    stats: &mut SnapshotStats,
+    new_file_cache: &mut FileCache,
+    read_limiter: Option<&ByteRateLimiter>,
+    transform_pool: Option<&rayon::ThreadPool>,
+    progress: &mut Option<&mut dyn FnMut(BackupProgressEvent)>,
+) -> Result<()> {
+    emit_progress(
+        progress,
+        BackupProgressEvent::SourceStarted {
+            source_path: source_path.to_string(),
+        },
+    );
+
+    let source = Path::new(source_path);
+    if !source.exists() {
+        return Err(VgerError::Other(format!(
+            "source directory does not exist: {source_path}"
+        )));
+    }
+    let source_dev = std::fs::symlink_metadata(source)
+        .map(|m| fs::summarize_metadata(&m, &m.file_type()).device)
+        .map_err(|e| VgerError::Other(format!("stat error for {}: {e}", source.display())))?;
+    let explicit_excludes = build_explicit_excludes(source, exclude_patterns)?;
+
+    // For multi-path mode, derive basename prefix.
+    let prefix = if multi_path {
+        let base = source
+            .file_name()
+            .map(|n| n.to_string_lossy().to_string())
+            .unwrap_or_else(|| source_path.to_string());
+        // Emit a directory item for the prefix.
+        let dir_item = Item {
+            path: base.clone(),
+            entry_type: ItemType::Directory,
+            mode: 0o755,
+            uid: 0,
+            gid: 0,
+            user: None,
+            group: None,
+            mtime: 0,
+            atime: None,
+            ctime: None,
+            size: 0,
+            chunks: Vec::new(),
+            link_target: None,
+            xattrs: None,
+        };
+        append_item_to_stream(
+            repo,
+            item_stream,
+            item_ptrs,
+            &dir_item,
+            items_config,
+            compression,
+        )?;
+        Some(base)
+    } else {
+        None
+    };
+
+    let mut walk_builder = WalkBuilder::new(source);
+    walk_builder.follow_links(false);
+    walk_builder.hidden(false);
+    walk_builder.ignore(false); // Only honor .gitignore (optional), not .ignore.
+    walk_builder.git_global(false); // Ignore user-global excludes.
+    walk_builder.git_exclude(false); // Ignore .git/info/exclude.
+    walk_builder.parents(git_ignore); // Read parent .gitignore only when enabled.
+    walk_builder.git_ignore(git_ignore);
+    walk_builder.require_git(false);
+    walk_builder.sort_by_file_name(std::ffi::OsStr::cmp);
+
+    let markers = exclude_if_present.to_vec();
+    let source_path_buf = source.to_path_buf();
+    walk_builder.filter_entry(move |entry| {
+        let path = entry.path();
+        if path == source_path_buf {
+            return true;
+        }
+
+        let rel = path.strip_prefix(&source_path_buf).unwrap_or(path);
+        let is_dir = entry.file_type().is_some_and(|ft| ft.is_dir());
+
+        // Apply explicit exclude patterns from config (gitignore syntax).
+        if explicit_excludes
+            .matched_path_or_any_parents(rel, is_dir)
+            .is_ignore()
+        {
+            return false;
+        }
+
+        // Stay on the source filesystem when enabled.
+        if one_file_system {
+            if let Ok(metadata) = std::fs::symlink_metadata(path) {
+                let entry_dev = fs::summarize_metadata(&metadata, &metadata.file_type()).device;
+                if should_skip_for_device(one_file_system, source_dev, entry_dev) {
+                    return false;
+                }
+            }
+        }
+
+        // Skip directories containing any configured marker file.
+        if is_dir && !markers.is_empty() {
+            for marker in &markers {
+                if path.join(marker).exists() {
+                    return false;
+                }
+            }
+        }
+
+        true
+    });
+
+    for entry in walk_builder.build() {
+        let entry = entry.map_err(|e| VgerError::Other(format!("walk error: {e}")))?;
+
+        let rel_path = entry
+            .path()
+            .strip_prefix(source)
+            .unwrap_or(entry.path())
+            .to_string_lossy()
+            .to_string();
+
+        // Skip root directory itself.
+        if rel_path.is_empty() {
+            continue;
+        }
+
+        let metadata = std::fs::symlink_metadata(entry.path())
+            .map_err(|e| VgerError::Other(format!("stat error for {}: {e}", entry.path().display())))?;
+
+        let file_type = metadata.file_type();
+        let metadata_summary = fs::summarize_metadata(&metadata, &file_type);
+
+        let (entry_type, link_target) = if file_type.is_dir() {
+            (ItemType::Directory, None)
+        } else if file_type.is_symlink() {
+            let target =
+                std::fs::read_link(entry.path()).map_err(|e| VgerError::Other(format!("readlink: {e}")))?;
+            (
+                ItemType::Symlink,
+                Some(target.to_string_lossy().to_string()),
+            )
+        } else if file_type.is_file() {
+            (ItemType::RegularFile, None)
+        } else {
+            // Skip special files (block devices, FIFOs, etc.)
+            continue;
+        };
+
+        // In multi-path mode, prefix each item path with the source basename.
+        let item_path = match &prefix {
+            Some(pfx) => format!("{pfx}/{rel_path}"),
+            None => rel_path,
+        };
+
+        let mut item = Item {
+            path: item_path,
+            entry_type,
+            mode: metadata_summary.mode,
+            uid: metadata_summary.uid,
+            gid: metadata_summary.gid,
+            user: None,
+            group: None,
+            mtime: metadata_summary.mtime_ns,
+            atime: None,
+            ctime: None,
+            size: metadata_summary.size,
+            chunks: Vec::new(),
+            link_target,
+            xattrs: None,
+        };
+
+        if xattrs_enabled {
+            item.xattrs = read_item_xattrs(entry.path());
+        }
+
+        // For regular files, chunk and store the content.
+        if entry_type == ItemType::RegularFile && metadata_summary.size > 0 {
+            process_regular_file_item(
+                repo,
+                entry.path(),
+                metadata_summary,
+                compression,
+                transform_pool,
+                read_limiter,
+                &mut item,
+                stats,
+                new_file_cache,
+                progress,
+            )?;
+        }
+
+        // Stream item metadata to avoid materializing a full Vec<Item>.
+        append_item_to_stream(
+            repo,
+            item_stream,
+            item_ptrs,
+            &item,
+            items_config,
+            compression,
+        )?;
+    }
+
+    emit_progress(
+        progress,
+        BackupProgressEvent::SourceFinished {
+            source_path: source_path.to_string(),
+        },
+    );
+
+    Ok(())
 }
 
 pub fn run_with_progress(
@@ -306,562 +912,39 @@ pub fn run_with_progress(
         let mut new_file_cache = FileCache::new();
 
         // Execute command dumps before walking filesystem
-        if !command_dumps.is_empty() {
-            // Emit a directory item for .vger-dumps/
-            let dumps_dir_item = Item {
-                path: ".vger-dumps".to_string(),
-                entry_type: ItemType::Directory,
-                mode: 0o755,
-                uid: 0,
-                gid: 0,
-                user: None,
-                group: None,
-                mtime: 0,
-                atime: None,
-                ctime: None,
-                size: 0,
-                chunks: Vec::new(),
-                link_target: None,
-                xattrs: None,
-            };
-            let item_bytes = rmp_serde::to_vec(&dumps_dir_item)?;
-            item_stream.extend_from_slice(&item_bytes);
-            if item_stream.len() >= items_config.avg_size as usize {
-                flush_item_stream_chunk(repo, &mut item_stream, &mut item_ptrs, compression)?;
-            }
+        process_command_dumps(
+            repo,
+            command_dumps,
+            compression,
+            &items_config,
+            &mut item_stream,
+            &mut item_ptrs,
+            &mut stats,
+            &mut progress,
+            time_start,
+        )?;
 
-            for dump in command_dumps {
-                info!(name = %dump.name, command = %dump.command, "executing command dump");
-                let data = execute_dump_command(dump)?;
-                let data_len = data.len() as u64;
-
-                let chunk_ranges = chunker::chunk_data(&data, &repo.config.chunker_params);
-                let chunk_id_key = *repo.crypto.chunk_id_key();
-
-                let mut chunk_refs = Vec::new();
-                for (offset, length) in chunk_ranges {
-                    let chunk_data = &data[offset..offset + length];
-                    let chunk_id = ChunkId::compute(&chunk_id_key, chunk_data);
-                    let size = length as u32;
-
-                    if let Some(csize) = repo.bump_ref_if_exists(&chunk_id) {
-                        stats.original_size += size as u64;
-                        stats.compressed_size += csize as u64;
-                        chunk_refs.push(ChunkRef {
-                            id: chunk_id,
-                            size,
-                            csize,
-                        });
-                    } else {
-                        let (chunk_id, csize, _is_new) =
-                            repo.store_chunk(chunk_data, compression, PackType::Data)?;
-                        stats.original_size += size as u64;
-                        stats.compressed_size += csize as u64;
-                        stats.deduplicated_size += csize as u64;
-                        chunk_refs.push(ChunkRef {
-                            id: chunk_id,
-                            size,
-                            csize,
-                        });
-                    }
-                }
-
-                stats.nfiles += 1;
-
-                let dump_item = Item {
-                    path: format!(".vger-dumps/{}", dump.name),
-                    entry_type: ItemType::RegularFile,
-                    mode: 0o644,
-                    uid: 0,
-                    gid: 0,
-                    user: None,
-                    group: None,
-                    mtime: time_start.timestamp_nanos_opt().unwrap_or(0),
-                    atime: None,
-                    ctime: None,
-                    size: data_len,
-                    chunks: chunk_refs,
-                    link_target: None,
-                    xattrs: None,
-                };
-                let item_bytes = rmp_serde::to_vec(&dump_item)?;
-                item_stream.extend_from_slice(&item_bytes);
-                if item_stream.len() >= items_config.avg_size as usize {
-                    flush_item_stream_chunk(repo, &mut item_stream, &mut item_ptrs, compression)?;
-                }
-
-                emit_progress(
-                    &mut progress,
-                    BackupProgressEvent::StatsUpdated {
-                        nfiles: stats.nfiles,
-                        original_size: stats.original_size,
-                        compressed_size: stats.compressed_size,
-                        deduplicated_size: stats.deduplicated_size,
-                        current_file: Some(format!(".vger-dumps/{}", dump.name)),
-                    },
-                );
-            }
-        }
-
-        // Walk each source directory
+        // Walk each source directory.
         for source_path in source_paths {
-            emit_progress(
+            process_source_path(
+                repo,
+                source_path,
+                multi_path,
+                exclude_patterns,
+                exclude_if_present,
+                one_file_system,
+                git_ignore,
+                xattrs_enabled,
+                compression,
+                &items_config,
+                &mut item_stream,
+                &mut item_ptrs,
+                &mut stats,
+                &mut new_file_cache,
+                read_limiter.as_deref(),
+                transform_pool.as_ref(),
                 &mut progress,
-                BackupProgressEvent::SourceStarted {
-                    source_path: source_path.clone(),
-                },
-            );
-
-            let source = Path::new(source_path.as_str());
-            if !source.exists() {
-                return Err(VgerError::Other(format!(
-                    "source directory does not exist: {source_path}"
-                )));
-            }
-            let source_dev = std::fs::symlink_metadata(source)
-                .map(|m| fs::summarize_metadata(&m, &m.file_type()).device)
-                .map_err(|e| {
-                    VgerError::Other(format!("stat error for {}: {e}", source.display()))
-                })?;
-            let explicit_excludes = build_explicit_excludes(source, exclude_patterns)?;
-
-            // For multi-path mode, derive basename prefix
-            let prefix = if multi_path {
-                let base = source
-                    .file_name()
-                    .map(|n| n.to_string_lossy().to_string())
-                    .unwrap_or_else(|| source_path.clone());
-                // Emit a directory item for the prefix
-                let dir_item = Item {
-                    path: base.clone(),
-                    entry_type: ItemType::Directory,
-                    mode: 0o755,
-                    uid: 0,
-                    gid: 0,
-                    user: None,
-                    group: None,
-                    mtime: 0,
-                    atime: None,
-                    ctime: None,
-                    size: 0,
-                    chunks: Vec::new(),
-                    link_target: None,
-                    xattrs: None,
-                };
-                let item_bytes = rmp_serde::to_vec(&dir_item)?;
-                item_stream.extend_from_slice(&item_bytes);
-                if item_stream.len() >= items_config.avg_size as usize {
-                    flush_item_stream_chunk(repo, &mut item_stream, &mut item_ptrs, compression)?;
-                }
-                Some(base)
-            } else {
-                None
-            };
-
-            let mut walk_builder = WalkBuilder::new(source);
-            walk_builder.follow_links(false);
-            walk_builder.hidden(false);
-            walk_builder.ignore(false); // Only honor .gitignore (optional), not .ignore.
-            walk_builder.git_global(false); // Ignore user-global excludes.
-            walk_builder.git_exclude(false); // Ignore .git/info/exclude.
-            walk_builder.parents(git_ignore); // Read parent .gitignore only when enabled.
-            walk_builder.git_ignore(git_ignore);
-            walk_builder.require_git(false);
-            walk_builder.sort_by_file_name(std::ffi::OsStr::cmp);
-
-            let markers = exclude_if_present.to_vec();
-            let source_path_buf = source.to_path_buf();
-            walk_builder.filter_entry(move |entry| {
-                let path = entry.path();
-                if path == source_path_buf {
-                    return true;
-                }
-
-                let rel = path.strip_prefix(&source_path_buf).unwrap_or(path);
-                let is_dir = entry.file_type().is_some_and(|ft| ft.is_dir());
-
-                // Apply explicit exclude patterns from config (gitignore syntax).
-                if explicit_excludes
-                    .matched_path_or_any_parents(rel, is_dir)
-                    .is_ignore()
-                {
-                    return false;
-                }
-
-                // Stay on the source filesystem when enabled.
-                if one_file_system {
-                    if let Ok(metadata) = std::fs::symlink_metadata(path) {
-                        let entry_dev =
-                            fs::summarize_metadata(&metadata, &metadata.file_type()).device;
-                        if should_skip_for_device(one_file_system, source_dev, entry_dev) {
-                            return false;
-                        }
-                    }
-                }
-
-                // Skip directories containing any configured marker file.
-                if is_dir && !markers.is_empty() {
-                    for marker in &markers {
-                        if path.join(marker).exists() {
-                            return false;
-                        }
-                    }
-                }
-
-                true
-            });
-
-            for entry in walk_builder.build() {
-                let entry = entry.map_err(|e| VgerError::Other(format!("walk error: {e}")))?;
-
-                let rel_path = entry
-                    .path()
-                    .strip_prefix(source)
-                    .unwrap_or(entry.path())
-                    .to_string_lossy()
-                    .to_string();
-
-                // Skip root directory itself
-                if rel_path.is_empty() {
-                    continue;
-                }
-
-                let metadata = std::fs::symlink_metadata(entry.path()).map_err(|e| {
-                    VgerError::Other(format!("stat error for {}: {e}", entry.path().display()))
-                })?;
-
-                let file_type = metadata.file_type();
-                let metadata_summary = fs::summarize_metadata(&metadata, &file_type);
-
-                let (entry_type, link_target) = if file_type.is_dir() {
-                    (ItemType::Directory, None)
-                } else if file_type.is_symlink() {
-                    let target = std::fs::read_link(entry.path())
-                        .map_err(|e| VgerError::Other(format!("readlink: {e}")))?;
-                    (
-                        ItemType::Symlink,
-                        Some(target.to_string_lossy().to_string()),
-                    )
-                } else if file_type.is_file() {
-                    (ItemType::RegularFile, None)
-                } else {
-                    // Skip special files (block devices, FIFOs, etc.)
-                    continue;
-                };
-
-                // In multi-path mode, prefix each item path with the source basename
-                let item_path = match &prefix {
-                    Some(pfx) => format!("{pfx}/{rel_path}"),
-                    None => rel_path,
-                };
-
-                let mut item = Item {
-                    path: item_path,
-                    entry_type,
-                    mode: metadata_summary.mode,
-                    uid: metadata_summary.uid,
-                    gid: metadata_summary.gid,
-                    user: None,
-                    group: None,
-                    mtime: metadata_summary.mtime_ns,
-                    atime: None,
-                    ctime: None,
-                    size: metadata_summary.size,
-                    chunks: Vec::new(),
-                    link_target,
-                    xattrs: None,
-                };
-
-                if xattrs_enabled {
-                    item.xattrs = read_item_xattrs(entry.path());
-                }
-
-                // For regular files, chunk and store the content
-                if entry_type == ItemType::RegularFile && metadata.len() > 0 {
-                    emit_progress(
-                        &mut progress,
-                        BackupProgressEvent::FileStarted {
-                            path: item.path.clone(),
-                        },
-                    );
-
-                    // File-level cache: skip read/chunk/compress/encrypt for unchanged files.
-                    let abs_path = entry.path().to_string_lossy().to_string();
-                    let file_size = metadata_summary.size;
-
-                    let cache_hit = repo.file_cache.lookup(
-                        &abs_path,
-                        metadata_summary.device,
-                        metadata_summary.inode,
-                        metadata_summary.mtime_ns,
-                        metadata_summary.ctime_ns,
-                        file_size,
-                    );
-
-                    if let Some(cached_refs) = cache_hit {
-                        // Verify all referenced chunks still exist in the index.
-                        let all_present = cached_refs
-                            .iter()
-                            .all(|cr| repo.chunk_index.contains(&cr.id));
-                        if all_present {
-                            // Bump refcounts for all cached chunks.
-                            let mut file_original: u64 = 0;
-                            let mut file_compressed: u64 = 0;
-                            let refs = cached_refs.clone();
-                            for cr in &refs {
-                                repo.chunk_index.increment_refcount(&cr.id);
-                                file_original += cr.size as u64;
-                                file_compressed += cr.csize as u64;
-                            }
-                            item.chunks = refs.clone();
-
-                            stats.nfiles += 1;
-                            stats.original_size += file_original;
-                            stats.compressed_size += file_compressed;
-                            // No deduplicated_size contribution — all chunks already existed.
-
-                            new_file_cache.insert(
-                                abs_path,
-                                metadata_summary.device,
-                                metadata_summary.inode,
-                                metadata_summary.mtime_ns,
-                                metadata_summary.ctime_ns,
-                                file_size,
-                                refs,
-                            );
-
-                            debug!(path = %item.path, "file cache hit");
-                            emit_progress(
-                                &mut progress,
-                                BackupProgressEvent::StatsUpdated {
-                                    nfiles: stats.nfiles,
-                                    original_size: stats.original_size,
-                                    compressed_size: stats.compressed_size,
-                                    deduplicated_size: stats.deduplicated_size,
-                                    current_file: Some(item.path.clone()),
-                                },
-                            );
-
-                            // Stream item metadata and continue to next entry.
-                            let item_bytes = rmp_serde::to_vec(&item)?;
-                            item_stream.extend_from_slice(&item_bytes);
-                            if item_stream.len() >= items_config.avg_size as usize {
-                                flush_item_stream_chunk(
-                                    repo,
-                                    &mut item_stream,
-                                    &mut item_ptrs,
-                                    compression,
-                                )?;
-                            }
-                            continue;
-                        }
-                    }
-
-                    let file_data =
-                        limits::read_file_with_limiter(entry.path(), read_limiter.as_deref())?;
-                    let chunk_ranges = chunker::chunk_data(&file_data, &repo.config.chunker_params);
-                    let chunk_id_key = *repo.crypto.chunk_id_key();
-
-                    let mut actions = Vec::with_capacity(chunk_ranges.len());
-                    let mut transform_jobs: Vec<TransformJob> =
-                        Vec::with_capacity(chunk_ranges.len());
-                    let mut pending_new: HashMap<ChunkId, usize> = HashMap::new();
-
-                    for (offset, length) in chunk_ranges {
-                        let chunk_data = &file_data[offset..offset + length];
-                        let chunk_id = ChunkId::compute(&chunk_id_key, chunk_data);
-                        let size = length as u32;
-
-                        if let Some(csize) = repo.bump_ref_if_exists(&chunk_id) {
-                            actions.push(FileChunkAction::Existing {
-                                chunk_id,
-                                size,
-                                csize,
-                            });
-                            continue;
-                        }
-
-                        if pending_new.contains_key(&chunk_id) {
-                            actions.push(FileChunkAction::NewDuplicate { chunk_id, size });
-                            continue;
-                        }
-
-                        let job_idx = transform_jobs.len();
-                        pending_new.insert(chunk_id, job_idx);
-                        transform_jobs.push(TransformJob {
-                            chunk_id,
-                            data: chunk_data.to_vec(),
-                        });
-                        actions.push(FileChunkAction::NewPrimary {
-                            chunk_id,
-                            size,
-                            job_idx,
-                        });
-                    }
-
-                    let mut prepared_chunks: Vec<Option<PreparedChunk>> = if transform_jobs
-                        .is_empty()
-                    {
-                        Vec::new()
-                    } else {
-                        let prepared_results: Vec<Result<PreparedChunk>> = {
-                            let crypto = repo.crypto.as_ref();
-                            if let Some(pool) = transform_pool.as_ref() {
-                                pool.install(|| {
-                                    transform_jobs
-                                        .par_iter()
-                                        .map(|job| {
-                                            let compressed =
-                                                crate::compress::compress(compression, &job.data)?;
-                                            let packed = pack_object(
-                                                ObjectType::ChunkData,
-                                                &compressed,
-                                                crypto,
-                                            )?;
-                                            Ok(PreparedChunk {
-                                                chunk_id: job.chunk_id,
-                                                uncompressed_size: job.data.len() as u32,
-                                                packed,
-                                            })
-                                        })
-                                        .collect()
-                                })
-                            } else {
-                                transform_jobs
-                                    .par_iter()
-                                    .map(|job| {
-                                        let compressed =
-                                            crate::compress::compress(compression, &job.data)?;
-                                        let packed = pack_object(
-                                            ObjectType::ChunkData,
-                                            &compressed,
-                                            crypto,
-                                        )?;
-                                        Ok(PreparedChunk {
-                                            chunk_id: job.chunk_id,
-                                            uncompressed_size: job.data.len() as u32,
-                                            packed,
-                                        })
-                                    })
-                                    .collect()
-                            }
-                        };
-
-                        prepared_results
-                            .into_iter()
-                            .collect::<Result<Vec<_>>>()?
-                            .into_iter()
-                            .map(Some)
-                            .collect()
-                    };
-
-                    for action in actions {
-                        match action {
-                            FileChunkAction::Existing {
-                                chunk_id,
-                                size,
-                                csize,
-                            } => {
-                                stats.original_size += size as u64;
-                                stats.compressed_size += csize as u64;
-                                item.chunks.push(ChunkRef {
-                                    id: chunk_id,
-                                    size,
-                                    csize,
-                                });
-                            }
-                            FileChunkAction::NewPrimary {
-                                chunk_id,
-                                size,
-                                job_idx,
-                            } => {
-                                let prepared = prepared_chunks
-                                    .get_mut(job_idx)
-                                    .and_then(Option::take)
-                                    .ok_or_else(|| {
-                                        VgerError::Other(format!(
-                                            "missing prepared chunk at index {job_idx}"
-                                        ))
-                                    })?;
-                                if prepared.chunk_id != chunk_id {
-                                    return Err(VgerError::Other(format!(
-                                        "prepared chunk mismatch at index {job_idx}"
-                                    )));
-                                }
-                                let csize = repo.commit_prepacked_chunk(
-                                    chunk_id,
-                                    prepared.packed,
-                                    prepared.uncompressed_size,
-                                    PackType::Data,
-                                )?;
-
-                                stats.original_size += size as u64;
-                                stats.compressed_size += csize as u64;
-                                stats.deduplicated_size += csize as u64;
-                                item.chunks.push(ChunkRef {
-                                    id: chunk_id,
-                                    size,
-                                    csize,
-                                });
-                            }
-                            FileChunkAction::NewDuplicate { chunk_id, size } => {
-                                let csize =
-                                    repo.bump_ref_if_exists(&chunk_id).ok_or_else(|| {
-                                        VgerError::Other(format!(
-                                            "dedup invariant violated for chunk {chunk_id}"
-                                        ))
-                                    })?;
-
-                                stats.original_size += size as u64;
-                                stats.compressed_size += csize as u64;
-                                item.chunks.push(ChunkRef {
-                                    id: chunk_id,
-                                    size,
-                                    csize,
-                                });
-                            }
-                        }
-                    }
-
-                    stats.nfiles += 1;
-
-                    // Update file cache with the chunks we just stored.
-                    new_file_cache.insert(
-                        abs_path,
-                        metadata_summary.device,
-                        metadata_summary.inode,
-                        metadata_summary.mtime_ns,
-                        metadata_summary.ctime_ns,
-                        file_size,
-                        item.chunks.clone(),
-                    );
-
-                    emit_progress(
-                        &mut progress,
-                        BackupProgressEvent::StatsUpdated {
-                            nfiles: stats.nfiles,
-                            original_size: stats.original_size,
-                            compressed_size: stats.compressed_size,
-                            deduplicated_size: stats.deduplicated_size,
-                            current_file: Some(item.path.clone()),
-                        },
-                    );
-                }
-
-                // Stream item metadata to avoid materializing a full Vec<Item>.
-                let item_bytes = rmp_serde::to_vec(&item)?;
-                item_stream.extend_from_slice(&item_bytes);
-                if item_stream.len() >= items_config.avg_size as usize {
-                    flush_item_stream_chunk(repo, &mut item_stream, &mut item_ptrs, compression)?;
-                }
-            }
-
-            emit_progress(
-                &mut progress,
-                BackupProgressEvent::SourceFinished {
-                    source_path: source_path.clone(),
-                },
-            );
+            )?;
         }
         flush_item_stream_chunk(repo, &mut item_stream, &mut item_ptrs, compression)?;
 

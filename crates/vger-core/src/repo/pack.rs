@@ -8,7 +8,7 @@ use crate::crypto::CryptoEngine;
 use crate::error::{Result, VgerError};
 use crate::storage::StorageBackend;
 
-use super::format::{pack_object, unpack_object, ObjectType};
+use super::format::{pack_object, unpack_object_expect, ObjectType};
 
 /// Magic bytes at the start of every pack file.
 pub const PACK_MAGIC: &[u8; 8] = b"VGERPACK";
@@ -249,7 +249,7 @@ pub fn read_pack_header(
     let header_start = len_offset - header_len;
     let encrypted_header = &pack_data[header_start..len_offset];
 
-    let (_obj_type, header_bytes) = unpack_object(encrypted_header, crypto)?;
+    let header_bytes = unpack_object_expect(encrypted_header, ObjectType::PackHeader, crypto)?;
     let entries: Vec<PackHeaderEntry> = rmp_serde::from_slice(&header_bytes)?;
     Ok(entries)
 }

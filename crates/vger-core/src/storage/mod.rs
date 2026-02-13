@@ -182,7 +182,7 @@ pub enum ParsedUrl {
 /// Parse a repository URL into its components.
 ///
 /// Supported formats:
-/// - Bare path (`/backups/repo`, `./relative`) -> `Local`
+/// - Bare path (`/backups/repo`, `./relative`, `relative`) -> `Local`
 /// - `file:///backups/repo` -> `Local`
 /// - `s3://bucket/prefix` -> `S3` (host is bucket, AWS default endpoint)
 /// - `s3://endpoint:port/bucket/prefix` -> `S3` (host with `.` or port = custom endpoint)
@@ -190,6 +190,9 @@ pub enum ParsedUrl {
 /// - `http(s)://...` -> `Rest`
 pub fn parse_repo_url(raw: &str) -> Result<ParsedUrl> {
     let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return Err(VgerError::Config("repository URL must not be empty".into()));
+    }
 
     // Bare path: starts with `/`, `./`, or `../`
     if trimmed.starts_with('/')
@@ -198,6 +201,13 @@ pub fn parse_repo_url(raw: &str) -> Result<ParsedUrl> {
         || trimmed == "."
         || trimmed == ".."
     {
+        return Ok(ParsedUrl::Local {
+            path: trimmed.to_string(),
+        });
+    }
+
+    // Bare relative paths (without ./) are local too.
+    if !trimmed.contains("://") {
         return Ok(ParsedUrl::Local {
             path: trimmed.to_string(),
         });
@@ -424,6 +434,17 @@ mod tests {
     }
 
     #[test]
+    fn test_bare_relative_path_without_dot_prefix() {
+        let parsed = parse_repo_url("my-repo").unwrap();
+        assert_eq!(
+            parsed,
+            ParsedUrl::Local {
+                path: "my-repo".into()
+            }
+        );
+    }
+
+    #[test]
     fn test_file_url() {
         let parsed = parse_repo_url("file:///backups/repo").unwrap();
         assert_eq!(
@@ -577,7 +598,13 @@ mod tests {
 
     #[test]
     fn test_invalid_url() {
-        let err = parse_repo_url("not a url at all").unwrap_err();
+        let err = parse_repo_url("http://[::1").unwrap_err();
         assert!(err.to_string().contains("invalid repository URL"));
+    }
+
+    #[test]
+    fn test_empty_url_rejected() {
+        let err = parse_repo_url("   ").unwrap_err();
+        assert!(err.to_string().contains("must not be empty"));
     }
 }

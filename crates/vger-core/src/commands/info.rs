@@ -3,9 +3,9 @@ use chrono::{DateTime, Utc};
 use crate::config::VgerConfig;
 use crate::error::Result;
 use crate::repo::EncryptionMode;
-use crate::storage;
 
 use super::list::load_snapshot_meta;
+use super::util::open_repo;
 
 /// Repository statistics for the `info` command.
 #[derive(Debug, Clone)]
@@ -24,8 +24,7 @@ pub struct InfoStats {
 
 /// Run `vger info`.
 pub fn run(config: &VgerConfig, passphrase: Option<&str>) -> Result<InfoStats> {
-    let backend = storage::backend_from_config(&config.repository, None)?;
-    let repo = crate::repo::Repository::open(backend, passphrase)?;
+    let repo = open_repo(config, passphrase)?;
 
     let mut raw_size = 0u64;
     let mut compressed_size = 0u64;

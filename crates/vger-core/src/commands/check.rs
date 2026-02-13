@@ -2,13 +2,12 @@ use crate::compress;
 use crate::config::VgerConfig;
 use crate::crypto::chunk_id::ChunkId;
 use crate::error::Result;
-use crate::repo::format::unpack_object;
+use crate::repo::format::{unpack_object_expect, ObjectType};
 use crate::repo::pack::read_blob_from_pack;
-use crate::repo::Repository;
 use crate::snapshot::item::ItemType;
-use crate::storage;
 
-use super::list::{load_snapshot_items, load_snapshot_meta};
+use super::list::{for_each_snapshot_item, load_snapshot_meta};
+use super::util::open_repo;
 
 /// A single integrity issue found during check.
 #[derive(Debug)]
@@ -73,8 +72,7 @@ pub fn run_with_progress(
     verify_data: bool,
     mut progress: Option<&mut dyn FnMut(CheckProgressEvent)>,
 ) -> Result<CheckResult> {
-    let backend = storage::backend_from_config(&config.repository, None)?;
-    let repo = Repository::open(backend, passphrase)?;
+    let repo = open_repo(config, passphrase)?;
 
     let mut errors: Vec<CheckError> = Vec::new();
     let mut snapshots_checked: usize = 0;
@@ -114,19 +112,10 @@ pub fn run_with_progress(
             }
         }
 
-        // Load and check items
-        let items = match load_snapshot_items(&repo, &entry.name) {
-            Ok(items) => items,
-            Err(e) => {
-                errors.push(CheckError {
-                    context: format!("snapshot '{}'", entry.name),
-                    message: format!("failed to load items: {e}"),
-                });
-                continue;
-            }
-        };
-
-        for item in &items {
+        // Load and check items.
+        let mut per_snapshot_items = 0usize;
+        if let Err(e) = for_each_snapshot_item(&repo, &entry.name, |item| {
+            per_snapshot_items += 1;
             if item.entry_type == ItemType::RegularFile {
                 for chunk_ref in &item.chunks {
                     if !repo.chunk_index.contains(&chunk_ref.id) {
@@ -137,9 +126,16 @@ pub fn run_with_progress(
                     }
                 }
             }
+            Ok(())
+        }) {
+            errors.push(CheckError {
+                context: format!("snapshot '{}'", entry.name),
+                message: format!("failed to load items: {e}"),
+            });
+            continue;
         }
 
-        items_checked += items.len();
+        items_checked += per_snapshot_items;
         snapshots_checked += 1;
     }
 
@@ -196,16 +192,17 @@ pub fn run_with_progress(
             };
 
             // Decrypt
-            let compressed = match unpack_object(&raw, repo.crypto.as_ref()) {
-                Ok((_obj_type, bytes)) => bytes,
-                Err(e) => {
-                    errors.push(CheckError {
-                        context: "verify-data".into(),
-                        message: format!("chunk {chunk_id}: decrypt failed: {e}"),
-                    });
-                    continue;
-                }
-            };
+            let compressed =
+                match unpack_object_expect(&raw, ObjectType::ChunkData, repo.crypto.as_ref()) {
+                    Ok(bytes) => bytes,
+                    Err(e) => {
+                        errors.push(CheckError {
+                            context: "verify-data".into(),
+                            message: format!("chunk {chunk_id}: decrypt failed: {e}"),
+                        });
+                        continue;
+                    }
+                };
 
             // Decompress
             let plaintext = match compress::decompress(&compressed) {

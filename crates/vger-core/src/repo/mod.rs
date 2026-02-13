@@ -22,7 +22,7 @@ use crate::index::ChunkIndex;
 use crate::storage::StorageBackend;
 
 use self::file_cache::FileCache;
-use self::format::{pack_object, unpack_object, ObjectType};
+use self::format::{pack_object, unpack_object_expect, ObjectType};
 use self::manifest::Manifest;
 use self::pack::{
     compute_data_pack_target, compute_tree_pack_target, read_blob_from_pack, PackType, PackWriter,
@@ -264,17 +264,14 @@ impl Repository {
         let manifest_data = storage
             .get("manifest")?
             .ok_or_else(|| VgerError::InvalidFormat("missing manifest".into()))?;
-        let (obj_type, manifest_bytes) = unpack_object(&manifest_data, crypto.as_ref())?;
-        if obj_type != ObjectType::Manifest {
-            return Err(VgerError::InvalidFormat(
-                "manifest has wrong type tag".into(),
-            ));
-        }
+        let manifest_bytes =
+            unpack_object_expect(&manifest_data, ObjectType::Manifest, crypto.as_ref())?;
         let manifest: Manifest = rmp_serde::from_slice(&manifest_bytes)?;
 
         // Read chunk index
         let chunk_index = if let Some(index_data) = storage.get("index")? {
-            let (_obj_type, index_bytes) = unpack_object(&index_data, crypto.as_ref())?;
+            let index_bytes =
+                unpack_object_expect(&index_data, ObjectType::ChunkIndex, crypto.as_ref())?;
             rmp_serde::from_slice(&index_bytes)?
         } else {
             ChunkIndex::new()
@@ -489,7 +486,8 @@ impl Repository {
             entry.stored_size,
         )?;
 
-        let (_obj_type, compressed) = unpack_object(&blob_data, self.crypto.as_ref())?;
+        let compressed =
+            unpack_object_expect(&blob_data, ObjectType::ChunkData, self.crypto.as_ref())?;
         compress::decompress(&compressed)
     }
 

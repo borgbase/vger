@@ -6,11 +6,10 @@ use tracing::warn;
 use crate::config::{RetentionConfig, SourceEntry, VgerConfig};
 use crate::error::{Result, VgerError};
 use crate::prune::{apply_policy, apply_policy_by_label, PruneDecision};
-use crate::repo::Repository;
-use crate::storage;
 
-use super::list::{load_snapshot_items, load_snapshot_meta};
-use super::util::with_repo_lock;
+use super::list::{load_snapshot_item_stream, load_snapshot_meta};
+use super::snapshot_ops::decrement_snapshot_chunk_refs;
+use super::util::with_open_repo_lock;
 
 pub struct PruneStats {
     pub kept: usize,
@@ -34,9 +33,7 @@ pub fn run(
     sources: &[SourceEntry],
     source_filter: &[String],
 ) -> Result<(PruneStats, Vec<PruneListEntry>)> {
-    let backend = storage::backend_from_config(&config.repository, None)?;
-    let mut repo = Repository::open(backend, passphrase)?;
-    with_repo_lock(&mut repo, |repo| {
+    with_open_repo_lock(config, passphrase, |repo| {
         let now = Utc::now();
 
         // When --source is given, restrict to matching snapshots only
@@ -142,30 +139,13 @@ pub fn run(
             let snapshot_key = format!("snapshots/{snapshot_id_hex}");
 
             let snapshot_meta = load_snapshot_meta(repo, snapshot_name)?;
-            let items = load_snapshot_items(repo, snapshot_name)?;
+            let items_stream = load_snapshot_item_stream(repo, snapshot_name)?;
 
-            // Decrement data chunk refcounts
             // Orphaned blobs remain in pack files until a future `compact` command.
-            for item in &items {
-                for chunk_ref in &item.chunks {
-                    if let Some((rc, size)) = repo.chunk_index.decrement(&chunk_ref.id) {
-                        if rc == 0 {
-                            total_chunks_deleted += 1;
-                            total_space_freed += size as u64;
-                        }
-                    }
-                }
-            }
-
-            // Decrement item-stream chunk refcounts
-            for chunk_id in &snapshot_meta.item_ptrs {
-                if let Some((rc, size)) = repo.chunk_index.decrement(chunk_id) {
-                    if rc == 0 {
-                        total_chunks_deleted += 1;
-                        total_space_freed += size as u64;
-                    }
-                }
-            }
+            let impact =
+                decrement_snapshot_chunk_refs(repo, &items_stream, &snapshot_meta.item_ptrs)?;
+            total_chunks_deleted += impact.chunks_deleted;
+            total_space_freed += impact.space_freed;
 
             // Remove from manifest
             repo.manifest.remove_snapshot(snapshot_name);

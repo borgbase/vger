@@ -8,7 +8,7 @@ use crate::crypto::CryptoEngine;
 use crate::error::Result;
 use crate::snapshot::item::ChunkRef;
 
-use super::format::{pack_object, unpack_object, ObjectType};
+use super::format::{pack_object, unpack_object_expect, ObjectType};
 
 /// Cached filesystem metadata for a file, used to skip re-reading unchanged files.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -116,7 +116,7 @@ impl FileCache {
         let Ok(data) = std::fs::read(&path) else {
             return Self::new();
         };
-        let Ok((_obj_type, plaintext)) = unpack_object(&data, crypto) else {
+        let Ok(plaintext) = unpack_object_expect(&data, ObjectType::FileCache, crypto) else {
             debug!("file cache: failed to decrypt, starting fresh");
             return Self::new();
         };

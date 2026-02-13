@@ -62,3 +62,19 @@ pub fn unpack_object(data: &[u8], crypto: &dyn CryptoEngine) -> Result<(ObjectTy
     let plaintext = crypto.decrypt(&data[1..], &aad)?;
     Ok((obj_type, plaintext))
 }
+
+/// Deserialize and decrypt a repo object, ensuring its type tag matches.
+pub fn unpack_object_expect(
+    data: &[u8],
+    expected_type: ObjectType,
+    crypto: &dyn CryptoEngine,
+) -> Result<Vec<u8>> {
+    let (obj_type, plaintext) = unpack_object(data, crypto)?;
+    if obj_type != expected_type {
+        return Err(VgerError::InvalidFormat(format!(
+            "unexpected object type: expected {:?}, got {:?}",
+            expected_type, obj_type
+        )));
+    }
+    Ok(plaintext)
+}

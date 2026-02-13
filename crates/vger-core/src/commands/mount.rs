@@ -28,7 +28,8 @@ use crate::crypto::chunk_id::ChunkId;
 use crate::error::{Result, VgerError};
 use crate::repo::Repository;
 use crate::snapshot::item::{ChunkRef, Item, ItemType};
-use crate::storage;
+
+use super::util::open_repo;
 
 // ─── VFS tree ──────────────────────────────────────────────────────────────
 
@@ -674,8 +675,7 @@ pub fn run(
     cache_size: usize,
     source_filter: &[String],
 ) -> Result<()> {
-    let backend = storage::backend_from_config(&config.repository, None)?;
-    let repo = Repository::open(backend, passphrase)?;
+    let repo = open_repo(config, passphrase)?;
 
     // Build the VFS tree from snapshot items
     eprintln!("Loading snapshot data...");
