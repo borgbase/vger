@@ -97,6 +97,18 @@ impl FileCache {
         self.entries.is_empty()
     }
 
+    /// Remove entries whose chunk IDs are not present in the index.
+    /// Returns the number of entries removed.
+    pub fn prune_stale_entries(
+        &mut self,
+        chunk_exists: &dyn Fn(&crate::crypto::chunk_id::ChunkId) -> bool,
+    ) -> usize {
+        let before = self.entries.len();
+        self.entries
+            .retain(|_path, entry| entry.chunk_refs.iter().all(|cr| chunk_exists(&cr.id)));
+        before - self.entries.len()
+    }
+
     /// Return the local filesystem path for the cache file.
     /// Platform cache dir + `vger/<repo_id_hex>/filecache`
     /// (macOS: `~/Library/Caches/vger/…`, Linux: `~/.cache/vger/…`)

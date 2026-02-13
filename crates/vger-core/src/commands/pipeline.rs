@@ -1,5 +1,6 @@
 use std::collections::HashMap;
 use std::fs::File;
+use std::io::Read;
 use std::path::Path;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
@@ -69,6 +70,51 @@ impl ByteBudget {
     }
 }
 
+/// Pre-acquires a block of byte budget and dispenses to small files without
+/// per-chunk CAS overhead. Releases unused budget on drop.
+pub struct BudgetBlock<'a> {
+    budget: &'a ByteBudget,
+    remaining: usize,
+    block_size: usize,
+}
+
+/// Default block size for BudgetBlock: 1 MiB.
+const BUDGET_BLOCK_SIZE: usize = 1024 * 1024;
+
+impl<'a> BudgetBlock<'a> {
+    pub fn new(budget: &'a ByteBudget) -> Self {
+        Self {
+            budget,
+            remaining: 0,
+            block_size: BUDGET_BLOCK_SIZE,
+        }
+    }
+
+    /// Acquire `n` bytes from the block, refilling from the underlying budget as needed.
+    pub fn acquire(&mut self, n: usize) {
+        if n <= self.remaining {
+            self.remaining -= n;
+        } else {
+            // Return leftover, then acquire a fresh block large enough.
+            if self.remaining > 0 {
+                self.budget.release(self.remaining);
+                self.remaining = 0;
+            }
+            let to_acquire = n.max(self.block_size);
+            self.budget.acquire(to_acquire);
+            self.remaining = to_acquire - n;
+        }
+    }
+}
+
+impl Drop for BudgetBlock<'_> {
+    fn drop(&mut self) {
+        if self.remaining > 0 {
+            self.budget.release(self.remaining);
+        }
+    }
+}
+
 /// Messages sent from the I/O producer to the consumer.
 pub enum FileMessage {
     /// A file with a cache hit. Chunk validity is verified by the consumer.
@@ -88,6 +134,14 @@ pub enum FileMessage {
     FileChunk { data: Vec<u8> },
     /// End of the file currently being streamed.
     FileEnd,
+    /// A small file (< min_chunk_size) sent as a single message.
+    /// Eliminates FileStart/FileChunk/FileEnd overhead and skips FastCDC.
+    WholeFile {
+        item: Item,
+        data: Vec<u8>,
+        metadata_summary: fs::MetadataSummary,
+        abs_path: String,
+    },
     /// A non-file item (directory, symlink) — just needs to be appended to the item stream.
     NonFileItem { item: Item },
     /// Signals the start of processing a source path.
@@ -327,6 +381,8 @@ fn produce_source(
         true
     });
 
+    let mut budget_block = BudgetBlock::new(byte_budget);
+
     for entry in walk_builder.build() {
         let entry = entry.map_err(|e| VgerError::Other(format!("walk error: {e}")))?;
 
@@ -418,7 +474,36 @@ fn produce_source(
                 continue;
             }
 
-            // Cache miss: stream chunks one at a time.
+            // Small-file fast path: files smaller than min_chunk_size produce
+            // exactly one chunk, so skip FastCDC and send a single WholeFile message.
+            if metadata_summary.size < chunker_config.min_size as u64 {
+                let mut file = File::open(entry.path()).map_err(VgerError::Io)?;
+                let mut data = Vec::with_capacity(metadata_summary.size as usize);
+                if let Some(limiter) = read_limiter {
+                    limits::LimitedReader::new(&mut file, Some(limiter))
+                        .read_to_end(&mut data)
+                        .map_err(VgerError::Io)?;
+                } else {
+                    file.read_to_end(&mut data).map_err(VgerError::Io)?;
+                }
+
+                budget_block.acquire(data.len());
+
+                if tx
+                    .send(FileMessage::WholeFile {
+                        item,
+                        data,
+                        metadata_summary,
+                        abs_path,
+                    })
+                    .is_err()
+                {
+                    return Ok(());
+                }
+                continue;
+            }
+
+            // Cache miss (large file): stream chunks one at a time.
             if tx
                 .send(FileMessage::FileStart {
                     item,

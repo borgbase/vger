@@ -1038,3 +1038,157 @@ fn command_dump_mixed_with_files() {
         std::fs::read_to_string(extract_dir.path().join(".vger-dumps/dump.txt")).unwrap();
     assert_eq!(dump_contents, "dump output\n");
 }
+
+/// Backup 500 small files (1 KiB each) + 1 large file, verify roundtrip.
+/// Tests both pipeline and sequential paths via two backups with different configs.
+#[test]
+fn backup_many_small_files_plus_large_file_roundtrip() {
+    let tmp = tempfile::tempdir().unwrap();
+    let repo_dir = tmp.path().join("repo");
+    let source_dir = tmp.path().join("source");
+    std::fs::create_dir_all(&repo_dir).unwrap();
+    std::fs::create_dir_all(&source_dir).unwrap();
+
+    // Create 500 small files (1 KiB each) with unique content.
+    for i in 0..500 {
+        let content: Vec<u8> = (0..1024).map(|j| ((i * 7 + j * 13) % 251) as u8).collect();
+        std::fs::write(source_dir.join(format!("small_{i:04}.bin")), &content).unwrap();
+    }
+
+    // Create 1 large file (256 KiB).
+    let large_payload: Vec<u8> = (0u32..256 * 1024).map(|i| (i % 251) as u8).collect();
+    std::fs::write(source_dir.join("large.bin"), &large_payload).unwrap();
+
+    let config = make_test_config(&repo_dir);
+    commands::init::run(&config, None).unwrap();
+
+    let source_paths = vec![source_dir.to_string_lossy().to_string()];
+    let exclude_if_present: Vec<String> = Vec::new();
+    let exclude_patterns: Vec<String> = Vec::new();
+
+    // First backup (pipeline path — default pipeline_depth > 0).
+    let stats = commands::backup::run(
+        &config,
+        commands::backup::BackupRequest {
+            snapshot_name: "snap-small-1",
+            passphrase: None,
+            source_paths: &source_paths,
+            source_label: "source",
+            exclude_patterns: &exclude_patterns,
+            exclude_if_present: &exclude_if_present,
+            one_file_system: true,
+            git_ignore: false,
+            xattrs_enabled: false,
+            compression: Compression::Lz4,
+            label: "",
+            command_dumps: &[],
+        },
+    )
+    .unwrap();
+
+    assert_eq!(stats.nfiles, 501);
+    assert!(stats.original_size > 0);
+
+    // Verify all items present in the snapshot.
+    {
+        let mut repo = open_local_repo(&repo_dir);
+        let items = commands::list::load_snapshot_items(&mut repo, "snap-small-1").unwrap();
+        let files: Vec<_> = items
+            .iter()
+            .filter(|i| i.entry_type == ItemType::RegularFile)
+            .collect();
+        assert_eq!(files.len(), 501, "all files should be in snapshot");
+
+        // Check walk order: items should be sorted by path.
+        let paths: Vec<_> = items.iter().map(|i| i.path.clone()).collect();
+        let mut sorted = paths.clone();
+        sorted.sort();
+        assert_eq!(paths, sorted, "items should be in sorted walk order");
+    }
+
+    // Extract and verify all file contents.
+    let restore_dir = tmp.path().join("restore1");
+    commands::extract::run(
+        &config,
+        None,
+        "snap-small-1",
+        restore_dir.to_str().unwrap(),
+        None,
+        false,
+    )
+    .unwrap();
+
+    for i in 0..500 {
+        let expected: Vec<u8> = (0..1024).map(|j| ((i * 7 + j * 13) % 251) as u8).collect();
+        let restored = std::fs::read(restore_dir.join(format!("small_{i:04}.bin"))).unwrap();
+        assert_eq!(restored, expected, "small file {i} content mismatch");
+    }
+    assert_eq!(
+        std::fs::read(restore_dir.join("large.bin")).unwrap(),
+        large_payload
+    );
+
+    // Second backup (sequential path — pipeline_depth=0).
+    let mut seq_config = make_test_config(&repo_dir);
+    seq_config.limits.cpu.max_threads = 1;
+
+    // Force sequential by setting pipeline_depth to 0 via the limits.
+    let stats2 = commands::backup::run(
+        &seq_config,
+        commands::backup::BackupRequest {
+            snapshot_name: "snap-small-2",
+            passphrase: None,
+            source_paths: &source_paths,
+            source_label: "source",
+            exclude_patterns: &exclude_patterns,
+            exclude_if_present: &exclude_if_present,
+            one_file_system: true,
+            git_ignore: false,
+            xattrs_enabled: false,
+            compression: Compression::Lz4,
+            label: "",
+            command_dumps: &[],
+        },
+    )
+    .unwrap();
+
+    assert_eq!(stats2.nfiles, 501);
+
+    // Verify the second snapshot also has correct walk order.
+    {
+        let mut repo = open_local_repo(&repo_dir);
+        let items = commands::list::load_snapshot_items(&mut repo, "snap-small-2").unwrap();
+        let files: Vec<_> = items
+            .iter()
+            .filter(|i| i.entry_type == ItemType::RegularFile)
+            .collect();
+        assert_eq!(files.len(), 501);
+
+        let paths: Vec<_> = items.iter().map(|i| i.path.clone()).collect();
+        let mut sorted = paths.clone();
+        sorted.sort();
+        assert_eq!(paths, sorted, "items should be in sorted walk order (seq)");
+    }
+
+    // Extract and verify second snapshot too.
+    let restore_dir2 = tmp.path().join("restore2");
+    commands::extract::run(
+        &config,
+        None,
+        "snap-small-2",
+        restore_dir2.to_str().unwrap(),
+        None,
+        false,
+    )
+    .unwrap();
+
+    for i in 0..500 {
+        let expected: Vec<u8> = (0..1024).map(|j| ((i * 7 + j * 13) % 251) as u8).collect();
+        let restored = std::fs::read(restore_dir2.join(format!("small_{i:04}.bin"))).unwrap();
+        assert_eq!(restored, expected, "small file {i} content mismatch (seq)");
+    }
+    assert_eq!(
+        std::fs::read(restore_dir2.join("large.bin")).unwrap(),
+        large_payload
+    );
+}

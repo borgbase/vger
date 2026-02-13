@@ -218,6 +218,185 @@ fn flush_regular_file_batch(
     Ok(())
 }
 
+/// Tracks a small file pending in the cross-file batch.
+struct PendingBatchFile {
+    item: Item,
+    metadata_summary: fs::MetadataSummary,
+    abs_path: String,
+    chunk_start: usize,
+    chunk_count: usize,
+}
+
+/// Accumulates chunks from many small files for a single rayon dispatch.
+struct CrossFileBatch {
+    files: Vec<PendingBatchFile>,
+    raw_chunks: Vec<Vec<u8>>,
+    pending_bytes: usize,
+}
+
+/// Flush threshold: 32 MiB or 8192 chunks.
+const CROSS_BATCH_MAX_BYTES: usize = 32 * 1024 * 1024;
+const CROSS_BATCH_MAX_CHUNKS: usize = 8192;
+
+impl CrossFileBatch {
+    fn new() -> Self {
+        Self {
+            files: Vec::new(),
+            raw_chunks: Vec::new(),
+            pending_bytes: 0,
+        }
+    }
+
+    fn is_empty(&self) -> bool {
+        self.files.is_empty()
+    }
+
+    fn should_flush(&self) -> bool {
+        self.pending_bytes >= CROSS_BATCH_MAX_BYTES
+            || self.raw_chunks.len() >= CROSS_BATCH_MAX_CHUNKS
+    }
+
+    fn add_file(
+        &mut self,
+        item: Item,
+        data: Vec<u8>,
+        metadata_summary: fs::MetadataSummary,
+        abs_path: String,
+    ) {
+        let chunk_start = self.raw_chunks.len();
+        self.pending_bytes += data.len();
+        self.raw_chunks.push(data);
+        self.files.push(PendingBatchFile {
+            item,
+            metadata_summary,
+            abs_path,
+            chunk_start,
+            chunk_count: 1,
+        });
+    }
+}
+
+/// Flush all accumulated small-file chunks in a single rayon dispatch, then
+/// distribute PreparedChunks back to their owning files in walk order.
+#[allow(clippy::too_many_arguments)]
+fn flush_cross_file_batch(
+    batch: &mut CrossFileBatch,
+    repo: &mut Repository,
+    compression: Compression,
+    chunk_id_key: &[u8; 32],
+    transform_pool: Option<&rayon::ThreadPool>,
+    items_config: &ChunkerConfig,
+    item_stream: &mut Vec<u8>,
+    item_ptrs: &mut Vec<ChunkId>,
+    stats: &mut SnapshotStats,
+    new_file_cache: &mut FileCache,
+    progress: &mut Option<&mut dyn FnMut(BackupProgressEvent)>,
+) -> Result<()> {
+    if batch.is_empty() {
+        return Ok(());
+    }
+
+    // Parallel phase: compute ChunkId + compress + encrypt for ALL accumulated chunks at once.
+    let prepared_results: Vec<Result<PreparedChunk>> = {
+        let crypto = repo.crypto.as_ref();
+        let do_work = |data: &Vec<u8>| -> Result<PreparedChunk> {
+            let chunk_id = ChunkId::compute(chunk_id_key, data);
+            let compressed = crate::compress::compress(compression, data)?;
+            let packed = pack_object(ObjectType::ChunkData, &compressed, crypto)?;
+            Ok(PreparedChunk {
+                chunk_id,
+                uncompressed_size: data.len() as u32,
+                packed,
+            })
+        };
+        if let Some(pool) = transform_pool {
+            pool.install(|| batch.raw_chunks.par_iter().map(do_work).collect())
+        } else {
+            batch.raw_chunks.iter().map(do_work).collect()
+        }
+    };
+
+    // Convert to Option<PreparedChunk> so we can .take() without cloning packed data.
+    let mut prepared: Vec<Option<PreparedChunk>> = prepared_results
+        .into_iter()
+        .map(|r| r.map(Some))
+        .collect::<Result<Vec<_>>>()?;
+
+    // Sequential phase: iterate files in walk order, commit chunks, update caches.
+    for file in batch.files.drain(..) {
+        emit_progress(
+            progress,
+            BackupProgressEvent::FileStarted {
+                path: file.item.path.clone(),
+            },
+        );
+
+        let mut item = file.item;
+
+        for slot in prepared
+            .iter_mut()
+            .skip(file.chunk_start)
+            .take(file.chunk_count)
+        {
+            let p = slot.take().expect("chunk already consumed");
+            let size = p.uncompressed_size;
+
+            if let Some(csize) = repo.bump_ref_if_exists(&p.chunk_id) {
+                stats.original_size += size as u64;
+                stats.compressed_size += csize as u64;
+                item.chunks.push(ChunkRef {
+                    id: p.chunk_id,
+                    size,
+                    csize,
+                });
+            } else {
+                let csize = repo.commit_prepacked_chunk(
+                    p.chunk_id,
+                    p.packed,
+                    p.uncompressed_size,
+                    PackType::Data,
+                )?;
+                stats.original_size += size as u64;
+                stats.compressed_size += csize as u64;
+                stats.deduplicated_size += csize as u64;
+                item.chunks.push(ChunkRef {
+                    id: p.chunk_id,
+                    size,
+                    csize,
+                });
+            }
+        }
+
+        stats.nfiles += 1;
+
+        new_file_cache.insert(
+            file.abs_path,
+            file.metadata_summary.device,
+            file.metadata_summary.inode,
+            file.metadata_summary.mtime_ns,
+            file.metadata_summary.ctime_ns,
+            file.metadata_summary.size,
+            item.chunks.clone(),
+        );
+
+        emit_stats_progress(progress, stats, Some(item.path.clone()));
+
+        append_item_to_stream(
+            repo,
+            item_stream,
+            item_ptrs,
+            &item,
+            items_config,
+            compression,
+        )?;
+    }
+
+    batch.raw_chunks.clear();
+    batch.pending_bytes = 0;
+
+    Ok(())
+}
+
 #[derive(Debug, Clone)]
 pub enum BackupProgressEvent {
     SourceStarted {
@@ -708,6 +887,10 @@ fn process_source_path(
         true
     });
 
+    let chunk_id_key = *repo.crypto.chunk_id_key();
+    let min_chunk_size = repo.config.chunker_params.min_size as u64;
+    let mut cross_batch = CrossFileBatch::new();
+
     for entry in walk_builder.build() {
         let entry = entry.map_err(|e| VgerError::Other(format!("walk error: {e}")))?;
 
@@ -775,19 +958,156 @@ fn process_source_path(
 
         // For regular files, chunk and store the content.
         if entry_type == ItemType::RegularFile && metadata_summary.size > 0 {
-            process_regular_file_item(
+            // Small-file fast path: read directly, accumulate in cross-file batch.
+            if metadata_summary.size < min_chunk_size {
+                // Flush batch before cache-hit check since it may need walk-order items.
+                let abs_path = entry.path().to_string_lossy().to_string();
+
+                let cache_hit = repo.file_cache.lookup(
+                    &abs_path,
+                    metadata_summary.device,
+                    metadata_summary.inode,
+                    metadata_summary.mtime_ns,
+                    metadata_summary.ctime_ns,
+                    metadata_summary.size,
+                );
+
+                if let Some(cached_refs) = cache_hit {
+                    let cached_refs = cached_refs.to_vec();
+                    // Flush batch to preserve walk order before the cache-hit item.
+                    flush_cross_file_batch(
+                        &mut cross_batch,
+                        repo,
+                        compression,
+                        &chunk_id_key,
+                        transform_pool,
+                        items_config,
+                        item_stream,
+                        item_ptrs,
+                        stats,
+                        new_file_cache,
+                        progress,
+                    )?;
+
+                    emit_progress(
+                        progress,
+                        BackupProgressEvent::FileStarted {
+                            path: item.path.clone(),
+                        },
+                    );
+
+                    let all_present = cached_refs.iter().all(|cr| repo.chunk_exists(&cr.id));
+                    if all_present {
+                        let mut file_original: u64 = 0;
+                        let mut file_compressed: u64 = 0;
+                        for cr in &cached_refs {
+                            repo.increment_chunk_ref(&cr.id);
+                            file_original += cr.size as u64;
+                            file_compressed += cr.csize as u64;
+                        }
+                        stats.nfiles += 1;
+                        stats.original_size += file_original;
+                        stats.compressed_size += file_compressed;
+                        item.chunks = cached_refs;
+
+                        new_file_cache.insert(
+                            abs_path,
+                            metadata_summary.device,
+                            metadata_summary.inode,
+                            metadata_summary.mtime_ns,
+                            metadata_summary.ctime_ns,
+                            metadata_summary.size,
+                            item.chunks.clone(),
+                        );
+
+                        debug!(path = %item.path, "file cache hit (sequential small)");
+                        emit_stats_progress(progress, stats, Some(item.path.clone()));
+                    } else {
+                        // Stale cache — read and process normally (rare after sanitization).
+                        let data = std::fs::read(entry.path()).map_err(VgerError::Io)?;
+                        cross_batch.add_file(item.clone(), data, metadata_summary, abs_path);
+                        flush_cross_file_batch(
+                            &mut cross_batch,
+                            repo,
+                            compression,
+                            &chunk_id_key,
+                            transform_pool,
+                            items_config,
+                            item_stream,
+                            item_ptrs,
+                            stats,
+                            new_file_cache,
+                            progress,
+                        )?;
+                        continue; // item already appended by flush
+                    }
+                } else {
+                    // Cache miss — read and add to batch.
+                    let data = std::fs::read(entry.path()).map_err(VgerError::Io)?;
+                    cross_batch.add_file(item, data, metadata_summary, abs_path);
+
+                    if cross_batch.should_flush() {
+                        flush_cross_file_batch(
+                            &mut cross_batch,
+                            repo,
+                            compression,
+                            &chunk_id_key,
+                            transform_pool,
+                            items_config,
+                            item_stream,
+                            item_ptrs,
+                            stats,
+                            new_file_cache,
+                            progress,
+                        )?;
+                    }
+                    continue; // item will be appended by flush
+                }
+            } else {
+                // Large file — flush batch first to maintain walk order.
+                flush_cross_file_batch(
+                    &mut cross_batch,
+                    repo,
+                    compression,
+                    &chunk_id_key,
+                    transform_pool,
+                    items_config,
+                    item_stream,
+                    item_ptrs,
+                    stats,
+                    new_file_cache,
+                    progress,
+                )?;
+
+                process_regular_file_item(
+                    repo,
+                    entry.path(),
+                    metadata_summary,
+                    compression,
+                    transform_pool,
+                    read_limiter,
+                    &mut item,
+                    stats,
+                    new_file_cache,
+                    progress,
+                    max_pending_transform_bytes,
+                    max_pending_file_actions,
+                )?;
+            }
+        } else {
+            // Non-regular-file — flush batch first to maintain walk order.
+            flush_cross_file_batch(
+                &mut cross_batch,
                 repo,
-                entry.path(),
-                metadata_summary,
                 compression,
+                &chunk_id_key,
                 transform_pool,
-                read_limiter,
-                &mut item,
+                items_config,
+                item_stream,
+                item_ptrs,
                 stats,
                 new_file_cache,
                 progress,
-                max_pending_transform_bytes,
-                max_pending_file_actions,
             )?;
         }
 
@@ -801,6 +1121,21 @@ fn process_source_path(
             compression,
         )?;
     }
+
+    // Flush any remaining small files in the cross-file batch.
+    flush_cross_file_batch(
+        &mut cross_batch,
+        repo,
+        compression,
+        &chunk_id_key,
+        transform_pool,
+        items_config,
+        item_stream,
+        item_ptrs,
+        stats,
+        new_file_cache,
+        progress,
+    )?;
 
     emit_progress(
         progress,
@@ -847,15 +1182,60 @@ fn run_pipeline_backup(
 
     let chunk_id_key = *repo.crypto.chunk_id_key();
     let mut current_file: Option<StreamingFile> = None;
+    let mut cross_batch = CrossFileBatch::new();
 
     for msg in rx.iter() {
         match msg {
+            FileMessage::WholeFile {
+                item,
+                data,
+                metadata_summary,
+                abs_path,
+            } => {
+                // Release byte budget for this file's data.
+                byte_budget.release(data.len());
+
+                // Accumulate into cross-file batch.
+                cross_batch.add_file(item, data, metadata_summary, abs_path);
+
+                if cross_batch.should_flush() {
+                    flush_cross_file_batch(
+                        &mut cross_batch,
+                        repo,
+                        compression,
+                        &chunk_id_key,
+                        transform_pool,
+                        items_config,
+                        item_stream,
+                        item_ptrs,
+                        stats,
+                        new_file_cache,
+                        progress,
+                    )?;
+                }
+            }
+
             FileMessage::CacheHit {
                 mut item,
                 cached_refs,
                 metadata_summary,
                 abs_path,
             } => {
+                // Flush cross-file batch to preserve walk order.
+                flush_cross_file_batch(
+                    &mut cross_batch,
+                    repo,
+                    compression,
+                    &chunk_id_key,
+                    transform_pool,
+                    items_config,
+                    item_stream,
+                    item_ptrs,
+                    stats,
+                    new_file_cache,
+                    progress,
+                )?;
+
                 emit_progress(
                     progress,
                     BackupProgressEvent::FileStarted {
@@ -971,6 +1351,21 @@ fn run_pipeline_backup(
                 metadata_summary,
                 abs_path,
             } => {
+                // Flush cross-file batch to preserve walk order.
+                flush_cross_file_batch(
+                    &mut cross_batch,
+                    repo,
+                    compression,
+                    &chunk_id_key,
+                    transform_pool,
+                    items_config,
+                    item_stream,
+                    item_ptrs,
+                    stats,
+                    new_file_cache,
+                    progress,
+                )?;
+
                 emit_progress(
                     progress,
                     BackupProgressEvent::FileStarted {
@@ -1055,6 +1450,21 @@ fn run_pipeline_backup(
             }
 
             FileMessage::NonFileItem { item } => {
+                // Flush cross-file batch to preserve walk order.
+                flush_cross_file_batch(
+                    &mut cross_batch,
+                    repo,
+                    compression,
+                    &chunk_id_key,
+                    transform_pool,
+                    items_config,
+                    item_stream,
+                    item_ptrs,
+                    stats,
+                    new_file_cache,
+                    progress,
+                )?;
+
                 append_item_to_stream(
                     repo,
                     item_stream,
@@ -1066,10 +1476,40 @@ fn run_pipeline_backup(
             }
 
             FileMessage::SourceStarted { source_path } => {
+                // Flush cross-file batch to preserve walk order.
+                flush_cross_file_batch(
+                    &mut cross_batch,
+                    repo,
+                    compression,
+                    &chunk_id_key,
+                    transform_pool,
+                    items_config,
+                    item_stream,
+                    item_ptrs,
+                    stats,
+                    new_file_cache,
+                    progress,
+                )?;
+
                 emit_progress(progress, BackupProgressEvent::SourceStarted { source_path });
             }
 
             FileMessage::SourceFinished { source_path } => {
+                // Flush cross-file batch to preserve walk order.
+                flush_cross_file_batch(
+                    &mut cross_batch,
+                    repo,
+                    compression,
+                    &chunk_id_key,
+                    transform_pool,
+                    items_config,
+                    item_stream,
+                    item_ptrs,
+                    stats,
+                    new_file_cache,
+                    progress,
+                )?;
+
                 emit_progress(
                     progress,
                     BackupProgressEvent::SourceFinished { source_path },
@@ -1077,6 +1517,21 @@ fn run_pipeline_backup(
             }
 
             FileMessage::Done => {
+                // Flush any remaining cross-file batch.
+                flush_cross_file_batch(
+                    &mut cross_batch,
+                    repo,
+                    compression,
+                    &chunk_id_key,
+                    transform_pool,
+                    items_config,
+                    item_stream,
+                    item_ptrs,
+                    stats,
+                    new_file_cache,
+                    progress,
+                )?;
+
                 break;
             }
 
@@ -1151,6 +1606,22 @@ pub fn run_with_progress(
         // Check snapshot name is unique while holding the lock.
         if repo.manifest.find_snapshot(snapshot_name).is_some() {
             return Err(VgerError::SnapshotAlreadyExists(snapshot_name.into()));
+        }
+
+        // Pre-sanitize stale file-cache entries whose chunks were pruned by
+        // delete+compact. Must happen before enable_dedup_mode() which drops
+        // the full chunk index. We temporarily take the cache to avoid
+        // simultaneous mutable + immutable borrows of `repo`.
+        {
+            let mut cache = std::mem::take(&mut repo.file_cache);
+            let pruned = cache.prune_stale_entries(&|id| repo.chunk_exists(id));
+            if pruned > 0 {
+                info!(
+                    pruned_entries = pruned,
+                    "removed stale file cache entries referencing pruned chunks"
+                );
+            }
+            repo.file_cache = cache;
         }
 
         // Switch to dedup-only index mode to reduce memory during backup.
