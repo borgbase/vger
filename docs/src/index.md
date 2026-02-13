@@ -20,6 +20,10 @@ V'Ger is a fast, encrypted, deduplicated backup tool written in Rust. It's cente
 - **Hooks** for monitoring and custom scripts
 - **Desktop GUI** (run, view and restore backups)
 
+<p align="center">
+  <img src="images/gui-screenshot.png" alt="V'Ger Backup Logo" width="400">
+</p>
+
 ## Inspired by
 
 - [BorgBackup](https://github.com/borgbackup/borg/): architecture, chunking strategy, repository concept, and overall backup pipeline.
@@ -37,7 +41,7 @@ V'Ger is a fast, encrypted, deduplicated backup tool written in Rust. It's cente
 | Hooks | Via Borgmatic | Via ResticProfile | Native | Native (per-command before/after) |
 | Rate limiting | None | Upload/download bandwidth | — | CPU, disk I/O, and network bandwidth |
 | Dedicated server | SSH (`borg serve`) | rest-server (append-only) | rustic_server | REST server with append-only, quotas, server-side compaction |
-| Desktop GUI | Vorta (third-party) | Third-party (Backrest) | None | Built-in (work in progress) |
+| Desktop GUI | Vorta (third-party) | Third-party (Backrest) | None | Built-in |
 | Scheduling | Via Borgmatic | Via ResticProfile | External (cron/systemd) | Built-in |
 | Language | Python + Cython | Go | Rust | Rust |
 | Chunker | Buzhash (custom) | Rabin | Rabin (Restic-compat) | FastCDC |

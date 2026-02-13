@@ -45,6 +45,10 @@ Windows support currently targets the CLI (`vger.exe`). GUI builds are not shipp
 
 ## Desktop UI
 
+<p align="center">
+  <img src="docs/src/images/gui-screenshot.png" alt="V'Ger GUI" width="380">
+</p>
+
 `vger-gui` is a Slint-based desktop app that uses `vger-core` directly (it does not shell out to the CLI).
 
 - Run backups on demand
