@@ -1,4 +1,6 @@
-use crate::chunker::chunk_data;
+use std::io::Cursor;
+
+use crate::chunker::{chunk_data, chunk_stream};
 use crate::config::ChunkerConfig;
 
 fn test_config() -> ChunkerConfig {
@@ -69,4 +71,20 @@ fn empty_data_no_chunks() {
     let config = test_config();
     let chunks = chunk_data(b"", &config);
     assert!(chunks.is_empty());
+}
+
+#[test]
+fn stream_chunking_matches_slice_chunking() {
+    let data = vec![0x42u8; 50_000];
+    let config = test_config();
+    let expected = chunk_data(&data, &config);
+
+    let actual: Vec<(usize, usize)> = chunk_stream(Cursor::new(data), &config)
+        .map(|result| {
+            let chunk = result.expect("stream chunking should succeed");
+            (chunk.offset as usize, chunk.length)
+        })
+        .collect();
+
+    assert_eq!(actual, expected);
 }

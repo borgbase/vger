@@ -83,20 +83,40 @@ impl ByteRateLimiter {
     }
 }
 
+/// Read adaptor that applies an optional shared byte-rate limiter.
+pub struct LimitedReader<'a, R> {
+    inner: R,
+    limiter: Option<&'a ByteRateLimiter>,
+}
+
+impl<'a, R> LimitedReader<'a, R> {
+    pub fn new(inner: R, limiter: Option<&'a ByteRateLimiter>) -> Self {
+        Self { inner, limiter }
+    }
+}
+
+impl<R: Read> Read for LimitedReader<'_, R> {
+    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        let n = self.inner.read(buf)?;
+        if let Some(limiter) = self.limiter {
+            limiter.consume(n);
+        }
+        Ok(n)
+    }
+}
+
 pub fn read_file_with_limiter(path: &Path, limiter: Option<&ByteRateLimiter>) -> Result<Vec<u8>> {
-    let mut file = File::open(path).map_err(VgerError::Io)?;
+    let file = File::open(path).map_err(VgerError::Io)?;
+    let mut reader = LimitedReader::new(file, limiter);
     let mut data = Vec::new();
     let mut buffer = [0u8; FILE_READ_CHUNK_SIZE];
 
     loop {
-        let n = file.read(&mut buffer).map_err(VgerError::Io)?;
+        let n = reader.read(&mut buffer).map_err(VgerError::Io)?;
         if n == 0 {
             break;
         }
         data.extend_from_slice(&buffer[..n]);
-        if let Some(limiter) = limiter {
-            limiter.consume(n);
-        }
     }
 
     Ok(data)

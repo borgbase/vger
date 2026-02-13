@@ -122,7 +122,7 @@ fn save_state_persists_manifest_and_index() {
 
 #[test]
 fn read_missing_chunk_fails() {
-    let repo = test_repo_plaintext();
+    let mut repo = test_repo_plaintext();
     let fake_id = crate::crypto::chunk_id::ChunkId([0xFF; 32]);
     let result = repo.read_chunk(&fake_id);
     assert!(result.is_err());

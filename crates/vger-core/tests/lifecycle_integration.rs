@@ -171,7 +171,10 @@ fn lifecycle_delete_compact_check_and_restore() {
     )
     .unwrap();
     assert_eq!(extract_stats.files, 2);
-    assert_eq!(std::fs::read(restore_dir.join("data.bin")).unwrap(), payload_v2);
+    assert_eq!(
+        std::fs::read(restore_dir.join("data.bin")).unwrap(),
+        payload_v2
+    );
     assert_eq!(
         std::fs::read_to_string(restore_dir.join("new.txt")).unwrap(),
         "new file"
@@ -209,7 +212,10 @@ fn prune_compact_check_and_restore_kept_snapshots() {
     std::fs::write(source_a.join("a.txt"), b"alpha-v2").unwrap();
     backup_source(&config, &source_a, "src-a", "snap-a2", None);
 
-    let sources = vec![source_entry(&source_a, "src-a"), source_entry(&source_b, "src-b")];
+    let sources = vec![
+        source_entry(&source_a, "src-a"),
+        source_entry(&source_b, "src-b"),
+    ];
     let source_filter = vec!["src-a".to_string()];
     let (prune_stats, list_entries) =
         commands::prune::run(&config, None, false, true, &sources, &source_filter).unwrap();

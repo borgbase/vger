@@ -157,7 +157,10 @@ fn delete_pack_for_first_chunk(repo_dir: &Path) {
         .next()
         .expect("repo must contain at least one chunk");
     let pack_path = repo_dir.join(entry.pack_id.storage_key());
-    assert!(pack_path.exists(), "expected pack file to exist: {pack_path:?}");
+    assert!(
+        pack_path.exists(),
+        "expected pack file to exist: {pack_path:?}"
+    );
     std::fs::remove_file(pack_path).unwrap();
 }
 

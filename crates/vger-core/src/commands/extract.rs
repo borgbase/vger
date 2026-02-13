@@ -77,7 +77,7 @@ fn extract_with_filter<F>(
 where
     F: FnMut(&str) -> bool,
 {
-    let repo = open_repo(config, passphrase)?;
+    let mut repo = open_repo(config, passphrase)?;
     let xattrs_enabled = if xattrs_enabled && !fs::xattrs_supported() {
         tracing::warn!(
             "xattrs requested but not supported on this platform; continuing without xattrs"
@@ -87,7 +87,7 @@ where
         xattrs_enabled
     };
 
-    let items = super::list::load_snapshot_items(&repo, snapshot_name)?;
+    let items = super::list::load_snapshot_items(&mut repo, snapshot_name)?;
 
     let dest_path = Path::new(dest);
     std::fs::create_dir_all(dest_path)?;

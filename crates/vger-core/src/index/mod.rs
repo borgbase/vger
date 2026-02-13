@@ -1,6 +1,7 @@
 use std::collections::HashMap;
 
 use serde::{Deserialize, Serialize};
+use tracing::debug;
 
 use crate::crypto::chunk_id::ChunkId;
 use crate::crypto::pack_id::PackId;
@@ -109,5 +110,130 @@ impl ChunkIndex {
         let packs: std::collections::HashSet<PackId> =
             self.entries.values().map(|e| e.pack_id).collect();
         packs.len()
+    }
+}
+
+/// Lightweight dedup-only index that stores only chunk_id → stored_size.
+///
+/// Used during backup to reduce memory: ~68 bytes per entry vs ~112 bytes
+/// for the full `ChunkIndex`. For 10M chunks this saves ~400 MB of RAM.
+///
+/// Does not track refcounts, pack locations, or offsets — those are recorded
+/// in an `IndexDelta` and merged back into the full index at save time.
+#[derive(Debug)]
+pub struct DedupIndex {
+    entries: HashMap<ChunkId, u32>,
+}
+
+impl DedupIndex {
+    /// Build a dedup index from the full chunk index, keeping only chunk_id → stored_size.
+    pub fn from_chunk_index(full: &ChunkIndex) -> Self {
+        let entries: HashMap<ChunkId, u32> = full
+            .entries
+            .iter()
+            .map(|(id, entry)| (*id, entry.stored_size))
+            .collect();
+        debug!(
+            "built dedup index with {} entries from full index",
+            entries.len()
+        );
+        Self { entries }
+    }
+
+    /// Check if a chunk exists (dedup hit).
+    pub fn contains(&self, id: &ChunkId) -> bool {
+        self.entries.contains_key(id)
+    }
+
+    /// Get the stored size for a chunk.
+    pub fn get_stored_size(&self, id: &ChunkId) -> Option<u32> {
+        self.entries.get(id).copied()
+    }
+
+    /// Insert a new chunk (used when new chunks are committed during backup).
+    pub fn insert(&mut self, id: ChunkId, stored_size: u32) {
+        self.entries.insert(id, stored_size);
+    }
+
+    pub fn len(&self) -> usize {
+        self.entries.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.entries.is_empty()
+    }
+}
+
+/// Records all index mutations that happen while in dedup-only mode.
+///
+/// At save time, these are applied to a freshly-loaded full `ChunkIndex`.
+#[derive(Debug, Default)]
+pub struct IndexDelta {
+    /// New chunk entries added during this session.
+    pub new_entries: Vec<NewChunkEntry>,
+    /// Refcount increments for chunks that already existed in the index.
+    pub refcount_bumps: HashMap<ChunkId, u32>,
+}
+
+/// A new chunk entry recorded during dedup-mode backup.
+#[derive(Debug, Clone)]
+pub struct NewChunkEntry {
+    pub chunk_id: ChunkId,
+    pub stored_size: u32,
+    pub pack_id: PackId,
+    pub pack_offset: u64,
+    pub refcount: u32,
+}
+
+impl IndexDelta {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Record a refcount bump for an existing chunk.
+    pub fn bump_refcount(&mut self, id: &ChunkId) {
+        *self.refcount_bumps.entry(*id).or_insert(0) += 1;
+    }
+
+    /// Record a new chunk entry.
+    pub fn add_new_entry(
+        &mut self,
+        chunk_id: ChunkId,
+        stored_size: u32,
+        pack_id: PackId,
+        pack_offset: u64,
+        refcount: u32,
+    ) {
+        self.new_entries.push(NewChunkEntry {
+            chunk_id,
+            stored_size,
+            pack_id,
+            pack_offset,
+            refcount,
+        });
+    }
+
+    /// Apply this delta to a full `ChunkIndex`.
+    pub fn apply_to(self, index: &mut ChunkIndex) {
+        // Apply new entries first
+        for entry in self.new_entries {
+            index.add(
+                entry.chunk_id,
+                entry.stored_size,
+                entry.pack_id,
+                entry.pack_offset,
+            );
+            // add() sets refcount=1; apply remaining refs
+            for _ in 1..entry.refcount {
+                index.increment_refcount(&entry.chunk_id);
+            }
+        }
+
+        // Apply refcount bumps for pre-existing chunks
+        for (id, count) in self.refcount_bumps {
+            for _ in 0..count {
+                index.increment_refcount(&id);
+            }
+        }
     }
 }

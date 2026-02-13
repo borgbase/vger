@@ -119,7 +119,7 @@ fn init_store_reopen_read() {
     };
 
     // Reopen and verify
-    let repo = open_local_repo(dir);
+    let mut repo = open_local_repo(dir);
     assert_eq!(repo.chunk_index.len(), 2);
     let read1 = repo.read_chunk(&id1).unwrap();
     let read2 = repo.read_chunk(&id2).unwrap();
@@ -322,8 +322,8 @@ fn backup_deduplicates_identical_files_and_extracts_correctly() {
     assert!(stats.deduplicated_size > 0);
     assert!(stats.deduplicated_size < stats.compressed_size);
 
-    let repo = open_local_repo(&repo_dir);
-    let items = commands::list::load_snapshot_items(&repo, "snap-dedup").unwrap();
+    let mut repo = open_local_repo(&repo_dir);
+    let items = commands::list::load_snapshot_items(&mut repo, "snap-dedup").unwrap();
     let file_items: Vec<_> = items
         .iter()
         .filter(|item| item.entry_type == ItemType::RegularFile)
@@ -478,8 +478,8 @@ fn backup_and_restore_preserves_file_xattrs_when_enabled() {
     )
     .unwrap();
 
-    let repo = open_local_repo(&repo_dir);
-    let items = commands::list::load_snapshot_items(&repo, "snap-xattrs").unwrap();
+    let mut repo = open_local_repo(&repo_dir);
+    let items = commands::list::load_snapshot_items(&mut repo, "snap-xattrs").unwrap();
     let item = items.iter().find(|i| i.path == "file.txt").unwrap();
     let stored = item
         .xattrs
@@ -548,8 +548,8 @@ fn backup_skips_xattrs_when_disabled() {
     )
     .unwrap();
 
-    let repo = open_local_repo(&repo_dir);
-    let items = commands::list::load_snapshot_items(&repo, "snap-no-xattrs").unwrap();
+    let mut repo = open_local_repo(&repo_dir);
+    let items = commands::list::load_snapshot_items(&mut repo, "snap-no-xattrs").unwrap();
     let item = items.iter().find(|i| i.path == "file.txt").unwrap();
     assert!(item.xattrs.is_none());
 }
@@ -606,8 +606,8 @@ fn file_cache_persists_and_matches_snapshot_items() {
 
     // Verify file cache was persisted and its chunk_refs match the snapshot.
     {
-        let repo = open_local_repo(&repo_dir);
-        let items = commands::list::load_snapshot_items(&repo, "snap-1").unwrap();
+        let mut repo = open_local_repo(&repo_dir);
+        let items = commands::list::load_snapshot_items(&mut repo, "snap-1").unwrap();
         let files: Vec<_> = items
             .iter()
             .filter(|i| i.entry_type == ItemType::RegularFile)
@@ -651,9 +651,9 @@ fn file_cache_persists_and_matches_snapshot_items() {
     )
     .unwrap();
 
-    let repo = open_local_repo(&repo_dir);
-    let items1 = commands::list::load_snapshot_items(&repo, "snap-1").unwrap();
-    let items2 = commands::list::load_snapshot_items(&repo, "snap-2").unwrap();
+    let mut repo = open_local_repo(&repo_dir);
+    let items1 = commands::list::load_snapshot_items(&mut repo, "snap-1").unwrap();
+    let items2 = commands::list::load_snapshot_items(&mut repo, "snap-2").unwrap();
     let files1: Vec<_> = items1
         .iter()
         .filter(|i| i.entry_type == ItemType::RegularFile)
@@ -728,8 +728,8 @@ fn file_cache_misses_on_modified_file() {
 
     // Collect chunk IDs from the first snapshot.
     let snap1_chunks: std::collections::HashMap<String, Vec<_>> = {
-        let repo = open_local_repo(&repo_dir);
-        let items = commands::list::load_snapshot_items(&repo, "snap-1").unwrap();
+        let mut repo = open_local_repo(&repo_dir);
+        let items = commands::list::load_snapshot_items(&mut repo, "snap-1").unwrap();
         items
             .iter()
             .filter(|i| i.entry_type == ItemType::RegularFile)
@@ -761,8 +761,8 @@ fn file_cache_misses_on_modified_file() {
     )
     .unwrap();
 
-    let repo = open_local_repo(&repo_dir);
-    let items2 = commands::list::load_snapshot_items(&repo, "snap-2").unwrap();
+    let mut repo = open_local_repo(&repo_dir);
+    let items2 = commands::list::load_snapshot_items(&mut repo, "snap-2").unwrap();
     let files2: std::collections::HashMap<String, Vec<_>> = items2
         .iter()
         .filter(|i| i.entry_type == ItemType::RegularFile)
@@ -897,8 +897,8 @@ fn command_dump_backup_and_extract() {
     assert!(stats.original_size > 0);
 
     // List snapshot contents — verify .vger-dumps/hello.txt appears
-    let repo = open_local_repo(repo_dir.path());
-    let items = commands::list::load_snapshot_items(&repo, "snap-dumps").unwrap();
+    let mut repo = open_local_repo(repo_dir.path());
+    let items = commands::list::load_snapshot_items(&mut repo, "snap-dumps").unwrap();
     let dump_items: Vec<_> = items
         .iter()
         .filter(|i| i.path == ".vger-dumps/hello.txt")
@@ -1012,8 +1012,8 @@ fn command_dump_mixed_with_files() {
     // Should have both the real file and the dump
     assert_eq!(stats.nfiles, 2);
 
-    let repo = open_local_repo(repo_dir.path());
-    let items = commands::list::load_snapshot_items(&repo, "snap-mixed").unwrap();
+    let mut repo = open_local_repo(repo_dir.path());
+    let items = commands::list::load_snapshot_items(&mut repo, "snap-mixed").unwrap();
     let has_real = items.iter().any(|i| i.path == "real.txt");
     let has_dump = items.iter().any(|i| i.path == ".vger-dumps/dump.txt");
     assert!(has_real, "should contain real.txt");

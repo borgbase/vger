@@ -4,7 +4,7 @@ pub mod lock;
 pub mod manifest;
 pub mod pack;
 
-use std::collections::VecDeque;
+use std::collections::{HashMap as StdHashMap, VecDeque};
 use std::sync::Arc;
 use std::thread::JoinHandle;
 
@@ -18,7 +18,7 @@ use crate::crypto::chunk_id::ChunkId;
 use crate::crypto::key::{EncryptedKey, MasterKey};
 use crate::crypto::{self, CryptoEngine, PlaintextEngine};
 use crate::error::{Result, VgerError};
-use crate::index::ChunkIndex;
+use crate::index::{ChunkIndex, DedupIndex, IndexDelta};
 use crate::storage::StorageBackend;
 
 use self::file_cache::FileCache;
@@ -53,6 +53,54 @@ fn default_max_pack_size() -> u32 {
 /// Maximum number of in-flight background pack uploads.
 const MAX_IN_FLIGHT_PACK_UPLOADS: usize = 4;
 
+/// Maximum total weight (bytes) of cached blobs in the blob cache.
+const BLOB_CACHE_MAX_BYTES: usize = 32 * 1024 * 1024; // 32 MiB
+
+/// FIFO blob cache bounded by total weight in bytes.
+/// Caches decrypted+decompressed chunks to avoid redundant storage reads.
+struct BlobCache {
+    entries: StdHashMap<ChunkId, Vec<u8>>,
+    order: VecDeque<ChunkId>,
+    current_bytes: usize,
+    max_bytes: usize,
+}
+
+impl BlobCache {
+    fn new(max_bytes: usize) -> Self {
+        Self {
+            entries: StdHashMap::new(),
+            order: VecDeque::new(),
+            current_bytes: 0,
+            max_bytes,
+        }
+    }
+
+    fn get(&self, id: &ChunkId) -> Option<&[u8]> {
+        self.entries.get(id).map(Vec::as_slice)
+    }
+
+    fn insert(&mut self, id: ChunkId, data: Vec<u8>) {
+        let data_len = data.len();
+        // Don't cache items larger than the entire cache
+        if data_len > self.max_bytes {
+            return;
+        }
+        // Evict oldest entries until there's room
+        while self.current_bytes + data_len > self.max_bytes {
+            if let Some(evicted_id) = self.order.pop_front() {
+                if let Some(evicted_data) = self.entries.remove(&evicted_id) {
+                    self.current_bytes -= evicted_data.len();
+                }
+            } else {
+                break;
+            }
+        }
+        self.current_bytes += data_len;
+        self.entries.insert(id, data);
+        self.order.push_back(id);
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum EncryptionMode {
     None,
@@ -82,6 +130,13 @@ pub struct Repository {
     tree_pack_writer: PackWriter,
     /// Background pack upload threads waiting to be joined.
     pending_uploads: VecDeque<JoinHandle<Result<()>>>,
+    /// Lightweight dedup-only index used during backup to save memory.
+    /// When active, `chunk_index` is empty and all lookups go through this.
+    dedup_index: Option<DedupIndex>,
+    /// Tracks index mutations while in dedup mode, applied at save time.
+    index_delta: Option<IndexDelta>,
+    /// Weight-bounded cache for decrypted chunks (used during restore).
+    blob_cache: BlobCache,
 }
 
 impl Repository {
@@ -200,6 +255,9 @@ impl Repository {
             data_pack_writer: PackWriter::new(PackType::Data, data_target),
             tree_pack_writer: PackWriter::new(PackType::Tree, tree_target),
             pending_uploads: VecDeque::new(),
+            dedup_index: None,
+            index_delta: None,
+            blob_cache: BlobCache::new(BLOB_CACHE_MAX_BYTES),
         })
     }
 
@@ -299,6 +357,9 @@ impl Repository {
             data_pack_writer: PackWriter::new(PackType::Data, data_target),
             tree_pack_writer: PackWriter::new(PackType::Tree, tree_target),
             pending_uploads: VecDeque::new(),
+            dedup_index: None,
+            index_delta: None,
+            blob_cache: BlobCache::new(BLOB_CACHE_MAX_BYTES),
         })
     }
 
@@ -328,11 +389,55 @@ impl Repository {
         Ok(())
     }
 
+    /// Switch to dedup-only index mode to reduce memory during backup.
+    ///
+    /// Builds a lightweight `DedupIndex` (chunk_id → stored_size only) from the
+    /// full `ChunkIndex`, then drops the full index to reclaim memory. All
+    /// mutations are recorded in an `IndexDelta` and merged back at save time.
+    ///
+    /// For 10M chunks this reduces steady-state memory from ~800 MB to ~450 MB.
+    pub fn enable_dedup_mode(&mut self) {
+        if self.dedup_index.is_some() {
+            return; // already enabled
+        }
+        let dedup = DedupIndex::from_chunk_index(&self.chunk_index);
+        // Drop the full index to reclaim memory
+        self.chunk_index = ChunkIndex::new();
+        self.dedup_index = Some(dedup);
+        self.index_delta = Some(IndexDelta::new());
+    }
+
+    /// Check if a chunk exists in the index (works in both normal and dedup modes).
+    pub fn chunk_exists(&self, id: &ChunkId) -> bool {
+        if let Some(ref dedup) = self.dedup_index {
+            return dedup.contains(id);
+        }
+        self.chunk_index.contains(id)
+    }
+
+    /// Increment the refcount for a chunk (works in both normal and dedup modes).
+    pub fn increment_chunk_ref(&mut self, id: &ChunkId) {
+        if let Some(ref mut delta) = self.index_delta {
+            delta.bump_refcount(id);
+            return;
+        }
+        self.chunk_index.increment_refcount(id);
+    }
+
     /// Save the manifest and chunk index back to storage.
     /// Flushes any pending pack writes first.
+    /// In dedup mode, reloads the full index from storage and applies the delta.
     pub fn save_state(&mut self) -> Result<()> {
         // Flush any pending packs
         self.flush_packs()?;
+
+        // If in dedup mode, reload the full index and apply our delta
+        if let Some(delta) = self.index_delta.take() {
+            self.dedup_index = None;
+            let mut full_index = self.reload_full_index()?;
+            delta.apply_to(&mut full_index);
+            self.chunk_index = full_index;
+        }
 
         // Save manifest
         let manifest_bytes = rmp_serde::to_vec(&self.manifest)?;
@@ -352,11 +457,29 @@ impl Repository {
         Ok(())
     }
 
+    /// Reload the full chunk index from storage.
+    fn reload_full_index(&self) -> Result<ChunkIndex> {
+        if let Some(index_data) = self.storage.get("index")? {
+            let index_bytes =
+                unpack_object_expect(&index_data, ObjectType::ChunkIndex, self.crypto.as_ref())?;
+            Ok(rmp_serde::from_slice(&index_bytes)?)
+        } else {
+            Ok(ChunkIndex::new())
+        }
+    }
+
     /// Increment refcount if this chunk already exists in committed or pending state.
-    /// Returns stored size when found.
+    /// Returns stored size when found. Works in both normal and dedup modes.
     pub fn bump_ref_if_exists(&mut self, chunk_id: &ChunkId) -> Option<u32> {
-        // Dedup check against committed index
-        if self.chunk_index.contains(chunk_id) {
+        // Dedup check against committed index (or dedup index in dedup mode)
+        if let Some(ref dedup) = self.dedup_index {
+            if let Some(stored_size) = dedup.get_stored_size(chunk_id) {
+                if let Some(ref mut delta) = self.index_delta {
+                    delta.bump_refcount(chunk_id);
+                }
+                return Some(stored_size);
+            }
+        } else if self.chunk_index.contains(chunk_id) {
             let stored_size = self.chunk_index.get(chunk_id).unwrap().stored_size;
             self.chunk_index.increment_refcount(chunk_id);
             return Some(stored_size);
@@ -417,7 +540,7 @@ impl Repository {
     }
 
     /// Seal a pack writer and upload in the background.
-    /// The ChunkIndex is updated immediately; the upload proceeds in a separate thread.
+    /// The index is updated immediately; the upload proceeds in a separate thread.
     fn flush_writer_async(&mut self, pack_type: PackType) -> Result<()> {
         // Keep upload fan-out bounded to avoid excessive memory/thread pressure.
         self.cap_pending_uploads()?;
@@ -429,10 +552,23 @@ impl Repository {
         };
 
         // Update index immediately — offsets and PackId are known before upload
-        for (chunk_id, stored_size, offset, refcount) in entries {
-            self.chunk_index.add(chunk_id, stored_size, pack_id, offset);
-            for _ in 1..refcount {
-                self.chunk_index.increment_refcount(&chunk_id);
+        if self.dedup_index.is_some() {
+            // Dedup mode: update lightweight index + record in delta
+            for (chunk_id, stored_size, offset, refcount) in entries {
+                if let Some(ref mut dedup) = self.dedup_index {
+                    dedup.insert(chunk_id, stored_size);
+                }
+                if let Some(ref mut delta) = self.index_delta {
+                    delta.add_new_entry(chunk_id, stored_size, pack_id, offset, refcount);
+                }
+            }
+        } else {
+            // Normal mode: update full index directly
+            for (chunk_id, stored_size, offset, refcount) in entries {
+                self.chunk_index.add(chunk_id, stored_size, pack_id, offset);
+                for _ in 1..refcount {
+                    self.chunk_index.increment_refcount(&chunk_id);
+                }
             }
         }
 
@@ -473,7 +609,13 @@ impl Repository {
     }
 
     /// Read and decrypt a chunk from the repository.
-    pub fn read_chunk(&self, chunk_id: &ChunkId) -> Result<Vec<u8>> {
+    /// Results are cached in a weight-bounded blob cache for faster repeated access.
+    pub fn read_chunk(&mut self, chunk_id: &ChunkId) -> Result<Vec<u8>> {
+        // Check cache first
+        if let Some(cached) = self.blob_cache.get(chunk_id) {
+            return Ok(cached.to_vec());
+        }
+
         let entry = self
             .chunk_index
             .get(chunk_id)
@@ -488,7 +630,11 @@ impl Repository {
 
         let compressed =
             unpack_object_expect(&blob_data, ObjectType::ChunkData, self.crypto.as_ref())?;
-        compress::decompress(&compressed)
+        let plaintext = compress::decompress(&compressed)?;
+
+        // Cache the result
+        self.blob_cache.insert(*chunk_id, plaintext.clone());
+        Ok(plaintext)
     }
 
     /// Flush all pending pack writes and wait for background uploads.

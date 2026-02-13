@@ -169,22 +169,24 @@ impl FileTree {
         }
 
         // Sort children of each node alphabetically (dirs first, then files)
-        let arena_snapshot: Vec<(bool, String)> = arena
-            .iter()
-            .map(|n| (n.is_dir, n.name.clone()))
-            .collect();
+        let arena_snapshot: Vec<(bool, String)> =
+            arena.iter().map(|n| (n.is_dir, n.name.clone())).collect();
         for node in &mut arena {
             node.children.sort_by(|&a, &b| {
                 let (a_dir, ref a_name) = arena_snapshot[a];
                 let (b_dir, ref b_name) = arena_snapshot[b];
-                b_dir.cmp(&a_dir).then_with(|| a_name.to_lowercase().cmp(&b_name.to_lowercase()))
+                b_dir
+                    .cmp(&a_dir)
+                    .then_with(|| a_name.to_lowercase().cmp(&b_name.to_lowercase()))
             });
         }
         // Also sort roots
         roots.sort_by(|&a, &b| {
             let (a_dir, ref a_name) = arena_snapshot[a];
             let (b_dir, ref b_name) = arena_snapshot[b];
-            b_dir.cmp(&a_dir).then_with(|| a_name.to_lowercase().cmp(&b_name.to_lowercase()))
+            b_dir
+                .cmp(&a_dir)
+                .then_with(|| a_name.to_lowercase().cmp(&b_name.to_lowercase()))
         });
 
         let mut tree = FileTree {
@@ -906,7 +908,10 @@ struct SourceInfoData {
 #[derive(Debug, Clone)]
 enum UiEvent {
     Status(String),
-    LogEntry { timestamp: String, message: String },
+    LogEntry {
+        timestamp: String,
+        message: String,
+    },
     ConfigInfo {
         path: String,
         schedule: String,
@@ -1159,7 +1164,14 @@ fn sort_snapshot_table(
 
     let rows: Vec<Vec<String>> = data
         .iter()
-        .map(|d| vec![d.id.clone(), d.time_str.clone(), d.source.clone(), d.label.clone()])
+        .map(|d| {
+            vec![
+                d.id.clone(),
+                d.time_str.clone(),
+                d.source.clone(),
+                d.label.clone(),
+            ]
+        })
         .collect();
     ui.set_snapshot_rows(to_table_model(rows));
 }
@@ -1205,10 +1217,7 @@ fn send_structured_data(ui_tx: &Sender<UiEvent>, repos: &[ResolvedRepo]) {
     let _ = ui_tx.send(UiEvent::RepoNames(collect_repo_names(repos)));
 
     let (items, labels) = build_source_model_data(repos);
-    let _ = ui_tx.send(UiEvent::SourceModelData {
-        items,
-        labels,
-    });
+    let _ = ui_tx.send(UiEvent::SourceModelData { items, labels });
 }
 
 fn resolve_passphrase_for_repo(repo: &ResolvedRepo) -> Result<Option<String>, VgerError> {
@@ -1726,11 +1735,13 @@ fn run_worker(
                                         format_bytes(stats.total_bytes),
                                     ),
                                 );
-                                let _ = ui_tx.send(UiEvent::RestoreStatus("Restore complete.".to_string()));
+                                let _ = ui_tx
+                                    .send(UiEvent::RestoreStatus("Restore complete.".to_string()));
                             }
                             Err(e) => {
                                 send_log(&ui_tx, format!("Extract failed: {e}"));
-                                let _ = ui_tx.send(UiEvent::RestoreStatus("Restore failed.".to_string()));
+                                let _ = ui_tx
+                                    .send(UiEvent::RestoreStatus("Restore failed.".to_string()));
                             }
                         }
                     }
@@ -1886,10 +1897,7 @@ fn run_worker(
                         });
                     }
                     Err(e) => {
-                        send_log(
-                            &ui_tx,
-                            format!("[{repo_name}] delete failed: {e}"),
-                        );
+                        send_log(&ui_tx, format!("[{repo_name}] delete failed: {e}"));
                     }
                 }
                 let _ = ui_tx.send(UiEvent::Status("Idle".to_string()));
@@ -2102,10 +2110,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                             });
                         }
                     }
-                    UiEvent::RepoModelData {
-                        items,
-                        labels,
-                    } => {
+                    UiEvent::RepoModelData { items, labels } => {
                         ui.set_repo_loading(false);
                         if let Ok(mut rl) = repo_labels.lock() {
                             *rl = labels;
@@ -2121,10 +2126,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                             .collect();
                         ui.set_repo_model(ModelRc::new(VecModel::from(model)));
                     }
-                    UiEvent::SourceModelData {
-                        items,
-                        labels,
-                    } => {
+                    UiEvent::SourceModelData { items, labels } => {
                         if let Ok(mut sl) = source_labels.lock() {
                             *sl = labels;
                         }
@@ -2148,7 +2150,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         }
                         let rows: Vec<Vec<String>> = data
                             .iter()
-                            .map(|d| vec![d.id.clone(), d.time_str.clone(), d.source.clone(), d.label.clone()])
+                            .map(|d| {
+                                vec![
+                                    d.id.clone(),
+                                    d.time_str.clone(),
+                                    d.source.clone(),
+                                    d.label.clone(),
+                                ]
+                            })
                             .collect();
                         if let Ok(mut sd) = snapshot_data.lock() {
                             *sd = data;

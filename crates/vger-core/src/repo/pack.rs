@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use std::time::Instant;
 
 use serde::{Deserialize, Serialize};
 
@@ -42,6 +43,15 @@ struct BufferedBlob {
     uncompressed_size: u32,
 }
 
+/// Maximum number of blobs in a single pack file.
+/// Prevents pathological cases where many tiny chunks create a pack with a huge header.
+pub const MAX_BLOBS_PER_PACK: usize = 10_000;
+
+/// Maximum age of a pack writer before it should be flushed (in seconds).
+/// Forces periodic flushes even if the pack isn't full, preventing stale data
+/// from sitting in memory indefinitely during long backups.
+pub const PACK_MAX_AGE_SECS: u64 = 300;
+
 /// Accumulates encrypted blobs and flushes them as pack files.
 pub struct PackWriter {
     pack_type: PackType,
@@ -50,6 +60,8 @@ pub struct PackWriter {
     current_size: usize,
     /// chunk_id -> (stored_size, refcount) for pending (not-yet-flushed) blobs.
     pending: HashMap<ChunkId, (u32, u32)>,
+    /// When the first blob was added to the current buffer.
+    first_blob_time: Option<Instant>,
 }
 
 impl PackWriter {
@@ -60,6 +72,7 @@ impl PackWriter {
             buffer: Vec::new(),
             current_size: 0,
             pending: HashMap::new(),
+            first_blob_time: None,
         }
     }
 
@@ -87,6 +100,9 @@ impl PackWriter {
         };
 
         self.current_size += 4 + encrypted_blob.len(); // 4B length prefix + blob data
+        if self.first_blob_time.is_none() {
+            self.first_blob_time = Some(Instant::now());
+        }
         self.pending.insert(chunk_id, (blob_len, 1));
         self.buffer.push(BufferedBlob {
             obj_type,
@@ -115,9 +131,28 @@ impl PackWriter {
         self.pending.get(chunk_id).map(|(size, _)| *size)
     }
 
-    /// Whether the current buffer has reached the target pack size.
+    /// Whether the current buffer should be flushed.
+    ///
+    /// Returns true when any of these conditions are met:
+    /// - Pack has reached its target byte size
+    /// - Pack has reached the maximum blob count (10,000)
+    /// - Pack has been open longer than the max age (300 seconds)
     pub fn should_flush(&self) -> bool {
-        self.current_size >= self.target_size
+        if self.buffer.is_empty() {
+            return false;
+        }
+        if self.current_size >= self.target_size {
+            return true;
+        }
+        if self.buffer.len() >= MAX_BLOBS_PER_PACK {
+            return true;
+        }
+        if let Some(first_time) = self.first_blob_time {
+            if first_time.elapsed().as_secs() >= PACK_MAX_AGE_SECS {
+                return true;
+            }
+        }
+        false
     }
 
     /// Whether there are any pending blobs.
@@ -191,6 +226,7 @@ impl PackWriter {
         self.buffer.clear();
         self.current_size = 0;
         self.pending.clear();
+        self.first_blob_time = None;
 
         Ok((pack_id, pack_bytes, results))
     }
@@ -308,4 +344,45 @@ pub fn compute_data_pack_target(
 pub fn compute_tree_pack_target(min_pack_size: u32) -> usize {
     let four_mib = 4 * 1024 * 1024;
     std::cmp::min(min_pack_size as usize, four_mib)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn dummy_chunk_id(byte: u8) -> ChunkId {
+        ChunkId([byte; 32])
+    }
+
+    #[test]
+    fn should_flush_on_size() {
+        let mut w = PackWriter::new(PackType::Data, 100);
+        assert!(!w.should_flush());
+        w.add_blob(1, dummy_chunk_id(0), vec![0u8; 120], 120);
+        assert!(w.should_flush());
+    }
+
+    #[test]
+    fn should_flush_on_blob_count() {
+        // Use a very large target size so size-based flush never triggers
+        let mut w = PackWriter::new(PackType::Data, usize::MAX);
+        for i in 0..MAX_BLOBS_PER_PACK {
+            assert!(!w.should_flush(), "should not flush at {i} blobs");
+            let mut id_bytes = [0u8; 32];
+            id_bytes[0..4].copy_from_slice(&(i as u32).to_le_bytes());
+            w.add_blob(1, ChunkId(id_bytes), vec![1], 1);
+        }
+        assert!(w.should_flush());
+    }
+
+    #[test]
+    fn seal_resets_first_blob_time() {
+        let mut w = PackWriter::new(PackType::Data, usize::MAX);
+        w.add_blob(1, dummy_chunk_id(0), vec![0u8; 10], 10);
+        assert!(w.first_blob_time.is_some());
+
+        let engine = crate::crypto::PlaintextEngine::new(&[0u8; 32]);
+        let _ = w.seal(&engine).unwrap();
+        assert!(w.first_blob_time.is_none());
+    }
 }

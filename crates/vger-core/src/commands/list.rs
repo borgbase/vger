@@ -24,7 +24,7 @@ pub fn run(
     passphrase: Option<&str>,
     snapshot_name: Option<&str>,
 ) -> Result<ListResult> {
-    let repo = open_repo(config, passphrase)?;
+    let mut repo = open_repo(config, passphrase)?;
 
     match snapshot_name {
         None => {
@@ -33,7 +33,7 @@ pub fn run(
         }
         Some(name) => {
             // List contents of a specific snapshot
-            let items = load_snapshot_items(&repo, name)?;
+            let items = load_snapshot_items(&mut repo, name)?;
             Ok(ListResult::Items(items))
         }
     }
@@ -58,13 +58,13 @@ pub fn load_snapshot_meta(repo: &Repository, snapshot_name: &str) -> Result<Snap
 }
 
 /// Load and deserialize all items from a snapshot.
-pub fn load_snapshot_items(repo: &Repository, snapshot_name: &str) -> Result<Vec<Item>> {
+pub fn load_snapshot_items(repo: &mut Repository, snapshot_name: &str) -> Result<Vec<Item>> {
     let items_stream = load_snapshot_item_stream(repo, snapshot_name)?;
     decode_items_stream(&items_stream)
 }
 
 /// Load the raw concatenated item stream bytes for a snapshot.
-pub fn load_snapshot_item_stream(repo: &Repository, snapshot_name: &str) -> Result<Vec<u8>> {
+pub fn load_snapshot_item_stream(repo: &mut Repository, snapshot_name: &str) -> Result<Vec<u8>> {
     let snapshot_meta = load_snapshot_meta(repo, snapshot_name)?;
 
     let mut items_stream = Vec::new();
@@ -96,7 +96,7 @@ pub fn for_each_decoded_item(
 
 /// Stream items from a snapshot without materializing `Vec<Item>`.
 pub fn for_each_snapshot_item(
-    repo: &Repository,
+    repo: &mut Repository,
     snapshot_name: &str,
     visit: impl FnMut(Item) -> Result<()>,
 ) -> Result<()> {

@@ -542,7 +542,7 @@ fn read_chunk_cached(
 
     // Slow path: read from repository
     let data = {
-        let guard = repo.lock().unwrap();
+        let mut guard = repo.lock().unwrap();
         guard
             .read_chunk(chunk_id)
             .map_err(|_| FsError::GeneralFailure)?
@@ -675,27 +675,28 @@ pub fn run(
     cache_size: usize,
     source_filter: &[String],
 ) -> Result<()> {
-    let repo = open_repo(config, passphrase)?;
+    let mut repo = open_repo(config, passphrase)?;
 
     // Build the VFS tree from snapshot items
     eprintln!("Loading snapshot data...");
     let tree = if let Some(name) = snapshot_name {
-        let items = list_cmd::load_snapshot_items(&repo, name)?;
+        let items = list_cmd::load_snapshot_items(&mut repo, name)?;
         eprintln!("Loaded {} items from snapshot '{name}'", items.len());
         build_vfs_tree(&items)
     } else {
         let mut root_children = HashMap::new();
         let entries: Vec<_> = if source_filter.is_empty() {
-            repo.manifest.snapshots.iter().collect()
+            repo.manifest.snapshots.clone()
         } else {
             repo.manifest
                 .snapshots
                 .iter()
                 .filter(|e| source_filter.contains(&e.source_label))
+                .cloned()
                 .collect()
         };
         for entry in &entries {
-            let items = list_cmd::load_snapshot_items(&repo, &entry.name)?;
+            let items = list_cmd::load_snapshot_items(&mut repo, &entry.name)?;
             eprintln!(
                 "Loaded {} items from snapshot '{}'",
                 items.len(),

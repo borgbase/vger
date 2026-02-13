@@ -6,7 +6,9 @@ use crate::repo::format::{unpack_object_expect, ObjectType};
 use crate::repo::pack::read_blob_from_pack;
 use crate::snapshot::item::ItemType;
 
-use super::list::{for_each_snapshot_item, load_snapshot_meta};
+use super::list::{
+    for_each_decoded_item, load_snapshot_item_stream, load_snapshot_meta,
+};
 use super::util::open_repo;
 
 /// A single integrity issue found during check.
@@ -72,15 +74,16 @@ pub fn run_with_progress(
     verify_data: bool,
     mut progress: Option<&mut dyn FnMut(CheckProgressEvent)>,
 ) -> Result<CheckResult> {
-    let repo = open_repo(config, passphrase)?;
+    let mut repo = open_repo(config, passphrase)?;
 
     let mut errors: Vec<CheckError> = Vec::new();
     let mut snapshots_checked: usize = 0;
     let mut items_checked: usize = 0;
 
     // Step 1: Check each snapshot in manifest
-    let snapshot_count = repo.manifest.snapshots.len();
-    for (i, entry) in repo.manifest.snapshots.iter().enumerate() {
+    let snapshot_entries = repo.manifest.snapshots.clone();
+    let snapshot_count = snapshot_entries.len();
+    for (i, entry) in snapshot_entries.iter().enumerate() {
         emit_progress(
             &mut progress,
             CheckProgressEvent::SnapshotStarted {
@@ -112,15 +115,27 @@ pub fn run_with_progress(
             }
         }
 
-        // Load and check items.
+        // Load item stream (needs &mut repo for blob cache), then check items
+        let items_stream = match load_snapshot_item_stream(&mut repo, &entry.name) {
+            Ok(s) => s,
+            Err(e) => {
+                errors.push(CheckError {
+                    context: format!("snapshot '{}'", entry.name),
+                    message: format!("failed to load items: {e}"),
+                });
+                continue;
+            }
+        };
+
         let mut per_snapshot_items = 0usize;
-        if let Err(e) = for_each_snapshot_item(&repo, &entry.name, |item| {
+        let entry_name = entry.name.clone();
+        if let Err(e) = for_each_decoded_item(&items_stream, |item| {
             per_snapshot_items += 1;
             if item.entry_type == ItemType::RegularFile {
                 for chunk_ref in &item.chunks {
                     if !repo.chunk_index.contains(&chunk_ref.id) {
                         errors.push(CheckError {
-                            context: format!("snapshot '{}' file '{}'", entry.name, item.path),
+                            context: format!("snapshot '{}' file '{}'", entry_name, item.path),
                             message: format!("chunk {} not in index", chunk_ref.id),
                         });
                     }

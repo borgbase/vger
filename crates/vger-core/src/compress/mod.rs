@@ -41,20 +41,29 @@ impl Compression {
 
 /// Compress data and prepend a 1-byte tag identifying the codec.
 pub fn compress(compression: Compression, data: &[u8]) -> Result<Vec<u8>> {
-    let (tag, compressed) = match compression {
-        Compression::None => (TAG_NONE, data.to_vec()),
-        Compression::Lz4 => (TAG_LZ4, lz4_flex::compress_prepend_size(data)),
-        Compression::Zstd { level } => {
-            let c = zstd::encode_all(std::io::Cursor::new(data), level)
-                .map_err(|e| VgerError::Other(format!("zstd compress: {e}")))?;
-            (TAG_ZSTD, c)
+    match compression {
+        Compression::None => {
+            let mut out = Vec::with_capacity(1 + data.len());
+            out.push(TAG_NONE);
+            out.extend_from_slice(data);
+            Ok(out)
         }
-    };
-
-    let mut out = Vec::with_capacity(1 + compressed.len());
-    out.push(tag);
-    out.extend_from_slice(&compressed);
-    Ok(out)
+        Compression::Lz4 => {
+            let compressed = lz4_flex::compress_prepend_size(data);
+            let mut out = Vec::with_capacity(1 + compressed.len());
+            out.push(TAG_LZ4);
+            out.extend_from_slice(&compressed);
+            Ok(out)
+        }
+        Compression::Zstd { level } => {
+            let compressed = zstd::encode_all(std::io::Cursor::new(data), level)
+                .map_err(|e| VgerError::Other(format!("zstd compress: {e}")))?;
+            let mut out = Vec::with_capacity(1 + compressed.len());
+            out.push(TAG_ZSTD);
+            out.extend_from_slice(&compressed);
+            Ok(out)
+        }
+    }
 }
 
 /// Decompress data by reading the 1-byte tag prefix and dispatching.
