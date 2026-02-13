@@ -86,7 +86,7 @@ pub struct ScheduleConfig {
     pub passphrase_prompt_timeout_seconds: u64,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct ResourceLimitsConfig {
     #[serde(default)]
     pub cpu: CpuLimitsConfig,
@@ -96,23 +96,13 @@ pub struct ResourceLimitsConfig {
     pub network: NetworkLimitsConfig,
 }
 
-impl Default for ResourceLimitsConfig {
-    fn default() -> Self {
-        Self {
-            cpu: CpuLimitsConfig::default(),
-            io: IoLimitsConfig::default(),
-            network: NetworkLimitsConfig::default(),
-        }
-    }
-}
-
 impl ResourceLimitsConfig {
     pub fn validate(&self) -> crate::error::Result<()> {
         self.cpu.validate()
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct CpuLimitsConfig {
     /// Max CPU worker threads for backup transforms (0 = default rayon behavior).
     #[serde(default)]
@@ -120,15 +110,6 @@ pub struct CpuLimitsConfig {
     /// Unix process niceness target (-20..19). 0 = unchanged.
     #[serde(default)]
     pub nice: i32,
-}
-
-impl Default for CpuLimitsConfig {
-    fn default() -> Self {
-        Self {
-            max_threads: 0,
-            nice: 0,
-        }
-    }
 }
 
 impl CpuLimitsConfig {
@@ -143,7 +124,7 @@ impl CpuLimitsConfig {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct IoLimitsConfig {
     /// Source-file read limit in MiB/s (0 = unlimited).
     #[serde(default)]
@@ -153,16 +134,7 @@ pub struct IoLimitsConfig {
     pub write_mib_per_sec: u64,
 }
 
-impl Default for IoLimitsConfig {
-    fn default() -> Self {
-        Self {
-            read_mib_per_sec: 0,
-            write_mib_per_sec: 0,
-        }
-    }
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct NetworkLimitsConfig {
     /// Remote backend read limit in MiB/s (0 = unlimited).
     #[serde(default)]
@@ -170,15 +142,6 @@ pub struct NetworkLimitsConfig {
     /// Remote backend write limit in MiB/s (0 = unlimited).
     #[serde(default)]
     pub write_mib_per_sec: u64,
-}
-
-impl Default for NetworkLimitsConfig {
-    fn default() -> Self {
-        Self {
-            read_mib_per_sec: 0,
-            write_mib_per_sec: 0,
-        }
-    }
 }
 
 impl Default for ScheduleConfig {
@@ -306,6 +269,7 @@ pub struct CommandDump {
 /// YAML input for a source entry — either a plain path or a rich object.
 #[derive(Debug, Clone, Deserialize)]
 #[serde(untagged)]
+#[allow(clippy::large_enum_variant)]
 pub enum SourceInput {
     Simple(String),
     Rich {

@@ -19,7 +19,7 @@ pub fn summarize_metadata(metadata: &Metadata, file_type: &FileType) -> Metadata
         let _ = file_type;
         use std::os::unix::fs::MetadataExt;
 
-        return MetadataSummary {
+        MetadataSummary {
             mode: metadata.mode(),
             uid: metadata.uid(),
             gid: metadata.gid(),
@@ -28,7 +28,7 @@ pub fn summarize_metadata(metadata: &Metadata, file_type: &FileType) -> Metadata
             device: metadata.dev(),
             inode: metadata.ino(),
             size: metadata.len(),
-        };
+        }
     }
 
     #[cfg(windows)]
@@ -79,7 +79,7 @@ pub fn apply_mode(path: &Path, mode: u32) -> std::io::Result<()> {
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
-        return std::fs::set_permissions(path, std::fs::Permissions::from_mode(mode));
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(mode))
     }
 
     #[cfg(windows)]
@@ -100,7 +100,7 @@ pub fn apply_mode(path: &Path, mode: u32) -> std::io::Result<()> {
 pub fn create_symlink(link_target: &Path, target: &Path) -> std::io::Result<()> {
     #[cfg(unix)]
     {
-        return std::os::unix::fs::symlink(link_target, target);
+        std::os::unix::fs::symlink(link_target, target)
     }
 
     #[cfg(windows)]

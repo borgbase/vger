@@ -52,6 +52,15 @@ pub const MAX_BLOBS_PER_PACK: usize = 10_000;
 /// from sitting in memory indefinitely during long backups.
 pub const PACK_MAX_AGE_SECS: u64 = 300;
 
+/// Tuple describing one chunk's location and refcount in a sealed/flushed pack.
+pub type PackedChunkEntry = (ChunkId, u32, u64, u32);
+
+/// Result of sealing a pack in-memory: (pack_id, serialized pack bytes, chunk entries).
+pub type SealedPackResult = (PackId, Vec<u8>, Vec<PackedChunkEntry>);
+
+/// Result of flushing a pack to storage: (pack_id, chunk entries).
+pub type FlushedPackResult = (PackId, Vec<PackedChunkEntry>);
+
 /// Accumulates encrypted blobs and flushes them as pack files.
 pub struct PackWriter {
     pack_type: PackType,
@@ -167,10 +176,7 @@ impl PackWriter {
     /// Assemble buffered blobs into a pack, compute its PackId, and clear internal state.
     /// Does NOT write to storage — the caller is responsible for uploading `pack_bytes`.
     /// Returns (pack_id, pack_bytes, vec of (chunk_id, stored_size, offset, refcount)).
-    pub fn seal(
-        &mut self,
-        crypto: &dyn CryptoEngine,
-    ) -> Result<(PackId, Vec<u8>, Vec<(ChunkId, u32, u64, u32)>)> {
+    pub fn seal(&mut self, crypto: &dyn CryptoEngine) -> Result<SealedPackResult> {
         if self.buffer.is_empty() {
             return Err(VgerError::Other("cannot seal empty pack writer".into()));
         }
@@ -212,7 +218,7 @@ impl PackWriter {
         let pack_id = PackId::compute(&pack_bytes);
 
         // Collect results with refcounts from pending map
-        let mut results: Vec<(ChunkId, u32, u64, u32)> = Vec::with_capacity(header_entries.len());
+        let mut results: Vec<PackedChunkEntry> = Vec::with_capacity(header_entries.len());
         for entry in &header_entries {
             let refcount = self
                 .pending
@@ -237,7 +243,7 @@ impl PackWriter {
         &mut self,
         storage: &dyn StorageBackend,
         crypto: &dyn CryptoEngine,
-    ) -> Result<(PackId, Vec<(ChunkId, u32, u64, u32)>)> {
+    ) -> Result<FlushedPackResult> {
         let (pack_id, pack_bytes, results) = self.seal(crypto)?;
         storage.put(&pack_id.storage_key(), &pack_bytes)?;
         Ok((pack_id, results))

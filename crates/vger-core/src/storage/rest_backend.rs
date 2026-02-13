@@ -46,6 +46,7 @@ impl RestBackend {
     }
 
     /// Retry a closure on transient errors with exponential backoff + jitter.
+    #[allow(clippy::result_large_err)]
     fn retry_call<T>(
         &self,
         op_name: &str,

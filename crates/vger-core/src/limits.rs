@@ -270,9 +270,9 @@ impl NiceGuard {
         {
             let previous = get_process_nice()?;
             set_process_nice(target_nice)?;
-            return Ok(Some(Self {
+            Ok(Some(Self {
                 previous_nice: previous,
-            }));
+            }))
         }
 
         #[cfg(not(unix))]

@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{hash_map::Entry, HashMap};
 use std::fs::File;
 use std::path::Path;
 
@@ -402,6 +402,7 @@ fn execute_dump_command(dump: &CommandDump) -> Result<Vec<u8>> {
     Ok(output.stdout)
 }
 
+#[allow(clippy::too_many_arguments)]
 fn process_command_dumps(
     repo: &mut Repository,
     command_dumps: &[CommandDump],
@@ -613,21 +614,27 @@ fn process_regular_file_item(
                 size,
                 csize,
             });
-        } else if pending_new.contains_key(&chunk_id) {
-            actions.push(FileChunkAction::NewDuplicate { chunk_id, size });
         } else {
-            let job_idx = transform_jobs.len();
-            pending_new.insert(chunk_id, job_idx);
-            pending_transform_bytes = pending_transform_bytes.saturating_add(chunk_data.len());
-            transform_jobs.push(TransformJob {
-                chunk_id,
-                data: chunk_data,
-            });
-            actions.push(FileChunkAction::NewPrimary {
-                chunk_id,
-                size,
-                job_idx,
-            });
+            match pending_new.entry(chunk_id) {
+                Entry::Occupied(_) => {
+                    actions.push(FileChunkAction::NewDuplicate { chunk_id, size });
+                }
+                Entry::Vacant(entry) => {
+                    let job_idx = transform_jobs.len();
+                    entry.insert(job_idx);
+                    pending_transform_bytes =
+                        pending_transform_bytes.saturating_add(chunk_data.len());
+                    transform_jobs.push(TransformJob {
+                        chunk_id,
+                        data: chunk_data,
+                    });
+                    actions.push(FileChunkAction::NewPrimary {
+                        chunk_id,
+                        size,
+                        job_idx,
+                    });
+                }
+            }
         }
 
         if pending_transform_bytes >= MAX_PENDING_TRANSFORM_BYTES

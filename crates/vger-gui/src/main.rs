@@ -1182,7 +1182,7 @@ fn to_string_model(items: Vec<String>) -> ModelRc<SharedString> {
 }
 
 fn collect_repo_names(repos: &[ResolvedRepo]) -> Vec<String> {
-    repos.iter().map(|r| format_repo_name(r)).collect()
+    repos.iter().map(format_repo_name).collect()
 }
 
 fn build_source_model_data(repos: &[ResolvedRepo]) -> (Vec<SourceInfoData>, Vec<String>) {

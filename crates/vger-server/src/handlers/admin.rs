@@ -223,12 +223,10 @@ async fn repack(
         .map_err(|e| ServerError::BadRequest(format!("invalid repack plan: {e}")))?;
     validate_repack_plan(&plan)?;
 
-    if state.inner.config.append_only {
-        if plan.operations.iter().any(|op| op.delete_after) {
-            return Err(ServerError::Forbidden(
-                "append-only: repack with delete not allowed".into(),
-            ));
-        }
+    if state.inner.config.append_only && plan.operations.iter().any(|op| op.delete_after) {
+        return Err(ServerError::Forbidden(
+            "append-only: repack with delete not allowed".into(),
+        ));
     }
 
     let repo_name = repo.to_string();

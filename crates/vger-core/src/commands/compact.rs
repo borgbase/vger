@@ -242,10 +242,10 @@ pub fn compact_repo(
     Ok(stats)
 }
 
-fn select_analyses_by_cap<'a>(
-    analyses: &'a [PackAnalysis],
+fn select_analyses_by_cap(
+    analyses: &[PackAnalysis],
     max_repack_size: Option<u64>,
-) -> Vec<&'a PackAnalysis> {
+) -> Vec<&PackAnalysis> {
     let mut selected = Vec::new();
     let mut total = 0u64;
 

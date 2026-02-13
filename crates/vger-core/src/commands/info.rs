@@ -32,7 +32,7 @@ pub fn run(config: &VgerConfig, passphrase: Option<&str>) -> Result<InfoStats> {
     let mut last_snapshot_time = None;
 
     for entry in &repo.manifest.snapshots {
-        if last_snapshot_time.map_or(true, |current| entry.time > current) {
+        if last_snapshot_time.is_none_or(|current| entry.time > current) {
             last_snapshot_time = Some(entry.time);
         }
 

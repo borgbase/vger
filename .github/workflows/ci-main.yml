@@ -1,0 +1,38 @@
+name: ci-main
+
+on:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-main-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test-and-lint:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    env:
+      CARGO_TERM_COLOR: always
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Check formatting
+        run: cargo fmt --all -- --check
+
+      - name: Lint (clippy)
+        run: cargo clippy --workspace --all-targets --all-features -- -D warnings
+
+      - name: Run tests
+        run: cargo test --workspace

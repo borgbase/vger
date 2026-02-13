@@ -6,9 +6,7 @@ use crate::repo::format::{unpack_object_expect, ObjectType};
 use crate::repo::pack::read_blob_from_pack;
 use crate::snapshot::item::ItemType;
 
-use super::list::{
-    for_each_decoded_item, load_snapshot_item_stream, load_snapshot_meta,
-};
+use super::list::{for_each_decoded_item, load_snapshot_item_stream, load_snapshot_meta};
 use super::util::open_repo;
 
 /// A single integrity issue found during check.

@@ -33,6 +33,8 @@ use super::util::open_repo;
 
 // ─── VFS tree ──────────────────────────────────────────────────────────────
 
+type ChunkCache = Arc<Mutex<LruCache<ChunkId, Arc<Vec<u8>>>>>;
+
 /// In-memory virtual filesystem node built from snapshot items.
 enum VfsNode {
     Dir {
@@ -513,7 +515,7 @@ struct VgerDavFile {
     meta: VfsMeta,
     pos: u64,
     repo: Arc<Mutex<Repository>>,
-    cache: Arc<Mutex<LruCache<ChunkId, Arc<Vec<u8>>>>>,
+    cache: ChunkCache,
 }
 
 impl fmt::Debug for VgerDavFile {
@@ -529,7 +531,7 @@ impl fmt::Debug for VgerDavFile {
 /// Read a chunk via the LRU cache, falling back to the repository.
 fn read_chunk_cached(
     repo: &Arc<Mutex<Repository>>,
-    cache: &Arc<Mutex<LruCache<ChunkId, Arc<Vec<u8>>>>>,
+    cache: &ChunkCache,
     chunk_id: &ChunkId,
 ) -> FsResult<Arc<Vec<u8>>> {
     // Fast path: cache hit

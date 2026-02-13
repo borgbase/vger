@@ -60,6 +60,7 @@ impl FileCache {
     }
 
     /// Insert or update a file's cache entry.
+    #[allow(clippy::too_many_arguments)]
     pub fn insert(
         &mut self,
         path: String,
