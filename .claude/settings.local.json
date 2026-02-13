@@ -2,22 +2,12 @@
   "permissions": {
     "allow": [
       "Bash(cargo:*)",
-      "Bash(rustup update:*)",
       "Bash(rustc:*)",
-      "Bash(/Users/manu/Workspace/borg-rs/target/debug/vger:*)",
       "Bash(echo:*)",
-      "Bash(./scripts/build-release.sh:*)",
-      "Bash(./target/release/vger delete:*)",
-      "Bash(./target/release/vger:*)",
       "Bash(test:*)",
-      "Bash(make docs-build:*)",
       "Bash(mdbook build:*)",
       "Bash(bash:*)",
-      "Bash(rustup target add:*)",
-      "Bash(rustup show:*)",
-      "Bash(rustup target list:*)",
-      "Bash(RUSTUP_TOOLCHAIN=stable cargo zigbuild:*)",
-      "Bash(brew list:*)"
+      "Bash(make:*)"
     ]
   }
 }
