@@ -4,6 +4,16 @@ on:
   push:
     tags:
       - "v*"
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Artifact version label (for manual runs)"
+        required: false
+        default: "manual"
+      publish_release:
+        description: "Publish a GitHub Release (true/false)"
+        required: false
+        default: "false"
 
 permissions:
   contents: write
@@ -30,7 +40,11 @@ jobs:
         run: cargo zigbuild --release --target "${{ matrix.target }}" -p vger-cli -p vger-server
       - name: Package
         run: |
-          VERSION="${GITHUB_REF_NAME}"
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            VERSION="${{ github.event.inputs.version }}"
+          else
+            VERSION="${GITHUB_REF_NAME}"
+          fi
           ARCHIVE="vger-${VERSION}-${{ matrix.target }}.tar.gz"
           tar -czf "${ARCHIVE}" -C "target/${{ matrix.target }}/release" vger vger-server
       - name: Upload artifact
@@ -51,7 +65,11 @@ jobs:
         run: cargo build --release --target aarch64-apple-darwin -p vger-cli -p vger-server -p vger-gui
       - name: Package
         run: |
-          VERSION="${GITHUB_REF_NAME}"
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            VERSION="${{ github.event.inputs.version }}"
+          else
+            VERSION="${GITHUB_REF_NAME}"
+          fi
           ARCHIVE="vger-${VERSION}-aarch64-apple-darwin.tar.gz"
           tar -czf "${ARCHIVE}" -C "target/aarch64-apple-darwin/release" vger vger-server vger-gui
       - name: Upload artifact
@@ -73,7 +91,11 @@ jobs:
       - name: Package
         shell: pwsh
         run: |
-          $version = "${{ github.ref_name }}"
+          if ("${{ github.event_name }}" -eq "workflow_dispatch") {
+            $version = "${{ github.event.inputs.version }}"
+          } else {
+            $version = "${{ github.ref_name }}"
+          }
           $archive = "vger-$version-x86_64-pc-windows-msvc.zip"
           Compress-Archive -Path "target/x86_64-pc-windows-msvc/release/vger.exe" -DestinationPath $archive -Force
       - name: Upload artifact
@@ -85,6 +107,7 @@ jobs:
   release:
     name: publish
     runs-on: ubuntu-latest
+    if: github.event_name == 'push' || github.event.inputs.publish_release == 'true'
     needs:
       - build-linux
       - build-macos
