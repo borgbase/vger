@@ -53,10 +53,11 @@ echo "    Created $DIST_DIR/$archive"
 # Generate checksums
 echo "==> Generating checksums..."
 cd "$DIST_DIR"
-for f in *.tar.gz; do
+for f in *.tar.gz *.zip; do
+    [ -e "$f" ] || continue
     shasum -a 256 "$f" > "$f.sha256"
 done
-shasum -a 256 *.tar.gz > SHA256SUMS
+shasum -a 256 *.tar.gz *.zip 2>/dev/null > SHA256SUMS || shasum -a 256 *.tar.gz > SHA256SUMS
 cd ..
 
 echo ""
@@ -67,3 +68,5 @@ echo "Done. Next steps:"
 echo "  git tag -a $VERSION -m \"Release $VERSION\""
 echo "  git push origin main --follow-tags"
 echo "  gh release create $VERSION --title \"vger $VERSION\" --notes \"Initial release\" $DIST_DIR/*"
+echo ""
+echo "Windows CLI artifacts are built in CI on tag push (x86_64-pc-windows-msvc)."

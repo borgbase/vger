@@ -1,7 +1,6 @@
-use std::process::Command;
-
 use crate::config::HooksConfig;
 use crate::error::{Result, VgerError};
+use crate::platform::shell;
 
 use crate::config::SourceHooksConfig;
 
@@ -99,8 +98,7 @@ fn execute_hook_command(cmd: &str, ctx: &HookContext) -> Result<()> {
     let expanded = substitute_variables(cmd, ctx);
     tracing::info!("Running hook: {expanded}");
 
-    let mut child = Command::new("sh");
-    child.arg("-c").arg(&expanded);
+    let mut child = shell::command_for_script(&expanded);
 
     // Set environment variables
     child.env("VGER_COMMAND", &ctx.command);
@@ -115,7 +113,10 @@ fn execute_hook_command(cmd: &str, ctx: &HookContext) -> Result<()> {
         child.env("VGER_SOURCE_LABEL", source_label);
     }
     if let Some(ref source_paths) = ctx.source_paths {
-        child.env("VGER_SOURCE_PATH", source_paths.join(":"));
+        child.env(
+            "VGER_SOURCE_PATH",
+            source_paths.join(source_paths_separator()),
+        );
     }
 
     let output = child
@@ -149,18 +150,42 @@ fn substitute_variables(cmd: &str, ctx: &HookContext) -> String {
     let source_path_str = ctx
         .source_paths
         .as_ref()
-        .map(|ps| ps.join(":"))
+        .map(|ps| ps.join(source_paths_separator()))
         .unwrap_or_default();
     result = result.replace("{source_path}", &shell_escape(&source_path_str));
     result
 }
 
 fn shell_escape(input: &str) -> String {
-    if input.is_empty() {
-        return "''".to_string();
+    #[cfg(windows)]
+    {
+        if input.is_empty() {
+            return "''".to_string();
+        }
+        let escaped = input.replace('\'', "''");
+        return format!("'{escaped}'");
     }
-    let escaped = input.replace('\'', "'\"'\"'");
-    format!("'{escaped}'")
+
+    #[cfg(not(windows))]
+    {
+        if input.is_empty() {
+            return "''".to_string();
+        }
+        let escaped = input.replace('\'', "'\"'\"'");
+        format!("'{escaped}'")
+    }
+}
+
+fn source_paths_separator() -> &'static str {
+    #[cfg(windows)]
+    {
+        ";"
+    }
+
+    #[cfg(not(windows))]
+    {
+        ":"
+    }
 }
 
 /// Run source-level hooks (before/after/failed/finally) around an action.
@@ -210,6 +235,7 @@ fn log_hook_errors(result: Result<()>) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::path::Path;
 
     fn make_ctx(command: &str) -> HookContext {
         HookContext {
@@ -231,6 +257,49 @@ mod tests {
             );
         }
         HooksConfig { hooks }
+    }
+
+    #[cfg(windows)]
+    fn cmd_env_assert() -> &'static str {
+        "if ($env:VGER_COMMAND -eq 'backup' -and $env:VGER_REPOSITORY -eq '/tmp/repo' -and $env:VGER_LABEL -eq 'test') { exit 0 } else { exit 1 }"
+    }
+
+    #[cfg(not(windows))]
+    fn cmd_env_assert() -> &'static str {
+        "test \"$VGER_COMMAND\" = backup && test \"$VGER_REPOSITORY\" = /tmp/repo && test \"$VGER_LABEL\" = test"
+    }
+
+    #[cfg(windows)]
+    fn cmd_true() -> &'static str {
+        "$true | Out-Null"
+    }
+
+    #[cfg(not(windows))]
+    fn cmd_true() -> &'static str {
+        "true"
+    }
+
+    #[cfg(windows)]
+    fn cmd_false() -> &'static str {
+        "exit 1"
+    }
+
+    #[cfg(not(windows))]
+    fn cmd_false() -> &'static str {
+        "false"
+    }
+
+    fn cmd_touch(path: &Path) -> String {
+        #[cfg(windows)]
+        {
+            let escaped = path.display().to_string().replace('\'', "''");
+            format!("New-Item -Path '{escaped}' -ItemType File -Force | Out-Null")
+        }
+
+        #[cfg(not(windows))]
+        {
+            format!("touch {}", path.display())
+        }
     }
 
     #[test]
@@ -264,7 +333,11 @@ mod tests {
             source_paths: Some(vec!["/home/user/docs".into(), "/home/user/photos".into()]),
         };
         let result = substitute_variables("paths={source_path}", &ctx);
-        assert_eq!(result, "paths='/home/user/docs:/home/user/photos'");
+        let expected_sep = if cfg!(windows) { ";" } else { ":" };
+        assert_eq!(
+            result,
+            format!("paths='/home/user/docs{expected_sep}/home/user/photos'")
+        );
     }
 
     #[test]
@@ -285,10 +358,7 @@ mod tests {
     fn test_hook_env_vars() {
         // Use env to print vars, verify they're set
         let global = HooksConfig::default();
-        let repo = hooks_from(&[(
-            "before_backup",
-            vec!["test \"$VGER_COMMAND\" = backup && test \"$VGER_REPOSITORY\" = /tmp/repo && test \"$VGER_LABEL\" = test"],
-        )]);
+        let repo = hooks_from(&[("before_backup", vec![cmd_env_assert()])]);
         let mut ctx = make_ctx("backup");
 
         let result = run_with_hooks(&global, &repo, &mut ctx, || Ok(()));
@@ -297,7 +367,7 @@ mod tests {
 
     #[test]
     fn test_before_hook_success() {
-        let global = hooks_from(&[("before", vec!["true"])]);
+        let global = hooks_from(&[("before", vec![cmd_true()])]);
         let repo = HooksConfig::default();
         let mut ctx = make_ctx("backup");
 
@@ -307,7 +377,7 @@ mod tests {
 
     #[test]
     fn test_before_hook_failure_aborts() {
-        let global = hooks_from(&[("before", vec!["false"])]);
+        let global = hooks_from(&[("before", vec![cmd_false()])]);
         let repo = HooksConfig::default();
         let mut ctx = make_ctx("backup");
         let mut action_ran = false;
@@ -326,7 +396,7 @@ mod tests {
         // after hook writes a marker file
         let dir = tempfile::tempdir().unwrap();
         let marker = dir.path().join("after_ran");
-        let cmd = format!("touch {}", marker.display());
+        let cmd = cmd_touch(&marker);
 
         let global = hooks_from(&[("after", vec![&cmd])]);
         let repo = HooksConfig::default();
@@ -338,7 +408,7 @@ mod tests {
 
         // Now test failure case
         let marker2 = dir.path().join("after_ran2");
-        let cmd2 = format!("touch {}", marker2.display());
+        let cmd2 = cmd_touch(&marker2);
         let global2 = hooks_from(&[("after", vec![&cmd2])]);
         let mut ctx2 = make_ctx("backup");
 
@@ -351,7 +421,7 @@ mod tests {
     fn test_failed_runs_on_failure_only() {
         let dir = tempfile::tempdir().unwrap();
         let marker = dir.path().join("failed_ran");
-        let cmd = format!("touch {}", marker.display());
+        let cmd = cmd_touch(&marker);
 
         let global = hooks_from(&[("failed", vec![&cmd])]);
         let repo = HooksConfig::default();
@@ -363,7 +433,7 @@ mod tests {
 
         // Now test success case
         let marker2 = dir.path().join("failed_ran2");
-        let cmd2 = format!("touch {}", marker2.display());
+        let cmd2 = cmd_touch(&marker2);
         let global2 = hooks_from(&[("failed", vec![&cmd2])]);
         let mut ctx2 = make_ctx("backup");
 
@@ -377,7 +447,7 @@ mod tests {
 
         // Test on success
         let marker1 = dir.path().join("finally_success");
-        let cmd1 = format!("touch {}", marker1.display());
+        let cmd1 = cmd_touch(&marker1);
         let global1 = hooks_from(&[("finally", vec![&cmd1])]);
         let repo = HooksConfig::default();
         let mut ctx1 = make_ctx("backup");
@@ -387,7 +457,7 @@ mod tests {
 
         // Test on failure
         let marker2 = dir.path().join("finally_failure");
-        let cmd2 = format!("touch {}", marker2.display());
+        let cmd2 = cmd_touch(&marker2);
         let global2 = hooks_from(&[("finally", vec![&cmd2])]);
         let mut ctx2 = make_ctx("backup");
 
@@ -401,8 +471,8 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let marker_backup = dir.path().join("before_backup_ran");
         let marker_prune = dir.path().join("before_prune_ran");
-        let cmd_backup = format!("touch {}", marker_backup.display());
-        let cmd_prune = format!("touch {}", marker_prune.display());
+        let cmd_backup = cmd_touch(&marker_backup);
+        let cmd_prune = cmd_touch(&marker_prune);
 
         let global = hooks_from(&[
             ("before_backup", vec![&cmd_backup]),
@@ -428,11 +498,11 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let failed_marker = dir.path().join("failed_ran");
         let finally_marker = dir.path().join("finally_ran");
-        let failed_cmd = format!("touch {}", failed_marker.display());
-        let finally_cmd = format!("touch {}", finally_marker.display());
+        let failed_cmd = cmd_touch(&failed_marker);
+        let finally_cmd = cmd_touch(&finally_marker);
 
         let global = hooks_from(&[
-            ("before", vec!["false"]),
+            ("before", vec![cmd_false()]),
             ("failed", vec![&failed_cmd]),
             ("finally", vec![&finally_cmd]),
         ]);

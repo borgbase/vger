@@ -1258,7 +1258,10 @@ impl fmt::Display for ConfigSource {
 pub fn default_config_search_paths() -> Vec<(PathBuf, &'static str)> {
     let mut paths = vec![(PathBuf::from("vger.yaml"), "project")];
 
-    // User config: $XDG_CONFIG_HOME/vger/config.yaml or ~/.config/vger/config.yaml
+    #[cfg(windows)]
+    let user_config = dirs::config_dir().map(|base| base.join("vger").join("config.yaml"));
+
+    #[cfg(not(windows))]
     let user_config = std::env::var_os("XDG_CONFIG_HOME")
         .map(PathBuf::from)
         .filter(|p| p.is_absolute())
@@ -1269,8 +1272,19 @@ pub fn default_config_search_paths() -> Vec<(PathBuf, &'static str)> {
         paths.push((p, "user"));
     }
 
-    // System config
-    paths.push((PathBuf::from("/etc/vger/config.yaml"), "system"));
+    #[cfg(windows)]
+    {
+        let program_data = std::env::var_os("PROGRAMDATA")
+            .map(PathBuf::from)
+            .unwrap_or_else(|| PathBuf::from(r"C:\ProgramData"));
+        paths.push((program_data.join("vger").join("config.yaml"), "system"));
+    }
+
+    #[cfg(not(windows))]
+    {
+        // System config
+        paths.push((PathBuf::from("/etc/vger/config.yaml"), "system"));
+    }
 
     paths
 }

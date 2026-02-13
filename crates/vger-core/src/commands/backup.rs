@@ -1,5 +1,4 @@
 use std::collections::HashMap;
-use std::os::unix::fs::MetadataExt;
 use std::path::Path;
 
 use chrono::Utc;
@@ -15,6 +14,7 @@ use crate::config::{ChunkerConfig, CommandDump, VgerConfig};
 use crate::crypto::chunk_id::ChunkId;
 use crate::error::{Result, VgerError};
 use crate::limits::{self, ByteRateLimiter};
+use crate::platform::{fs, shell};
 use crate::repo::file_cache::FileCache;
 use crate::repo::format::{pack_object, ObjectType};
 use crate::repo::manifest::SnapshotEntry;
@@ -64,6 +64,7 @@ fn should_skip_for_device(one_file_system: bool, source_dev: u64, entry_dev: u64
     one_file_system && source_dev != entry_dev
 }
 
+#[cfg(unix)]
 fn read_item_xattrs(path: &Path) -> Option<HashMap<String, Vec<u8>>> {
     let names = match xattr::list(path) {
         Ok(names) => names,
@@ -112,6 +113,11 @@ fn read_item_xattrs(path: &Path) -> Option<HashMap<String, Vec<u8>>> {
     } else {
         Some(attrs)
     }
+}
+
+#[cfg(not(unix))]
+fn read_item_xattrs(_path: &Path) -> Option<HashMap<String, Vec<u8>>> {
+    None
 }
 
 struct TransformJob {
@@ -205,16 +211,12 @@ fn build_transform_pool(max_threads: usize) -> Result<Option<rayon::ThreadPool>>
 
 /// Execute a shell command and capture its stdout.
 fn execute_dump_command(dump: &CommandDump) -> Result<Vec<u8>> {
-    let output = std::process::Command::new("sh")
-        .arg("-c")
-        .arg(&dump.command)
-        .output()
-        .map_err(|e| {
-            VgerError::Other(format!(
-                "failed to execute command_dump '{}': {}",
-                dump.name, e
-            ))
-        })?;
+    let output = shell::run_script(&dump.command).map_err(|e| {
+        VgerError::Other(format!(
+            "failed to execute command_dump '{}': {}",
+            dump.name, e
+        ))
+    })?;
 
     if !output.status.success() {
         let code = output
@@ -249,7 +251,12 @@ pub fn run_with_progress(
     let exclude_if_present = req.exclude_if_present;
     let one_file_system = req.one_file_system;
     let git_ignore = req.git_ignore;
-    let xattrs_enabled = req.xattrs_enabled;
+    let xattrs_enabled = if req.xattrs_enabled && !fs::xattrs_supported() {
+        warn!("xattrs requested but not supported on this platform; continuing without xattrs");
+        false
+    } else {
+        req.xattrs_enabled
+    };
     let compression = req.compression;
     let label = req.label;
 
@@ -259,6 +266,9 @@ pub fn run_with_progress(
         return Err(VgerError::Other(
             "no source paths or command dumps specified".into(),
         ));
+    }
+    if one_file_system && !cfg!(unix) {
+        warn!("one_file_system filtering has limited support on this platform");
     }
 
     let multi_path = source_paths.len() > 1;
@@ -377,12 +387,7 @@ pub fn run_with_progress(
                 let item_bytes = rmp_serde::to_vec(&dump_item)?;
                 item_stream.extend_from_slice(&item_bytes);
                 if item_stream.len() >= items_config.avg_size as usize {
-                    flush_item_stream_chunk(
-                        repo,
-                        &mut item_stream,
-                        &mut item_ptrs,
-                        compression,
-                    )?;
+                    flush_item_stream_chunk(repo, &mut item_stream, &mut item_ptrs, compression)?;
                 }
 
                 emit_progress(
@@ -414,8 +419,10 @@ pub fn run_with_progress(
                 )));
             }
             let source_dev = std::fs::symlink_metadata(source)
-                .map_err(|e| VgerError::Other(format!("stat error for {}: {e}", source.display())))?
-                .dev();
+                .map(|m| fs::summarize_metadata(&m, &m.file_type()).device)
+                .map_err(|e| {
+                    VgerError::Other(format!("stat error for {}: {e}", source.display()))
+                })?;
             let explicit_excludes = build_explicit_excludes(source, exclude_patterns)?;
 
             // For multi-path mode, derive basename prefix
@@ -484,7 +491,9 @@ pub fn run_with_progress(
                 // Stay on the source filesystem when enabled.
                 if one_file_system {
                     if let Ok(metadata) = std::fs::symlink_metadata(path) {
-                        if should_skip_for_device(one_file_system, source_dev, metadata.dev()) {
+                        let entry_dev =
+                            fs::summarize_metadata(&metadata, &metadata.file_type()).device;
+                        if should_skip_for_device(one_file_system, source_dev, entry_dev) {
                             return false;
                         }
                     }
@@ -522,6 +531,7 @@ pub fn run_with_progress(
                 })?;
 
                 let file_type = metadata.file_type();
+                let metadata_summary = fs::summarize_metadata(&metadata, &file_type);
 
                 let (entry_type, link_target) = if file_type.is_dir() {
                     (ItemType::Directory, None)
@@ -539,8 +549,6 @@ pub fn run_with_progress(
                     continue;
                 };
 
-                let mtime_ns = metadata.mtime() * 1_000_000_000 + metadata.mtime_nsec();
-
                 // In multi-path mode, prefix each item path with the source basename
                 let item_path = match &prefix {
                     Some(pfx) => format!("{pfx}/{rel_path}"),
@@ -550,15 +558,15 @@ pub fn run_with_progress(
                 let mut item = Item {
                     path: item_path,
                     entry_type,
-                    mode: metadata.mode(),
-                    uid: metadata.uid(),
-                    gid: metadata.gid(),
+                    mode: metadata_summary.mode,
+                    uid: metadata_summary.uid,
+                    gid: metadata_summary.gid,
                     user: None,
                     group: None,
-                    mtime: mtime_ns,
+                    mtime: metadata_summary.mtime_ns,
                     atime: None,
                     ctime: None,
-                    size: metadata.len(),
+                    size: metadata_summary.size,
                     chunks: Vec::new(),
                     link_target,
                     xattrs: None,
@@ -579,15 +587,14 @@ pub fn run_with_progress(
 
                     // File-level cache: skip read/chunk/compress/encrypt for unchanged files.
                     let abs_path = entry.path().to_string_lossy().to_string();
-                    let ctime_ns = metadata.ctime() * 1_000_000_000 + metadata.ctime_nsec();
-                    let file_size = metadata.len();
+                    let file_size = metadata_summary.size;
 
                     let cache_hit = repo.file_cache.lookup(
                         &abs_path,
-                        metadata.dev(),
-                        metadata.ino(),
-                        mtime_ns,
-                        ctime_ns,
+                        metadata_summary.device,
+                        metadata_summary.inode,
+                        metadata_summary.mtime_ns,
+                        metadata_summary.ctime_ns,
                         file_size,
                     );
 
@@ -615,10 +622,10 @@ pub fn run_with_progress(
 
                             new_file_cache.insert(
                                 abs_path,
-                                metadata.dev(),
-                                metadata.ino(),
-                                mtime_ns,
-                                ctime_ns,
+                                metadata_summary.device,
+                                metadata_summary.inode,
+                                metadata_summary.mtime_ns,
+                                metadata_summary.ctime_ns,
                                 file_size,
                                 refs,
                             );
@@ -821,10 +828,10 @@ pub fn run_with_progress(
                     // Update file cache with the chunks we just stored.
                     new_file_cache.insert(
                         abs_path,
-                        metadata.dev(),
-                        metadata.ino(),
-                        mtime_ns,
-                        ctime_ns,
+                        metadata_summary.device,
+                        metadata_summary.inode,
+                        metadata_summary.mtime_ns,
+                        metadata_summary.ctime_ns,
                         file_size,
                         item.chunks.clone(),
                     );
@@ -925,6 +932,36 @@ pub fn run_with_progress(
 mod tests {
     use super::*;
 
+    #[cfg(windows)]
+    fn shell_echo_hello() -> &'static str {
+        "Write-Output hello"
+    }
+
+    #[cfg(not(windows))]
+    fn shell_echo_hello() -> &'static str {
+        "echo hello"
+    }
+
+    #[cfg(windows)]
+    fn shell_fail() -> &'static str {
+        "exit 1"
+    }
+
+    #[cfg(not(windows))]
+    fn shell_fail() -> &'static str {
+        "false"
+    }
+
+    #[cfg(windows)]
+    fn shell_success_no_output() -> &'static str {
+        "$null = 1"
+    }
+
+    #[cfg(not(windows))]
+    fn shell_success_no_output() -> &'static str {
+        "true"
+    }
+
     #[test]
     fn one_file_system_device_filter_logic() {
         assert!(should_skip_for_device(true, 42, 43));
@@ -936,17 +973,18 @@ mod tests {
     fn execute_dump_command_captures_stdout() {
         let dump = CommandDump {
             name: "test.txt".to_string(),
-            command: "echo hello".to_string(),
+            command: shell_echo_hello().to_string(),
         };
         let result = execute_dump_command(&dump).unwrap();
-        assert_eq!(result, b"hello\n");
+        let text = String::from_utf8(result).unwrap();
+        assert_eq!(text.trim_end(), "hello");
     }
 
     #[test]
     fn execute_dump_command_fails_on_nonzero_exit() {
         let dump = CommandDump {
             name: "fail.txt".to_string(),
-            command: "false".to_string(),
+            command: shell_fail().to_string(),
         };
         let result = execute_dump_command(&dump);
         assert!(result.is_err());
@@ -958,7 +996,7 @@ mod tests {
     fn execute_dump_command_empty_stdout_succeeds() {
         let dump = CommandDump {
             name: "empty.txt".to_string(),
-            command: "true".to_string(),
+            command: shell_success_no_output().to_string(),
         };
         let result = execute_dump_command(&dump).unwrap();
         assert!(result.is_empty());

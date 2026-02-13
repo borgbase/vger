@@ -13,8 +13,12 @@ V'Ger automatically finds config files in this order:
 1. `--config <path>` flag
 2. `VGER_CONFIG` environment variable
 3. `./vger.yaml` (project)
-4. `$XDG_CONFIG_HOME/vger/config.yaml` or `~/.config/vger/config.yaml` (user)
-5. `/etc/vger/config.yaml` (system)
+4. User config dir + `vger/config.yaml`:
+   - Unix: `$XDG_CONFIG_HOME/vger/config.yaml` or `~/.config/vger/config.yaml`
+   - Windows: `%APPDATA%\\vger\\config.yaml`
+5. System config:
+   - Unix: `/etc/vger/config.yaml`
+   - Windows: `%PROGRAMDATA%\\vger\\config.yaml`
 
 You can also set `VGER_PASSPHRASE` to supply the passphrase non-interactively.
 
@@ -109,6 +113,11 @@ encryption:
   # passcommand: "pass show borg"    # Shell command that prints the passphrase
 ```
 
+`passcommand` runs through the platform shell:
+
+- Unix: `sh -c`
+- Windows: `powershell -NoProfile -NonInteractive -Command`
+
 ## Compression
 
 ```yaml
@@ -138,7 +147,7 @@ exclude_if_present:                  # Skip dirs containing any marker file
 one_file_system: true                # Do not cross filesystem/mount boundaries (default true)
 git_ignore: false                    # Respect .gitignore files (default false)
 xattrs:                              # Extended attribute handling
-  enabled: true                      # Preserve xattrs on backup/restore (default true)
+  enabled: true                      # Preserve xattrs on backup/restore (default true, Unix-only)
 ```
 
 ## Retention
@@ -159,7 +168,7 @@ retention:                           # Global retention policy (can be overridde
 limits:                              # Optional backup resource limits
   cpu:
     max_threads: 0                   # 0 = default rayon behavior
-    nice: 0                          # Unix niceness target (-20..19), 0 = unchanged
+    nice: 0                          # Unix niceness target (-20..19), ignored on Windows
   io:
     read_mib_per_sec: 0              # Source file reads during backup
     write_mib_per_sec: 0             # Local repository writes during backup
@@ -213,9 +222,11 @@ Hook commands support `{variable}` placeholders that are replaced before executi
 | `{label}`        | Repository label (empty if unset)            |
 | `{error}`        | Error message (empty if no error)            |
 | `{source_label}` | Source label (empty if unset)                |
-| `{source_path}`  | Source path(s), colon-separated if multiple  |
+| `{source_path}`  | Source path list (Unix `:`, Windows `;`)     |
 
 The same values are also exported as environment variables: `VGER_COMMAND`, `VGER_REPOSITORY`, `VGER_LABEL`, `VGER_ERROR`, `VGER_SOURCE_LABEL`, `VGER_SOURCE_PATH`.
+
+`{source_path}` / `VGER_SOURCE_PATH` joins multiple paths with `:` on Unix and `;` on Windows.
 
 ```yaml
 hooks:

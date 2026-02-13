@@ -13,6 +13,7 @@ use vger_core::commands;
 use vger_core::compress::Compression;
 use vger_core::config::{self, EncryptionModeConfig, ResolvedRepo, SourceEntry, VgerConfig};
 use vger_core::hooks::{self, HookContext};
+use vger_core::platform::shell;
 use vger_core::storage::{parse_repo_url, ParsedUrl};
 
 const PROGRESS_REDRAW_INTERVAL: Duration = Duration::from_millis(100);
@@ -217,8 +218,8 @@ Configuration file lookup order:
   1. --config <path>             (explicit flag)
   2. $VGER_CONFIG                (environment variable)
   3. ./vger.yaml                 (project)
-  4. $XDG_CONFIG_HOME/vger/config.yaml or ~/.config/vger/config.yaml (user)
-  5. /etc/vger/config.yaml       (system)
+  4. Platform user config dir + /vger/config.yaml (e.g. ~/.config or %APPDATA%)
+  5. Platform system config path (Unix: /etc/vger/config.yaml, Windows: %PROGRAMDATA%/vger/config.yaml)
 
 Environment variables:
   VGER_CONFIG       Path to configuration file (overrides default search)
@@ -766,10 +767,7 @@ fn configured_passphrase(
         return Ok(Some(p.clone()));
     }
     if let Some(ref cmd) = config.encryption.passcommand {
-        let output = std::process::Command::new("sh")
-            .arg("-c")
-            .arg(cmd)
-            .output()?;
+        let output = shell::run_script(cmd)?;
         if !output.status.success() {
             return Err(format!(
                 "passcommand failed: {}",

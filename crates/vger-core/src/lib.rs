@@ -8,6 +8,7 @@ pub mod error;
 pub mod hooks;
 pub mod index;
 pub mod limits;
+pub mod platform;
 pub mod prune;
 pub mod repo;
 pub mod snapshot;

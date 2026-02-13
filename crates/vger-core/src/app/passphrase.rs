@@ -1,5 +1,6 @@
 use crate::config::{EncryptionModeConfig, VgerConfig};
 use crate::error::{Result, VgerError};
+use crate::platform::shell;
 
 #[derive(Debug, Clone)]
 pub struct PassphrasePrompt {
@@ -14,11 +15,7 @@ pub fn configured_passphrase(config: &VgerConfig) -> Result<Option<String>> {
     }
 
     if let Some(ref cmd) = config.encryption.passcommand {
-        let output = std::process::Command::new("sh")
-            .arg("-c")
-            .arg(cmd)
-            .output()
-            .map_err(VgerError::Io)?;
+        let output = shell::run_script(cmd).map_err(VgerError::Io)?;
 
         if !output.status.success() {
             return Err(VgerError::Config(format!(

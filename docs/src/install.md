@@ -12,6 +12,17 @@ tar xzf vger-*.tar.gz
 sudo cp vger /usr/local/bin/
 ```
 
+For Windows CLI releases:
+
+```powershell
+Expand-Archive vger-*.zip -DestinationPath .
+Move-Item .\vger.exe "$env:USERPROFILE\\bin\\vger.exe"
+```
+
+Add your chosen directory (for example, `%USERPROFILE%\bin`) to `PATH` if needed.
+
+Windows releases currently include the CLI binary (`vger.exe`) only.
+
 ## Build from source
 
 Requires Rust 1.88 or later.

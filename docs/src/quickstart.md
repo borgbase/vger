@@ -24,6 +24,8 @@ Or write it to a specific path:
 vger config --dest ~/.config/vger/config.yaml
 ```
 
+On Windows, use `%APPDATA%\\vger\\config.yaml` (for example: `vger config --dest "$env:APPDATA\\vger\\config.yaml"`).
+
 Edit the generated `vger.yaml` to set your repository path and source directories. Encryption is enabled by default. See [Configuration](configuration.md) for a full reference.
 
 ## Initialize and back up

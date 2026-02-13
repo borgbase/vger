@@ -1,11 +1,11 @@
 use std::collections::HashMap;
-use std::os::unix::fs::PermissionsExt;
 use std::path::{Component, Path, PathBuf};
 
 use tracing::info;
 
 use crate::config::VgerConfig;
 use crate::error::{Result, VgerError};
+use crate::platform::fs;
 use crate::repo::Repository;
 use crate::snapshot::item::ItemType;
 use crate::storage;
@@ -21,6 +21,14 @@ pub fn run(
 ) -> Result<ExtractStats> {
     let backend = storage::backend_from_config(&config.repository, None)?;
     let repo = Repository::open(backend, passphrase)?;
+    let xattrs_enabled = if xattrs_enabled && !fs::xattrs_supported() {
+        tracing::warn!(
+            "xattrs requested but not supported on this platform; continuing without xattrs"
+        );
+        false
+    } else {
+        xattrs_enabled
+    };
 
     let items = super::list::load_snapshot_items(&repo, snapshot_name)?;
 
@@ -73,8 +81,7 @@ pub fn run(
                 std::fs::create_dir_all(&target)?;
                 ensure_path_within_root(&target, &dest_root)?;
                 // Set permissions (ignore errors on directories for now, re-set after)
-                let _ =
-                    std::fs::set_permissions(&target, std::fs::Permissions::from_mode(item.mode));
+                let _ = fs::apply_mode(&target, item.mode);
                 if xattrs_enabled {
                     apply_item_xattrs(&target, item.xattrs.as_ref());
                 }
@@ -85,7 +92,7 @@ pub fn run(
                     ensure_parent_exists_within_root(&target, &dest_root)?;
                     // Remove existing if present
                     let _ = std::fs::remove_file(&target);
-                    std::os::unix::fs::symlink(link_target, &target)?;
+                    fs::create_symlink(Path::new(link_target), &target)?;
                     if xattrs_enabled {
                         apply_item_xattrs(&target, item.xattrs.as_ref());
                     }
@@ -106,8 +113,7 @@ pub fn run(
                 }
 
                 // Set permissions
-                let _ =
-                    std::fs::set_permissions(&target, std::fs::Permissions::from_mode(item.mode));
+                let _ = fs::apply_mode(&target, item.mode);
                 if xattrs_enabled {
                     apply_item_xattrs(&target, item.xattrs.as_ref());
                 }
@@ -145,6 +151,7 @@ fn apply_item_xattrs(target: &Path, xattrs: Option<&HashMap<String, Vec<u8>>>) {
             continue;
         };
 
+        #[cfg(unix)]
         if let Err(e) = xattr::set(target, name, value) {
             tracing::warn!(
                 path = %target.display(),
@@ -152,6 +159,12 @@ fn apply_item_xattrs(target: &Path, xattrs: Option<&HashMap<String, Vec<u8>>>) {
                 error = %e,
                 "failed to restore extended attribute"
             );
+        }
+        #[cfg(not(unix))]
+        {
+            let _ = target;
+            let _ = name;
+            let _ = value;
         }
     }
 }

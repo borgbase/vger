@@ -39,6 +39,8 @@ vger list
 
 See the [full documentation](https://vger.borgbase.com) for storage backends, restore, maintenance, and more.
 
+Windows support currently targets the CLI (`vger.exe`). GUI builds are not shipped for Windows yet.
+
 ## Desktop UI
 
 `vger-gui` is a Slint-based desktop app that uses `vger-core` directly (it does not shell out to the CLI).
