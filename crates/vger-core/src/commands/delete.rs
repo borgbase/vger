@@ -2,6 +2,7 @@ use crate::config::VgerConfig;
 use crate::error::Result;
 use crate::repo::Repository;
 use crate::storage;
+use tracing::warn;
 
 use super::list::{load_snapshot_items, load_snapshot_meta};
 use super::util::with_repo_lock;
@@ -90,15 +91,24 @@ pub fn run(
             }
         }
 
-        // Delete snapshot metadata object
-        repo.storage
-            .delete(&format!("snapshots/{snapshot_id_hex}"))?;
-
         // Remove from manifest
         repo.manifest.remove_snapshot(snapshot_name);
 
         // Persist state
         repo.save_state()?;
+
+        // Best-effort cleanup of snapshot metadata object.
+        // If this fails after state is persisted, the repo remains consistent and
+        // only leaves an orphaned metadata object.
+        let snapshot_key = format!("snapshots/{snapshot_id_hex}");
+        if let Err(err) = repo.storage.delete(&snapshot_key) {
+            warn!(
+                snapshot = %snapshot_name,
+                key = %snapshot_key,
+                error = %err,
+                "failed to delete snapshot metadata object after state commit"
+            );
+        }
 
         Ok(DeleteStats {
             snapshot_name: snapshot_name.to_string(),

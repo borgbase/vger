@@ -7,6 +7,7 @@ use std::time::Duration;
 
 use opendal::layers::{ConcurrentLimitLayer, RetryLayer, ThrottleLayer};
 use opendal::Operator;
+use serde::{Deserialize, Serialize};
 use url::Url;
 
 use crate::config::{RepositoryConfig, RetryConfig};
@@ -20,6 +21,44 @@ const DEFAULT_S3_CONCURRENT_REQUESTS: usize = 64;
 /// Burst size for ThrottleLayer (256 MiB).
 /// Must be larger than any single write operation (multipart chunks are 32 MiB).
 const THROTTLE_BURST_BYTES: u32 = 256 * 1024 * 1024;
+
+/// Metadata sent to backends that support native advisory lock APIs.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BackendLockInfo {
+    pub hostname: String,
+    pub pid: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RepackBlobRef {
+    pub offset: u64,
+    pub length: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RepackOperationRequest {
+    pub source_pack: String,
+    pub keep_blobs: Vec<RepackBlobRef>,
+    pub delete_after: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RepackPlanRequest {
+    pub operations: Vec<RepackOperationRequest>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RepackOperationResult {
+    pub source_pack: String,
+    pub new_pack: Option<String>,
+    pub new_offsets: Vec<u64>,
+    pub deleted: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RepackResultResponse {
+    pub completed: Vec<RepackOperationResult>,
+}
 
 /// Abstract key-value storage for repository objects.
 /// Keys are `/`-separated string paths (e.g. "packs/ab/ab01cd02...").
@@ -50,6 +89,32 @@ pub trait StorageBackend: Send + Sync {
     fn put_owned(&self, key: &str, data: Vec<u8>) -> Result<()> {
         self.put(key, &data)
     }
+
+    /// Acquire an advisory lock using a backend-native API.
+    ///
+    /// Backends that don't support a lock API should return
+    /// `VgerError::UnsupportedBackend`, so the caller can fall back to
+    /// object-based lock files.
+    fn acquire_advisory_lock(&self, _lock_id: &str, _info: &BackendLockInfo) -> Result<()> {
+        Err(VgerError::UnsupportedBackend("advisory lock API".into()))
+    }
+
+    /// Release an advisory lock using a backend-native API.
+    fn release_advisory_lock(&self, _lock_id: &str) -> Result<()> {
+        Err(VgerError::UnsupportedBackend("advisory lock API".into()))
+    }
+
+    /// Execute a server-side repack plan when supported by the backend.
+    fn server_repack(&self, _plan: &RepackPlanRequest) -> Result<RepackResultResponse> {
+        Err(VgerError::UnsupportedBackend(
+            "server-side repack API".into(),
+        ))
+    }
+
+    /// Batch-delete keys using a backend-native API.
+    fn batch_delete_keys(&self, _keys: &[String]) -> Result<()> {
+        Err(VgerError::UnsupportedBackend("batch delete API".into()))
+    }
 }
 
 impl StorageBackend for Arc<dyn StorageBackend> {
@@ -76,6 +141,18 @@ impl StorageBackend for Arc<dyn StorageBackend> {
     }
     fn put_owned(&self, key: &str, data: Vec<u8>) -> Result<()> {
         (**self).put_owned(key, data)
+    }
+    fn acquire_advisory_lock(&self, lock_id: &str, info: &BackendLockInfo) -> Result<()> {
+        (**self).acquire_advisory_lock(lock_id, info)
+    }
+    fn release_advisory_lock(&self, lock_id: &str) -> Result<()> {
+        (**self).release_advisory_lock(lock_id)
+    }
+    fn server_repack(&self, plan: &RepackPlanRequest) -> Result<RepackResultResponse> {
+        (**self).server_repack(plan)
+    }
+    fn batch_delete_keys(&self, keys: &[String]) -> Result<()> {
+        (**self).batch_delete_keys(keys)
     }
 }
 

@@ -15,10 +15,32 @@ pub struct RuntimeConfig {
 
 impl RuntimeConfig {
     pub fn schedule(&self) -> ScheduleConfig {
-        self.repos
-            .first()
-            .map(|r| r.config.schedule.clone())
-            .unwrap_or_default()
+        let mut iter = self.repos.iter().map(|r| r.config.schedule.clone());
+        let Some(mut merged) = iter.next() else {
+            return ScheduleConfig::default();
+        };
+
+        // For multi-repo configs, pick the shortest interval and union the
+        // trigger semantics so no repo's cadence is accidentally ignored.
+        for schedule in iter {
+            merged.enabled |= schedule.enabled;
+            merged.on_startup |= schedule.on_startup;
+            merged.jitter_seconds = merged.jitter_seconds.max(schedule.jitter_seconds);
+            merged.passphrase_prompt_timeout_seconds = merged
+                .passphrase_prompt_timeout_seconds
+                .max(schedule.passphrase_prompt_timeout_seconds);
+
+            let candidate_secs = schedule.every_duration().map(|d| d.as_secs()).ok();
+            let merged_secs = merged.every_duration().map(|d| d.as_secs()).ok();
+            match (merged_secs, candidate_secs) {
+                (Some(current), Some(candidate)) if candidate < current => {
+                    merged.every = schedule.every.clone();
+                }
+                _ => {}
+            }
+        }
+
+        merged
     }
 }
 

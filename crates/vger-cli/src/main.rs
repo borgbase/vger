@@ -1170,7 +1170,35 @@ fn run_check(
     verify_data: bool,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let result = with_repo_passphrase(config, label, |passphrase| {
-        commands::check::run(config, passphrase, verify_data)
+        let mut on_progress = |event: commands::check::CheckProgressEvent| match event {
+            commands::check::CheckProgressEvent::SnapshotStarted {
+                current,
+                total,
+                name,
+            } => {
+                eprintln!("[{current}/{total}] Checking snapshot '{name}'...");
+            }
+            commands::check::CheckProgressEvent::ChunksExistencePhaseStarted { total_chunks } => {
+                eprintln!("Verifying existence of {total_chunks} chunks in pack files...");
+            }
+            commands::check::CheckProgressEvent::ChunksExistenceProgress {
+                checked,
+                total_chunks,
+            } => {
+                eprintln!("  existence: {checked}/{total_chunks}");
+            }
+            commands::check::CheckProgressEvent::ChunksDataPhaseStarted { total_chunks } => {
+                eprintln!("Verifying data integrity of {total_chunks} chunks...");
+            }
+            commands::check::CheckProgressEvent::ChunksDataProgress {
+                verified,
+                total_chunks,
+            } => {
+                eprintln!("  verify-data: {verified}/{total_chunks}");
+            }
+        };
+
+        commands::check::run_with_progress(config, passphrase, verify_data, Some(&mut on_progress))
             .map_err(|e| -> Box<dyn std::error::Error> { Box::new(e) })
     })?;
 

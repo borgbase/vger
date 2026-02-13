@@ -1,16 +1,16 @@
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
 use tracing::{info, warn};
 
 use super::util::with_repo_lock;
 use crate::config::VgerConfig;
 use crate::crypto::pack_id::PackId;
-use crate::error::Result;
+use crate::error::{Result, VgerError};
 use crate::repo::pack::{
     read_blob_from_pack, read_pack_header, PackHeaderEntry, PackType, PackWriter,
 };
 use crate::repo::Repository;
-use crate::storage;
+use crate::storage::{self, RepackBlobRef, RepackOperationRequest, RepackPlanRequest};
 
 /// Statistics returned by the compact command.
 #[derive(Debug, Default)]
@@ -136,9 +136,10 @@ pub fn compact_repo(
 
     // Sort by most wasteful first (highest dead bytes)
     analyses.sort_by(|a, b| b.dead_bytes.cmp(&a.dead_bytes));
+    let selected = select_analyses_by_cap(&analyses, max_repack_size);
 
     if dry_run {
-        for a in &analyses {
+        for a in &selected {
             let pct = (a.dead_bytes as f64 / a.total_bytes as f64) * 100.0;
             if a.live_entries.is_empty() {
                 info!(
@@ -163,11 +164,15 @@ pub fn compact_repo(
         return Ok(stats);
     }
 
+    if try_server_side_repack(repo, &selected, &mut stats)? {
+        return Ok(stats);
+    }
+
     // Phase 2: Repack
     let mut total_repacked_bytes: u64 = 0;
     let pack_target = repo.config.min_pack_size as usize;
 
-    for analysis in &analyses {
+    for analysis in &selected {
         if let Some(cap) = max_repack_size {
             if total_repacked_bytes >= cap {
                 info!("Reached max-repack-size limit, stopping");
@@ -236,4 +241,120 @@ pub fn compact_repo(
     }
 
     Ok(stats)
+}
+
+fn select_analyses_by_cap<'a>(
+    analyses: &'a [PackAnalysis],
+    max_repack_size: Option<u64>,
+) -> Vec<&'a PackAnalysis> {
+    let mut selected = Vec::new();
+    let mut total = 0u64;
+
+    for analysis in analyses {
+        if let Some(cap) = max_repack_size {
+            if total >= cap {
+                break;
+            }
+        }
+        selected.push(analysis);
+        total = total.saturating_add(analysis.total_bytes);
+    }
+
+    selected
+}
+
+fn try_server_side_repack(
+    repo: &mut Repository,
+    analyses: &[&PackAnalysis],
+    stats: &mut CompactStats,
+) -> Result<bool> {
+    if analyses.is_empty() {
+        return Ok(true);
+    }
+
+    let mut operations = Vec::with_capacity(analyses.len());
+    for analysis in analyses {
+        operations.push(RepackOperationRequest {
+            source_pack: analysis.storage_key.clone(),
+            keep_blobs: analysis
+                .live_entries
+                .iter()
+                .map(|entry| RepackBlobRef {
+                    offset: entry.offset,
+                    length: entry.length as u64,
+                })
+                .collect(),
+            delete_after: true,
+        });
+    }
+    let plan = RepackPlanRequest { operations };
+
+    let response = match repo.storage.server_repack(&plan) {
+        Ok(resp) => resp,
+        Err(VgerError::UnsupportedBackend(_)) => return Ok(false),
+        Err(err) => return Err(err),
+    };
+
+    let mut completed_by_source: HashMap<String, crate::storage::RepackOperationResult> = response
+        .completed
+        .into_iter()
+        .map(|op| (op.source_pack.clone(), op))
+        .collect();
+
+    for analysis in analyses {
+        let result = completed_by_source
+            .remove(&analysis.storage_key)
+            .ok_or_else(|| {
+                VgerError::Other(format!(
+                    "server repack response missing operation for {}",
+                    analysis.storage_key
+                ))
+            })?;
+
+        if analysis.live_entries.is_empty() {
+            if result.deleted {
+                stats.packs_deleted_empty += 1;
+                stats.space_freed += analysis.total_bytes;
+            }
+            continue;
+        }
+
+        let new_pack_key = result.new_pack.as_ref().ok_or_else(|| {
+            VgerError::Other(format!(
+                "server repack did not return new pack for {}",
+                analysis.storage_key
+            ))
+        })?;
+        let new_pack_id = PackId::from_storage_key(new_pack_key).map_err(|e| {
+            VgerError::Other(format!(
+                "server repack returned invalid pack key '{new_pack_key}': {e}"
+            ))
+        })?;
+
+        if result.new_offsets.len() != analysis.live_entries.len() {
+            return Err(VgerError::Other(format!(
+                "server repack offsets mismatch for {}: expected {}, got {}",
+                analysis.storage_key,
+                analysis.live_entries.len(),
+                result.new_offsets.len()
+            )));
+        }
+
+        for (entry, new_offset) in analysis.live_entries.iter().zip(result.new_offsets.iter()) {
+            repo.chunk_index.update_location(
+                &entry.chunk_id,
+                new_pack_id,
+                *new_offset,
+                entry.length,
+            );
+        }
+
+        stats.packs_repacked += 1;
+        if result.deleted {
+            stats.space_freed += analysis.dead_bytes;
+        }
+    }
+
+    repo.save_state()?;
+    Ok(true)
 }

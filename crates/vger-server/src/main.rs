@@ -7,7 +7,7 @@ use std::time::Duration;
 
 use clap::Parser;
 use tokio::net::TcpListener;
-use tracing::info;
+use tracing::{info, warn};
 
 use crate::config::ServerConfig;
 use crate::state::AppState;
@@ -37,6 +37,14 @@ async fn main() {
     if config.server.token.is_empty() {
         eprintln!("Error: server.token must be set in config");
         std::process::exit(1);
+    }
+
+    if config.server.rate_limit_rps > 0 || config.server.rate_limit_mbps > 0 {
+        warn!(
+            rate_limit_rps = config.server.rate_limit_rps,
+            rate_limit_mbps = config.server.rate_limit_mbps,
+            "rate limiting is configured but not yet enforced by vger-server"
+        );
     }
 
     // Initialize tracing

@@ -26,11 +26,52 @@ pub struct CheckResult {
     pub errors: Vec<CheckError>,
 }
 
+#[derive(Debug, Clone)]
+pub enum CheckProgressEvent {
+    SnapshotStarted {
+        current: usize,
+        total: usize,
+        name: String,
+    },
+    ChunksExistencePhaseStarted {
+        total_chunks: usize,
+    },
+    ChunksExistenceProgress {
+        checked: usize,
+        total_chunks: usize,
+    },
+    ChunksDataPhaseStarted {
+        total_chunks: usize,
+    },
+    ChunksDataProgress {
+        verified: usize,
+        total_chunks: usize,
+    },
+}
+
+fn emit_progress(
+    progress: &mut Option<&mut dyn FnMut(CheckProgressEvent)>,
+    event: CheckProgressEvent,
+) {
+    if let Some(callback) = progress.as_deref_mut() {
+        callback(event);
+    }
+}
+
 /// Run `vger check`.
 pub fn run(
     config: &VgerConfig,
     passphrase: Option<&str>,
     verify_data: bool,
+) -> Result<CheckResult> {
+    run_with_progress(config, passphrase, verify_data, None)
+}
+
+pub fn run_with_progress(
+    config: &VgerConfig,
+    passphrase: Option<&str>,
+    verify_data: bool,
+    mut progress: Option<&mut dyn FnMut(CheckProgressEvent)>,
 ) -> Result<CheckResult> {
     let backend = storage::backend_from_config(&config.repository, None)?;
     let repo = Repository::open(backend, passphrase)?;
@@ -42,11 +83,13 @@ pub fn run(
     // Step 1: Check each snapshot in manifest
     let snapshot_count = repo.manifest.snapshots.len();
     for (i, entry) in repo.manifest.snapshots.iter().enumerate() {
-        eprintln!(
-            "[{}/{}] Checking snapshot '{}'...",
-            i + 1,
-            snapshot_count,
-            entry.name
+        emit_progress(
+            &mut progress,
+            CheckProgressEvent::SnapshotStarted {
+                current: i + 1,
+                total: snapshot_count,
+                name: entry.name.clone(),
+            },
         );
 
         // Load snapshot metadata
@@ -102,7 +145,10 @@ pub fn run(
 
     // Step 2: Verify all chunks' pack files exist in storage
     let total_chunks = repo.chunk_index.len();
-    eprintln!("Verifying existence of {total_chunks} chunks in pack files...");
+    emit_progress(
+        &mut progress,
+        CheckProgressEvent::ChunksExistencePhaseStarted { total_chunks },
+    );
     let mut chunks_existence_checked: usize = 0;
     for (_chunk_id, entry) in repo.chunk_index.iter() {
         let pack_key = entry.pack_id.storage_key();
@@ -114,14 +160,23 @@ pub fn run(
         }
         chunks_existence_checked += 1;
         if chunks_existence_checked.is_multiple_of(1000) {
-            eprintln!("  existence: {chunks_existence_checked}/{total_chunks}",);
+            emit_progress(
+                &mut progress,
+                CheckProgressEvent::ChunksExistenceProgress {
+                    checked: chunks_existence_checked,
+                    total_chunks,
+                },
+            );
         }
     }
 
     // Step 3: If --verify-data, read + decrypt + decompress + recompute ID
     let mut chunks_data_verified: usize = 0;
     if verify_data {
-        eprintln!("Verifying data integrity of {total_chunks} chunks...");
+        emit_progress(
+            &mut progress,
+            CheckProgressEvent::ChunksDataPhaseStarted { total_chunks },
+        );
         let chunk_id_key = repo.crypto.chunk_id_key();
         for (chunk_id, entry) in repo.chunk_index.iter() {
             let raw = match read_blob_from_pack(
@@ -175,7 +230,13 @@ pub fn run(
 
             chunks_data_verified += 1;
             if chunks_data_verified.is_multiple_of(1000) {
-                eprintln!("  verify-data: {chunks_data_verified}/{total_chunks}",);
+                emit_progress(
+                    &mut progress,
+                    CheckProgressEvent::ChunksDataProgress {
+                        verified: chunks_data_verified,
+                        total_chunks,
+                    },
+                );
             }
         }
     }

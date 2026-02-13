@@ -1,6 +1,7 @@
 use std::collections::HashMap;
 
 use chrono::Utc;
+use tracing::warn;
 
 use crate::config::{RetentionConfig, SourceEntry, VgerConfig};
 use crate::error::{Result, VgerError};
@@ -129,6 +130,7 @@ pub fn run(
         to_prune.reverse();
         let mut total_chunks_deleted = 0u64;
         let mut total_space_freed = 0u64;
+        let mut metadata_keys_to_delete: Vec<(String, String)> = Vec::with_capacity(to_prune.len());
 
         for snapshot_name in &to_prune {
             // Get snapshot ID before we modify manifest
@@ -137,6 +139,7 @@ pub fn run(
                 .find_snapshot(snapshot_name)
                 .map(|e| hex::encode(&e.id))
                 .ok_or_else(|| VgerError::SnapshotNotFound(snapshot_name.clone()))?;
+            let snapshot_key = format!("snapshots/{snapshot_id_hex}");
 
             let snapshot_meta = load_snapshot_meta(repo, snapshot_name)?;
             let items = load_snapshot_items(repo, snapshot_name)?;
@@ -164,16 +167,25 @@ pub fn run(
                 }
             }
 
-            // Delete snapshot metadata
-            repo.storage
-                .delete(&format!("snapshots/{snapshot_id_hex}"))?;
-
             // Remove from manifest
             repo.manifest.remove_snapshot(snapshot_name);
+            metadata_keys_to_delete.push((snapshot_name.clone(), snapshot_key));
         }
 
         // Single atomic save after all deletions
         repo.save_state()?;
+
+        // Best-effort cleanup of snapshot metadata objects after state commit.
+        for (snapshot_name, snapshot_key) in metadata_keys_to_delete {
+            if let Err(err) = repo.storage.delete(&snapshot_key) {
+                warn!(
+                    snapshot = %snapshot_name,
+                    key = %snapshot_key,
+                    error = %err,
+                    "failed to delete snapshot metadata object after state commit"
+                );
+            }
+        }
 
         Ok((
             PruneStats {

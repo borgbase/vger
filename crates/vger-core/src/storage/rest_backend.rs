@@ -3,7 +3,7 @@ use std::time::Duration;
 
 use crate::config::RetryConfig;
 use crate::error::{Result, VgerError};
-use crate::storage::StorageBackend;
+use crate::storage::{BackendLockInfo, RepackPlanRequest, RepackResultResponse, StorageBackend};
 
 /// HTTP REST backend for remote repository access via vger-server.
 pub struct RestBackend {
@@ -84,12 +84,13 @@ impl RestBackend {
     }
 
     /// Batch delete multiple keys in a single request.
-    pub fn batch_delete(&self, keys: &[&str]) -> Result<()> {
+    pub fn batch_delete(&self, keys: &[String]) -> Result<()> {
         let url = format!("{}?batch-delete", self.base_url);
+        let payload = keys.to_vec();
         let resp = self
             .retry_call("batch-delete", || {
                 let req = self.apply_auth(self.agent.post(&url));
-                req.send_json(ureq::json!(keys))
+                req.send_json(payload.clone())
             })
             .map_err(|e| VgerError::Other(format!("REST batch-delete: {e}")))?;
         if resp.status() >= 400 {
@@ -117,44 +118,34 @@ impl RestBackend {
     }
 
     /// Acquire a lock on the server.
-    pub fn acquire_lock(&self, id: &str, info: &serde_json::Value) -> Result<()> {
+    pub fn acquire_lock(&self, id: &str, info: &BackendLockInfo) -> Result<()> {
         let url = format!("{}/locks/{}", self.base_url, id);
         let info = info.clone();
-        let resp = self
-            .retry_call("lock-acquire", || {
-                let req = self.apply_auth(self.agent.post(&url));
-                req.send_json(info.clone())
-            })
-            .map_err(|e| VgerError::Other(format!("REST lock acquire: {e}")))?;
-        if resp.status() >= 400 {
-            return Err(VgerError::Other(format!(
-                "REST lock acquire failed: HTTP {}",
-                resp.status()
-            )));
+        match self.retry_call("lock-acquire", || {
+            let req = self.apply_auth(self.agent.post(&url));
+            req.send_json(info.clone())
+        }) {
+            Ok(_) => Ok(()),
+            Err(ureq::Error::Status(409, _)) => Err(VgerError::Locked(id.to_string())),
+            Err(e) => Err(VgerError::Other(format!("REST lock acquire: {e}"))),
         }
-        Ok(())
     }
 
     /// Release a lock on the server.
     pub fn release_lock(&self, id: &str) -> Result<()> {
         let url = format!("{}/locks/{}", self.base_url, id);
-        let resp = self
-            .retry_call("lock-release", || {
-                let req = self.apply_auth(self.agent.delete(&url));
-                req.call()
-            })
-            .map_err(|e| VgerError::Other(format!("REST lock release: {e}")))?;
-        if resp.status() >= 400 {
-            return Err(VgerError::Other(format!(
-                "REST lock release failed: HTTP {}",
-                resp.status()
-            )));
+        match self.retry_call("lock-release", || {
+            let req = self.apply_auth(self.agent.delete(&url));
+            req.call()
+        }) {
+            Ok(_) => Ok(()),
+            Err(ureq::Error::Status(404, _)) => Ok(()),
+            Err(e) => Err(VgerError::Other(format!("REST lock release: {e}"))),
         }
-        Ok(())
     }
 
     /// Send a repack plan to the server for server-side compaction.
-    pub fn repack(&self, plan: &serde_json::Value) -> Result<serde_json::Value> {
+    pub fn repack(&self, plan: &RepackPlanRequest) -> Result<RepackResultResponse> {
         let url = format!("{}?repack", self.base_url);
         let plan = plan.clone();
         let resp = self
@@ -169,7 +160,7 @@ impl RestBackend {
                 resp.status()
             )));
         }
-        let val: serde_json::Value = resp
+        let val: RepackResultResponse = resp
             .into_json()
             .map_err(|e| VgerError::Other(format!("REST repack parse: {e}")))?;
         Ok(val)
@@ -276,5 +267,21 @@ impl StorageBackend for RestBackend {
         })
         .map_err(|e| VgerError::Other(format!("REST MKDIR {key}: {e}")))?;
         Ok(())
+    }
+
+    fn acquire_advisory_lock(&self, lock_id: &str, info: &BackendLockInfo) -> Result<()> {
+        self.acquire_lock(lock_id, info)
+    }
+
+    fn release_advisory_lock(&self, lock_id: &str) -> Result<()> {
+        self.release_lock(lock_id)
+    }
+
+    fn server_repack(&self, plan: &RepackPlanRequest) -> Result<RepackResultResponse> {
+        self.repack(plan)
+    }
+
+    fn batch_delete_keys(&self, keys: &[String]) -> Result<()> {
+        self.batch_delete(keys)
     }
 }

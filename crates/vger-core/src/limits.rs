@@ -10,7 +10,10 @@ use tracing::warn;
 
 use crate::config::ResourceLimitsConfig;
 use crate::error::{Result, VgerError};
-use crate::storage::{parse_repo_url, ParsedUrl, StorageBackend};
+use crate::storage::{
+    parse_repo_url, BackendLockInfo, ParsedUrl, RepackPlanRequest, RepackResultResponse,
+    StorageBackend,
+};
 
 const BYTES_PER_MIB: u64 = 1024 * 1024;
 const FILE_READ_CHUNK_SIZE: usize = 256 * 1024;
@@ -212,6 +215,22 @@ impl StorageBackend for ThrottledStorageBackend {
             limiter.consume(data.len());
         }
         self.inner.put_owned(key, data)
+    }
+
+    fn acquire_advisory_lock(&self, lock_id: &str, info: &BackendLockInfo) -> Result<()> {
+        self.inner.acquire_advisory_lock(lock_id, info)
+    }
+
+    fn release_advisory_lock(&self, lock_id: &str) -> Result<()> {
+        self.inner.release_advisory_lock(lock_id)
+    }
+
+    fn server_repack(&self, plan: &RepackPlanRequest) -> Result<RepackResultResponse> {
+        self.inner.server_repack(plan)
+    }
+
+    fn batch_delete_keys(&self, keys: &[String]) -> Result<()> {
+        self.inner.batch_delete_keys(keys)
     }
 }
 

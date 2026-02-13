@@ -7,8 +7,7 @@ use crate::config::VgerConfig;
 use crate::error::{Result, VgerError};
 use crate::platform::fs;
 use crate::repo::Repository;
-use crate::snapshot::item::ItemType;
-use crate::storage;
+use crate::snapshot::item::{Item, ItemType};
 
 /// Run `vger extract`.
 pub fn run(
@@ -19,20 +18,6 @@ pub fn run(
     pattern: Option<&str>,
     xattrs_enabled: bool,
 ) -> Result<ExtractStats> {
-    let backend = storage::backend_from_config(&config.repository, None)?;
-    let repo = Repository::open(backend, passphrase)?;
-    let xattrs_enabled = if xattrs_enabled && !fs::xattrs_supported() {
-        tracing::warn!(
-            "xattrs requested but not supported on this platform; continuing without xattrs"
-        );
-        false
-    } else {
-        xattrs_enabled
-    };
-
-    let items = super::list::load_snapshot_items(&repo, snapshot_name)?;
-
-    // Build optional filter pattern
     let filter = pattern
         .map(|p| {
             globset::GlobBuilder::new(p)
@@ -43,99 +28,19 @@ pub fn run(
         .transpose()
         .map_err(|e| VgerError::Config(format!("invalid pattern: {e}")))?;
 
-    let dest_path = Path::new(dest);
-    std::fs::create_dir_all(dest_path)?;
-    let dest_root = dest_path
-        .canonicalize()
-        .map_err(|e| VgerError::Other(format!("invalid destination '{}': {e}", dest)))?;
-
-    let mut stats = ExtractStats::default();
-
-    // Sort: directories first so parents exist before children
-    let mut sorted_items = items;
-    sorted_items.sort_by(|a, b| {
-        let type_ord = |t: &ItemType| match t {
-            ItemType::Directory => 0,
-            ItemType::Symlink => 1,
-            ItemType::RegularFile => 2,
-        };
-        type_ord(&a.entry_type)
-            .cmp(&type_ord(&b.entry_type))
-            .then_with(|| a.path.cmp(&b.path))
-    });
-
-    for item in &sorted_items {
-        // Apply filter
-        if let Some(ref matcher) = filter {
-            if !matcher.is_match(&item.path) {
-                continue;
-            }
-        }
-
-        let rel = sanitize_item_path(&item.path)?;
-        let target = dest_root.join(&rel);
-
-        match item.entry_type {
-            ItemType::Directory => {
-                ensure_path_within_root(&target, &dest_root)?;
-                std::fs::create_dir_all(&target)?;
-                ensure_path_within_root(&target, &dest_root)?;
-                // Set permissions (ignore errors on directories for now, re-set after)
-                let _ = fs::apply_mode(&target, item.mode);
-                if xattrs_enabled {
-                    apply_item_xattrs(&target, item.xattrs.as_ref());
-                }
-                stats.dirs += 1;
-            }
-            ItemType::Symlink => {
-                if let Some(ref link_target) = item.link_target {
-                    ensure_parent_exists_within_root(&target, &dest_root)?;
-                    // Remove existing if present
-                    let _ = std::fs::remove_file(&target);
-                    fs::create_symlink(Path::new(link_target), &target)?;
-                    if xattrs_enabled {
-                        apply_item_xattrs(&target, item.xattrs.as_ref());
-                    }
-                    stats.symlinks += 1;
-                }
-            }
-            ItemType::RegularFile => {
-                // Ensure parent directory exists
-                ensure_parent_exists_within_root(&target, &dest_root)?;
-
-                let mut file = std::fs::File::create(&target)?;
-                let mut total_bytes: u64 = 0;
-
-                for chunk_ref in &item.chunks {
-                    let chunk_data = repo.read_chunk(&chunk_ref.id)?;
-                    std::io::Write::write_all(&mut file, &chunk_data)?;
-                    total_bytes += chunk_data.len() as u64;
-                }
-
-                // Set permissions
-                let _ = fs::apply_mode(&target, item.mode);
-                if xattrs_enabled {
-                    apply_item_xattrs(&target, item.xattrs.as_ref());
-                }
-
-                // Set modification time
-                let mtime_secs = item.mtime / 1_000_000_000;
-                let mtime_nanos = (item.mtime % 1_000_000_000) as u32;
-                let mtime = filetime::FileTime::from_unix_time(mtime_secs, mtime_nanos);
-                let _ = filetime::set_file_mtime(&target, mtime);
-
-                stats.files += 1;
-                stats.total_bytes += total_bytes;
-            }
-        }
-    }
-
-    info!(
-        "Extracted {} files, {} dirs, {} symlinks ({} bytes)",
-        stats.files, stats.dirs, stats.symlinks, stats.total_bytes
-    );
-
-    Ok(stats)
+    extract_with_filter(
+        config,
+        passphrase,
+        snapshot_name,
+        dest,
+        xattrs_enabled,
+        move |path| {
+            filter
+                .as_ref()
+                .map(|matcher| matcher.is_match(path))
+                .unwrap_or(true)
+        },
+    )
 }
 
 /// Run `vger extract` for a selected set of paths.
@@ -150,6 +55,27 @@ pub fn run_selected(
     selected_paths: &HashSet<String>,
     xattrs_enabled: bool,
 ) -> Result<ExtractStats> {
+    extract_with_filter(
+        config,
+        passphrase,
+        snapshot_name,
+        dest,
+        xattrs_enabled,
+        |path| path_matches_selection(path, selected_paths),
+    )
+}
+
+fn extract_with_filter<F>(
+    config: &VgerConfig,
+    passphrase: Option<&str>,
+    snapshot_name: &str,
+    dest: &str,
+    xattrs_enabled: bool,
+    mut include_path: F,
+) -> Result<ExtractStats>
+where
+    F: FnMut(&str) -> bool,
+{
     let backend = crate::storage::backend_from_config(&config.repository, None)?;
     let repo = Repository::open(backend, passphrase)?;
     let xattrs_enabled = if xattrs_enabled && !fs::xattrs_supported() {
@@ -169,24 +95,13 @@ pub fn run_selected(
         .canonicalize()
         .map_err(|e| VgerError::Other(format!("invalid destination '{}': {e}", dest)))?;
 
+    let mut sorted_items = items;
+    sort_items_for_extract(&mut sorted_items);
+
     let mut stats = ExtractStats::default();
 
-    // Sort: directories first so parents exist before children
-    let mut sorted_items = items;
-    sorted_items.sort_by(|a, b| {
-        let type_ord = |t: &ItemType| match t {
-            ItemType::Directory => 0,
-            ItemType::Symlink => 1,
-            ItemType::RegularFile => 2,
-        };
-        type_ord(&a.entry_type)
-            .cmp(&type_ord(&b.entry_type))
-            .then_with(|| a.path.cmp(&b.path))
-    });
-
     for item in &sorted_items {
-        // Check if this item is selected or under a selected parent
-        if !path_matches_selection(&item.path, selected_paths) {
+        if !include_path(&item.path) {
             continue;
         }
 
@@ -244,11 +159,24 @@ pub fn run_selected(
     }
 
     info!(
-        "Extracted {} files, {} dirs, {} symlinks ({} bytes) [selected]",
+        "Extracted {} files, {} dirs, {} symlinks ({} bytes)",
         stats.files, stats.dirs, stats.symlinks, stats.total_bytes
     );
 
     Ok(stats)
+}
+
+fn sort_items_for_extract(items: &mut [Item]) {
+    items.sort_by(|a, b| {
+        let type_ord = |t: &ItemType| match t {
+            ItemType::Directory => 0,
+            ItemType::Symlink => 1,
+            ItemType::RegularFile => 2,
+        };
+        type_ord(&a.entry_type)
+            .cmp(&type_ord(&b.entry_type))
+            .then_with(|| a.path.cmp(&b.path))
+    });
 }
 
 /// Check if a path matches the selection set.
