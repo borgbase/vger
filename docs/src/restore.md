@@ -17,7 +17,22 @@ vger list --source docs
 
 ```bash
 # List files inside a snapshot
-vger list --snapshot a1b2c3d4
+vger snapshot list a1b2c3d4
+
+# List with details (type, permissions, size, mtime)
+vger snapshot list a1b2c3d4 --long
+
+# Limit listing to a subtree
+vger snapshot list a1b2c3d4 --path src
+
+# Sort listing by size (name, size, mtime)
+vger snapshot list a1b2c3d4 --sort size
+```
+
+## Inspect snapshot metadata
+
+```bash
+vger snapshot info a1b2c3d4
 ```
 
 ## Restore to a directory

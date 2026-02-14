@@ -59,7 +59,7 @@ vger list --last 5
 vger list --source docs
 
 # List files inside a snapshot
-vger list --snapshot a1b2c3d4
+vger snapshot list a1b2c3d4
 ```
 
 ## Command dumps
@@ -79,7 +79,7 @@ sources:
 
 Each command runs via `sh -c` and the captured output is stored as a virtual file under `.vger-dumps/` in the snapshot. On extract, these appear as regular files:
 
-```
+```text
 .vger-dumps/postgres.sql
 .vger-dumps/redis.rdb
 ```

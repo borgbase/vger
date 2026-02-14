@@ -113,12 +113,7 @@ pub fn run_backup_for_all_repos(
 }
 
 pub fn list_snapshots(config: &VgerConfig, passphrase: Option<&str>) -> Result<Vec<SnapshotEntry>> {
-    match commands::list::run(config, passphrase, None)? {
-        commands::list::ListResult::Snapshots(entries) => Ok(entries),
-        commands::list::ListResult::Items(_) => Err(VgerError::Other(
-            "unexpected list result: expected snapshots".into(),
-        )),
-    }
+    commands::list::list_snapshots(config, passphrase)
 }
 
 pub fn list_snapshot_items(
@@ -126,12 +121,7 @@ pub fn list_snapshot_items(
     passphrase: Option<&str>,
     snapshot_name: &str,
 ) -> Result<Vec<Item>> {
-    match commands::list::run(config, passphrase, Some(snapshot_name))? {
-        commands::list::ListResult::Items(items) => Ok(items),
-        commands::list::ListResult::Snapshots(_) => Err(VgerError::Other(
-            "unexpected list result: expected snapshot items".into(),
-        )),
-    }
+    commands::list::list_snapshot_items(config, passphrase, snapshot_name)
 }
 
 pub fn extract_snapshot(

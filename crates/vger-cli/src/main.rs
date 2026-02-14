@@ -265,12 +265,8 @@ enum Commands {
         paths: Vec<String>,
     },
 
-    /// List snapshots or snapshot contents
+    /// List snapshots
     List {
-        /// Show contents of a specific snapshot
-        #[arg(long)]
-        snapshot: Option<String>,
-
         /// Filter displayed snapshots by source label
         #[arg(short = 'S', long = "source")]
         source: Vec<String>,
@@ -278,6 +274,12 @@ enum Commands {
         /// Show only the N most recent snapshots
         #[arg(long)]
         last: Option<usize>,
+    },
+
+    /// Inspect snapshot contents and metadata
+    Snapshot {
+        #[command(subcommand)]
+        command: SnapshotCommand,
     },
 
     /// Restore files from a snapshot
@@ -372,6 +374,36 @@ enum Commands {
     },
 }
 
+#[derive(Clone, clap::ValueEnum)]
+enum SortField {
+    Name,
+    Size,
+    Mtime,
+}
+
+#[derive(Subcommand)]
+enum SnapshotCommand {
+    /// Show contents of a snapshot
+    List {
+        /// Snapshot to inspect
+        snapshot: String,
+        /// Show only files under this subtree
+        #[arg(long)]
+        path: Option<String>,
+        /// Show permissions, size, mtime
+        #[arg(long)]
+        long: bool,
+        /// Sort output (default: name)
+        #[arg(long, value_enum, default_value_t = SortField::Name)]
+        sort: SortField,
+    },
+    /// Show metadata of a snapshot
+    Info {
+        /// Snapshot to inspect
+        snapshot: String,
+    },
+}
+
 fn command_name(cmd: &Commands) -> &'static str {
     match cmd {
         Commands::Init => "init",
@@ -384,6 +416,7 @@ fn command_name(cmd: &Commands) -> &'static str {
         Commands::Info => "info",
         Commands::Mount { .. } => "mount",
         Commands::Compact { .. } => "compact",
+        Commands::Snapshot { .. } => "snapshot",
         Commands::Config { .. } => "config",
     }
 }
@@ -697,11 +730,8 @@ fn dispatch_command(
             sources,
             source,
         ),
-        Commands::List {
-            snapshot,
-            source,
-            last,
-        } => run_list(cfg, label, snapshot.clone(), source, *last),
+        Commands::List { source, last } => run_list(cfg, label, source, *last),
+        Commands::Snapshot { command } => run_snapshot_command(command, cfg, label),
         Commands::Restore {
             snapshot,
             dest,
@@ -977,84 +1007,199 @@ fn run_backup(
 fn run_list(
     config: &VgerConfig,
     label: Option<&str>,
-    snapshot_name: Option<String>,
     source_filter: &[String],
     last: Option<usize>,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    if snapshot_name.is_some() && !source_filter.is_empty() {
-        return Err("cannot combine --source with --snapshot".into());
-    }
-
-    let result = with_repo_passphrase(config, label, |passphrase| {
-        commands::list::run(config, passphrase, snapshot_name.as_deref())
+    let mut snapshots = with_repo_passphrase(config, label, |passphrase| {
+        commands::list::list_snapshots(config, passphrase)
             .map_err(|e| -> Box<dyn std::error::Error> { Box::new(e) })
     })?;
 
-    match result {
-        commands::list::ListResult::Snapshots(mut snapshots) => {
-            // Filter by source label if requested
-            if !source_filter.is_empty() {
-                snapshots.retain(|e| source_filter.iter().any(|f| f == &e.source_label));
-            }
-
-            // Truncate to last N entries
-            if let Some(n) = last {
-                let len = snapshots.len();
-                if n < len {
-                    snapshots.drain(..len - n);
-                }
-            }
-            if snapshots.is_empty() {
-                println!("No snapshots found.");
-                return Ok(());
-            }
-
-            let theme = CliTableTheme::detect();
-            let mut table = theme.new_data_table(&["ID", "Source", "Label", "Date"]);
-
-            for entry in &snapshots {
-                let source_col = if !entry.source_paths.is_empty() {
-                    entry.source_paths.join("\n")
-                } else if !entry.source_label.is_empty() {
-                    entry.source_label.clone()
-                } else {
-                    "-".to_string()
-                };
-                let label_col = if !entry.label.is_empty() {
-                    entry.label.clone()
-                } else if !entry.source_label.is_empty() {
-                    entry.source_label.clone()
-                } else {
-                    "-".to_string()
-                };
-                table.add_row(vec![
-                    Cell::new(entry.name.clone()),
-                    Cell::new(source_col),
-                    Cell::new(label_col),
-                    Cell::new(entry.time.format("%Y-%m-%d %H:%M:%S").to_string()),
-                ]);
-            }
-            println!("{table}");
-        }
-        commands::list::ListResult::Items(items) => {
-            for item in &items {
-                let type_char = match item.entry_type {
-                    vger_core::snapshot::item::ItemType::Directory => "d",
-                    vger_core::snapshot::item::ItemType::RegularFile => "-",
-                    vger_core::snapshot::item::ItemType::Symlink => "l",
-                };
-                println!(
-                    "{}{:o} {:>8} {}",
-                    type_char,
-                    item.mode & 0o7777,
-                    item.size,
-                    item.path
-                );
-            }
-        }
+    // Filter by source label if requested
+    if !source_filter.is_empty() {
+        snapshots.retain(|e| source_filter.iter().any(|f| f == &e.source_label));
     }
 
+    // Truncate to last N entries
+    if let Some(n) = last {
+        let len = snapshots.len();
+        if n < len {
+            snapshots.drain(..len - n);
+        }
+    }
+    if snapshots.is_empty() {
+        println!("No snapshots found.");
+        return Ok(());
+    }
+
+    let theme = CliTableTheme::detect();
+    let mut table = theme.new_data_table(&["ID", "Source", "Label", "Date"]);
+
+    for entry in &snapshots {
+        let source_col = if !entry.source_paths.is_empty() {
+            entry.source_paths.join("\n")
+        } else if !entry.source_label.is_empty() {
+            entry.source_label.clone()
+        } else {
+            "-".to_string()
+        };
+        let label_col = if !entry.label.is_empty() {
+            entry.label.clone()
+        } else if !entry.source_label.is_empty() {
+            entry.source_label.clone()
+        } else {
+            "-".to_string()
+        };
+        table.add_row(vec![
+            Cell::new(entry.name.clone()),
+            Cell::new(source_col),
+            Cell::new(label_col),
+            Cell::new(entry.time.format("%Y-%m-%d %H:%M:%S").to_string()),
+        ]);
+    }
+    println!("{table}");
+
     Ok(())
+}
+
+fn normalize_path_filter(raw: &str) -> String {
+    let s = raw.strip_prefix("./").unwrap_or(raw);
+    s.trim_end_matches('/').to_string()
+}
+
+fn path_matches_filter(item_path: &str, filter: &str) -> bool {
+    item_path == filter || item_path.starts_with(&format!("{filter}/"))
+}
+
+fn run_snapshot_command(
+    command: &SnapshotCommand,
+    config: &VgerConfig,
+    label: Option<&str>,
+) -> Result<(), Box<dyn std::error::Error>> {
+    match command {
+        SnapshotCommand::List {
+            snapshot,
+            path,
+            long,
+            sort,
+        } => {
+            let mut items = with_repo_passphrase(config, label, |passphrase| {
+                commands::list::list_snapshot_items(config, passphrase, snapshot)
+                    .map_err(|e| -> Box<dyn std::error::Error> { Box::new(e) })
+            })?;
+
+            // Apply path filter (empty filter after normalization means "all items")
+            if let Some(ref raw_path) = path {
+                let filter = normalize_path_filter(raw_path);
+                if !filter.is_empty() {
+                    items.retain(|item| path_matches_filter(&item.path, &filter));
+                }
+            }
+
+            // Apply sort
+            match sort {
+                SortField::Name => items.sort_by(|a, b| a.path.cmp(&b.path)),
+                SortField::Size => items.sort_by(|a, b| b.size.cmp(&a.size)),
+                SortField::Mtime => items.sort_by(|a, b| b.mtime.cmp(&a.mtime)),
+            }
+
+            if *long {
+                for item in &items {
+                    let type_char = match item.entry_type {
+                        vger_core::snapshot::item::ItemType::Directory => "d",
+                        vger_core::snapshot::item::ItemType::RegularFile => "-",
+                        vger_core::snapshot::item::ItemType::Symlink => "l",
+                    };
+                    let secs = item.mtime / 1_000_000_000;
+                    let nsecs = (item.mtime % 1_000_000_000) as u32;
+                    let mtime = chrono::DateTime::<chrono::Utc>::from_timestamp(secs, nsecs)
+                        .map(|dt| dt.format("%Y-%m-%d %H:%M:%S").to_string())
+                        .unwrap_or_else(|| "-".to_string());
+                    println!(
+                        "{}{:04o} {:>10} {} {}",
+                        type_char,
+                        item.mode & 0o7777,
+                        format_bytes(item.size),
+                        mtime,
+                        item.path,
+                    );
+                }
+            } else {
+                for item in &items {
+                    println!("{}", item.path);
+                }
+            }
+            Ok(())
+        }
+        SnapshotCommand::Info { snapshot } => {
+            let meta = with_repo_passphrase(config, label, |passphrase| {
+                commands::list::get_snapshot_meta(config, passphrase, snapshot)
+                    .map_err(|e| -> Box<dyn std::error::Error> { Box::new(e) })
+            })?;
+
+            let theme = CliTableTheme::detect();
+            let mut table = theme.new_kv_table();
+
+            add_kv_row(&mut table, theme, "Name", &meta.name);
+            add_kv_row(&mut table, theme, "Hostname", &meta.hostname);
+            add_kv_row(&mut table, theme, "Username", &meta.username);
+            add_kv_row(
+                &mut table,
+                theme,
+                "Start time",
+                meta.time.format("%Y-%m-%d %H:%M:%S UTC"),
+            );
+            add_kv_row(
+                &mut table,
+                theme,
+                "End time",
+                meta.time_end.format("%Y-%m-%d %H:%M:%S UTC"),
+            );
+            let duration = meta.time_end.signed_duration_since(meta.time);
+            let secs = duration.num_seconds();
+            let duration_str = if secs >= 60 {
+                format!("{}m {:02}s", secs / 60, secs % 60)
+            } else {
+                format!("{secs}s")
+            };
+            add_kv_row(&mut table, theme, "Duration", duration_str);
+            add_kv_row(&mut table, theme, "Source label", &meta.source_label);
+            add_kv_row(
+                &mut table,
+                theme,
+                "Source paths",
+                meta.source_paths.join(", "),
+            );
+            if !meta.label.is_empty() {
+                add_kv_row(&mut table, theme, "Label", &meta.label);
+            }
+            if !meta.comment.is_empty() {
+                add_kv_row(&mut table, theme, "Comment", &meta.comment);
+            }
+            add_kv_row(&mut table, theme, "Files", meta.stats.nfiles);
+            add_kv_row(
+                &mut table,
+                theme,
+                "Original size",
+                format_bytes(meta.stats.original_size),
+            );
+            add_kv_row(
+                &mut table,
+                theme,
+                "Compressed size",
+                format_bytes(meta.stats.compressed_size),
+            );
+            add_kv_row(
+                &mut table,
+                theme,
+                "Deduplicated size",
+                format_bytes(meta.stats.deduplicated_size),
+            );
+
+            println!("{table}");
+            Ok(())
+        }
+    }
 }
 
 fn run_extract(

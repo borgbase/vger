@@ -10,33 +10,30 @@ use crate::snapshot::SnapshotMeta;
 
 use super::util::open_repo;
 
-/// Result of a list operation.
-pub enum ListResult {
-    /// List of snapshots in the repository.
-    Snapshots(Vec<SnapshotEntry>),
-    /// Contents of a specific snapshot.
-    Items(Vec<Item>),
+/// List all snapshots in the repository.
+pub fn list_snapshots(config: &VgerConfig, passphrase: Option<&str>) -> Result<Vec<SnapshotEntry>> {
+    let repo = open_repo(config, passphrase)?;
+    Ok(repo.manifest.snapshots.clone())
 }
 
-/// Run `vger list`.
-pub fn run(
+/// List all items in a specific snapshot.
+pub fn list_snapshot_items(
     config: &VgerConfig,
     passphrase: Option<&str>,
-    snapshot_name: Option<&str>,
-) -> Result<ListResult> {
+    snapshot_name: &str,
+) -> Result<Vec<Item>> {
     let mut repo = open_repo(config, passphrase)?;
+    load_snapshot_items(&mut repo, snapshot_name)
+}
 
-    match snapshot_name {
-        None => {
-            // List all snapshots
-            Ok(ListResult::Snapshots(repo.manifest.snapshots.clone()))
-        }
-        Some(name) => {
-            // List contents of a specific snapshot
-            let items = load_snapshot_items(&mut repo, name)?;
-            Ok(ListResult::Items(items))
-        }
-    }
+/// Get metadata for a specific snapshot.
+pub fn get_snapshot_meta(
+    config: &VgerConfig,
+    passphrase: Option<&str>,
+    snapshot_name: &str,
+) -> Result<SnapshotMeta> {
+    let repo = open_repo(config, passphrase)?;
+    load_snapshot_meta(&repo, snapshot_name)
 }
 
 /// Load the SnapshotMeta for a snapshot by name.

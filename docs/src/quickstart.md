@@ -50,16 +50,10 @@ List all snapshots:
 vger list
 ```
 
-Show repository statistics:
-
-```bash
-vger info
-```
-
 List files inside a snapshot (use the hex ID from `vger list`):
 
 ```bash
-vger list --snapshot a1b2c3d4
+vger snapshot list a1b2c3d4
 ```
 
 ## Restore
