@@ -2,11 +2,13 @@
 
 ## Install
 
-Run our `install.sh` or download a pre-built binary from the [releases page](https://github.com/borgbase/vger/releases). See [Installing](install.md) for more details.
+Run the install script:
 
 ```bash
 curl -fsSL https://vger.pages.dev/install.sh | sh
 ```
+
+Or download a pre-built binary from the [releases page](https://github.com/borgbase/vger/releases). See [Installing](install.md) for more details.
 
 
 ## Create a config file
