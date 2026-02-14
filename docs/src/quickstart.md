@@ -2,13 +2,12 @@
 
 ## Install
 
-Download a pre-built binary from the [releases page](https://github.com/borgbase/vger/releases), or build from source:
+Run our `install.sh` or download a pre-built binary from the [releases page](https://github.com/borgbase/vger/releases). See [Installing](install.md) for more details.
 
 ```bash
-cargo build --release
+curl -fsSL https://vger.pages.dev/install.sh | sh
 ```
 
-The binary is at `target/release/vger`. See [Installing](install.md) for more details.
 
 ## Create a config file
 

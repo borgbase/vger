@@ -14,6 +14,7 @@ use slint::{ModelRc, SharedString, StandardListViewItem, VecModel};
 use tray_icon::menu::{Menu, MenuEvent, MenuId, MenuItem};
 use tray_icon::{Icon, TrayIconBuilder};
 use vger_core::app::{self, operations, passphrase};
+use vger_core::commands::find::{FileStatus, FindFilter, FindScope};
 use vger_core::config::{self, ResolvedRepo, ScheduleConfig};
 use vger_core::error::VgerError;
 use vger_core::snapshot::item::{Item, ItemType};
@@ -586,6 +587,75 @@ slint::slint! {
         }
     }
 
+    export component FindWindow inherits Window {
+        in-out property <[string]> repo_names: [];
+        in-out property <string> repo_combo_value;
+        in-out property <string> name_pattern;
+        in-out property <string> status_text: "Enter a name pattern and click Search.";
+        in-out property <[[StandardListViewItem]]> result_rows: [];
+
+        callback search_clicked();
+        callback close_clicked();
+
+        title: "Find Files";
+        preferred-width: 950px;
+        preferred-height: 600px;
+
+        VerticalBox {
+            padding: 12px;
+            spacing: 8px;
+
+            // Search controls bar
+            HorizontalBox {
+                spacing: 8px;
+                Text { text: "Repository:"; vertical-alignment: center; }
+                ComboBox {
+                    model: root.repo_names;
+                    current-value <=> root.repo_combo_value;
+                }
+                Text { text: "Name pattern:"; vertical-alignment: center; }
+                LineEdit {
+                    horizontal-stretch: 1;
+                    text <=> root.name_pattern;
+                    placeholder-text: "e.g. *.rs, config*";
+                    accepted => { root.search_clicked(); }
+                }
+                Button {
+                    text: "Search";
+                    clicked => { root.search_clicked(); }
+                }
+            }
+
+            // Results table
+            StandardTableView {
+                vertical-stretch: 1;
+                columns: [
+                    { title: "Snapshot", width: 160px },
+                    { title: "Path", horizontal-stretch: 1 },
+                    { title: "Date", width: 150px },
+                    { title: "Size", width: 90px },
+                    { title: "Status", width: 90px },
+                ];
+                rows: root.result_rows;
+            }
+
+            // Footer
+            HorizontalBox {
+                spacing: 8px;
+                Text {
+                    vertical-alignment: center;
+                    text: root.status_text;
+                    color: #666666;
+                    horizontal-stretch: 1;
+                }
+                Button {
+                    text: "Close";
+                    clicked => { root.close_clicked(); }
+                }
+            }
+        }
+    }
+
     export component MainWindow inherits Window {
         in-out property <string> config_path;
         in-out property <string> schedule_text;
@@ -606,6 +676,7 @@ slint::slint! {
 
         callback open_config_clicked();
         callback backup_all_clicked();
+        callback find_files_clicked();
         callback reload_config_clicked();
         callback backup_repo_clicked(/* index */ int);
         callback check_repo_clicked(/* index */ int);
@@ -646,6 +717,10 @@ slint::slint! {
                     Button {
                         text: "Reload";
                         clicked => { root.reload_config_clicked(); }
+                    }
+                    Button {
+                        text: "Find Files";
+                        clicked => { root.find_files_clicked(); }
                     }
                     Button {
                         text: "Backup All";
@@ -872,6 +947,10 @@ enum AppCommand {
         repo_name: String,
         snapshot_name: String,
     },
+    FindFiles {
+        repo_name: String,
+        name_pattern: String,
+    },
     OpenConfigFile,
     ReloadConfig,
     ToggleSchedulePause,
@@ -906,6 +985,15 @@ struct SourceInfoData {
 }
 
 #[derive(Debug, Clone)]
+struct FindResultRow {
+    path: String,
+    snapshot: String,
+    date: String,
+    size: String,
+    status: String,
+}
+
+#[derive(Debug, Clone)]
 enum UiEvent {
     Status(String),
     LogEntry {
@@ -932,6 +1020,9 @@ enum UiEvent {
         items: Vec<Item>,
     },
     RestoreStatus(String),
+    FindResultsData {
+        rows: Vec<FindResultRow>,
+    },
     Quit,
     ShowWindow,
 }
@@ -1899,6 +1990,95 @@ fn run_worker(
                 }
                 let _ = ui_tx.send(UiEvent::Status("Idle".to_string()));
             }
+            AppCommand::FindFiles {
+                repo_name,
+                name_pattern,
+            } => {
+                let _ = ui_tx.send(UiEvent::Status("Searching files...".to_string()));
+
+                let repo = match config::select_repo(&runtime.repos, &repo_name) {
+                    Some(r) => r,
+                    None => {
+                        send_log(&ui_tx, format!("No repository matching '{repo_name}'."));
+                        let _ = ui_tx.send(UiEvent::Status("Idle".to_string()));
+                        continue;
+                    }
+                };
+
+                let passphrase = match get_or_resolve_passphrase(repo, &mut passphrases) {
+                    Ok(p) => p,
+                    Err(e) => {
+                        send_log(&ui_tx, format!("[{repo_name}] passphrase error: {e}"));
+                        let _ = ui_tx.send(UiEvent::Status("Idle".to_string()));
+                        continue;
+                    }
+                };
+
+                let filter = match FindFilter::build(
+                    None,
+                    Some(&name_pattern),
+                    None,
+                    None,
+                    None,
+                    None,
+                    None,
+                ) {
+                    Ok(f) => f,
+                    Err(e) => {
+                        send_log(&ui_tx, format!("Invalid name pattern: {e}"));
+                        let _ = ui_tx.send(UiEvent::Status("Idle".to_string()));
+                        continue;
+                    }
+                };
+
+                let scope = FindScope {
+                    source_label: None,
+                    last_n: None,
+                };
+
+                match vger_core::commands::find::run(
+                    &repo.config,
+                    passphrase.as_deref(),
+                    &scope,
+                    &filter,
+                ) {
+                    Ok(timelines) => {
+                        let mut rows = Vec::new();
+                        for tl in &timelines {
+                            for ah in &tl.hits {
+                                let ts: DateTime<Local> =
+                                    ah.hit.snapshot_time.with_timezone(&Local);
+                                rows.push(FindResultRow {
+                                    path: tl.path.clone(),
+                                    snapshot: ah.hit.snapshot_name.clone(),
+                                    date: ts.format("%Y-%m-%d %H:%M:%S").to_string(),
+                                    size: format_bytes(ah.hit.size),
+                                    status: match ah.status {
+                                        FileStatus::Added => "Added".to_string(),
+                                        FileStatus::Modified => "Modified".to_string(),
+                                        FileStatus::Unchanged => "Unchanged".to_string(),
+                                    },
+                                });
+                            }
+                        }
+                        send_log(
+                            &ui_tx,
+                            format!(
+                                "[{repo_name}] Find '{}': {} paths, {} total hits",
+                                name_pattern,
+                                timelines.len(),
+                                rows.len(),
+                            ),
+                        );
+                        let _ = ui_tx.send(UiEvent::FindResultsData { rows });
+                    }
+                    Err(e) => {
+                        send_log(&ui_tx, format!("[{repo_name}] find failed: {e}"));
+                    }
+                }
+
+                let _ = ui_tx.send(UiEvent::Status("Idle".to_string()));
+            }
             AppCommand::OpenConfigFile => {
                 let path = runtime.source.path().display().to_string();
                 send_log(&ui_tx, format!("Opening config file: {path}"));
@@ -2051,6 +2231,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     ui.set_status_text("Idle".into());
 
     let restore_win = RestoreWindow::new()?;
+    let find_win = FindWindow::new()?;
 
     // Parallel arrays for looking up names by table row index.
     // Wrapped in Arc<Mutex<>> so callbacks and the event loop can share them.
@@ -2064,6 +2245,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let ui_weak_for_events = ui.as_weak();
     let restore_weak_for_events = restore_win.as_weak();
+    let find_weak_for_events = find_win.as_weak();
     let repo_labels_for_events = repo_labels.clone();
     let source_labels_for_events = source_labels.clone();
     let snapshot_ids_for_events = snapshot_ids.clone();
@@ -2075,6 +2257,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         while let Ok(event) = ui_rx.recv() {
             let ui_weak = ui_weak_for_events.clone();
             let restore_weak = restore_weak_for_events.clone();
+            let find_weak = find_weak_for_events.clone();
             let repo_labels = repo_labels_for_events.clone();
             let source_labels = source_labels_for_events.clone();
             let snapshot_ids = snapshot_ids_for_events.clone();
@@ -2179,6 +2362,19 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                             rw.set_status_text(status.into());
                         }
                     }
+                    UiEvent::FindResultsData { rows } => {
+                        if let Some(fw) = find_weak.upgrade() {
+                            let count = rows.len();
+                            let table_rows: Vec<Vec<String>> = rows
+                                .into_iter()
+                                .map(|r| vec![r.snapshot, r.path, r.date, r.size, r.status])
+                                .collect();
+                            fw.set_result_rows(to_table_model(table_rows));
+                            fw.set_status_text(
+                                format!("{count} results found.").into(),
+                            );
+                        }
+                    }
                     UiEvent::Quit => {
                         let _ = slint::quit_event_loop();
                     }
@@ -2201,6 +2397,21 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     ui.on_backup_all_clicked(move || {
         let _ = tx.send(AppCommand::RunBackupAll { scheduled: false });
     });
+
+    // Find Files button — sync repo names and show FindWindow
+    {
+        let fw_weak = find_win.as_weak();
+        let ui_weak = ui.as_weak();
+        ui.on_find_files_clicked(move || {
+            if let (Some(fw), Some(u)) = (fw_weak.upgrade(), ui_weak.upgrade()) {
+                fw.set_repo_names(u.get_repo_names());
+                if fw.get_repo_combo_value().is_empty() {
+                    fw.set_repo_combo_value(u.get_snapshots_repo_combo_value());
+                }
+                let _ = fw.show();
+            }
+        });
+    }
 
     let tx = app_tx.clone();
     let ui_weak = ui.as_weak();
@@ -2506,6 +2717,39 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         restore_win.on_cancel_clicked(move || {
             if let Some(rw) = rw_weak.upgrade() {
                 let _ = rw.hide();
+            }
+        });
+    }
+
+    // ── Callback wiring: FindWindow ──
+
+    {
+        let tx = app_tx.clone();
+        let fw_weak = find_win.as_weak();
+        find_win.on_search_clicked(move || {
+            let Some(fw) = fw_weak.upgrade() else {
+                return;
+            };
+            let repo = fw.get_repo_combo_value().to_string();
+            let pattern = fw.get_name_pattern().to_string();
+            if repo.is_empty() || pattern.is_empty() {
+                fw.set_status_text("Please select a repository and enter a name pattern.".into());
+                return;
+            }
+            fw.set_status_text("Searching...".into());
+            fw.set_result_rows(to_table_model(vec![]));
+            let _ = tx.send(AppCommand::FindFiles {
+                repo_name: repo,
+                name_pattern: pattern,
+            });
+        });
+    }
+
+    {
+        let fw_weak = find_win.as_weak();
+        find_win.on_close_clicked(move || {
+            if let Some(fw) = fw_weak.upgrade() {
+                let _ = fw.hide();
             }
         });
     }

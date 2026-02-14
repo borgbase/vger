@@ -345,7 +345,6 @@ fn memory_restore_peak_rss_under_cap() {
         "--config",
         &cfg,
         "restore",
-        "--snapshot",
         &snapshot,
         "--dest",
         &restore_str,
