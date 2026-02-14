@@ -2374,9 +2374,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 .map(|r| vec![r.snapshot, r.path, r.date, r.size, r.status])
                                 .collect();
                             fw.set_result_rows(to_table_model(table_rows));
-                            fw.set_status_text(
-                                format!("{count} results found.").into(),
-                            );
+                            fw.set_status_text(format!("{count} results found.").into());
                         }
                     }
                     UiEvent::Quit => {
