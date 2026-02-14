@@ -6,16 +6,10 @@
 curl -fsSL https://vger.pages.dev/install.sh | sh
 ```
 
-Or download and review the script first:
+Or download the latest release for your platform from the [releases page](https://github.com/borgbase/vger/releases).
 
-```bash
-curl -fsSL https://vger.pages.dev/install.sh -o install.sh
-sh install.sh
-```
 
 ## Pre-built binaries
-
-Download the latest release for your platform from the [releases page](https://github.com/borgbase/vger/releases).
 
 Extract the archive and place the `vger` binary somewhere on your `PATH`:
 
@@ -34,7 +28,6 @@ Move-Item .\vger.exe "$env:USERPROFILE\\bin\\vger.exe"
 
 Add your chosen directory (for example, `%USERPROFILE%\bin`) to `PATH` if needed.
 
-Windows releases currently include the CLI binary (`vger.exe`) only.
 
 ## Build from source
 
@@ -60,5 +53,4 @@ vger --version
 
 ## Next steps
 
-- [Quick Start](quickstart.md)
 - [Initialize and Set Up a Repository](init-setup.md)

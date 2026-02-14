@@ -2,7 +2,7 @@
 
 ## Generate a configuration file
 
-Create a starter config in the current directory:
+Create a starter config
 
 ```bash
 vger config
@@ -22,6 +22,7 @@ The passphrase is requested interactively at init time. You can also supply it v
 
 - `VGER_PASSPHRASE` environment variable
 - `passcommand` in the config (e.g. `passcommand: "pass show vger"`)
+- `passphrase` in the config
 
 ## Configure repositories and sources
 

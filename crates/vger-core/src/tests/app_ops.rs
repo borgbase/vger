@@ -11,7 +11,7 @@ fn run_backup_for_repo_rejects_empty_sources() {
     std::fs::create_dir_all(&repo_dir).unwrap();
     let config = init_repo(&repo_dir);
 
-    let err = run_backup_for_repo(&config, &[], None, None).err().unwrap();
+    let err = run_backup_for_repo(&config, &[], None).err().unwrap();
     assert!(matches!(err, VgerError::Config(msg) if msg.contains("no sources configured")));
 }
 
@@ -34,9 +34,7 @@ fn run_backup_for_all_repos_propagates_passphrase_lookup_errors() {
         Err(VgerError::Other("lookup failed".into()))
     };
 
-    let err = run_backup_for_all_repos(&repos, &mut lookup, None)
-        .err()
-        .unwrap();
+    let err = run_backup_for_all_repos(&repos, &mut lookup).err().unwrap();
     assert!(matches!(err, VgerError::Other(msg) if msg == "lookup failed"));
 }
 
@@ -52,7 +50,7 @@ fn run_backup_for_repo_returns_created_source_report() {
     let config = init_repo(&repo_dir);
     let sources = vec![source_entry(&source_dir, "src-a")];
 
-    let report = run_backup_for_repo(&config, &sources, None, Some("manual-label")).unwrap();
+    let report = run_backup_for_repo(&config, &sources, None).unwrap();
     assert_eq!(report.created.len(), 1);
     assert_eq!(report.created[0].source_label, "src-a");
     assert_eq!(report.created[0].source_paths.len(), 1);

@@ -109,7 +109,6 @@ fn backup_source(
             git_ignore: false,
             xattrs_enabled: config.xattrs.enabled,
             compression: Compression::None,
-            label: "",
             command_dumps: &[],
         },
     )
@@ -394,7 +393,6 @@ fn command_dump_failure_does_not_mutate_repository_state() {
             git_ignore: false,
             xattrs_enabled: false,
             compression: Compression::None,
-            label: "",
             command_dumps: &dumps,
         },
     );
@@ -439,7 +437,6 @@ fn backup_fails_when_repository_lock_is_held_by_another_process() {
             git_ignore: false,
             xattrs_enabled: false,
             compression: Compression::None,
-            label: "",
             command_dumps: &[],
         },
     );

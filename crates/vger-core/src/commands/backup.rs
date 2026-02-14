@@ -455,7 +455,6 @@ pub struct BackupRequest<'a> {
     pub git_ignore: bool,
     pub xattrs_enabled: bool,
     pub compression: Compression,
-    pub label: &'a str,
     pub command_dumps: &'a [CommandDump],
 }
 
@@ -1564,8 +1563,6 @@ pub fn run_with_progress(
         req.xattrs_enabled
     };
     let compression = req.compression;
-    let label = req.label;
-
     let command_dumps = req.command_dumps;
 
     if source_paths.is_empty() && command_dumps.is_empty() {
@@ -1748,7 +1745,7 @@ pub fn run_with_progress(
             stats: stats.clone(),
             source_label: source_label.to_string(),
             source_paths: source_paths.to_vec(),
-            label: label.to_string(),
+            label: String::new(),
         };
 
         // Generate snapshot ID and store
@@ -1768,7 +1765,7 @@ pub fn run_with_progress(
             id: snapshot_id,
             time: time_start,
             source_label: source_label.to_string(),
-            label: label.to_string(),
+            label: String::new(),
             source_paths: source_paths.to_vec(),
         });
 

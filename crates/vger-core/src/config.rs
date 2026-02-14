@@ -1628,6 +1628,9 @@ sources:
 
 # --- Common optional settings (uncomment as needed) ---
 
+# encryption:
+#   passphrase: "secret"
+#
 # retention:
 #   keep_daily: 7
 #   keep_weekly: 4
@@ -1724,7 +1727,6 @@ mod tests {
     #[test]
     fn test_minimal_template_is_valid_yaml() {
         let template = minimal_config_template();
-        assert!(!template.contains("encryption:"));
         let parsed: Result<RawConfig, _> = serde_yaml::from_str(template);
         assert!(
             parsed.is_ok(),

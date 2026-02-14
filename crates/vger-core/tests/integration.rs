@@ -206,7 +206,6 @@ fn backup_exclude_if_present_skips_marked_directories() {
             git_ignore: false,
             xattrs_enabled: config.xattrs.enabled,
             compression: Compression::None,
-            label: "",
             command_dumps: &[],
         },
     )
@@ -246,7 +245,6 @@ fn backup_git_ignore_respected_when_enabled() {
             git_ignore: false,
             xattrs_enabled: config.xattrs.enabled,
             compression: Compression::None,
-            label: "",
             command_dumps: &[],
         },
     )
@@ -265,7 +263,6 @@ fn backup_git_ignore_respected_when_enabled() {
             git_ignore: true,
             xattrs_enabled: config.xattrs.enabled,
             compression: Compression::None,
-            label: "",
             command_dumps: &[],
         },
     )
@@ -312,7 +309,6 @@ fn backup_deduplicates_identical_files_and_extracts_correctly() {
             git_ignore: false,
             xattrs_enabled: config.xattrs.enabled,
             compression: Compression::None,
-            label: "",
             command_dumps: &[],
         },
     )
@@ -389,7 +385,6 @@ fn backup_run_with_progress_emits_events_and_final_stats() {
             git_ignore: false,
             xattrs_enabled: config.xattrs.enabled,
             compression: Compression::None,
-            label: "",
             command_dumps: &[],
         },
         Some(&mut on_progress),
@@ -472,7 +467,6 @@ fn backup_and_restore_preserves_file_xattrs_when_enabled() {
             git_ignore: false,
             xattrs_enabled: true,
             compression: Compression::None,
-            label: "",
             command_dumps: &[],
         },
     )
@@ -542,7 +536,6 @@ fn backup_skips_xattrs_when_disabled() {
             git_ignore: false,
             xattrs_enabled: false,
             compression: Compression::None,
-            label: "",
             command_dumps: &[],
         },
     )
@@ -593,7 +586,6 @@ fn file_cache_persists_and_matches_snapshot_items() {
             git_ignore: false,
             xattrs_enabled: config.xattrs.enabled,
             compression: Compression::None,
-            label: "",
             command_dumps: &[],
         },
     )
@@ -645,7 +637,6 @@ fn file_cache_persists_and_matches_snapshot_items() {
             git_ignore: false,
             xattrs_enabled: config.xattrs.enabled,
             compression: Compression::None,
-            label: "",
             command_dumps: &[],
         },
     )
@@ -720,7 +711,6 @@ fn file_cache_misses_on_modified_file() {
             git_ignore: false,
             xattrs_enabled: config.xattrs.enabled,
             compression: Compression::None,
-            label: "",
             command_dumps: &[],
         },
     )
@@ -755,7 +745,6 @@ fn file_cache_misses_on_modified_file() {
             git_ignore: false,
             xattrs_enabled: config.xattrs.enabled,
             compression: Compression::None,
-            label: "",
             command_dumps: &[],
         },
     )
@@ -841,7 +830,6 @@ fn info_reports_repository_statistics() {
             git_ignore: false,
             xattrs_enabled: config.xattrs.enabled,
             compression: Compression::None,
-            label: "",
             command_dumps: &[],
         },
     )
@@ -887,7 +875,6 @@ fn command_dump_backup_and_extract() {
             git_ignore: false,
             xattrs_enabled: false,
             compression: Compression::None,
-            label: "",
             command_dumps: &dumps,
         },
     )
@@ -958,7 +945,6 @@ fn command_dump_failing_command_aborts_backup() {
             git_ignore: false,
             xattrs_enabled: false,
             compression: Compression::None,
-            label: "",
             command_dumps: &dumps,
         },
     );
@@ -1003,7 +989,6 @@ fn command_dump_mixed_with_files() {
             git_ignore: false,
             xattrs_enabled: false,
             compression: Compression::None,
-            label: "",
             command_dumps: &dumps,
         },
     )
@@ -1080,7 +1065,6 @@ fn backup_many_small_files_plus_large_file_roundtrip() {
             git_ignore: false,
             xattrs_enabled: false,
             compression: Compression::Lz4,
-            label: "",
             command_dumps: &[],
         },
     )
@@ -1146,7 +1130,6 @@ fn backup_many_small_files_plus_large_file_roundtrip() {
             git_ignore: false,
             xattrs_enabled: false,
             compression: Compression::Lz4,
-            label: "",
             command_dumps: &[],
         },
     )

@@ -1410,7 +1410,6 @@ fn run_worker(
                         &repo.config,
                         &repo.sources,
                         passphrase.as_deref(),
-                        None,
                     ) {
                         Ok(report) => log_backup_report(&ui_tx, &repo_name, &report),
                         Err(e) => {
@@ -1467,7 +1466,6 @@ fn run_worker(
                     &repo.config,
                     &repo.sources,
                     passphrase.as_deref(),
-                    None,
                 ) {
                     Ok(report) => log_backup_report(&ui_tx, &rn, &report),
                     Err(e) => send_log(&ui_tx, format!("[{rn}] backup failed: {e}")),
@@ -1524,7 +1522,6 @@ fn run_worker(
                         &repo.config,
                         &matching_sources,
                         passphrase.as_deref(),
-                        None,
                     ) {
                         Ok(report) => {
                             any_backed_up = true;

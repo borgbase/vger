@@ -27,7 +27,8 @@ pub struct SnapshotMeta {
     /// Source directories that were backed up.
     #[serde(default)]
     pub source_paths: Vec<String>,
-    /// User-provided annotation for this snapshot.
+    /// Legacy field kept for backward compatibility with existing snapshots.
+    /// New snapshots always write `""`.
     #[serde(default)]
     pub label: String,
 }

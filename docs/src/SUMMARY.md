@@ -17,4 +17,5 @@
 - [Configuration](configuration.md)
 - [Command Reference](commands.md)
 - [Server Mode](server-mode.md)
+- [Design Goals](goals.md)
 - [Architecture](architecture.md)

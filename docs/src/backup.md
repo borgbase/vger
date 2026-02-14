@@ -12,17 +12,28 @@ By default, V'Ger preserves filesystem extended attributes (`xattrs`). Configure
 
 ## Sources and labels
 
-Each source in your config produces its own snapshot. When you use the rich source form, the `label` field gives each source a short name you can reference from the CLI:
+In its simplest form, sources are just a list of paths:
 
 ```yaml
 sources:
-  - path: "/home/user/documents"
-    label: "docs"
-  - path: "/home/user/photos"
-    label: "photos"
+  - /home/user/documents
+  - /home/user/photos
 ```
 
-For simple string sources (e.g. `- "/home/user/documents"`), the label is derived automatically from the directory name (`documents`).
+For more complex situations you can add overrides to source groups. Each "rich" source in your config produces its own snapshot. When you use the rich source form, the `label` field gives each source a short name you can reference from the CLI:
+
+```yaml
+sources:
+  - path: "/home/user/photos"
+    label: "photos"
+  - paths:
+      - "/home/user/documents"
+      - "/home/user/notes"
+    label: "docs"
+    exclude: ["*.tmp"]
+    hooks:
+      before: "echo starting docs backup"
+```
 
 Back up only a specific source by label:
 
@@ -36,15 +47,21 @@ When targeting a specific repository, use `--repo`:
 vger backup --repo local --source docs
 ```
 
-## Label backups
+## Ad-hoc backups
 
-Annotate a snapshot with a label, for example before a system change:
+You can still do ad-hoc backups of arbitrary folders and annotate them with a label, for example before a system change:
+
+```bash
+vger backup --label before-upgrade /var/www
+```
+
+`--label` is only valid for ad-hoc backups with explicit path arguments. For example, this is rejected:
 
 ```bash
 vger backup --label before-upgrade
 ```
 
-This is separate from source labels — it tags the resulting snapshot so you can identify it later in `vger list` output.
+So you can identify it later in `vger list` output.
 
 ## List and verify snapshots
 

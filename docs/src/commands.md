@@ -2,6 +2,7 @@
 
 | Command | Description |
 |---------|-------------|
+| `vger` | Run full backup process: `backup`, `prune`, `compact`, `check`. This is useful for automation. |
 | `vger config` | Generate a starter configuration file |
 | `vger init` | Initialize a new backup repository |
 | `vger backup` | Back up files to a new snapshot |

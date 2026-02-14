@@ -268,7 +268,7 @@ pub fn apply_policy_by_label(
     source_retentions: &HashMap<String, RetentionConfig>,
     now: DateTime<Utc>,
 ) -> Result<Vec<PruneEntry>> {
-    // Group snapshots by source_label (preserving original indices)
+    // Group snapshots by source_label (preserving original indices).
     let mut groups: BTreeMap<&str, Vec<usize>> = BTreeMap::new();
     for (i, entry) in snapshots.iter().enumerate() {
         groups

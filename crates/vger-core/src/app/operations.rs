@@ -44,7 +44,6 @@ pub fn run_backup_for_repo(
     config: &VgerConfig,
     sources: &[SourceEntry],
     passphrase: Option<&str>,
-    user_label: Option<&str>,
 ) -> Result<BackupRunReport> {
     if sources.is_empty() {
         return Err(VgerError::Config(
@@ -56,7 +55,6 @@ pub fn run_backup_for_repo(
         Compression::from_algorithm(config.compression.algorithm, config.compression.zstd_level);
 
     let mut report = BackupRunReport::default();
-    let label = user_label.unwrap_or("");
 
     for source in sources {
         let snapshot_name = generate_snapshot_name();
@@ -73,7 +71,6 @@ pub fn run_backup_for_repo(
                 git_ignore: source.git_ignore,
                 xattrs_enabled: source.xattrs_enabled,
                 compression,
-                label,
                 command_dumps: &source.command_dumps,
             },
         )?;
@@ -92,17 +89,11 @@ pub fn run_backup_for_repo(
 pub fn run_backup_for_all_repos(
     repos: &[ResolvedRepo],
     passphrase_lookup: &mut dyn FnMut(&ResolvedRepo) -> Result<Option<String>>,
-    user_label: Option<&str>,
 ) -> Result<Vec<RepoBackupRunReport>> {
     let mut reports = Vec::with_capacity(repos.len());
     for repo in repos {
         let passphrase = passphrase_lookup(repo)?;
-        let report = run_backup_for_repo(
-            &repo.config,
-            &repo.sources,
-            passphrase.as_deref(),
-            user_label,
-        )?;
+        let report = run_backup_for_repo(&repo.config, &repo.sources, passphrase.as_deref())?;
         reports.push(RepoBackupRunReport {
             repo_label: repo.label.clone(),
             repository_url: repo.config.repository.url.clone(),

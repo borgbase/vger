@@ -19,7 +19,8 @@ pub struct SnapshotEntry {
     /// Label of the source that produced this snapshot.
     #[serde(default)]
     pub source_label: String,
-    /// User-provided annotation for this snapshot.
+    /// Legacy field kept for backward compatibility with existing snapshots.
+    /// New snapshots always write `""`.
     #[serde(default)]
     pub label: String,
     /// Actual source paths that were backed up.

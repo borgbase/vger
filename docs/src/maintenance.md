@@ -9,10 +9,10 @@ vger delete --snapshot a1b2c3d4
 
 ## Prune old snapshots
 
-Apply the retention policy defined in your configuration to remove expired snapshots.
+Apply the retention policy defined in your configuration to remove expired snapshots. Optionally `compact` the repository after pruning.
 
 ```bash
-vger prune
+vger prune --compact
 ```
 
 ## Verify repository integrity

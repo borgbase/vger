@@ -105,7 +105,6 @@ pub fn backup_single_source(
             git_ignore: false,
             xattrs_enabled: config.xattrs.enabled,
             compression: Compression::None,
-            label: "",
             command_dumps: &[],
         },
     )

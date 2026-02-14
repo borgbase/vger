@@ -245,7 +245,7 @@ enum Commands {
         #[arg(short = 'R', long = "repo")]
         repo: Option<String>,
 
-        /// User-provided annotation for the snapshot
+        /// Label for the snapshot (sets source_label for ad-hoc backups)
         #[arg(short = 'l', long)]
         label: Option<String>,
 
@@ -1018,10 +1018,16 @@ fn run_backup(
             return Err("cannot combine --source with ad-hoc paths".into());
         }
 
+        if user_label.is_some() && paths.is_empty() {
+            return Err("--label can only be used with ad-hoc paths".into());
+        }
+
         if !paths.is_empty() {
             // Ad-hoc paths mode: group all paths into a single snapshot
             let expanded: Vec<String> = paths.iter().map(|p| config::expand_tilde(p)).collect();
-            let source_label = if expanded.len() == 1 {
+            let source_label = if !user_label_str.is_empty() {
+                user_label_str.to_string()
+            } else if expanded.len() == 1 {
                 config::label_from_path(&expanded[0])
             } else {
                 "adhoc".to_string()
@@ -1041,16 +1047,12 @@ fn run_backup(
                     git_ignore: config.git_ignore,
                     xattrs_enabled: config.xattrs.enabled,
                     compression,
-                    label: user_label_str,
                     command_dumps: &[],
                 },
                 show_progress,
             )?;
 
             println!("Snapshot created: {name}");
-            if !user_label_str.is_empty() {
-                println!("  Label: {user_label_str}");
-            }
             let paths_display = expanded.join(", ");
             println!("  Source: {paths_display} (label: {source_label})");
             println!(
@@ -1093,16 +1095,12 @@ fn run_backup(
                             git_ignore: source.git_ignore,
                             xattrs_enabled: source.xattrs_enabled,
                             compression,
-                            label: user_label_str,
                             command_dumps: &source.command_dumps,
                         },
                         show_progress,
                     )?;
 
                     println!("Snapshot created: {name}");
-                    if !user_label_str.is_empty() {
-                        println!("  Label: {user_label_str}");
-                    }
                     let paths_display = source.paths.join(", ");
                     println!("  Source: {paths_display} (label: {})", source.label);
                     println!(
@@ -1308,16 +1306,13 @@ fn run_snapshot_command(
                 format!("{secs}s")
             };
             add_kv_row(&mut t1, theme, "Duration", duration_str);
-            add_kv_row(&mut t1, theme, "Source label", &meta.source_label);
-            add_kv_row(
-                &mut t1,
-                theme,
-                "Source paths",
-                meta.source_paths.join(", "),
-            );
-            if !meta.label.is_empty() {
-                add_kv_row(&mut t1, theme, "Label", &meta.label);
-            }
+            let effective_label = if meta.label.is_empty() {
+                &meta.source_label
+            } else {
+                &meta.label
+            };
+            add_kv_row(&mut t1, theme, "Label", effective_label);
+            add_kv_row(&mut t1, theme, "Source paths", meta.source_paths.join(", "));
             if !meta.comment.is_empty() {
                 add_kv_row(&mut t1, theme, "Comment", &meta.comment);
             }
