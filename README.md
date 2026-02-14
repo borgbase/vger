@@ -12,16 +12,14 @@ Inspired by [BorgBackup](https://github.com/borgbackup/borg/), [Borgmatic](https
 
 ## Features
 
-- Deduplication via FastCDC content-defined chunking
-- Compression with LZ4 (default), Zstandard, or none
-- Encryption with auto-selected AES-256-GCM or ChaCha20-Poly1305 and Argon2id key derivation
-- Storage backends via Apache OpenDAL (local filesystem, S3-compatible storage, SFTP)
-- Dedicated REST server (`vger-server`) for append-only enforcement, quotas, lock TTLs, and server-side compaction
-- Built-in web interface (webDAV) to browse snapshots and restore files
-- Rate limiting for CPU, disk I/O, and network bandwidth
-- Command dumps to capture database exports and other command output directly into backups
-- Hooks for monitoring, database backups, and custom scripts
-- Desktop GUI (run, view and restore backups)
+- **Deduplication** via FastCDC content-defined chunking
+- **Compression** with LZ4 (default), Zstandard, or none
+- **Encryption** with AES-256-GCM or ChaCha20-Poly1305 (auto-selected) and Argon2id key derivation
+- **Storage backends** — local filesystem, S3-compatible storage, SFTP
+- **YAML-based configuration** with multiple repositories, hooks, and command dumps
+- **REST server** with append-only enforcement, quotas, and server-side compaction
+- **Built-in WebDAV and desktop GUI** to browse and restore snapshots
+- **Rate limiting** for CPU, disk I/O, and network bandwidth
 
 ## Quick start
 
