@@ -53,7 +53,7 @@ repositories:
     region: "us-east-1"
 ```
 
-Each entry accepts an optional `label` for CLI targeting (`vger --repo local list`) and optional pack size tuning (`min_pack_size`, `max_pack_size`). See [Storage Backends](backends.md) for all backend-specific options.
+Each entry accepts an optional `label` for CLI targeting (`vger list --repo local`) and optional pack size tuning (`min_pack_size`, `max_pack_size`). See [Storage Backends](backends.md) for all backend-specific options.
 
 ## Sources
 
@@ -356,6 +356,6 @@ When `limits` is set on a repository entry, it replaces top-level `limits` for t
 By default, commands operate on all repositories. Use `--repo` / `-R` to target a single one:
 
 ```bash
-vger --repo local list
-vger -R /backups/local list
+vger list --repo local
+vger list -R /backups/local
 ```

@@ -33,7 +33,7 @@ vger backup --source docs
 When targeting a specific repository, use `--repo`:
 
 ```bash
-vger --repo local backup --source docs
+vger backup --repo local --source docs
 ```
 
 ## Label backups

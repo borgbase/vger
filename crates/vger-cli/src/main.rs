@@ -230,15 +230,6 @@ struct Cli {
     #[arg(short, long)]
     config: Option<String>,
 
-    /// Select repository by label or path (operates on all repos if omitted)
-    #[arg(
-        short = 'R',
-        long = "repo",
-        global = true,
-        help_heading = "Global Options"
-    )]
-    repo: Option<String>,
-
     /// Verbosity level (-v, -vv, -vvv)
     #[arg(short, long, action = clap::ArgAction::Count)]
     verbose: u8,
@@ -250,10 +241,18 @@ struct Cli {
 #[derive(Subcommand)]
 enum Commands {
     /// Initialize a new repository
-    Init,
+    Init {
+        /// Select repository by label or path
+        #[arg(short = 'R', long = "repo")]
+        repo: Option<String>,
+    },
 
     /// Back up files to a new snapshot
     Backup {
+        /// Select repository by label or path
+        #[arg(short = 'R', long = "repo")]
+        repo: Option<String>,
+
         /// User-provided annotation for the snapshot
         #[arg(short = 'l', long)]
         label: Option<String>,
@@ -272,6 +271,10 @@ enum Commands {
 
     /// List snapshots
     List {
+        /// Select repository by label or path
+        #[arg(short = 'R', long = "repo")]
+        repo: Option<String>,
+
         /// Filter displayed snapshots by source label
         #[arg(short = 'S', long = "source")]
         source: Vec<String>,
@@ -283,12 +286,20 @@ enum Commands {
 
     /// Inspect snapshot contents and metadata
     Snapshot {
+        /// Select repository by label or path
+        #[arg(short = 'R', long = "repo")]
+        repo: Option<String>,
+
         #[command(subcommand)]
         command: SnapshotCommand,
     },
 
     /// Restore files from a snapshot
     Restore {
+        /// Select repository by label or path
+        #[arg(short = 'R', long = "repo")]
+        repo: Option<String>,
+
         /// Snapshot to restore from
         snapshot: String,
 
@@ -303,6 +314,10 @@ enum Commands {
 
     /// Delete a specific snapshot
     Delete {
+        /// Select repository by label or path
+        #[arg(short = 'R', long = "repo")]
+        repo: Option<String>,
+
         /// Snapshot name to delete
         snapshot: String,
 
@@ -313,6 +328,10 @@ enum Commands {
 
     /// Prune snapshots according to retention policy
     Prune {
+        /// Select repository by label or path
+        #[arg(short = 'R', long = "repo")]
+        repo: Option<String>,
+
         /// Only show what would be pruned, don't actually prune
         #[arg(short = 'n', long)]
         dry_run: bool,
@@ -328,13 +347,21 @@ enum Commands {
 
     /// Verify repository integrity
     Check {
+        /// Select repository by label or path
+        #[arg(short = 'R', long = "repo")]
+        repo: Option<String>,
+
         /// Read and verify all data chunks (slow but thorough)
         #[arg(long)]
         verify_data: bool,
     },
 
     /// Show repository statistics and snapshot totals
-    Info,
+    Info {
+        /// Select repository by label or path
+        #[arg(short = 'R', long = "repo")]
+        repo: Option<String>,
+    },
 
     /// Generate a minimal configuration file
     Config {
@@ -345,6 +372,10 @@ enum Commands {
 
     /// Browse snapshots via a local WebDAV server
     Mount {
+        /// Select repository by label or path
+        #[arg(short = 'R', long = "repo")]
+        repo: Option<String>,
+
         /// Serve a single snapshot (omit for all snapshots)
         #[arg(long)]
         snapshot: Option<String>,
@@ -364,6 +395,10 @@ enum Commands {
 
     /// Free repository space by compacting pack files
     Compact {
+        /// Select repository by label or path
+        #[arg(short = 'R', long = "repo")]
+        repo: Option<String>,
+
         /// Minimum percentage of unused space to trigger repack (default: 10)
         #[arg(long, default_value = "10")]
         threshold: f64,
@@ -441,20 +476,39 @@ enum SnapshotCommand {
     },
 }
 
-fn command_name(cmd: &Commands) -> &'static str {
-    match cmd {
-        Commands::Init => "init",
-        Commands::Backup { .. } => "backup",
-        Commands::List { .. } => "list",
-        Commands::Restore { .. } => "restore",
-        Commands::Delete { .. } => "delete",
-        Commands::Prune { .. } => "prune",
-        Commands::Check { .. } => "check",
-        Commands::Info => "info",
-        Commands::Mount { .. } => "mount",
-        Commands::Compact { .. } => "compact",
-        Commands::Snapshot { .. } => "snapshot",
-        Commands::Config { .. } => "config",
+impl Commands {
+    fn repo(&self) -> Option<&str> {
+        match self {
+            Self::Init { repo, .. }
+            | Self::Backup { repo, .. }
+            | Self::List { repo, .. }
+            | Self::Snapshot { repo, .. }
+            | Self::Restore { repo, .. }
+            | Self::Delete { repo, .. }
+            | Self::Prune { repo, .. }
+            | Self::Check { repo, .. }
+            | Self::Info { repo, .. }
+            | Self::Mount { repo, .. }
+            | Self::Compact { repo, .. } => repo.as_deref(),
+            Self::Config { .. } => None,
+        }
+    }
+
+    fn name(&self) -> &'static str {
+        match self {
+            Self::Init { .. } => "init",
+            Self::Backup { .. } => "backup",
+            Self::List { .. } => "list",
+            Self::Restore { .. } => "restore",
+            Self::Delete { .. } => "delete",
+            Self::Prune { .. } => "prune",
+            Self::Check { .. } => "check",
+            Self::Info { .. } => "info",
+            Self::Mount { .. } => "mount",
+            Self::Compact { .. } => "compact",
+            Self::Snapshot { .. } => "snapshot",
+            Self::Config { .. } => "config",
+        }
     }
 }
 
@@ -514,8 +568,9 @@ fn main() {
         }
     };
 
-    // Filter by --repo if provided
-    let repos: Vec<&ResolvedRepo> = if let Some(ref selector) = cli.repo {
+    // Filter by --repo if provided on the subcommand
+    let repo_selector = cli.command.as_ref().and_then(|cmd| cmd.repo());
+    let repos: Vec<&ResolvedRepo> = if let Some(selector) = repo_selector {
         match config::select_repo(&all_repos, selector) {
             Some(r) => vec![r],
             None => {
@@ -548,7 +603,7 @@ fn main() {
         let has_hooks = !repo.global_hooks.is_empty() || !repo.repo_hooks.is_empty();
 
         let cmd_name = match &cli.command {
-            Some(cmd) => command_name(cmd),
+            Some(cmd) => cmd.name(),
             None => "run",
         };
 
@@ -789,12 +844,13 @@ fn dispatch_command(
     sources: &[SourceEntry],
 ) -> Result<(), Box<dyn std::error::Error>> {
     match command {
-        Commands::Init => run_init(cfg, label),
+        Commands::Init { .. } => run_init(cfg, label),
         Commands::Backup {
             label: user_label,
             compression,
             source,
             paths,
+            ..
         } => run_backup(
             cfg,
             label,
@@ -804,28 +860,31 @@ fn dispatch_command(
             sources,
             source,
         ),
-        Commands::List { source, last } => run_list(cfg, label, source, *last),
-        Commands::Snapshot { command } => run_snapshot_command(command, cfg, label),
+        Commands::List { source, last, .. } => run_list(cfg, label, source, *last),
+        Commands::Snapshot { command, .. } => run_snapshot_command(command, cfg, label),
         Commands::Restore {
             snapshot,
             dest,
             pattern,
+            ..
         } => run_extract(cfg, label, snapshot.clone(), dest.clone(), pattern.clone()),
-        Commands::Delete { snapshot, dry_run } => {
-            run_delete(cfg, label, snapshot.clone(), *dry_run)
-        }
+        Commands::Delete {
+            snapshot, dry_run, ..
+        } => run_delete(cfg, label, snapshot.clone(), *dry_run),
         Commands::Prune {
             dry_run,
             list,
             source,
+            ..
         } => run_prune(cfg, label, *dry_run, *list, sources, source),
-        Commands::Check { verify_data } => run_check(cfg, label, *verify_data),
-        Commands::Info => run_info(cfg, label),
+        Commands::Check { verify_data, .. } => run_check(cfg, label, *verify_data),
+        Commands::Info { .. } => run_info(cfg, label),
         Commands::Mount {
             snapshot,
             source,
             address,
             cache_size,
+            ..
         } => run_mount(
             cfg,
             label,
@@ -838,6 +897,7 @@ fn dispatch_command(
             threshold,
             max_repack_size,
             dry_run,
+            ..
         } => run_compact(cfg, label, *threshold, max_repack_size.clone(), *dry_run),
         Commands::Config { .. } => unreachable!(),
     }
