@@ -374,7 +374,7 @@ impl FileTree {
 }
 
 slint::slint! {
-    import { VerticalBox, HorizontalBox, Button, LineEdit, ScrollView, TabWidget, ComboBox, StandardTableView, ListView, CheckBox } from "std-widgets.slint";
+    import { VerticalBox, HorizontalBox, Button, LineEdit, ScrollView, TabWidget, ComboBox, StandardTableView, ListView, CheckBox, Palette } from "std-widgets.slint";
 
     struct RepoInfo {
         name: string,
@@ -450,22 +450,22 @@ slint::slint! {
                 Button { text: "Select All"; clicked => { root.select_all_clicked(); } }
                 Button { text: "Deselect All"; clicked => { root.deselect_all_clicked(); } }
                 Rectangle { horizontal-stretch: 1; }
-                Text { text: root.selection_text; vertical-alignment: center; color: #666666; }
+                Text { text: root.selection_text; vertical-alignment: center; color: Palette.foreground; }
             }
 
             // Tree view
             Rectangle {
                 vertical-stretch: 1;
                 border-width: 1px;
-                border-color: #d5d5d5;
+                border-color: Palette.border;
                 border-radius: 4px;
-                background: #fafafa;
+                background: Palette.alternate-background;
                 ListView {
                 for row[row_idx] in root.tree_rows: Rectangle {
                     height: 28px;
                     // Hover highlight — declared first so it sits behind the interactive layout
                     Rectangle {
-                        background: ta.has-hover ? #f0f4fa : transparent;
+                        background: ta.has-hover ? Palette.background.darker(3%) : transparent;
                         opacity: 0.5;
                         ta := TouchArea { }
                     }
@@ -485,7 +485,7 @@ slint::slint! {
                             Text {
                                 text: row.expanded ? "v" : ">";
                                 font-size: 10px;
-                                color: #666666;
+                                color: Palette.foreground;
                                 vertical-alignment: center;
                                 horizontal-alignment: center;
                             }
@@ -503,9 +503,9 @@ slint::slint! {
                                 width: 16px;
                                 height: 16px;
                                 border-width: 1px;
-                                border-color: row.check_state == 0 ? #aaaaaa : #3584e4;
+                                border-color: row.check_state == 0 ? Palette.border : Palette.accent-background;
                                 border-radius: 3px;
-                                background: row.check_state == 1 ? #3584e4 : row.check_state == 2 ? #a0c8f0 : #ffffff;
+                                background: row.check_state == 1 ? Palette.accent-background : row.check_state == 2 ? Palette.accent-background.transparentize(50%) : Palette.background;
 
                                 // Checkmark for checked state
                                 if row.check_state == 1: Text {
@@ -540,7 +540,7 @@ slint::slint! {
                             text: row.type_str;
                             vertical-alignment: center;
                             width: 50px;
-                            color: #888888;
+                            color: Palette.foreground.transparentize(40%);
                             font-size: 11px;
                         }
 
@@ -549,7 +549,7 @@ slint::slint! {
                             text: row.permissions;
                             vertical-alignment: center;
                             width: 70px;
-                            color: #888888;
+                            color: Palette.foreground.transparentize(40%);
                             font-size: 11px;
                         }
 
@@ -559,7 +559,7 @@ slint::slint! {
                             vertical-alignment: center;
                             width: 80px;
                             horizontal-alignment: right;
-                            color: #888888;
+                            color: Palette.foreground.transparentize(40%);
                             font-size: 11px;
                         }
                     }
@@ -572,7 +572,7 @@ slint::slint! {
                 Text {
                     vertical-alignment: center;
                     text: root.status_text;
-                    color: #666666;
+                    color: Palette.foreground;
                 }
                 Rectangle { horizontal-stretch: 1; }
                 Button {
@@ -1430,6 +1430,9 @@ fn run_worker(
 ) {
     let mut passphrases: HashMap<String, String> = HashMap::new();
 
+    let config_display_path = std::fs::canonicalize(runtime.source.path())
+        .unwrap_or_else(|_| runtime.source.path().to_path_buf());
+
     let schedule = runtime.schedule();
     let mut schedule_paused = false;
     let schedule_interval = vger_core::app::scheduler::schedule_interval(&schedule)
@@ -1444,7 +1447,7 @@ fn run_worker(
     }
 
     let _ = ui_tx.send(UiEvent::ConfigInfo {
-        path: runtime.source.path().display().to_string(),
+        path: config_display_path.display().to_string(),
         schedule: schedule_description(&schedule, schedule_paused),
     });
 
@@ -2085,7 +2088,8 @@ fn run_worker(
                 let _ = std::process::Command::new("open").arg(&path).spawn();
             }
             AppCommand::ReloadConfig => {
-                let config_path = runtime.source.path().to_path_buf();
+                let config_path = std::fs::canonicalize(runtime.source.path())
+                    .unwrap_or_else(|_| runtime.source.path().to_path_buf());
                 match app::load_runtime_config_from_path(&config_path) {
                     Ok(repos) => {
                         if repos.is_empty() {
@@ -2142,7 +2146,7 @@ fn run_worker(
                 }
                 let schedule = runtime.schedule();
                 let _ = ui_tx.send(UiEvent::ConfigInfo {
-                    path: runtime.source.path().display().to_string(),
+                    path: config_display_path.display().to_string(),
                     schedule: schedule_description(&schedule, schedule_paused),
                 });
                 send_log(
