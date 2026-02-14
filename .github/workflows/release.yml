@@ -82,7 +82,7 @@ jobs:
         with:
           targets: x86_64-pc-windows-msvc
       - name: Build
-        run: cargo build --release --target x86_64-pc-windows-msvc -p vger-cli
+        run: cargo build --release --target x86_64-pc-windows-msvc -p vger-cli -p vger-server -p vger-gui
       - name: Package
         shell: pwsh
         run: |
@@ -92,7 +92,7 @@ jobs:
             $version = "${{ github.ref_name }}"
           }
           $archive = "vger-$version-x86_64-pc-windows-msvc.zip"
-          Compress-Archive -Path "target/x86_64-pc-windows-msvc/release/vger.exe" -DestinationPath $archive -Force
+          Compress-Archive -Path "target/x86_64-pc-windows-msvc/release/vger.exe","target/x86_64-pc-windows-msvc/release/vger-server.exe","target/x86_64-pc-windows-msvc/release/vger-gui.exe" -DestinationPath $archive -Force
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
