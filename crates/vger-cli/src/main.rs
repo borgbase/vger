@@ -335,6 +335,10 @@ enum Commands {
         /// Apply retention only to snapshots matching these source labels
         #[arg(short = 'S', long = "source")]
         source: Vec<String>,
+
+        /// Run compact after pruning to reclaim space from orphaned blobs
+        #[arg(long)]
+        compact: bool,
     },
 
     /// Verify repository integrity
@@ -698,7 +702,7 @@ fn run_default_actions(
         steps.push(("prune", StepResult::Skipped("backup failed")));
     } else {
         eprintln!("==> Starting prune");
-        match run_prune(cfg, label, false, false, sources, &[]) {
+        match run_prune(cfg, label, false, false, sources, &[], false) {
             Ok(()) => steps.push(("prune", StepResult::Ok)),
             Err(e) => {
                 eprintln!("Error: {e}");
@@ -867,8 +871,9 @@ fn dispatch_command(
             dry_run,
             list,
             source,
+            compact,
             ..
-        } => run_prune(cfg, label, *dry_run, *list, sources, source),
+        } => run_prune(cfg, label, *dry_run, *list, sources, source, *compact),
         Commands::Check { verify_data, .. } => run_check(cfg, label, *verify_data),
         Commands::Info { .. } => run_info(cfg, label),
         Commands::Mount {
@@ -1530,6 +1535,7 @@ fn run_prune(
     list: bool,
     sources: &[SourceEntry],
     source_filter: &[String],
+    compact: bool,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let (stats, list_entries) = with_repo_passphrase(config, label, |passphrase| {
         commands::prune::run(config, passphrase, dry_run, list, sources, source_filter)
@@ -1565,6 +1571,10 @@ fn run_prune(
             stats.chunks_deleted,
             format_bytes(stats.space_freed),
         );
+    }
+
+    if compact {
+        run_compact(config, label, 10.0, None, dry_run)?;
     }
 
     Ok(())
