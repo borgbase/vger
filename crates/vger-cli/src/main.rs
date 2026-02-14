@@ -2,11 +2,7 @@ use std::io::{IsTerminal, Write};
 use std::time::{Duration, Instant};
 
 use clap::{Parser, Subcommand};
-use comfy_table::{
-    modifiers::UTF8_ROUND_CORNERS,
-    presets::{ASCII_FULL_CONDENSED, UTF8_FULL_CONDENSED},
-    Attribute, Cell, Color, Table,
-};
+use comfy_table::{presets::NOTHING, Attribute, Cell, Table};
 use rand::RngCore;
 
 use vger_core::commands;
@@ -164,26 +160,22 @@ impl CliTableTheme {
 
     fn new_data_table(self, headers: &[&str]) -> Table {
         let mut table = Table::new();
-        if self.use_unicode {
-            table.load_preset(UTF8_FULL_CONDENSED);
-            table.apply_modifier(UTF8_ROUND_CORNERS);
-        } else {
-            table.load_preset(ASCII_FULL_CONDENSED);
-        }
-
+        table.load_preset(NOTHING);
         let header_cells: Vec<Cell> = headers.iter().map(|h| self.header_cell(h)).collect();
         table.set_header(header_cells);
         table
     }
 
     fn new_kv_table(self) -> Table {
-        self.new_data_table(&["Field", "Value"])
+        let mut table = Table::new();
+        table.load_preset(NOTHING);
+        table
     }
 
     fn header_cell(self, text: &str) -> Cell {
         let mut cell = Cell::new(text);
         if self.use_color {
-            cell = cell.fg(Color::Cyan).add_attribute(Attribute::Bold);
+            cell = cell.add_attribute(Attribute::Bold);
         }
         cell
     }
@@ -191,7 +183,7 @@ impl CliTableTheme {
     fn key_cell(self, text: &str) -> Cell {
         let mut cell = Cell::new(text);
         if self.use_color {
-            cell = cell.fg(Color::Green).add_attribute(Attribute::Bold);
+            cell = cell.add_attribute(Attribute::Bold);
         }
         cell
     }
@@ -1285,19 +1277,20 @@ fn run_snapshot_command(
             })?;
 
             let theme = CliTableTheme::detect();
-            let mut table = theme.new_kv_table();
 
-            add_kv_row(&mut table, theme, "Name", &meta.name);
-            add_kv_row(&mut table, theme, "Hostname", &meta.hostname);
-            add_kv_row(&mut table, theme, "Username", &meta.username);
+            // Group 1: snapshot metadata
+            let mut t1 = theme.new_kv_table();
+            add_kv_row(&mut t1, theme, "Name", &meta.name);
+            add_kv_row(&mut t1, theme, "Hostname", &meta.hostname);
+            add_kv_row(&mut t1, theme, "Username", &meta.username);
             add_kv_row(
-                &mut table,
+                &mut t1,
                 theme,
                 "Start time",
                 meta.time.format("%Y-%m-%d %H:%M:%S UTC"),
             );
             add_kv_row(
-                &mut table,
+                &mut t1,
                 theme,
                 "End time",
                 meta.time_end.format("%Y-%m-%d %H:%M:%S UTC"),
@@ -1309,41 +1302,45 @@ fn run_snapshot_command(
             } else {
                 format!("{secs}s")
             };
-            add_kv_row(&mut table, theme, "Duration", duration_str);
-            add_kv_row(&mut table, theme, "Source label", &meta.source_label);
+            add_kv_row(&mut t1, theme, "Duration", duration_str);
+            add_kv_row(&mut t1, theme, "Source label", &meta.source_label);
             add_kv_row(
-                &mut table,
+                &mut t1,
                 theme,
                 "Source paths",
                 meta.source_paths.join(", "),
             );
             if !meta.label.is_empty() {
-                add_kv_row(&mut table, theme, "Label", &meta.label);
+                add_kv_row(&mut t1, theme, "Label", &meta.label);
             }
             if !meta.comment.is_empty() {
-                add_kv_row(&mut table, theme, "Comment", &meta.comment);
+                add_kv_row(&mut t1, theme, "Comment", &meta.comment);
             }
-            add_kv_row(&mut table, theme, "Files", meta.stats.nfiles);
+            println!("{t1}");
+            println!();
+
+            // Group 2: statistics
+            let mut t2 = theme.new_kv_table();
+            add_kv_row(&mut t2, theme, "Files", meta.stats.nfiles);
             add_kv_row(
-                &mut table,
+                &mut t2,
                 theme,
                 "Original size",
                 format_bytes(meta.stats.original_size),
             );
             add_kv_row(
-                &mut table,
+                &mut t2,
                 theme,
-                "Compressed size",
+                "Compressed",
                 format_bytes(meta.stats.compressed_size),
             );
             add_kv_row(
-                &mut table,
+                &mut t2,
                 theme,
-                "Deduplicated size",
+                "Deduplicated",
                 format_bytes(meta.stats.deduplicated_size),
             );
-
-            println!("{table}");
+            println!("{t2}");
             Ok(())
         }
     }
@@ -1642,73 +1639,62 @@ fn run_info(config: &VgerConfig, label: Option<&str>) -> Result<(), Box<dyn std:
     })?;
 
     let theme = CliTableTheme::detect();
-    let mut table = theme.new_kv_table();
 
+    // Group 1: repository metadata
+    let mut t1 = theme.new_kv_table();
     let repo_name = label.unwrap_or(&config.repository.url);
-    add_kv_row(&mut table, theme, "Repository", repo_name);
-    add_kv_row(&mut table, theme, "URL", config.repository.url.clone());
-
-    let encryption = stats.encryption.as_str();
-    add_kv_row(&mut table, theme, "Encryption", encryption.to_string());
+    add_kv_row(&mut t1, theme, "Repository", repo_name);
+    add_kv_row(&mut t1, theme, "URL", config.repository.url.clone());
+    add_kv_row(&mut t1, theme, "Encryption", stats.encryption.as_str());
     add_kv_row(
-        &mut table,
+        &mut t1,
         theme,
         "Created",
-        stats
-            .repo_created
-            .format("%Y-%m-%d %H:%M:%S UTC")
-            .to_string(),
+        stats.repo_created.format("%Y-%m-%d %H:%M:%S UTC"),
     );
-    add_kv_row(
-        &mut table,
-        theme,
-        "Snapshots",
-        stats.snapshot_count.to_string(),
-    );
+    println!("{t1}");
+    println!();
 
+    // Group 2: statistics
+    let mut t2 = theme.new_kv_table();
+    add_kv_row(&mut t2, theme, "Snapshots", stats.snapshot_count);
     let last_snapshot = stats
         .last_snapshot_time
         .map(|t| t.format("%Y-%m-%d %H:%M:%S UTC").to_string())
         .unwrap_or_else(|| "-".to_string());
-    add_kv_row(&mut table, theme, "Last snapshot", last_snapshot);
+    add_kv_row(&mut t2, theme, "Last snapshot", last_snapshot);
     add_kv_row(
-        &mut table,
+        &mut t2,
         theme,
-        "Raw size (logical sum)",
+        "Raw size",
         format_size_with_bytes(stats.raw_size),
     );
     add_kv_row(
-        &mut table,
+        &mut t2,
         theme,
-        "Compressed size (logical sum)",
-        format_size_with_bytes(stats.compressed_size),
+        "Compressed",
+        format_size_with_savings(stats.compressed_size, stats.raw_size, "ratio"),
     );
     add_kv_row(
-        &mut table,
+        &mut t2,
         theme,
-        "Deduplicated size (logical sum)",
-        format_size_with_bytes(stats.deduplicated_size),
+        "Deduplicated",
+        format_size_with_savings(stats.deduplicated_size, stats.raw_size, "savings"),
     );
     add_kv_row(
-        &mut table,
+        &mut t2,
         theme,
-        "Unique stored size (live)",
+        "Unique stored",
         format_size_with_bytes(stats.unique_stored_size),
     );
     add_kv_row(
-        &mut table,
+        &mut t2,
         theme,
-        "Referenced stored size (live)",
+        "Referenced",
         format_size_with_bytes(stats.referenced_stored_size),
     );
-    add_kv_row(
-        &mut table,
-        theme,
-        "Unique chunks",
-        stats.unique_chunks.to_string(),
-    );
-
-    println!("{table}");
+    add_kv_row(&mut t2, theme, "Unique chunks", stats.unique_chunks);
+    println!("{t2}");
     Ok(())
 }
 
@@ -1810,12 +1796,20 @@ fn format_bytes(bytes: u64) -> String {
 }
 
 fn format_size_with_bytes(bytes: u64) -> String {
-    format!("{} ({} B)", format_bytes(bytes), bytes)
+    format_bytes(bytes)
+}
+
+fn format_size_with_savings(bytes: u64, reference: u64, label: &str) -> String {
+    if reference == 0 {
+        return format_bytes(bytes);
+    }
+    let pct = (1.0 - bytes as f64 / reference as f64) * 100.0;
+    format!("{}  ({:.1}% {label})", format_bytes(bytes), pct)
 }
 
 #[cfg(test)]
 mod tests {
-    use comfy_table::{presets::ASCII_FULL_CONDENSED, TableComponent};
+    use comfy_table::presets::NOTHING;
 
     use super::{resolve_table_theme, truncate_with_ellipsis};
 
@@ -1863,17 +1857,17 @@ mod tests {
     }
 
     #[test]
-    fn non_tty_data_table_uses_ascii_preset() {
+    fn data_table_uses_nothing_preset() {
         let theme = resolve_table_theme(false, false);
         let mut table = theme.new_data_table(&["A", "B"]);
-        assert_eq!(table.current_style_as_preset(), ASCII_FULL_CONDENSED);
+        assert_eq!(table.current_style_as_preset(), NOTHING);
     }
 
     #[test]
-    fn tty_data_table_uses_round_corners() {
+    fn kv_table_uses_nothing_preset() {
         let theme = resolve_table_theme(true, false);
-        let mut table = theme.new_data_table(&["A", "B"]);
-        assert_eq!(table.style(TableComponent::TopLeftCorner), Some('╭'));
-        assert_eq!(table.style(TableComponent::TopRightCorner), Some('╮'));
+        let mut table = theme.new_kv_table();
+        table.add_row(vec!["key", "value"]);
+        assert_eq!(table.current_style_as_preset(), NOTHING);
     }
 }
