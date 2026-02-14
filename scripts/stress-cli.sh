@@ -145,7 +145,7 @@ VERIFY_DATA_EVERY=0
 DELETE_EVERY=1
 COMPACT_THRESHOLD=0
 COMPRESSION="zstd"
-ZSTD_LEVEL=6
+ZSTD_LEVEL=3
 KEEP_LAST=1
 REPO_LABEL="stress"
 PRESERVE_ON_FAILURE=1
@@ -376,7 +376,8 @@ repositories:
   - label: "$REPO_LABEL"
     url: "$repo_q"
 encryption:
-  mode: none
+  mode: auto
+  passphrase: "stress-test"
 compression:
   algorithm: $COMPRESSION
   zstd_level: $ZSTD_LEVEL
