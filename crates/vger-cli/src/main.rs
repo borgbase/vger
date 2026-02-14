@@ -290,7 +290,6 @@ enum Commands {
     /// Restore files from a snapshot
     Restore {
         /// Snapshot to restore from
-        #[arg(long)]
         snapshot: String,
 
         /// Destination directory

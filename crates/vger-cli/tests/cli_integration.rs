@@ -188,7 +188,6 @@ fn cli_init_backup_list_restore_info_roundtrip() {
         "--config",
         &cfg,
         "restore",
-        "--snapshot",
         &snapshot,
         "--dest",
         &restore_str,
