@@ -1,5 +1,18 @@
 # Installing
 
+## Quick install
+
+```bash
+curl -fsSL https://vger.pages.dev/install.sh | sh
+```
+
+Or download and review the script first:
+
+```bash
+curl -fsSL https://vger.pages.dev/install.sh -o install.sh
+sh install.sh
+```
+
 ## Pre-built binaries
 
 Download the latest release for your platform from the [releases page](https://github.com/borgbase/vger/releases).

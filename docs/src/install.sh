@@ -1,0 +1,203 @@
+#!/bin/sh
+set -eu
+
+REPO="borgbase/vger"
+GITHUB_API="https://api.github.com/repos/${REPO}/releases/latest"
+GITHUB_DOWNLOAD="https://github.com/${REPO}/releases/download"
+DEFAULT_INSTALL_DIR="/usr/local/bin"
+BINARY_NAME="vger"
+
+# --- Utilities -----------------------------------------------------------
+
+log() { printf '%s\n' "$*"; }
+
+die() { printf 'Error: %s\n' "$*" >&2; exit 1; }
+
+require_cmd() {
+    command -v "$1" >/dev/null 2>&1 || die "required command not found: $1"
+}
+
+find_sha_tool() {
+    if command -v sha256sum >/dev/null 2>&1; then
+        SHA_TOOL="sha256sum"
+    elif command -v shasum >/dev/null 2>&1; then
+        SHA_TOOL="shasum"
+    elif command -v openssl >/dev/null 2>&1; then
+        SHA_TOOL="openssl"
+    else
+        die "no SHA-256 tool found (need sha256sum, shasum, or openssl)"
+    fi
+}
+
+sha256_of() {
+    local file="$1"
+    case "$SHA_TOOL" in
+        sha256sum) sha256sum "$file" | awk '{print $1}' ;;
+        shasum)    shasum -a 256 "$file" | awk '{print $1}' ;;
+        openssl)   openssl dgst -sha256 "$file" | awk '{print $NF}' ;;
+    esac
+}
+
+# --- Platform detection ---------------------------------------------------
+
+detect_platform() {
+    local os arch
+    os="$(uname -s)"
+    arch="$(uname -m)"
+
+    case "$os" in
+        Linux)
+            case "$arch" in
+                x86_64)  TARGET="x86_64-unknown-linux-gnu" ;;
+                *)       die "unsupported Linux architecture: $arch (only x86_64 builds are available)" ;;
+            esac
+            ;;
+        Darwin)
+            case "$arch" in
+                arm64|aarch64) TARGET="aarch64-apple-darwin" ;;
+                *)             die "unsupported macOS architecture: $arch (only Apple Silicon builds are available)" ;;
+            esac
+            ;;
+        *)
+            die "unsupported operating system: $os (only Linux and macOS are supported)"
+            ;;
+    esac
+}
+
+# --- Version fetch --------------------------------------------------------
+
+fetch_latest_version() {
+    VERSION=$(curl -fsSL "$GITHUB_API" | grep '"tag_name"' | sed 's/.*"tag_name" *: *"\([^"]*\)".*/\1/')
+    if [ -z "$VERSION" ]; then
+        die "could not determine latest version from GitHub API"
+    fi
+}
+
+# --- Interactive prompts --------------------------------------------------
+
+prompt_install_dir() {
+    INSTALL_DIR="$DEFAULT_INSTALL_DIR"
+
+    if [ -t 0 ]; then
+        printf 'Install location [%s]: ' "$DEFAULT_INSTALL_DIR"
+        read -r user_dir || true
+        if [ -n "$user_dir" ]; then
+            INSTALL_DIR="$user_dir"
+        fi
+    fi
+
+    # Expand ~ manually (shell does not expand ~ in variables)
+    case "$INSTALL_DIR" in
+        "~/"*) INSTALL_DIR="$HOME/${INSTALL_DIR#"~/"}" ;;
+        "~")   INSTALL_DIR="$HOME" ;;
+    esac
+
+    # Ensure the directory exists
+    if [ ! -d "$INSTALL_DIR" ]; then
+        mkdir -p "$INSTALL_DIR" 2>/dev/null || \
+            sudo mkdir -p "$INSTALL_DIR" || \
+            die "could not create directory: $INSTALL_DIR"
+    fi
+}
+
+prompt_config() {
+    if [ -t 0 ]; then
+        printf 'Run "vger config" to create a starter configuration? [Y/n]: '
+        read -r answer || true
+        case "$answer" in
+            [nN]*) ;;
+            *)     "${INSTALL_DIR}/${BINARY_NAME}" config ;;
+        esac
+    else
+        log ""
+        log "Run 'vger config' to create a starter configuration."
+    fi
+}
+
+# --- Download & verify ----------------------------------------------------
+
+download_and_verify() {
+    local archive checksum_file tmpdir expected actual
+
+    archive="vger-${VERSION}-${TARGET}.tar.gz"
+    tmpdir="$(mktemp -d)"
+    trap 'rm -rf "$tmpdir"' EXIT
+
+    log "Downloading ${archive}..."
+    curl -fSL -o "${tmpdir}/${archive}" \
+        "${GITHUB_DOWNLOAD}/${VERSION}/${archive}"
+
+    log "Downloading checksums..."
+    checksum_file="${tmpdir}/SHA256SUMS"
+    curl -fsSL -o "$checksum_file" \
+        "${GITHUB_DOWNLOAD}/${VERSION}/SHA256SUMS"
+
+    expected=$(grep "$archive" "$checksum_file" | awk '{print $1}')
+    if [ -z "$expected" ]; then
+        die "checksum for ${archive} not found in SHA256SUMS"
+    fi
+
+    log "Verifying checksum..."
+    actual=$(sha256_of "${tmpdir}/${archive}")
+    if [ "$expected" != "$actual" ]; then
+        die "checksum mismatch!\n  expected: ${expected}\n  got:      ${actual}"
+    fi
+
+    log "Extracting ${BINARY_NAME}..."
+    tar xzf "${tmpdir}/${archive}" -C "$tmpdir" "$BINARY_NAME"
+
+    EXTRACTED="${tmpdir}/${BINARY_NAME}"
+}
+
+# --- Install --------------------------------------------------------------
+
+install_binary() {
+    local dest="${INSTALL_DIR}/${BINARY_NAME}"
+
+    if [ -w "$INSTALL_DIR" ]; then
+        cp "$EXTRACTED" "$dest"
+        chmod 755 "$dest"
+    else
+        log "Installing to ${INSTALL_DIR} requires elevated permissions."
+        sudo cp "$EXTRACTED" "$dest"
+        sudo chmod 755 "$dest"
+    fi
+
+    log ""
+    log "Installed: $("$dest" --version)"
+}
+
+# --- Main -----------------------------------------------------------------
+
+main() {
+    log "vger installer"
+    log ""
+
+    require_cmd curl
+    require_cmd tar
+    require_cmd mktemp
+    find_sha_tool
+
+    detect_platform
+    log "Platform: ${TARGET}"
+
+    fetch_latest_version
+    log "Latest version: ${VERSION}"
+    log ""
+
+    prompt_install_dir
+
+    log "Installing vger ${VERSION} to ${INSTALL_DIR}"
+    log ""
+
+    download_and_verify
+    install_binary
+    log ""
+
+    prompt_config
+
+    log ""
+    log "Done. Run 'vger --help' to get started."
+}
+
+main
