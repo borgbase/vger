@@ -357,7 +357,7 @@ run_vger() {
 
   local log_file="$LOG_DIR/iter-$(printf '%06d' "$iter")-$name.log"
   if ! HOME="$HOME_DIR" XDG_CACHE_HOME="$XDG_CACHE_DIR" \
-    "$VGER_BIN" --config "$CONFIG_PATH" --repo "$REPO_LABEL" "$@" >"$log_file" 2>&1; then
+    "$VGER_BIN" --config "$CONFIG_PATH" "$@" --repo "$REPO_LABEL" >"$log_file" 2>&1; then
     printf 'FAILED iteration=%s step=%s snapshot=%s command=%s log=%s\n' \
       "$iter" "$name" "${CURRENT_SNAPSHOT:-<none>}" "$*" "$log_file" >&2
     tail -n 120 "$log_file" >&2 || true
@@ -570,7 +570,7 @@ main() {
 
     log "[$i/$ITERATIONS] backup"
     CURRENT_STEP="backup"
-    backup_log="$(run_vger "$i" backup backup --label "stress-$i")"
+    backup_log="$(run_vger "$i" backup backup)"
     LAST_BACKUP_LOG="$backup_log"
     snapshot="$(extract_snapshot_id "$backup_log")" || die "failed to parse snapshot ID"
     CURRENT_SNAPSHOT="$snapshot"
@@ -591,7 +591,7 @@ main() {
 
     log "[$i/$ITERATIONS] restore"
     CURRENT_STEP="restore"
-    LAST_RESTORE_LOG="$(run_vger "$i" restore restore --snapshot "$snapshot" --dest "$restore_target")"
+    LAST_RESTORE_LOG="$(run_vger "$i" restore restore "$snapshot" --dest "$restore_target")"
 
     log "[$i/$ITERATIONS] verify"
     CURRENT_STEP="verify"
