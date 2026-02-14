@@ -5,6 +5,37 @@ use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
 
+const STRICT_STRING_ERROR: &str = "string value must be quoted";
+const NULL_VALUE_ERROR: &str = "value cannot be null or empty; provide a value or omit the field";
+
+/// Generates `visit_*` methods that reject non-string YAML scalars (bool, int, float, null)
+/// with [`STRICT_STRING_ERROR`]. Use inside a `serde::de::Visitor` impl block.
+macro_rules! reject_non_string_visits {
+    ($out:ty) => {
+        fn visit_bool<E: de::Error>(self, _v: bool) -> Result<$out, E> {
+            Err(E::custom(STRICT_STRING_ERROR))
+        }
+        fn visit_i64<E: de::Error>(self, _v: i64) -> Result<$out, E> {
+            Err(E::custom(STRICT_STRING_ERROR))
+        }
+        fn visit_u64<E: de::Error>(self, _v: u64) -> Result<$out, E> {
+            Err(E::custom(STRICT_STRING_ERROR))
+        }
+        fn visit_i128<E: de::Error>(self, _v: i128) -> Result<$out, E> {
+            Err(E::custom(STRICT_STRING_ERROR))
+        }
+        fn visit_u128<E: de::Error>(self, _v: u128) -> Result<$out, E> {
+            Err(E::custom(STRICT_STRING_ERROR))
+        }
+        fn visit_f64<E: de::Error>(self, _v: f64) -> Result<$out, E> {
+            Err(E::custom(STRICT_STRING_ERROR))
+        }
+        fn visit_unit<E: de::Error>(self) -> Result<$out, E> {
+            Err(E::custom(STRICT_STRING_ERROR))
+        }
+    };
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct VgerConfig {
     pub repository: RepositoryConfig,
@@ -35,6 +66,7 @@ pub struct VgerConfig {
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct RetentionConfig {
     /// Keep all snapshots within this time interval (e.g. "2d", "48h", "1w")
+    #[serde(default, deserialize_with = "deserialize_optional_duration_string")]
     pub keep_within: Option<String>,
     /// Keep the N most recent snapshots
     pub keep_last: Option<usize>,
@@ -76,7 +108,10 @@ impl Default for XattrsConfig {
 pub struct ScheduleConfig {
     #[serde(default)]
     pub enabled: bool,
-    #[serde(default = "default_schedule_every")]
+    #[serde(
+        default = "default_schedule_every",
+        deserialize_with = "deserialize_duration_string"
+    )]
     pub every: String,
     #[serde(default)]
     pub on_startup: bool,
@@ -250,7 +285,7 @@ pub(crate) const HOOK_COMMANDS: &[&str] = &["backup", "prune", "compact", "check
 /// command-specific variants (`before_backup`, `finally_prune`, etc.).
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct HooksConfig {
-    #[serde(flatten)]
+    #[serde(flatten, deserialize_with = "deserialize_strict_hooks_map")]
     pub hooks: HashMap<String, Vec<String>>,
 }
 
@@ -299,6 +334,195 @@ pub struct SourceHooksConfig {
     pub finally: Vec<String>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+struct StrictString(String);
+
+impl StrictString {
+    fn into_inner(self) -> String {
+        self.0
+    }
+}
+
+impl<'de> Deserialize<'de> for StrictString {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        use serde::de;
+
+        struct StrictStringVisitor;
+
+        impl<'de> de::Visitor<'de> for StrictStringVisitor {
+            type Value = StrictString;
+
+            fn expecting(&self, f: &mut fmt::Formatter) -> fmt::Result {
+                f.write_str("a string")
+            }
+
+            fn visit_str<E: de::Error>(self, v: &str) -> Result<StrictString, E> {
+                Ok(StrictString(v.to_string()))
+            }
+
+            fn visit_string<E: de::Error>(self, v: String) -> Result<StrictString, E> {
+                Ok(StrictString(v))
+            }
+
+            reject_non_string_visits!(StrictString);
+        }
+
+        deserializer.deserialize_any(StrictStringVisitor)
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+struct DurationString(String);
+
+impl DurationString {
+    fn into_inner(self) -> String {
+        self.0
+    }
+}
+
+impl<'de> Deserialize<'de> for DurationString {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        use serde::de;
+
+        struct DurationStringVisitor;
+
+        impl<'de> de::Visitor<'de> for DurationStringVisitor {
+            type Value = DurationString;
+
+            fn expecting(&self, f: &mut fmt::Formatter) -> fmt::Result {
+                f.write_str("a duration string or integer")
+            }
+
+            fn visit_str<E: de::Error>(self, v: &str) -> Result<DurationString, E> {
+                Ok(DurationString(v.to_string()))
+            }
+
+            fn visit_string<E: de::Error>(self, v: String) -> Result<DurationString, E> {
+                Ok(DurationString(v))
+            }
+
+            fn visit_i64<E: de::Error>(self, v: i64) -> Result<DurationString, E> {
+                Ok(DurationString(v.to_string()))
+            }
+
+            fn visit_u64<E: de::Error>(self, v: u64) -> Result<DurationString, E> {
+                Ok(DurationString(v.to_string()))
+            }
+
+            fn visit_i128<E: de::Error>(self, v: i128) -> Result<DurationString, E> {
+                Ok(DurationString(v.to_string()))
+            }
+
+            fn visit_u128<E: de::Error>(self, v: u128) -> Result<DurationString, E> {
+                Ok(DurationString(v.to_string()))
+            }
+
+            fn visit_bool<E: de::Error>(self, _v: bool) -> Result<DurationString, E> {
+                Err(E::custom(STRICT_STRING_ERROR))
+            }
+
+            fn visit_f64<E: de::Error>(self, _v: f64) -> Result<DurationString, E> {
+                Err(E::custom(STRICT_STRING_ERROR))
+            }
+
+            fn visit_unit<E: de::Error>(self) -> Result<DurationString, E> {
+                Err(E::custom(STRICT_STRING_ERROR))
+            }
+        }
+
+        deserializer.deserialize_any(DurationStringVisitor)
+    }
+}
+
+fn deserialize_strict_string<'de, D>(deserializer: D) -> Result<String, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    StrictString::deserialize(deserializer).map(StrictString::into_inner)
+}
+
+fn deserialize_optional_strict_string<'de, D>(deserializer: D) -> Result<Option<String>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    use serde::de::Error;
+
+    match Option::<StrictString>::deserialize(deserializer)? {
+        Some(v) => Ok(Some(v.into_inner())),
+        None => Err(D::Error::custom(NULL_VALUE_ERROR)),
+    }
+}
+
+fn deserialize_vec_strict_string<'de, D>(deserializer: D) -> Result<Vec<String>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let values = Vec::<StrictString>::deserialize(deserializer)?;
+    Ok(values.into_iter().map(StrictString::into_inner).collect())
+}
+
+fn deserialize_optional_vec_strict_string<'de, D>(
+    deserializer: D,
+) -> Result<Option<Vec<String>>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    use serde::de::Error;
+
+    match Option::<Vec<StrictString>>::deserialize(deserializer)? {
+        Some(values) => Ok(Some(
+            values
+                .into_iter()
+                .map(StrictString::into_inner)
+                .collect::<Vec<_>>(),
+        )),
+        None => Err(D::Error::custom(NULL_VALUE_ERROR)),
+    }
+}
+
+fn deserialize_duration_string<'de, D>(deserializer: D) -> Result<String, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    DurationString::deserialize(deserializer).map(DurationString::into_inner)
+}
+
+fn deserialize_optional_duration_string<'de, D>(deserializer: D) -> Result<Option<String>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    use serde::de::Error;
+
+    match Option::<DurationString>::deserialize(deserializer)? {
+        Some(v) => Ok(Some(v.into_inner())),
+        None => Err(D::Error::custom(NULL_VALUE_ERROR)),
+    }
+}
+
+fn deserialize_strict_hooks_map<'de, D>(
+    deserializer: D,
+) -> Result<HashMap<String, Vec<String>>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let raw = HashMap::<StrictString, Vec<StrictString>>::deserialize(deserializer)?;
+    Ok(raw
+        .into_iter()
+        .map(|(k, v)| {
+            (
+                k.into_inner(),
+                v.into_iter().map(StrictString::into_inner).collect(),
+            )
+        })
+        .collect())
+}
+
 /// Deserialize a YAML field that can be either a single string or a list of strings.
 fn deserialize_string_or_vec<'de, D>(deserializer: D) -> Result<Vec<String>, D::Error>
 where
@@ -319,13 +543,19 @@ where
             Ok(vec![v.to_string()])
         }
 
+        fn visit_string<E: de::Error>(self, v: String) -> Result<Vec<String>, E> {
+            Ok(vec![v])
+        }
+
         fn visit_seq<A: de::SeqAccess<'de>>(self, mut seq: A) -> Result<Vec<String>, A::Error> {
             let mut v = Vec::new();
-            while let Some(s) = seq.next_element()? {
-                v.push(s);
+            while let Some(s) = seq.next_element::<StrictString>()? {
+                v.push(s.into_inner());
             }
             Ok(v)
         }
+
+        reject_non_string_visits!(Vec<String>);
     }
 
     deserializer.deserialize_any(StringOrVec)
@@ -335,8 +565,10 @@ where
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CommandDump {
     /// Virtual filename (e.g. "mydb.sql"). Must not contain `/` or `\`.
+    #[serde(deserialize_with = "deserialize_strict_string")]
     pub name: String,
     /// Shell command whose stdout is captured (run via `sh -c`).
+    #[serde(deserialize_with = "deserialize_strict_string")]
     pub command: String,
 }
 
@@ -345,13 +577,17 @@ pub struct CommandDump {
 #[serde(untagged)]
 #[allow(clippy::large_enum_variant)]
 pub enum SourceInput {
-    Simple(String),
+    Simple(#[serde(deserialize_with = "deserialize_strict_string")] String),
     Rich {
+        #[serde(default, deserialize_with = "deserialize_optional_strict_string")]
         path: Option<String>,
+        #[serde(default, deserialize_with = "deserialize_optional_vec_strict_string")]
         paths: Option<Vec<String>>,
+        #[serde(default, deserialize_with = "deserialize_optional_strict_string")]
         label: Option<String>,
-        #[serde(default)]
+        #[serde(default, deserialize_with = "deserialize_vec_strict_string")]
         exclude: Vec<String>,
+        #[serde(default, deserialize_with = "deserialize_optional_vec_strict_string")]
         exclude_if_present: Option<Vec<String>>,
         one_file_system: Option<bool>,
         git_ignore: Option<bool>,
@@ -359,7 +595,7 @@ pub enum SourceInput {
         #[serde(default)]
         hooks: SourceHooksConfig,
         retention: Option<RetentionConfig>,
-        #[serde(default)]
+        #[serde(default, deserialize_with = "deserialize_vec_strict_string")]
         repos: Vec<String>,
         #[serde(default)]
         command_dumps: Vec<CommandDump>,
@@ -411,7 +647,9 @@ pub struct RepositoryConfig {
 pub struct EncryptionConfig {
     #[serde(default = "default_encryption_mode")]
     pub mode: EncryptionModeConfig,
+    #[serde(default, deserialize_with = "deserialize_optional_strict_string")]
     pub passphrase: Option<String>,
+    #[serde(default, deserialize_with = "deserialize_optional_strict_string")]
     pub passcommand: Option<String>,
 }
 
@@ -648,17 +886,25 @@ impl Default for RetryConfig {
 #[derive(Debug, Clone, Deserialize)]
 pub struct RepositoryEntry {
     /// Repository URL: bare path, `file://`, `s3://`, `sftp://`, or `http(s)://`.
+    #[serde(deserialize_with = "deserialize_strict_string")]
     pub url: String,
+    #[serde(default, deserialize_with = "deserialize_optional_strict_string")]
     pub region: Option<String>,
+    #[serde(default, deserialize_with = "deserialize_optional_strict_string")]
     pub access_key_id: Option<String>,
+    #[serde(default, deserialize_with = "deserialize_optional_strict_string")]
     pub secret_access_key: Option<String>,
+    #[serde(default, deserialize_with = "deserialize_optional_strict_string")]
     pub endpoint: Option<String>,
+    #[serde(default, deserialize_with = "deserialize_optional_strict_string")]
     pub sftp_key: Option<String>,
+    #[serde(default, deserialize_with = "deserialize_optional_strict_string")]
     pub rest_token: Option<String>,
     pub min_pack_size: Option<u32>,
     pub max_pack_size: Option<u32>,
 
     /// Optional label for `--repo` selection.
+    #[serde(default, deserialize_with = "deserialize_optional_strict_string")]
     pub label: Option<String>,
 
     // Per-repo overrides (None = use top-level defaults)
@@ -702,9 +948,9 @@ struct ConfigDocument {
     encryption: EncryptionConfig,
     #[serde(default)]
     sources: Vec<SourceInput>,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_vec_strict_string")]
     exclude_patterns: Vec<String>,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_vec_strict_string")]
     exclude_if_present: Vec<String>,
     #[serde(default = "default_one_file_system")]
     one_file_system: bool,
@@ -2055,6 +2301,26 @@ hooks:
     }
 
     #[test]
+    fn test_hooks_rejects_bool_in_command_list() {
+        let yaml = r#"
+repositories:
+  - url: /tmp/repo
+hooks:
+  before_backup:
+    - true
+"#;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.yaml");
+        fs::write(&path, yaml).unwrap();
+
+        let err = load_and_resolve(&path).unwrap_err();
+        assert!(
+            err.to_string().contains(STRICT_STRING_ERROR),
+            "unexpected: {err}"
+        );
+    }
+
+    #[test]
     fn test_hooks_validation_rejects_non_automation_command_keys() {
         let dir = tempfile::tempdir().unwrap();
 
@@ -2783,6 +3049,132 @@ sources:
         assert!(parse_human_duration("").is_err());
         assert!(parse_human_duration("0h").is_err());
         assert!(parse_human_duration("5w").is_err());
+    }
+
+    #[test]
+    fn test_keep_within_accepts_integer_scalar() {
+        let yaml = r#"
+retention:
+  keep_within: 7
+repositories:
+  - url: /tmp/repo
+sources:
+  - /home/user
+"#;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.yaml");
+        fs::write(&path, yaml).unwrap();
+
+        let repos = load_and_resolve(&path).unwrap();
+        assert_eq!(repos[0].config.retention.keep_within.as_deref(), Some("7"));
+    }
+
+    #[test]
+    fn test_schedule_every_accepts_integer_scalar() {
+        let yaml = r#"
+schedule:
+  every: 12
+repositories:
+  - url: /tmp/repo
+sources:
+  - /home/user
+"#;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.yaml");
+        fs::write(&path, yaml).unwrap();
+
+        let repos = load_and_resolve(&path).unwrap();
+        assert_eq!(repos[0].config.schedule.every, "12");
+        assert_eq!(
+            repos[0].config.schedule.every_duration().unwrap().as_secs(),
+            12 * 24 * 60 * 60
+        );
+    }
+
+    #[test]
+    fn test_strict_string_rejects_unquoted_numeric_label() {
+        let yaml = r#"
+repositories:
+  - url: /tmp/repo
+    label: 7
+sources:
+  - /home/user
+"#;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.yaml");
+        fs::write(&path, yaml).unwrap();
+
+        let err = load_and_resolve(&path).unwrap_err();
+        assert!(
+            err.to_string().contains(STRICT_STRING_ERROR),
+            "unexpected: {err}"
+        );
+    }
+
+    #[test]
+    fn test_strict_string_rejects_unquoted_bool_url() {
+        let yaml = r#"
+repositories:
+  - url: false
+sources:
+  - /home/user
+"#;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.yaml");
+        fs::write(&path, yaml).unwrap();
+
+        let err = load_and_resolve(&path).unwrap_err();
+        assert!(
+            err.to_string().contains(STRICT_STRING_ERROR),
+            "unexpected: {err}"
+        );
+    }
+
+    #[test]
+    fn test_strict_string_accepts_quoted_literals() {
+        let yaml = r#"
+repositories:
+  - url: "false"
+    label: "7"
+sources:
+  - /home/user
+"#;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.yaml");
+        fs::write(&path, yaml).unwrap();
+
+        let repos = load_and_resolve(&path).unwrap();
+        assert_eq!(repos[0].config.repository.url, "false");
+        assert_eq!(repos[0].label.as_deref(), Some("7"));
+    }
+
+    /// serde_yaml 0.9 only treats `true`/`false`/`True`/`False`/`TRUE`/`FALSE`
+    /// as booleans. The extended YAML 1.1 boolean literals (`yes`/`no`/`on`/`off`)
+    /// are deserialized as plain strings, so they pass through `StrictString`
+    /// without issue. These tests document that guarantee.
+    #[test]
+    fn test_strict_string_allows_yaml11_bool_words_as_strings() {
+        for word in ["no", "yes", "on", "off"] {
+            let yaml = format!(
+                r#"
+repositories:
+  - url: /tmp/repo
+    label: {word}
+sources:
+  - /home/user
+"#
+            );
+            let dir = tempfile::tempdir().unwrap();
+            let path = dir.path().join("config.yaml");
+            fs::write(&path, yaml).unwrap();
+
+            let repos = load_and_resolve(&path).unwrap();
+            assert_eq!(
+                repos[0].label.as_deref(),
+                Some(word),
+                "bare `{word}` should be treated as a string, not a boolean"
+            );
+        }
     }
 
     // --- command_dumps tests ---
