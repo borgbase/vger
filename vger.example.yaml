@@ -1,242 +1,216 @@
 # vger example configuration
 # Copy this file to vger.yaml and adjust to your needs.
+#
+# Main concepts:
+#   1) sources      -> what gets backed up
+#   2) repositories -> where backups are stored
+#
+# Top-level options (encryption/compression/retention/etc.) are defaults.
+# Rich source/repository entries can override parts of those defaults.
+#
+# Environment variable expansion (before YAML parsing):
+#   Use env placeholders in values (see docs for exact syntax).
+#   Avoid writing placeholder syntax in comments, because expansion runs
+#   before YAML parsing.
 
-# Repositories to back up to.
-# Top-level settings (encryption, compression, etc.) serve as defaults.
-# Each repository entry can override: encryption, compression, retention, and limits.
-# Select a single repo at runtime with: vger --repo <label-or-url>
-#
-# URL formats:
-#   Local:  /backups/repo  or  file:///backups/repo
-#   S3:     s3://bucket/prefix  or  s3://endpoint:port/bucket/prefix
-#   SFTP:   sftp://user@host/path  (compile with feature 'backend-sftp')
-#   REST:   https://backup.example.com/repo  (compile with feature 'backend-rest')
-#
-# Environment expansion (applies before YAML parsing):
-#   ${VAR}                -> requires VAR to be set
-#   ${VAR:-default}       -> uses default when VAR is unset or empty
-# Example:
-#   - url: ${VGER_REPO_URL:-/backups/myrepo}
+# --- Minimal runnable config -------------------------------------------------
+
+sources:
+  - /home/user/documents
+
 repositories:
   - url: /backups/myrepo
     label: main
 
-  # S3 (AWS default endpoint — host is the bucket name):
-  # - url: s3://my-bucket/vger
-  #   label: aws
-  #   region: us-east-1
-  #   access_key_id: AKIA...
-  #   secret_access_key: ...
+# --- Common options many users enable ---------------------------------------
 
-  # S3-compatible (host with dot/port = custom endpoint, first path segment = bucket):
-  # - url: s3://minio.local:9000/my-bucket/vger
-  #   label: minio
-  #   region: us-east-1
-  #   access_key_id: minioadmin
-  #   secret_access_key: minioadmin
+# Many users prefer zstd over lz4 for better compression ratio.
+compression:
+  algorithm: zstd                 # lz4|zstd|none
+  zstd_level: 3
 
-  # SFTP:
-  # - url: sftp://backupuser@nas.example.com/backups/vger
-  #   label: remote
-  #   sftp_key: ~/.ssh/id_ed25519
+# Optional global hooks (run for backup/prune/check/compact):
+#
+# hooks:
+#   before_backup:
+#     - "echo starting backup for {repository}"
+#   failed:
+#     - "notify-send 'vger {command} failed: {error}'"
 
-  # REST server (vger-server):
-  # - url: https://backup.example.com/myrepo
-  #   label: server
-  #   rest_token: "${VGER_REST_TOKEN}"
+# --- Sources (what to back up) ----------------------------------------------
 
-  # Per-repo hooks — run only for this repository:
-  # - url: /mnt/nas/repo
-  #   label: nas
-  #   hooks:
-  #     before:
-  #       - "mount /mnt/nas"
-  #     finally:
-  #       - "umount /mnt/nas"
+# Simple source form (path strings, label auto-derived from basename):
+#
+# sources:
+#   - /home/user/documents
+#   - /home/user/photos
 
-  # Per-repo overrides:
-  # - url: s3://my-bucket/vger
-  #   label: offsite
-  #   region: us-east-1
-  #   encryption:
-  #     passcommand: "pass show vger-remote"
-  #   compression:
-  #     algorithm: zstd              # override: better ratio for remote
-  #   retention:
-  #     keep_daily: 30               # override: keep more on remote
-
-# Encryption settings
-encryption:
-  # Mode: "auto", "aes256gcm", "chacha20poly1305", or "none" (default: "auto")
-  mode: auto
-
-  # Passphrase (optional — if omitted, vger will prompt interactively)
-  # passphrase: my-secret-passphrase
-
-  # Shell command that outputs the passphrase on stdout (optional)
-  # passcommand: "cat /path/to/passphrase-file"
-  # Or via environment:
-  # passphrase: "${VGER_PASSPHRASE}"
-
-# Sources to back up.
-# Each source produces its own snapshot per repository.
-# Simple form — just a path (label derived from basename):
-sources:
-  - /home/user/documents
-  - /home/user/photos
-
-# Rich form — with label, per-source excludes, hooks, retention, and repo targeting:
+# Rich source form (single path):
 #
 # sources:
 #   - path: /home/user/documents
 #     label: docs
 #     exclude:
 #       - "*.tmp"
-#       - ".git/**"
-#     # Optional per-source overrides:
-#     # exclude_if_present: [".nobackup", "CACHEDIR.TAG"]
-#     # one_file_system: true
-#     # git_ignore: false
-#     # xattrs:
-#     #   enabled: false
-#     hooks:
-#       before: "echo backing up docs"
-#       after:
-#         - "notify-send 'docs backup complete'"
+#       - ".cache/**"
+#     exclude_if_present:
+#       - .nobackup
+#       - CACHEDIR.TAG
+#     one_file_system: true
+#     git_ignore: false
+#     xattrs:
+#       enabled: false
+#     repos:                 # only back up to these repos (default: all)
+#       - main
 #     retention:
 #       keep_daily: 14
 #       keep_weekly: 8
-#     repos:               # only back up to these repos (empty = all)
-#       - main
+#     hooks:                 # source hooks: before/after/failed/finally
+#       before: "echo starting docs backup"
+#       after:
+#         - "notify-send 'docs backup complete'"
+#     command_dumps:
+#       - name: postgres.sql
+#         command: pg_dump -U myuser mydb
+
+# Rich source form (multiple paths; requires explicit label):
 #
-#   - path: /home/user/photos
-#     label: photos
+# sources:
+#   - paths:
+#       - /home/user/documents
+#       - /home/user/notes
+#     label: writing
+#     exclude:
+#       - "*.tmp"
+
+# Dump-only source (no filesystem paths; label required):
+#
+# sources:
+#   - label: databases
+#     command_dumps:
+#       - name: all-databases.sql
+#         command: pg_dumpall -U postgres
+
+# --- Repositories (where backups go) ----------------------------------------
+
+# URL formats:
+#   Local: /backups/repo  or  file:///backups/repo
+#   S3:    s3://bucket/prefix  or  s3://endpoint:port/bucket/prefix
+#   SFTP:  sftp://user@host/path               (compile with feature 'backend-sftp')
+#   REST:  https://backup.example.com/repo     (compile with feature 'backend-rest')
+
+# Simple repository form:
+#
+# repositories:
+#   - url: /backups/myrepo
+#     label: main
+
+# Rich repository form (backend options + per-repo overrides):
+#
+# repositories:
+#   - url: s3://my-bucket/vger
+#     label: offsite
+#     region: us-east-1
+#     access_key_id: AWS_ACCESS_KEY_ID
+#     secret_access_key: AWS_SECRET_ACCESS_KEY
+#     # endpoint: https://s3.us-east-1.amazonaws.com
+#     # sftp_key: ~/.ssh/id_ed25519
+#     # rest_token: VGER_REST_TOKEN
+#
+#     min_pack_size: 33554432      # 32 MiB
+#     max_pack_size: 536870912     # 512 MiB
+#
+#     retry:
+#       max_retries: 5
+#       retry_delay_ms: 2000
+#       retry_max_delay_ms: 120000
+#
+#     encryption:
+#       passcommand: "pass show vger-offsite"
+#     compression:
+#       algorithm: zstd
+#       zstd_level: 6
 #     retention:
-#       keep_daily: 7
-#       keep_monthly: 12
+#       keep_daily: 30
+#
+#     limits:
+#       cpu:
+#         max_threads: 2
+#       network:
+#         write_mib_per_sec: 25
+#
+#     hooks:
+#       before:
+#         - "echo starting offsite backup"
+#       finally:
+#         - "echo finished offsite backup"
 
-# Gitignore-style patterns to exclude from all backups (merged with per-source excludes)
-exclude_patterns:
-  - "*.tmp"
-  - "*.cache"
-  - ".DS_Store"
-  - "node_modules"
+# --- Global defaults and advanced options -----------------------------------
 
-# Skip directories that contain any of these marker files.
-exclude_if_present:
-  - ".nobackup"
-  - "CACHEDIR.TAG"
+# Encryption defaults to mode: auto.
+#
+# encryption:
+#   mode: auto                     # auto|aes256gcm|chacha20poly1305|none
+#   # passphrase: "inline-secret"
+#   # passcommand: "pass show vger"
 
-# Do not cross mount boundaries while walking sources.
-one_file_system: true
+# chunker:
+#   min_size: 524288               # 512 KiB
+#   avg_size: 2097152              # 2 MiB
+#   max_size: 8388608              # 8 MiB
 
-# Respect repository .gitignore files while walking sources.
-git_ignore: false
+# Global source traversal defaults:
+#
+# exclude_patterns:
+#   - "*.tmp"
+#   - "*.cache"
+#   - ".DS_Store"
+#   - "node_modules"
+# exclude_if_present:
+#   - .nobackup
+#   - CACHEDIR.TAG
+# one_file_system: true
+# git_ignore: false
+# xattrs:
+#   enabled: true
 
-# Extended attribute handling.
-xattrs:
-  # Preserve filesystem extended attributes during backup and restore.
-  enabled: true
+# Retention policy for `vger prune` (rules are additive):
+#
+# retention:
+#   keep_within: "2d"             # plain number means days
+#   keep_last: 5
+#   keep_hourly: 24
+#   keep_daily: 7
+#   keep_weekly: 4
+#   keep_monthly: 6
+#   keep_yearly: 2
 
-# Content-defined chunking parameters (FastCDC)
-chunker:
-  min_size: 524288    # 512 KiB (default)
-  avg_size: 2097152   # 2 MiB (default)
-  max_size: 8388608   # 8 MiB (default)
+# Desktop scheduler settings (used by vger-gui):
+#
+# schedule:
+#   enabled: false
+#   every: "24h"                  # supports m, h, d
+#   on_startup: false
+#   jitter_seconds: 0
+#   passphrase_prompt_timeout_seconds: 300
 
-# Compression settings
-compression:
-  # Algorithm: "lz4", "zstd", or "none" (default: "lz4")
-  algorithm: lz4
-
-  # Zstd compression level, 1-22 (default: 3, only used when algorithm is "zstd")
-  zstd_level: 3
-
-# Optional backup resource limits.
+# Optional resource limits for backup.
 # All values are MiB/s unless noted; 0 means unlimited/no change.
 #
 # limits:
 #   cpu:
-#     # Cap backup transform workers (compression/encryption); 0 = default rayon behavior.
 #     max_threads: 0
-#     # Process niceness target on Unix (-20..19). 0 = leave unchanged.
-#     nice: 0
+#     nice: 0                      # Unix niceness target (-20..19)
+#     max_upload_concurrency: 4
+#     transform_batch_mib: 32
+#     transform_batch_chunks: 8192
+#     pipeline_depth: 4
+#     pipeline_buffer_mib: 256
 #   io:
-#     # Throttle source file reads during backup.
 #     read_mib_per_sec: 0
-#     # Throttle local repository writes (for local/file:// repositories).
 #     write_mib_per_sec: 0
 #   network:
-#     # Throttle remote backend reads/writes (s3/sftp/rest repositories).
 #     read_mib_per_sec: 0
 #     write_mib_per_sec: 0
 
-# Hooks — shell commands to run before/after vger commands (backup, prune, check, compact).
-# Global hooks apply to all repositories. Per-repo hooks go in the repo entry.
-# Source-level hooks go in the source entry (simpler: before/after/failed/finally only).
-#
-# Hook types:
-#   before / before_<cmd>   — runs before the command (failure aborts)
-#   after / after_<cmd>     — runs after success only
-#   failed / failed_<cmd>   — runs after failure only
-#   finally / finally_<cmd> — runs always, regardless of outcome
-#   Valid <cmd> values: backup, prune, check, compact
-#
-# Variables: {repository}, {command}, {label}, {error}, {source_label}, {source_path}
-# Env vars:  VGER_REPOSITORY, VGER_COMMAND, VGER_LABEL, VGER_ERROR,
-#            VGER_SOURCE_LABEL, VGER_SOURCE_PATH
-#
-# hooks:
-#   before_backup:
-#     - "pg_dump mydb > /tmp/db.sql"
-#   finally_backup:
-#     - "rm -f /tmp/db.sql"
-#   failed:
-#     - "notify-send 'vger {command} failed: {error}'"
-#
-# Apprise notifications (requires `pip install apprise`)
-# Apprise supports 100+ notification services via URL schemes.
-# See https://github.com/caronc/apprise/wiki for all supported URLs.
-#
-# hooks:
-#   after_backup:
-#     - >-
-#       apprise -t "Backup complete"
-#       -b "vger {command} finished for {repository}"
-#       "gotify://hostname/token"
-#       "slack://tokenA/tokenB/tokenC"
-#   failed:
-#     - >-
-#       apprise -t "Backup failed"
-#       -b "vger {command} failed for {repository}: {error}"
-#       "gotify://hostname/token"
-
-# Retention policy for `vger prune`
-# At least one keep_* option must be set for prune to run.
-# Snapshots matching multiple rules are kept (rules are additive).
-# Per-source retention overrides this default (set in the source entry).
-retention:
-  # Keep all snapshots created within this duration
-  # Supported suffixes: h (hours), d (days), w (weeks), m (months ~30d), y (years ~365d)
-  # A plain number is treated as days.
-  keep_within: "2d"
-
-  # Keep the N most recent snapshots
-  keep_last: 5
-
-  # Keep N snapshots per time bucket (newest in each bucket is kept)
-  keep_hourly: 24
-  keep_daily: 7
-  keep_weekly: 4
-  keep_monthly: 6
-  keep_yearly: 2
-
-# Optional desktop scheduler settings (used by vger-gui).
-# The GUI reads this as source-of-truth and auto-reloads on config edits.
-#
-# schedule:
-#   enabled: false
-#   every: "24h"                      # supports m, h, d (e.g. 30m, 6h, 2d)
-#   on_startup: false
-#   jitter_seconds: 0
-#   passphrase_prompt_timeout_seconds: 300
+# See docs/src/configuration.md for full option reference.

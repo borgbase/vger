@@ -1371,102 +1371,28 @@ pub fn load_config(path: &Path) -> crate::error::Result<VgerConfig> {
 /// Returns a minimal YAML config template suitable for bootstrapping.
 pub fn minimal_config_template() -> &'static str {
     r#"# vger configuration file
-# See https://github.com/your-org/vger for full documentation.
+# Minimal required configuration.
+# For advanced examples, see docs and vger.example.yaml.
 
 repositories:
   - url: /path/to/repo
-    label: main
-
-encryption:
-  mode: auto
-  # passphrase: secret
-  # passcommand: "pass show vger"
 
 sources:
-  - /home/user/documents
+  - /path/to/source
 
-# exclude_patterns:
-#   - "*.tmp"
-#   - ".cache/**"
-#
-# # Skip directories if any marker file is present:
-# # exclude_if_present:
-# #   - .nobackup
-# #   - CACHEDIR.TAG
-#
-# # Don't cross filesystem boundaries (default: true)
-# # one_file_system: true
-#
-# # Respect repository .gitignore files (default: false)
-# # git_ignore: false
-#
-# # Preserve extended attributes by default.
-# # xattrs:
-# #   enabled: true
+# --- Common optional settings (uncomment as needed) ---
 
 # retention:
 #   keep_daily: 7
 #   keep_weekly: 4
-#   keep_monthly: 6
+#
+# exclude_patterns:
+#   - "*.tmp"
+#   - ".cache/**"
 #
 # schedule:
-#   enabled: false
+#   enabled: true
 #   every: "24h"
-#   on_startup: false
-#   jitter_seconds: 0
-#   passphrase_prompt_timeout_seconds: 300
-#
-# # Optional resource limits for backup.
-# # All values are MiB/s unless noted; 0 means unlimited/no change.
-# #
-# # limits:
-# #   cpu:
-# #     max_threads: 0
-# #     nice: 0
-# #   io:
-# #     read_mib_per_sec: 0
-# #     write_mib_per_sec: 0
-# #   network:
-# #     read_mib_per_sec: 0
-# #     write_mib_per_sec: 0
-
-# Sources support simple paths (above) or rich entries:
-#
-# sources:
-#   - path: /home/user/documents
-#     label: docs
-#     exclude:
-#       - "*.tmp"
-#     xattrs:
-#       enabled: false
-#     repos:
-#       - main
-#     retention:
-#       keep_daily: 14
-#     hooks:
-#       before: "echo backing up docs"
-#
-# Multiple repositories: add more entries to 'repositories:'.
-# Top-level settings serve as defaults; per-repo entries can override
-# encryption, compression, retention, and limits.
-#
-# URL formats:
-#   Local:  /backups/repo  or  file:///backups/repo
-#   S3:     s3://bucket/prefix  or  s3://endpoint:port/bucket/prefix
-#   SFTP:   sftp://user@host/path
-#   REST:   https://backup.example.com/repo
-#
-#  - url: s3://my-bucket/vger
-#    label: remote
-#    region: us-east-1
-#    compression:
-#      algorithm: zstd
-#    retention:
-#      keep_daily: 30
-#    retry:
-#      max_retries: 5
-#      retry_delay_ms: 2000
-#      retry_max_delay_ms: 120000
 "#
 }
 
@@ -1552,6 +1478,7 @@ mod tests {
     #[test]
     fn test_minimal_template_is_valid_yaml() {
         let template = minimal_config_template();
+        assert!(!template.contains("encryption:"));
         let parsed: Result<RawConfig, _> = serde_yaml::from_str(template);
         assert!(
             parsed.is_ok(),
@@ -1563,8 +1490,8 @@ mod tests {
         assert_eq!(repos.len(), 1);
         assert_eq!(repos[0].config.repository.url, "/path/to/repo");
         assert_eq!(repos[0].sources.len(), 1);
-        assert_eq!(repos[0].sources[0].paths, vec!["/home/user/documents"]);
-        assert_eq!(repos[0].sources[0].label, "documents");
+        assert_eq!(repos[0].sources[0].paths, vec!["/path/to/source"]);
+        assert_eq!(repos[0].sources[0].label, "source");
     }
 
     #[test]
