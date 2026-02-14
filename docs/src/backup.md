@@ -60,6 +60,12 @@ vger list --source docs
 
 # List files inside a snapshot
 vger snapshot list a1b2c3d4
+
+# Find recent SQL dumps across recent snapshots
+vger snapshot find --last 5 --name '*.sql'
+
+# Find logs from one source changed in the last week
+vger snapshot find --source myapp --since 7d --iname '*.log'
 ```
 
 ## Command dumps

@@ -231,7 +231,12 @@ struct Cli {
     config: Option<String>,
 
     /// Select repository by label or path (operates on all repos if omitted)
-    #[arg(short = 'R', long = "repo", global = true)]
+    #[arg(
+        short = 'R',
+        long = "repo",
+        global = true,
+        help_heading = "Global Options"
+    )]
     repo: Option<String>,
 
     /// Verbosity level (-v, -vv, -vvv)
@@ -401,6 +406,39 @@ enum SnapshotCommand {
     Info {
         /// Snapshot to inspect
         snapshot: String,
+    },
+    /// Find files across snapshots
+    Find {
+        /// Starting directory (default: root)
+        path: Option<String>,
+        /// Filter by source label
+        #[arg(short = 'S', long = "source", help_heading = "Scope Options")]
+        source: Option<String>,
+        /// Search only the last N snapshots (must be >= 1)
+        #[arg(
+            long,
+            value_parser = clap::value_parser!(u64).range(1..),
+            help_heading = "Scope Options"
+        )]
+        last: Option<u64>,
+        /// Match filename by glob pattern (case-sensitive)
+        #[arg(long = "name", help_heading = "Filter Options")]
+        name: Option<String>,
+        /// Match filename by glob pattern (case-insensitive)
+        #[arg(long = "iname", help_heading = "Filter Options")]
+        iname: Option<String>,
+        /// Filter by entry type: f (file), d (directory), l (symlink)
+        #[arg(long = "type", value_name = "TYPE", help_heading = "Filter Options")]
+        entry_type: Option<String>,
+        /// Only include items modified within this time span (e.g. 24h, 7d, 2w)
+        #[arg(long, help_heading = "Filter Options")]
+        since: Option<String>,
+        /// Only include items at least this size (e.g. 1M, 500K)
+        #[arg(long, help_heading = "Filter Options")]
+        larger: Option<String>,
+        /// Only include items at most this size (e.g. 10M, 1G)
+        #[arg(long, help_heading = "Filter Options")]
+        smaller: Option<String>,
     },
 }
 
@@ -1131,6 +1169,19 @@ fn run_snapshot_command(
             }
             Ok(())
         }
+        SnapshotCommand::Find {
+            path,
+            source,
+            last,
+            name,
+            iname,
+            entry_type,
+            since,
+            larger,
+            smaller,
+        } => run_snapshot_find(
+            config, label, path, source, last, name, iname, entry_type, since, larger, smaller,
+        ),
         SnapshotCommand::Info { snapshot } => {
             let meta = with_repo_passphrase(config, label, |passphrase| {
                 commands::list::get_snapshot_meta(config, passphrase, snapshot)
@@ -1200,6 +1251,123 @@ fn run_snapshot_command(
             Ok(())
         }
     }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn run_snapshot_find(
+    config: &VgerConfig,
+    label: Option<&str>,
+    path: &Option<String>,
+    source: &Option<String>,
+    last: &Option<u64>,
+    name: &Option<String>,
+    iname: &Option<String>,
+    entry_type: &Option<String>,
+    since: &Option<String>,
+    larger: &Option<String>,
+    smaller: &Option<String>,
+) -> Result<(), Box<dyn std::error::Error>> {
+    use commands::find::{FileStatus, FindFilter, FindScope};
+    use vger_core::snapshot::item::ItemType;
+
+    let scope = FindScope {
+        source_label: source.clone(),
+        last_n: last.map(|n| n as usize),
+    };
+
+    let path_prefix = path.as_deref().map(normalize_path_filter);
+
+    let item_type: Option<ItemType> = entry_type
+        .as_deref()
+        .map(|t| match t {
+            "f" => Ok(ItemType::RegularFile),
+            "d" => Ok(ItemType::Directory),
+            "l" => Ok(ItemType::Symlink),
+            _ => Err(format!("unknown --type '{t}': use f, d, or l")),
+        })
+        .transpose()
+        .map_err(|e| -> Box<dyn std::error::Error> { e.into() })?;
+
+    let since_dt = since.as_deref().map(parse_duration_span).transpose()?;
+
+    let larger_than = larger.as_deref().map(|s| parse_size(s)).transpose()?;
+
+    let smaller_than = smaller.as_deref().map(|s| parse_size(s)).transpose()?;
+
+    let filter = FindFilter::build(
+        path_prefix,
+        name.as_deref(),
+        iname.as_deref(),
+        item_type,
+        since_dt,
+        larger_than,
+        smaller_than,
+    )
+    .map_err(|e| -> Box<dyn std::error::Error> { e.into() })?;
+
+    let timelines = with_repo_passphrase(config, label, |passphrase| {
+        commands::find::run(config, passphrase, &scope, &filter)
+            .map_err(|e| -> Box<dyn std::error::Error> { Box::new(e) })
+    })?;
+
+    if timelines.is_empty() {
+        println!("No matching files found.");
+        return Ok(());
+    }
+
+    for timeline in &timelines {
+        println!("{}", timeline.path);
+        println!("  {:<12} {:<20} {:>10}  Status", "Snapshot", "Date", "Size");
+        for ah in &timeline.hits {
+            let date = ah.hit.snapshot_time.format("%Y-%m-%d %H:%M:%S").to_string();
+            let size = format_bytes(ah.hit.size);
+            let status = match ah.status {
+                FileStatus::Added => "added",
+                FileStatus::Modified => "modified",
+                FileStatus::Unchanged => "unchanged",
+            };
+            println!(
+                "  {:<12} {:<20} {:>10}  {}",
+                ah.hit.snapshot_name, date, size, status
+            );
+        }
+        println!();
+    }
+
+    Ok(())
+}
+
+fn parse_duration_span(
+    s: &str,
+) -> Result<chrono::DateTime<chrono::Utc>, Box<dyn std::error::Error>> {
+    let s = s.trim();
+    if s.is_empty() {
+        return Err("empty duration string".into());
+    }
+
+    let (num_str, suffix) = match s.as_bytes().last() {
+        Some(b'h' | b'H') => (&s[..s.len() - 1], 3600i64),
+        Some(b'd' | b'D') => (&s[..s.len() - 1], 86400i64),
+        Some(b'w' | b'W') => (&s[..s.len() - 1], 604800i64),
+        _ => {
+            return Err(format!(
+                "invalid duration '{s}': use a suffix of h, d, or w (e.g. 24h, 7d, 2w)"
+            )
+            .into())
+        }
+    };
+
+    let n: i64 = num_str
+        .parse()
+        .map_err(|_| format!("invalid duration number: '{num_str}'"))?;
+
+    if n <= 0 {
+        return Err(format!("--since duration must be positive (got '{s}')").into());
+    }
+
+    let seconds = n * suffix;
+    let duration = chrono::Duration::seconds(seconds);
+    Ok(chrono::Utc::now() - duration)
 }
 
 fn run_extract(

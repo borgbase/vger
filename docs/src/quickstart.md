@@ -56,6 +56,12 @@ List files inside a snapshot (use the hex ID from `vger list`):
 vger snapshot list a1b2c3d4
 ```
 
+Search for a file across recent snapshots:
+
+```bash
+vger snapshot find --name '*.txt' --since 7d
+```
+
 ## Restore
 
 Restore files from a snapshot to a directory:

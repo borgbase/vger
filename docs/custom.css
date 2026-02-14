@@ -1,0 +1,8 @@
+/* Keep command names readable in Command Reference. */
+h1#command-reference + .table-wrapper table th:first-child,
+h1#command-reference + .table-wrapper table td:first-child,
+h1#command-reference + table th:first-child,
+h1#command-reference + table td:first-child {
+  width: 35%;
+  white-space: nowrap;
+}

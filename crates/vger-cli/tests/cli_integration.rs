@@ -277,6 +277,141 @@ fn cli_prune_list_source_filter_and_mutation() {
 }
 
 #[test]
+fn cli_snapshot_find_timeline_and_filters() {
+    let fx = CliFixture::new();
+    write_plain_config(&fx.config_path, &fx.repo_dir);
+
+    let cfg = fx.config_path.to_string_lossy().to_string();
+    let source = fx.source_a.to_string_lossy().to_string();
+
+    // Create initial files
+    std::fs::create_dir_all(fx.source_a.join("sub")).unwrap();
+    std::fs::write(fx.source_a.join("hello.txt"), b"hello v1").unwrap();
+    std::fs::write(fx.source_a.join("sub/deep.rs"), b"fn main() {}").unwrap();
+    std::fs::write(fx.source_a.join("big.bin"), vec![0u8; 2048]).unwrap();
+
+    fx.run_ok(&["--config", &cfg, "init"]);
+
+    // First backup
+    let out1 = fx.run_ok(&["--config", &cfg, "backup", &source]);
+    let snap1 = parse_snapshot_name(&out1);
+    std::thread::sleep(Duration::from_millis(10));
+
+    // Modify hello.txt, leave others unchanged
+    std::fs::write(fx.source_a.join("hello.txt"), b"hello v2").unwrap();
+
+    // Second backup
+    let out2 = fx.run_ok(&["--config", &cfg, "backup", &source]);
+    let snap2 = parse_snapshot_name(&out2);
+
+    // --- Basic find (no filters) returns all files across both snapshots ---
+    let find_all = fx.run_ok(&["--config", &cfg, "snapshot", "find"]);
+    assert!(find_all.contains("hello.txt"), "should list hello.txt");
+    assert!(find_all.contains("big.bin"), "should list big.bin");
+    assert!(find_all.contains(&snap1), "should reference first snapshot");
+    assert!(
+        find_all.contains(&snap2),
+        "should reference second snapshot"
+    );
+
+    // --- Status annotations ---
+    // hello.txt was added in snap1, modified in snap2
+    assert!(find_all.contains("added"), "should show 'added' status");
+    assert!(
+        find_all.contains("modified"),
+        "should show 'modified' status"
+    );
+    // big.bin and sub/deep.rs are unchanged in snap2
+    assert!(
+        find_all.contains("unchanged"),
+        "should show 'unchanged' status"
+    );
+
+    // --- Filter by --name glob ---
+    let find_rs = fx.run_ok(&["--config", &cfg, "snapshot", "find", "--name", "*.rs"]);
+    assert!(find_rs.contains("deep.rs"), "glob should match .rs files");
+    assert!(
+        !find_rs.contains("hello.txt"),
+        "glob should exclude .txt files"
+    );
+    assert!(
+        !find_rs.contains("big.bin"),
+        "glob should exclude .bin files"
+    );
+
+    // --- Filter by --type ---
+    let find_dirs = fx.run_ok(&["--config", &cfg, "snapshot", "find", "--type", "d"]);
+    assert!(find_dirs.contains("sub"), "should find 'sub' directory");
+    assert!(
+        !find_dirs.contains("hello.txt"),
+        "should exclude regular files"
+    );
+
+    // --- Filter by --path subtree ---
+    let find_sub = fx.run_ok(&["--config", &cfg, "snapshot", "find", "sub"]);
+    assert!(
+        find_sub.contains("deep.rs"),
+        "path filter should include sub/deep.rs"
+    );
+    assert!(
+        !find_sub.contains("hello.txt"),
+        "path filter should exclude hello.txt"
+    );
+
+    // --- Filter by --larger ---
+    let find_large = fx.run_ok(&["--config", &cfg, "snapshot", "find", "--larger", "1K"]);
+    assert!(
+        find_large.contains("big.bin"),
+        "should include 2 KiB file when --larger 1K"
+    );
+    assert!(
+        !find_large.contains("hello.txt"),
+        "should exclude small file when --larger 1K"
+    );
+
+    // --- Filter by --smaller ---
+    let find_small = fx.run_ok(&["--config", &cfg, "snapshot", "find", "--smaller", "100"]);
+    assert!(
+        find_small.contains("hello.txt"),
+        "should include small file when --smaller 100"
+    );
+    assert!(
+        !find_small.contains("big.bin"),
+        "should exclude large file when --smaller 100"
+    );
+
+    // --- Filter by --last ---
+    let find_last1 = fx.run_ok(&["--config", &cfg, "snapshot", "find", "--last", "1"]);
+    assert!(
+        !find_last1.contains(&snap1),
+        "--last 1 should exclude first snapshot"
+    );
+    assert!(
+        find_last1.contains(&snap2),
+        "--last 1 should include second snapshot"
+    );
+    // With only one snapshot, all files are "added"
+    assert!(
+        !find_last1.contains("unchanged"),
+        "--last 1 should not show 'unchanged'"
+    );
+
+    // --- --last 0 is rejected ---
+    let (_stdout, stderr) = fx.run_err(&["--config", &cfg, "snapshot", "find", "--last", "0"]);
+    assert!(
+        stderr.contains("0") || stderr.contains("invalid"),
+        "--last 0 should be rejected"
+    );
+
+    // --- --since with invalid value is rejected ---
+    let (_stdout, stderr) = fx.run_err(&["--config", &cfg, "snapshot", "find", "--since", "0h"]);
+    assert!(
+        stderr.contains("positive") || stderr.contains("must be"),
+        "--since 0h should be rejected"
+    );
+}
+
+#[test]
 fn cli_check_verify_data_detects_tampered_pack() {
     let fx = CliFixture::new();
     write_plain_config(&fx.config_path, &fx.repo_dir);

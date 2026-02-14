@@ -35,6 +35,28 @@ vger snapshot list a1b2c3d4 --sort size
 vger snapshot info a1b2c3d4
 ```
 
+## Find files across snapshots
+
+Use `snapshot find` to locate files before choosing which snapshot to restore from.
+
+```bash
+# Find PDFs modified in the last 14 days
+vger snapshot find --name '*.pdf' --since 14d
+
+# Limit search to one source and recent snapshots
+vger snapshot find --source docs --last 10 --name '*.docx'
+
+# Search under a subtree with case-insensitive name matching
+vger snapshot find sub --iname 'report*' --since 7d
+
+# Combine type and size filters
+vger snapshot find --type f --larger 1M --smaller 20M --since 30d
+```
+
+- `--last` must be `>= 1`.
+- `--since` accepts positive spans with suffix `h`, `d`, or `w` (for example: `24h`, `7d`, `2w`).
+- `--larger` means at least this size, and `--smaller` means at most this size.
+
 ## Restore to a directory
 
 ```bash
