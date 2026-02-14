@@ -338,9 +338,9 @@ enum Commands {
 
     /// Generate a minimal configuration file
     Config {
-        /// Destination path for the config file (default: ./vger.yaml)
-        #[arg(short, long, default_value = "vger.yaml")]
-        dest: String,
+        /// Destination path (skips interactive prompt)
+        #[arg(short, long)]
+        dest: Option<String>,
     },
 
     /// Browse snapshots via a local WebDAV server
@@ -482,7 +482,7 @@ fn main() {
 
     // Handle `config` subcommand early — no config file needed
     if let Some(Commands::Config { dest }) = &cli.command {
-        if let Err(e) = run_config_generate(dest) {
+        if let Err(e) = run_config_generate(dest.as_deref()) {
             eprintln!("Error: {e}");
             std::process::exit(1);
         }
@@ -717,11 +717,14 @@ fn run_default_actions(
     }
 }
 
-fn run_config_generate(dest: &str) -> Result<(), Box<dyn std::error::Error>> {
-    let path = std::path::Path::new(dest);
+fn run_config_generate(dest: Option<&str>) -> Result<(), Box<dyn std::error::Error>> {
+    let path = match dest {
+        Some(d) => std::path::PathBuf::from(d),
+        None => pick_config_location()?,
+    };
 
     if path.exists() {
-        return Err(format!("file already exists: {dest}").into());
+        return Err(format!("file already exists: {}", path.display()).into());
     }
 
     if let Some(parent) = path.parent() {
@@ -730,10 +733,44 @@ fn run_config_generate(dest: &str) -> Result<(), Box<dyn std::error::Error>> {
         }
     }
 
-    std::fs::write(path, config::minimal_config_template())?;
-    println!("Config written to: {dest}");
+    std::fs::write(&path, config::minimal_config_template())?;
+    println!("Config written to: {}", path.display());
     println!("Edit it to set your repository path and source directories.");
     Ok(())
+}
+
+fn pick_config_location() -> Result<std::path::PathBuf, Box<dyn std::error::Error>> {
+    let bold = dialoguer::console::Style::new().bold();
+    let search_paths = config::default_config_search_paths();
+
+    let descriptions: &[&str] = &[
+        "Best for: project-specific backups, version-controlled settings",
+        "Best for: personal backups of your home directory",
+        "Best for: server backups, runs as root or via systemd",
+    ];
+
+    let labels: &[&str] = &["Local directory", "User config", "System-wide"];
+
+    let items: Vec<String> = search_paths
+        .iter()
+        .zip(labels.iter())
+        .zip(descriptions.iter())
+        .map(|(((path, _level), label), desc)| {
+            format!(
+                "{} {}\n  {desc}",
+                bold.apply_to(label),
+                bold.apply_to(path.display()),
+            )
+        })
+        .collect();
+
+    let selection = dialoguer::Select::new()
+        .with_prompt("Where should the config file live?")
+        .items(&items)
+        .default(0)
+        .interact()?;
+
+    Ok(search_paths[selection].0.clone())
 }
 
 fn with_repo_passphrase<T>(
