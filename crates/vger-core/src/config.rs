@@ -241,9 +241,8 @@ impl ScheduleConfig {
 const HOOK_PREFIXES: &[&str] = &["before", "after", "failed", "finally"];
 
 /// Valid command suffixes for command-specific hooks.
-const HOOK_COMMANDS: &[&str] = &[
-    "backup", "prune", "compact", "check", "delete", "restore", "info", "init", "list", "run",
-];
+/// Also used by the hook runner to skip hooks for non-hookable commands.
+pub(crate) const HOOK_COMMANDS: &[&str] = &["backup", "prune", "compact", "check"];
 
 /// Hook configuration: flat map of hook keys to lists of shell commands.
 ///
@@ -2126,6 +2125,30 @@ hooks:
         let err = load_and_resolve(&path).unwrap_err();
         let msg = err.to_string();
         assert!(msg.contains("invalid hook key"), "unexpected error: {msg}");
+    }
+
+    #[test]
+    fn test_hooks_validation_rejects_non_automation_command_keys() {
+        let dir = tempfile::tempdir().unwrap();
+
+        for key in ["before_info", "after_init", "failed_run"] {
+            let yaml = format!(
+                r#"
+repositories:
+  - url: /tmp/repo
+hooks:
+  {key}:
+    - "echo nope"
+"#
+            );
+            let path = dir.path().join(format!("{key}.yaml"));
+            fs::write(&path, yaml).unwrap();
+
+            let err = load_and_resolve(&path).unwrap_err();
+            let msg = err.to_string();
+            assert!(msg.contains("invalid hook key"), "unexpected error: {msg}");
+            assert!(msg.contains(key), "error should mention key {key}: {msg}");
+        }
     }
 
     #[test]

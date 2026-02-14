@@ -33,6 +33,11 @@ pub fn run_with_hooks<F, T>(
 where
     F: FnOnce() -> std::result::Result<T, Box<dyn std::error::Error>>,
 {
+    // Hooks only run for hookable commands (backup, prune, check, compact).
+    if !crate::config::HOOK_COMMANDS.contains(&ctx.command.as_str()) {
+        return action();
+    }
+
     let cmd = ctx.command.clone();
     let before_key = format!("before_{cmd}");
     let after_key = format!("after_{cmd}");
@@ -389,6 +394,32 @@ mod tests {
 
         assert!(result.is_err());
         assert!(!action_ran, "action should not run when before hook fails");
+    }
+
+    #[test]
+    fn test_non_hookable_commands_skip_hooks() {
+        let global = hooks_from(&[
+            ("before", vec![cmd_false()]),
+            ("before_info", vec![cmd_false()]),
+            ("before_run", vec![cmd_false()]),
+        ]);
+        let repo = HooksConfig::default();
+
+        for command in ["info", "run"] {
+            let mut ctx = make_ctx(command);
+            let mut action_ran = false;
+
+            let result = run_with_hooks(&global, &repo, &mut ctx, || {
+                action_ran = true;
+                Ok(())
+            });
+
+            assert!(
+                result.is_ok(),
+                "non-hookable command should skip hooks: {command}"
+            );
+            assert!(action_ran, "action should run for command: {command}");
+        }
     }
 
     #[test]

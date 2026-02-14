@@ -171,7 +171,7 @@ compression:
 #     read_mib_per_sec: 0
 #     write_mib_per_sec: 0
 
-# Hooks — shell commands to run before/after vger commands.
+# Hooks — shell commands to run before/after vger commands (backup, prune, check, compact).
 # Global hooks apply to all repositories. Per-repo hooks go in the repo entry.
 # Source-level hooks go in the source entry (simpler: before/after/failed/finally only).
 #
@@ -180,6 +180,7 @@ compression:
 #   after / after_<cmd>     — runs after success only
 #   failed / failed_<cmd>   — runs after failure only
 #   finally / finally_<cmd> — runs always, regardless of outcome
+#   Valid <cmd> values: backup, prune, check, compact
 #
 # Variables: {repository}, {command}, {label}, {error}, {source_label}, {source_path}
 # Env vars:  VGER_REPOSITORY, VGER_COMMAND, VGER_LABEL, VGER_ERROR,

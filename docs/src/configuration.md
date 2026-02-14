@@ -182,7 +182,7 @@ limits:                              # Optional backup resource limits
 Shell commands that run at specific points in the vger command lifecycle. Hooks can be defined at three levels: global (top-level `hooks:`), per-repository, and per-source.
 
 ```yaml
-hooks:                               # Global hooks: run for every command
+hooks:                               # Global hooks: run for backup/prune/check/compact
   before: "echo starting"
   after: "echo done"
   # before_backup: "echo backup starting"  # Command-specific hooks
@@ -199,7 +199,7 @@ hooks:                               # Global hooks: run for every command
 | `failed` / `failed_<cmd>`   | After failure only      | Logged, doesn't affect result |
 | `finally` / `finally_<cmd>` | Always, regardless of outcome | Logged, doesn't affect result |
 
-Use the bare form (`before`, `after`, etc.) to match all commands, or append a command name (`before_backup`, `failed_prune`, etc.) to match only that command.
+Hooks only run for `backup`, `prune`, `check`, and `compact`. The bare form (`before`, `after`, etc.) fires for all four commands, while the command-specific form (`before_backup`, `failed_prune`, etc.) fires only for that command.
 
 ### Execution order
 
