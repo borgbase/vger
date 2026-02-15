@@ -298,6 +298,8 @@ impl Drop for NiceGuard {
 #[cfg(unix)]
 fn get_process_nice() -> std::result::Result<i32, String> {
     Errno::clear();
+    // SAFETY: getpriority with PRIO_PROCESS/0 reads the calling process's nice value.
+    // No pointer arguments; errno is cleared beforehand to distinguish -1 return from error.
     let value = unsafe { nix::libc::getpriority(nix::libc::PRIO_PROCESS, 0) };
     let errno = Errno::last_raw();
     if value == -1 && errno != 0 {
@@ -312,6 +314,8 @@ fn get_process_nice() -> std::result::Result<i32, String> {
 #[cfg(unix)]
 fn set_process_nice(value: i32) -> std::result::Result<(), String> {
     Errno::clear();
+    // SAFETY: setpriority with PRIO_PROCESS/0 adjusts the calling process's nice value.
+    // No pointer arguments; the value parameter is range-checked by the kernel.
     let rc = unsafe { nix::libc::setpriority(nix::libc::PRIO_PROCESS, 0, value) };
     if rc != 0 {
         let errno = Errno::last_raw();

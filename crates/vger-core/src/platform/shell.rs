@@ -20,6 +20,8 @@ pub fn command_for_script(script: &str) -> Command {
         let mut cmd = Command::new("sh");
         cmd.arg("-c").arg(script);
         // Place child in its own process group so we can kill the entire tree on timeout.
+        // SAFETY: The pre_exec closure calls only setpgid, which is async-signal-safe
+        // (POSIX.1-2008). No heap allocation, locks, or non-reentrant functions are used.
         unsafe {
             cmd.pre_exec(|| {
                 // setpgid(0, 0) sets the process group ID to the child's own PID.
