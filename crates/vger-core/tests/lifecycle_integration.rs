@@ -12,7 +12,7 @@ use vger_core::config::{
 use vger_core::error::VgerError;
 use vger_core::repo::lock;
 use vger_core::repo::{EncryptionMode, Repository};
-use vger_core::storage::opendal_backend::OpendalBackend;
+use vger_core::storage::local_backend::LocalBackend;
 
 static TEST_ENV_INIT: Once = Once::new();
 
@@ -83,7 +83,7 @@ fn source_entry(path: &Path, label: &str) -> SourceEntry {
 }
 
 fn open_local_repo(repo_dir: &Path, passphrase: Option<&str>) -> Repository {
-    let storage = Box::new(OpendalBackend::local(repo_dir.to_str().unwrap()).unwrap());
+    let storage = Box::new(LocalBackend::new(repo_dir.to_str().unwrap()).unwrap());
     Repository::open(storage, passphrase).unwrap()
 }
 
@@ -325,7 +325,7 @@ fn run_encrypted_lifecycle(mode: EncryptionModeConfig, expected_mode: Encryption
         payload
     );
 
-    let storage = Box::new(OpendalBackend::local(repo_dir.to_str().unwrap()).unwrap());
+    let storage = Box::new(LocalBackend::new(repo_dir.to_str().unwrap()).unwrap());
     let wrong_open = Repository::open(storage, Some(wrong_passphrase));
     assert!(matches!(wrong_open, Err(VgerError::DecryptionFailed)));
 
@@ -419,7 +419,7 @@ fn backup_fails_when_repository_lock_is_held_by_another_process() {
     let config = make_test_config(&repo_dir);
     commands::init::run(&config, None).unwrap();
 
-    let storage = OpendalBackend::local(repo_dir.to_str().unwrap()).unwrap();
+    let storage = LocalBackend::new(repo_dir.to_str().unwrap()).unwrap();
     let guard = lock::acquire_lock(&storage).unwrap();
 
     let source_paths = vec![source_dir.to_string_lossy().to_string()];

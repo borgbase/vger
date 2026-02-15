@@ -1,13 +1,13 @@
 # Storage Backends
 
-V'Ger uses [Apache OpenDAL](https://opendal.apache.org/) for storage abstraction. The repository URL in your config determines which backend is used.
+The repository URL in your config determines which backend is used. S3 storage is implemented via [Apache OpenDAL](https://opendal.apache.org/), while SFTP uses a native [russh](https://github.com/Eugeny/russh) implementation. OpenDAL could be used to add more backends in the future.
 
-| Backend | URL example | Feature flag |
-|---------|-------------|--------------|
-| Local filesystem | `/backups/repo` | — (always available) |
-| S3 / S3-compatible | `s3://bucket/prefix` | — (always available) |
-| SFTP | `sftp://host/path` | `backend-sftp` |
-| REST (vger-server) | `https://host/repo` | `backend-rest` |
+| Backend | URL example |
+|---------|-------------|
+| Local filesystem | `/backups/repo` |
+| S3 / S3-compatible | `s3://bucket/prefix` |
+| SFTP | `sftp://host/path` |
+| REST (vger-server) | `https://host/repo` |
 
 ## Local filesystem
 
@@ -60,11 +60,9 @@ repositories:
 
 ## SFTP
 
-Store backups on a remote server via SFTP. Uses a direct [russh](https://github.com/Eugeny/russh) implementation (pure Rust SSH/SFTP) — no system `ssh` binary required. Works on all platforms including Windows.
+Store backups on a remote server via SFTP. Uses a native [russh](https://github.com/Eugeny/russh) implementation (pure Rust SSH/SFTP) — no system `ssh` binary required. Works on all platforms including Windows.
 
 Host keys are verified with an OpenSSH `known_hosts` file. Unknown hosts use TOFU (trust-on-first-use): the first key is stored, and later key changes fail connection.
-
-> Requires building with the `backend-sftp` feature flag (see [Building with optional backends](#building-with-optional-backends) below).
 
 ```yaml
 repositories:
@@ -89,8 +87,6 @@ URL format: `sftp://[user@]host[:port]/path`. Default port is 22.
 
 Store backups on a dedicated [vger-server](server-mode.md) instance via HTTP/HTTPS. The server provides append-only enforcement, quotas, lock management, and server-side compaction.
 
-> Requires building with the `backend-rest` feature flag (see [Building with optional backends](#building-with-optional-backends) below).
-
 ```yaml
 repositories:
   - url: "https://backup.example.com/myrepo"
@@ -106,19 +102,4 @@ repositories:
 
 See [Server Mode](server-mode.md) for how to set up and configure the server.
 
-## Building with optional backends
-
-Local and S3 backends are always available. SFTP and REST require feature flags at build time:
-
-```bash
-# All backends
-cargo build --release --features backend-sftp,backend-rest
-
-# Just SFTP
-cargo build --release --features backend-sftp
-
-# Just REST
-cargo build --release --features backend-rest
-```
-
-Pre-built binaries from the [releases page](https://github.com/borgbase/vger/releases) include all backends.
+All backends are included in the default build and in pre-built binaries from the [releases page](https://github.com/borgbase/vger/releases).

@@ -28,7 +28,8 @@ crates/
       config.rs                         # YAML config structs (serde)
       storage/
         mod.rs                          # StorageBackend trait (get/put/delete/exists/list/get_range/create_dir)
-        opendal_backend.rs              # OpenDAL adapter (local, S3)
+        local_backend.rs                # Native std::fs local filesystem backend
+        opendal_backend.rs              # OpenDAL adapter (S3 only)
       crypto/
         mod.rs                          # CryptoEngine trait + PlaintextEngine
         aes_gcm.rs                      # AES-256-GCM implementation
@@ -127,7 +128,7 @@ The type tag byte is used as AAD (authenticated additional data) in AES-GCM.
 | KDF | `argon2` 0.5 |
 | Compression | `lz4_flex` 0.11, `zstd` 0.13 |
 | Chunking | `fastcdc` 3 |
-| Storage | `opendal` 0.51 (services-fs, services-s3) |
+| Storage | `opendal` 0.51 (services-s3), `std::fs` for local |
 | Serialization | `rmp-serde` 1, `serde_json` 1 |
 | CLI | `clap` 4 (derive), `serde_yaml` 0.9 |
 | Filesystem | `walkdir` 2, `globset` 0.4, `filetime` 0.2, `xattr` 1 |

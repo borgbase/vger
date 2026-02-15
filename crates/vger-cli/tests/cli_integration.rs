@@ -4,7 +4,7 @@ use std::time::Duration;
 
 use tempfile::TempDir;
 use vger_core::repo::Repository;
-use vger_core::storage::opendal_backend::OpendalBackend;
+use vger_core::storage::local_backend::LocalBackend;
 
 struct CliFixture {
     _tmp: TempDir,
@@ -149,7 +149,7 @@ fn parse_snapshot_name(output: &str) -> String {
 }
 
 fn delete_pack_for_first_chunk(repo_dir: &Path) {
-    let storage = Box::new(OpendalBackend::local(repo_dir.to_str().unwrap()).unwrap());
+    let storage = Box::new(LocalBackend::new(repo_dir.to_str().unwrap()).unwrap());
     let repo = Repository::open(storage, None).unwrap();
     let (_chunk_id, entry) = repo
         .chunk_index

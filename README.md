@@ -23,7 +23,11 @@ Inspired by [BorgBackup](https://github.com/borgbackup/borg/), [Borgmatic](https
 
 ## Quick start
 
-Download a binary from the [releases page](https://github.com/borgbase/vger/releases), then:
+```bash
+curl -fsSL https://vger.pages.dev/install.sh | sh
+```
+
+Or download the latest release for your platform from the [releases page](https://github.com/borgbase/vger/releases).
 
 ```bash
 # Generate a starter config and edit it
@@ -39,7 +43,6 @@ vger list
 
 See the [full documentation](https://vger.borgbase.com) for storage backends, restore, maintenance, and more.
 
-Windows support currently targets the CLI (`vger.exe`). GUI builds are not shipped for Windows yet.
 
 ## Desktop UI
 

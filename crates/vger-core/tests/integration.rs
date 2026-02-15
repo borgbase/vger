@@ -9,7 +9,7 @@ use vger_core::repo::manifest::SnapshotEntry;
 use vger_core::repo::pack::PackType;
 use vger_core::repo::{EncryptionMode, Repository};
 use vger_core::snapshot::item::ItemType;
-use vger_core::storage::opendal_backend::OpendalBackend;
+use vger_core::storage::local_backend::LocalBackend;
 
 static TEST_ENV_INIT: std::sync::Once = std::sync::Once::new();
 
@@ -29,7 +29,7 @@ fn init_test_environment() {
 
 fn init_local_repo(dir: &std::path::Path) -> Repository {
     init_test_environment();
-    let storage = Box::new(OpendalBackend::local(dir.to_str().unwrap()).unwrap());
+    let storage = Box::new(LocalBackend::new(dir.to_str().unwrap()).unwrap());
     Repository::init(
         storage,
         EncryptionMode::None,
@@ -42,7 +42,7 @@ fn init_local_repo(dir: &std::path::Path) -> Repository {
 
 fn open_local_repo(dir: &std::path::Path) -> Repository {
     init_test_environment();
-    let storage = Box::new(OpendalBackend::local(dir.to_str().unwrap()).unwrap());
+    let storage = Box::new(LocalBackend::new(dir.to_str().unwrap()).unwrap());
     Repository::open(storage, None).unwrap()
 }
 
@@ -171,7 +171,7 @@ fn init_auto_mode_persists_concrete_encryption_mode() {
     ));
     drop(repo);
 
-    let storage = Box::new(OpendalBackend::local(repo_dir.to_str().unwrap()).unwrap());
+    let storage = Box::new(LocalBackend::new(repo_dir.to_str().unwrap()).unwrap());
     let reopened = Repository::open(storage, Some("test-passphrase")).unwrap();
     assert_eq!(reopened.config.encryption, selected);
 }

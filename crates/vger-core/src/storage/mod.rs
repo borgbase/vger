@@ -1,3 +1,4 @@
+pub mod local_backend;
 pub mod opendal_backend;
 #[cfg(feature = "backend-rest")]
 pub mod rest_backend;
@@ -340,7 +341,7 @@ pub fn backend_from_config(
     let parsed = parse_repo_url(&cfg.url)?;
 
     match parsed {
-        ParsedUrl::Local { path } => Ok(Box::new(opendal_backend::OpendalBackend::local(&path)?)),
+        ParsedUrl::Local { path } => Ok(Box::new(local_backend::LocalBackend::new(&path)?)),
         ParsedUrl::S3 {
             bucket,
             root,

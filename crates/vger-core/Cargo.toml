@@ -27,7 +27,7 @@ zstd = "0.13"
 fastcdc = "3"
 
 # Storage
-opendal = { version = "0.51", features = ["services-fs", "services-s3", "layers-blocking", "layers-throttle"] }
+opendal = { version = "0.51", features = ["services-s3", "layers-blocking", "layers-throttle"] }
 url = "2"
 
 # Filesystem

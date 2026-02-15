@@ -1,13 +1,13 @@
 use crate::commands;
 use crate::error::VgerError;
 use crate::repo::Repository;
-use crate::storage::opendal_backend::OpendalBackend;
+use crate::storage::local_backend::LocalBackend;
 
 use super::helpers::{backup_single_source, init_repo, init_test_environment};
 
 fn open_local_repo(repo_dir: &std::path::Path) -> Repository {
     init_test_environment();
-    let storage = Box::new(OpendalBackend::local(repo_dir.to_str().unwrap()).unwrap());
+    let storage = Box::new(LocalBackend::new(repo_dir.to_str().unwrap()).unwrap());
     Repository::open(storage, None).unwrap()
 }
 
