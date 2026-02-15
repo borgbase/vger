@@ -12,15 +12,16 @@ Compare vger against two established backup tools — restic and rustic — on a
 ## Scope
 
 - **Backend**: local only (eliminates network variability)
-- **Source dataset**: `~/corpus-local`
+- **Source dataset**: default `~/corpus-remote` (smaller, faster iteration). Optionally `~/corpus-local` for stress.
 - **Tools under test**: `vger`, `restic`, `rustic`
 
 ## Prerequisites
 
-1. Install restic and rustic if not present:
+1. Install required tools if not present:
    ```bash
-   sudo apt-get install -y restic
-   # For rustic, download from GitHub releases or use cargo install
+   sudo apt-get update -y
+   sudo apt-get install -y restic hyperfine time strace linux-perf
+   # rustic is typically preinstalled in this sandbox; otherwise install it.
    ```
 2. Verify all three tools are available:
    ```bash
@@ -28,8 +29,57 @@ Compare vger against two established backup tools — restic and rustic — on a
    restic version
    rustic --version
    ```
-3. Ensure `/usr/bin/time` is available (not shell builtin — use full path)
-4. Optional: install `hyperfine` for more rigorous timing
+3. Ensure `/usr/bin/time` exists (not the shell builtin `time`).
+
+## Quick Start (Scripted)
+
+Use the bundled harness (preferred; produces comparable outputs every run).
+
+Scripts live under `scripts/benchmarks/` relative to this skill directory.
+
+```bash
+SKILL_DIR="$(dirname "$(readlink -f "$0")")"  # or set manually
+
+# Basic: timing + repo size + tool stats
+RUNS=5 "$SKILL_DIR/scripts/benchmarks/run.sh" ~/corpus-remote
+
+# Add profiling: /usr/bin/time -v + strace summaries + perf (if allowed on host)
+PROFILE=1 PROFILE_STRACE=1 PROFILE_PERF=1 RUNS=3 "$SKILL_DIR/scripts/benchmarks/run.sh" ~/corpus-remote
+```
+
+The harness writes to `~/runtime/benchmarks/<UTC_STAMP>/`.
+
+Summaries:
+```bash
+python3 "$SKILL_DIR/scripts/benchmarks/summarize.py" ~/runtime/benchmarks/<UTC_STAMP>
+python3 "$SKILL_DIR/scripts/benchmarks/profile_report.py" ~/runtime/benchmarks/<UTC_STAMP>
+```
+
+## What To Look At (Actionable Signals)
+
+From `profile_report.py` (when `PROFILE=1`):
+- `maxrss_kb`: memory spikes (often restore path)
+- `user` vs `sys`: CPU vs kernel/IO bound work
+- `cswV`/`cswI`: scheduling overhead and contention
+- `minF`: page faults, often tracks allocator/memory behavior
+- `fs_out`: write amplification during restore
+
+From `strace.summary.txt` (when `PROFILE_STRACE=1`):
+- Heavy `futex` can indicate contention/over-threading.
+- Heavy `statx/newfstatat/llistxattr/getdents64` indicates metadata-walk cost (tree scan).
+
+From tool stats:
+- vger: `vger.info.txt`
+- restic: `restic.stats.txt` (includes `restic stats --mode raw-data`)
+- rustic: `rustic.stats.txt`
+
+## Full vs Incremental
+
+Decide what you are measuring:
+- **Incremental**: run backups repeatedly against an existing repo (measures “unchanged tree” behavior).
+- **Full**: wipe/re-init the repo before each backup run (measures ingest/pack performance).
+
+The harness defaults to an “incremental-like” loop once initialized, but you can rerun it multiple times and compare across stamps. For full-ingest benchmarks, patch the harness to re-init repos per run or wrap each command with repo wipe + init.
 
 ## Benchmark Phases
 
@@ -62,7 +112,7 @@ Test each tool through four phases:
 export VGER_PASSPHRASE=123
 vger init -c <config> -R local
 vger backup -c <config> -R local -l bench ~/corpus-local
-vger extract -c <config> -R local --dest <restore_dir> <snapshot_id>
+vger restore -c <config> -R local --dest <restore_dir> <snapshot_id>
 ```
 
 ### restic
@@ -91,6 +141,12 @@ From `/usr/bin/time -v` output:
 - **CPU usage** (`Percent of CPU this job got`)
 - **User time** (`User time`)
 - **System time** (`System time`)
+- **Context switches** (`Voluntary/Involuntary context switches`)
+- **Page faults** (`Minor/Major page faults`)
+- **FS IO** (`File system inputs/outputs`)
+
+From `perf stat` (optional):
+- Often blocked on locked-down hosts (`perf_event_paranoid=3`). Treat as best-effort.
 
 ## Output Format
 
