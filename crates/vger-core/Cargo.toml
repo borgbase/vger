@@ -32,6 +32,7 @@ opendal = { version = "0.51", features = ["services-s3", "layers-blocking", "lay
 url = "2"
 
 # Filesystem
+tempfile = "3"
 globset = "0.4"
 ignore = "0.4"
 filetime = "0.2"
@@ -73,7 +74,6 @@ backend-sftp = ["russh", "russh-sftp"]
 mount = ["dav-server", "tokio/rt-multi-thread", "tokio/macros", "tokio/signal", "tokio/net", "hyper", "hyper-util", "lru", "bytes", "futures-util"]
 
 [dev-dependencies]
-tempfile = "3"
 
 [target.'cfg(unix)'.dependencies]
 nix = { version = "0.29", features = ["fs", "hostname", "user", "signal", "process"] }

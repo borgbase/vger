@@ -1,6 +1,6 @@
 use std::fs;
-use std::io::{Read, Seek, SeekFrom};
-use std::path::{Component, PathBuf};
+use std::io::{Read, Seek, SeekFrom, Write};
+use std::path::{Component, Path, PathBuf};
 
 use crate::error::{Result, VgerError};
 use crate::storage::StorageBackend;
@@ -55,6 +55,16 @@ impl LocalBackend {
         Self::validate_key(key)?;
         Ok(self.root.join(key))
     }
+
+    /// Write data to a temp file in the same directory, then atomically rename
+    /// into place. This ensures readers never see a partial/corrupt file.
+    fn atomic_write(&self, path: &Path, data: &[u8]) -> Result<()> {
+        let dir = path.parent().unwrap_or(&self.root);
+        let mut tmp = tempfile::NamedTempFile::new_in(dir)?;
+        tmp.write_all(data)?;
+        tmp.persist(path).map_err(|e| e.error)?;
+        Ok(())
+    }
 }
 
 impl StorageBackend for LocalBackend {
@@ -69,11 +79,19 @@ impl StorageBackend for LocalBackend {
 
     fn put(&self, key: &str, data: &[u8]) -> Result<()> {
         let path = self.resolve(key)?;
-        if let Some(parent) = path.parent() {
-            fs::create_dir_all(parent)?;
+        match self.atomic_write(&path, data) {
+            Err(VgerError::Io(ref e)) if e.kind() == std::io::ErrorKind::NotFound => {
+                if let Some(parent) = path.parent() {
+                    fs::create_dir_all(parent)?;
+                }
+                self.atomic_write(&path, data)
+            }
+            other => other,
         }
-        fs::write(&path, data)?;
-        Ok(())
+    }
+
+    fn put_owned(&self, key: &str, data: Vec<u8>) -> Result<()> {
+        self.put(key, &data)
     }
 
     fn delete(&self, key: &str) -> Result<()> {
@@ -221,5 +239,59 @@ mod tests {
         assert!(backend.get("../../etc/passwd").is_err());
         assert!(backend.put("../escape", b"bad").is_err());
         assert!(backend.delete("/absolute").is_err());
+    }
+
+    #[test]
+    fn put_overwrites_existing_key() {
+        let dir = tempfile::tempdir().unwrap();
+        let backend = LocalBackend::new(dir.path().to_str().unwrap()).unwrap();
+        backend.put("manifest", b"version1").unwrap();
+        assert_eq!(backend.get("manifest").unwrap().unwrap(), b"version1");
+        backend.put("manifest", b"version2").unwrap();
+        assert_eq!(backend.get("manifest").unwrap().unwrap(), b"version2");
+    }
+
+    #[test]
+    fn put_creates_parent_dirs_on_demand() {
+        let dir = tempfile::tempdir().unwrap();
+        let backend = LocalBackend::new(dir.path().to_str().unwrap()).unwrap();
+        // Parent directory "locks" doesn't exist yet — put should create it
+        backend.put("locks/abc.json", b"lock").unwrap();
+        assert_eq!(backend.get("locks/abc.json").unwrap().unwrap(), b"lock");
+    }
+
+    #[test]
+    fn put_concurrent_writes_are_atomic() {
+        use std::sync::{Arc, Barrier};
+        use std::thread;
+
+        let dir = tempfile::tempdir().unwrap();
+        let backend = Arc::new(LocalBackend::new(dir.path().to_str().unwrap()).unwrap());
+        // Pre-create the parent directory so both threads can write immediately
+        backend.put("contested", b"seed").unwrap();
+
+        let payload_a = vec![0xAAu8; 1024 * 64];
+        let payload_b = vec![0xBBu8; 1024 * 64];
+
+        let barrier = Arc::new(Barrier::new(2));
+        let handles: Vec<_> = [payload_a.clone(), payload_b.clone()]
+            .into_iter()
+            .map(|payload| {
+                let backend = Arc::clone(&backend);
+                let barrier = Arc::clone(&barrier);
+                thread::spawn(move || {
+                    barrier.wait();
+                    backend.put("contested", &payload).unwrap();
+                })
+            })
+            .collect();
+
+        for h in handles {
+            h.join().unwrap();
+        }
+
+        let result = backend.get("contested").unwrap().unwrap();
+        // Result must be exactly one of the two full payloads — never a mixture
+        assert!(result == payload_a || result == payload_b);
     }
 }
