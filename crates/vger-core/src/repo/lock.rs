@@ -39,9 +39,7 @@ impl LockGuard {
 
 /// Acquire an advisory lock on the repository.
 pub fn acquire_lock(storage: &dyn StorageBackend) -> Result<LockGuard> {
-    let hostname = nix::unistd::gethostname()
-        .map(|h| h.to_string_lossy().to_string())
-        .unwrap_or_else(|_| "unknown".into());
+    let hostname = crate::platform::hostname();
     let pid = std::process::id() as u64;
 
     // Prefer backend-native lock APIs when available (e.g. REST server locks).
