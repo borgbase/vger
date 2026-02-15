@@ -15,28 +15,18 @@ Run an autonomous vger stress test from a single folder layout:
   ./stress-cli.sh
 
 The script creates ./repository and ./restore while running, then deletes
-both (plus all temp artifacts) on success. On failure, artifacts are preserved by
-default for debugging unless --no-preserve-on-failure is set.
+both (plus all temp artifacts) on success. On failure, artifacts are preserved
+for debugging.
 Corpus fingerprint baseline is cached at $SCRIPT_DIR/.stress-cache/corpus.fp;
 delete this file manually if corpus content changes.
 
 Options:
-  --iterations N           Loop count (default: 1000)
-  --check-every N          Run 'check' every N iterations; 0 disables (default: 50)
-  --verify-data-every N    Run 'check --verify-data' every N iterations; 0 disables (default: 0)
-  --delete-every N         Run delete every N iterations (default: 1)
-  --compact-threshold PCT  Compact threshold (default: 0)
-  --compression ALG        lz4|zstd|none (default: zstd)
-  --zstd-level N           zstd level (default: 6)
-  --keep-last N            retention.keep_last (default: 1)
-  --repo-label LABEL       repository label in config (default: stress)
-  --vger-bin PATH          vger binary path (default: ./vger next to script)
-  --corpus-dir PATH        corpus path (default: ./corpus next to script)
-  --preserve-on-failure    keep repository/restore/.stress-runtime on failure (default)
-  --no-preserve-on-failure always clean up, even on failure
-  --verify-diff-preview-lines N
-                           mismatch diff preview lines to stderr (default: 80)
-  --help                   Show help
+  --iterations N         Loop count (default: 1000)
+  --check-every N        Run 'check' every N iterations; 0 disables (default: 50)
+  --verify-data-every N  Run 'check --verify-data' every N iterations; 0 disables (default: 0)
+  --vger-bin PATH        vger binary path (default: ./vger next to script)
+  --corpus-dir PATH      corpus path (default: ./corpus next to script)
+  --help                 Show help
 USAGE
 }
 
@@ -67,25 +57,6 @@ find_sha_tool() {
     return 0
   fi
   return 1
-}
-
-sha256_file() {
-  local file="$1"
-  case "$SHA_TOOL" in
-    sha256sum)
-      sha256sum "$file" | awk '{print $1}'
-      ;;
-    shasum)
-      shasum -a 256 "$file" | awk '{print $1}'
-      ;;
-    openssl)
-      # output format: SHA2-256(file)= <hex>
-      openssl dgst -sha256 "$file" | awk '{print $NF}'
-      ;;
-    *)
-      die "internal error: unsupported hash tool '$SHA_TOOL'"
-      ;;
-  esac
 }
 
 abs_path() {
@@ -142,15 +113,6 @@ sha256_bulk() {
 ITERATIONS=1000
 CHECK_EVERY=50
 VERIFY_DATA_EVERY=0
-DELETE_EVERY=1
-COMPACT_THRESHOLD=0
-COMPRESSION="zstd"
-ZSTD_LEVEL=3
-KEEP_LAST=1
-REPO_LABEL="stress"
-PRESERVE_ON_FAILURE=1
-VERIFY_DIFF_PREVIEW_LINES=80
-ORIGINAL_ARGS=("$@")
 
 DEFAULT_VGER="$SCRIPT_DIR/vger"
 if [[ -x "$DEFAULT_VGER" ]]; then
@@ -175,48 +137,12 @@ while [[ $# -gt 0 ]]; do
       VERIFY_DATA_EVERY="${2:-}"
       shift 2
       ;;
-    --delete-every)
-      DELETE_EVERY="${2:-}"
-      shift 2
-      ;;
-    --compact-threshold)
-      COMPACT_THRESHOLD="${2:-}"
-      shift 2
-      ;;
-    --compression)
-      COMPRESSION="${2:-}"
-      shift 2
-      ;;
-    --zstd-level)
-      ZSTD_LEVEL="${2:-}"
-      shift 2
-      ;;
-    --keep-last)
-      KEEP_LAST="${2:-}"
-      shift 2
-      ;;
-    --repo-label)
-      REPO_LABEL="${2:-}"
-      shift 2
-      ;;
     --vger-bin)
       VGER_BIN="${2:-}"
       shift 2
       ;;
     --corpus-dir)
       CORPUS_DIR="${2:-}"
-      shift 2
-      ;;
-    --preserve-on-failure)
-      PRESERVE_ON_FAILURE=1
-      shift
-      ;;
-    --no-preserve-on-failure)
-      PRESERVE_ON_FAILURE=0
-      shift
-      ;;
-    --verify-diff-preview-lines)
-      VERIFY_DIFF_PREVIEW_LINES="${2:-}"
       shift 2
       ;;
     --help|-h)
@@ -232,17 +158,6 @@ done
 [[ "$ITERATIONS" =~ ^[0-9]+$ ]] || die "--iterations must be a non-negative integer"
 [[ "$CHECK_EVERY" =~ ^[0-9]+$ ]] || die "--check-every must be a non-negative integer"
 [[ "$VERIFY_DATA_EVERY" =~ ^[0-9]+$ ]] || die "--verify-data-every must be a non-negative integer"
-[[ "$DELETE_EVERY" =~ ^[0-9]+$ ]] || die "--delete-every must be a non-negative integer"
-[[ "$KEEP_LAST" =~ ^[0-9]+$ ]] || die "--keep-last must be a non-negative integer"
-[[ "$ZSTD_LEVEL" =~ ^-?[0-9]+$ ]] || die "--zstd-level must be an integer"
-[[ "$VERIFY_DIFF_PREVIEW_LINES" =~ ^[0-9]+$ ]] || die "--verify-diff-preview-lines must be a non-negative integer"
-[[ "$PRESERVE_ON_FAILURE" == "0" || "$PRESERVE_ON_FAILURE" == "1" ]] || die "internal error: invalid preserve-on-failure setting"
-(( DELETE_EVERY > 0 )) || die "--delete-every must be > 0"
-
-case "$COMPRESSION" in
-  lz4|zstd|none) ;;
-  *) die "--compression must be one of: lz4, zstd, none" ;;
-esac
 
 VGER_BIN="$(abs_path "$VGER_BIN")"
 CORPUS_DIR="$(abs_path "$CORPUS_DIR")"
@@ -277,17 +192,12 @@ cleanup() {
 
 print_failure_context() {
   local exit_code="$1"
-  local rerun_cmd
-
-  rerun_cmd="$(printf '%q ' "$SCRIPT_DIR/$SCRIPT_NAME" "${ORIGINAL_ARGS[@]}")"
-  rerun_cmd="${rerun_cmd% }"
 
   printf 'Failure context:\n' >&2
   printf '  exit_code:           %s\n' "$exit_code" >&2
   printf '  iteration:           %s\n' "$CURRENT_ITER" >&2
   printf '  step:                %s\n' "$CURRENT_STEP" >&2
   printf '  snapshot:            %s\n' "${CURRENT_SNAPSHOT:-<none>}" >&2
-  printf '  preserve_on_failure: %s\n' "$PRESERVE_ON_FAILURE" >&2
   printf '  repository_dir:      %s\n' "$REPO_DIR" >&2
   printf '  restore_dir:         %s\n' "$RESTORE_DIR" >&2
   printf '  runtime_dir:         %s\n' "$RUNTIME_DIR" >&2
@@ -302,7 +212,6 @@ print_failure_context() {
   [[ -n "$LAST_PRUNE_LOG" ]] && printf '  prune_log:           %s\n' "$LAST_PRUNE_LOG" >&2
   [[ -n "$LAST_CHECK_LOG" ]] && printf '  check_log:           %s\n' "$LAST_CHECK_LOG" >&2
   [[ -n "$LAST_VERIFY_CHECK_LOG" ]] && printf '  check_verify_log:    %s\n' "$LAST_VERIFY_CHECK_LOG" >&2
-  printf '  rerun:               %s\n' "$rerun_cmd" >&2
 }
 
 on_exit() {
@@ -314,14 +223,7 @@ on_exit() {
   fi
 
   print_failure_context "$exit_code"
-
-  if [[ "$PRESERVE_ON_FAILURE" == "1" ]]; then
-    log "Run failed; preserving artifacts for debugging"
-    return
-  fi
-
-  log "Run failed; cleaning artifacts (--no-preserve-on-failure)"
-  cleanup
+  log "Run failed; preserving artifacts for debugging"
 }
 
 trap on_exit EXIT
@@ -357,7 +259,7 @@ run_vger() {
 
   local log_file="$LOG_DIR/iter-$(printf '%06d' "$iter")-$name.log"
   if ! HOME="$HOME_DIR" XDG_CACHE_HOME="$XDG_CACHE_DIR" \
-    "$VGER_BIN" --config "$CONFIG_PATH" "$@" --repo "$REPO_LABEL" >"$log_file" 2>&1; then
+    "$VGER_BIN" --config "$CONFIG_PATH" "$@" --repo stress >"$log_file" 2>&1; then
     printf 'FAILED iteration=%s step=%s snapshot=%s command=%s log=%s\n' \
       "$iter" "$name" "${CURRENT_SNAPSHOT:-<none>}" "$*" "$log_file" >&2
     tail -n 120 "$log_file" >&2 || true
@@ -373,16 +275,16 @@ write_config() {
 
   cat >"$CONFIG_PATH" <<CFG
 repositories:
-  - label: "$REPO_LABEL"
+  - label: "stress"
     url: "$repo_q"
 encryption:
   mode: auto
   passphrase: "stress-test"
 compression:
-  algorithm: $COMPRESSION
-  zstd_level: $ZSTD_LEVEL
+  algorithm: zstd
+  zstd_level: 3
 retention:
-  keep_last: $KEEP_LAST
+  keep_last: 1
 git_ignore: false
 xattrs:
   enabled: false
@@ -404,14 +306,6 @@ check_locks_clear() {
   local count
   count="$(find "$locks_dir" -type f -name '*.json' | wc -l | tr -d ' ')"
   [[ "$count" == "0" ]] || die "stale lock file(s) detected in $locks_dir"
-}
-
-clear_vger_file_cache() {
-  local cache_root="$XDG_CACHE_DIR/vger"
-  if [[ -d "$cache_root" ]]; then
-    rm -rf "$cache_root"
-    log "Cleared vger local file cache: $cache_root"
-  fi
 }
 
 fingerprint_tree() {
@@ -526,10 +420,8 @@ verify_restore_matches() {
   printf '  restored counts:  dirs=%s symlinks=%s files=%s\n' \
     "$dst_dirs" "$dst_syms" "$dst_files" >&2
 
-  if (( VERIFY_DIFF_PREVIEW_LINES > 0 )); then
-    printf '  diff preview (first %s lines):\n' "$VERIFY_DIFF_PREVIEW_LINES" >&2
-    sed -n "1,${VERIFY_DIFF_PREVIEW_LINES}p" "$diff_file" >&2 || true
-  fi
+  printf '  diff preview (first 80 lines):\n' >&2
+  sed -n '1,80p' "$diff_file" >&2 || true
 
   return 1
 }
@@ -598,17 +490,15 @@ main() {
     verify_restore_matches "$i" "$restore_target" "$corpus_fp" || die "restore verification failed (iteration $i)"
     restores=$((restores + 1))
 
-    if (( i % DELETE_EVERY == 0 )); then
-      log "[$i/$ITERATIONS] delete"
-      CURRENT_STEP="delete"
-      LAST_DELETE_LOG="$(run_vger "$i" delete delete "$snapshot")"
-      deletes=$((deletes + 1))
-      check_locks_clear
-    fi
+    log "[$i/$ITERATIONS] delete"
+    CURRENT_STEP="delete"
+    LAST_DELETE_LOG="$(run_vger "$i" delete delete "$snapshot")"
+    deletes=$((deletes + 1))
+    check_locks_clear
 
     log "[$i/$ITERATIONS] compact"
     CURRENT_STEP="compact"
-    LAST_COMPACT_LOG="$(run_vger "$i" compact compact --threshold "$COMPACT_THRESHOLD")"
+    LAST_COMPACT_LOG="$(run_vger "$i" compact compact --threshold 0)"
     compacts=$((compacts + 1))
     check_locks_clear
 
