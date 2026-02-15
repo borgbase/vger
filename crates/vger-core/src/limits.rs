@@ -15,6 +15,8 @@ use crate::storage::{
     StorageBackend,
 };
 
+// ── Rate limiting runtime ────────────────────────────────────────────────────
+
 const BYTES_PER_MIB: u64 = 1024 * 1024;
 const FILE_READ_CHUNK_SIZE: usize = 256 * 1024;
 

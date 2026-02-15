@@ -1,10 +1,10 @@
 use std::time::Duration;
 
-use crate::config::HooksConfig;
+use crate::config::{HooksConfig, SourceHooksConfig, HOOK_COMMANDS};
 use crate::error::{Result, VgerError};
 use crate::platform::shell;
 
-use crate::config::SourceHooksConfig;
+// ── Hook runner ──────────────────────────────────────────────────────────────
 
 /// Default timeout for hook command execution (5 minutes).
 const HOOK_TIMEOUT: Duration = Duration::from_secs(300);
@@ -39,7 +39,7 @@ where
     F: FnOnce() -> std::result::Result<T, Box<dyn std::error::Error>>,
 {
     // Hooks only run for hookable commands (backup, prune, check, compact).
-    if !crate::config::HOOK_COMMANDS.contains(&ctx.command.as_str()) {
+    if !HOOK_COMMANDS.contains(&ctx.command.as_str()) {
         return action();
     }
 
