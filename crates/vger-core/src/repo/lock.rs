@@ -39,7 +39,7 @@ impl LockGuard {
 
 /// Acquire an advisory lock on the repository.
 pub fn acquire_lock(storage: &dyn StorageBackend) -> Result<LockGuard> {
-    let hostname = hostname::get()
+    let hostname = nix::unistd::gethostname()
         .map(|h| h.to_string_lossy().to_string())
         .unwrap_or_else(|_| "unknown".into());
     let pid = std::process::id() as u64;

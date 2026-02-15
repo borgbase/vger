@@ -16,13 +16,10 @@ serde_yaml = "0.9"
 rpassword = "7"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
-indicatif = "0.17"
 comfy-table = "7"
 chrono = "0.4"
-hostname = "0.4"
 hex = "0.4"
 rand = "0.8"
-dialoguer = "0.11"
 
 [dev-dependencies]
 tempfile = "3"

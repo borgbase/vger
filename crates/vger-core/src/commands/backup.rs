@@ -1728,10 +1728,10 @@ pub fn run_with_progress(
         let time_end = Utc::now();
 
         // Build snapshot metadata
-        let hostname = hostname::get()
+        let hostname = nix::unistd::gethostname()
             .map(|h| h.to_string_lossy().to_string())
             .unwrap_or_else(|_| "unknown".into());
-        let username = whoami::username();
+        let username = std::env::var("USER").unwrap_or_else(|_| "unknown".into());
 
         let snapshot_meta = SnapshotMeta {
             name: snapshot_name.to_string(),

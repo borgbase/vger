@@ -192,7 +192,9 @@ impl SftpBackend {
         max_connections: Option<usize>,
         retry: RetryConfig,
     ) -> Result<Self> {
-        let user = user.map(|u| u.to_string()).unwrap_or_else(whoami::username);
+        let user = user
+            .map(|u| u.to_string())
+            .unwrap_or_else(|| std::env::var("USER").unwrap_or_else(|_| "unknown".into()));
         let known_hosts_path = resolve_known_hosts_path(known_hosts_path)?;
         let requested_max_connections = max_connections;
         let max_connections = normalize_max_connections(requested_max_connections);

@@ -39,8 +39,6 @@ filetime = "0.2"
 chrono = { version = "0.4", features = ["serde"] }
 
 # OS
-hostname = "0.4"
-whoami = "1"
 dirs = "6"
 
 # Error handling
@@ -77,5 +75,5 @@ mount = ["dav-server", "tokio/rt-multi-thread", "tokio/macros", "tokio/signal", 
 tempfile = "3"
 
 [target.'cfg(unix)'.dependencies]
-nix = { version = "0.29", features = ["fs", "user"] }
+nix = { version = "0.29", features = ["fs", "hostname", "user"] }
 xattr = "1"

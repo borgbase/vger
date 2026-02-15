@@ -796,7 +796,6 @@ fn run_config_generate(dest: Option<&str>) -> Result<(), Box<dyn std::error::Err
 }
 
 fn pick_config_location() -> Result<std::path::PathBuf, Box<dyn std::error::Error>> {
-    let bold = dialoguer::console::Style::new().bold();
     let search_paths = config::default_config_search_paths();
 
     let descriptions: &[&str] = &[
@@ -807,24 +806,34 @@ fn pick_config_location() -> Result<std::path::PathBuf, Box<dyn std::error::Erro
 
     let labels: &[&str] = &["Local directory", "User config", "System-wide"];
 
-    let items: Vec<String> = search_paths
+    eprintln!("Where should the config file live?");
+    for (i, (((path, _level), label), desc)) in search_paths
         .iter()
         .zip(labels.iter())
         .zip(descriptions.iter())
-        .map(|(((path, _level), label), desc)| {
-            format!(
-                "{} {}\n  {desc}",
-                bold.apply_to(label),
-                bold.apply_to(path.display()),
-            )
-        })
-        .collect();
+        .enumerate()
+    {
+        eprintln!("  [{}] {} {}", i + 1, label, path.display());
+        eprintln!("      {desc}");
+    }
+    eprint!("Choice [1]: ");
+    std::io::Write::flush(&mut std::io::stderr())?;
 
-    let selection = dialoguer::Select::new()
-        .with_prompt("Where should the config file live?")
-        .items(&items)
-        .default(0)
-        .interact()?;
+    let mut input = String::new();
+    std::io::stdin().read_line(&mut input)?;
+    let input = input.trim();
+
+    let selection = if input.is_empty() {
+        0
+    } else {
+        let n: usize = input
+            .parse()
+            .map_err(|_| format!("invalid choice: '{input}'"))?;
+        if n == 0 || n > search_paths.len() {
+            return Err(format!("choice out of range: {n}").into());
+        }
+        n - 1
+    };
 
     Ok(search_paths[selection].0.clone())
 }
