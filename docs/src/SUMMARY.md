@@ -11,6 +11,7 @@
 - [Make a Backup](backup.md)
 - [Restore a Backup](restore.md)
 - [Maintenance](maintenance.md)
+- [Backup Recipes](recipes.md)
 
 # Reference
 

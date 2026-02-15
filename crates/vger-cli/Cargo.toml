@@ -9,7 +9,7 @@ name = "vger"
 path = "src/main.rs"
 
 [dependencies]
-vger-core = { path = "../vger-core", features = ["mount"] }
+vger-core = { path = "../vger-core", features = ["mount", "backend-sftp"] }
 clap = { version = "4", features = ["derive"] }
 serde = { version = "1", features = ["derive"] }
 serde_yaml = "0.9"

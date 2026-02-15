@@ -64,7 +64,7 @@ bytes = { version = "1", optional = true }
 futures-util = { version = "0.3", optional = true }
 
 [features]
-default = []
+default = ["backend-rest"]
 backend-rest = ["ureq"]
 backend-sftp = ["opendal/services-sftp"]
 mount = ["dav-server", "tokio/rt-multi-thread", "tokio/macros", "tokio/signal", "tokio/net", "hyper", "hyper-util", "lru", "bytes", "futures-util"]
