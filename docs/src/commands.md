@@ -6,12 +6,13 @@
 | `vger config` | Generate a starter configuration file |
 | `vger init` | Initialize a new backup repository |
 | `vger backup` | Back up files to a new snapshot |
+| `vger restore` | Restore files from a snapshot |
 | `vger list` | List snapshots |
 | `vger snapshot list` | Show files and directories inside a snapshot |
 | `vger snapshot info` | Show metadata for a snapshot |
 | `vger snapshot find` | Find matching files across snapshots and show change timeline (`added`, `modified`, `unchanged`) |
-| `vger restore` | Restore files from a snapshot |
-| `vger delete` | Delete a specific snapshot |
+| `vger snapshot delete` | Delete a specific snapshot |
+| `vger delete` | Delete an entire repository permanently |
 | `vger prune` | Prune snapshots according to retention policy |
 | `vger check` | Verify repository integrity (`--verify-data` for full content verification) |
 | `vger info` | Show repository statistics (snapshot counts and size totals) |

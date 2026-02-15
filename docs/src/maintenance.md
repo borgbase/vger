@@ -4,7 +4,19 @@
 
 ```bash
 # Delete a specific snapshot by ID
-vger delete --snapshot a1b2c3d4
+vger snapshot delete a1b2c3d4
+```
+
+## Delete a repository
+
+Permanently delete an entire repository and all its snapshots.
+
+```bash
+# Interactive confirmation (prompts you to type "delete")
+vger delete
+
+# Non-interactive (for scripting)
+vger delete --yes-delete-this-repo
 ```
 
 ## Prune old snapshots
