@@ -1,19 +1,23 @@
-use aes_gcm::aead::{Aead, KeyInit};
+use aes_gcm::aead::{Aead, KeyInit, Payload};
 use aes_gcm::{Aes256Gcm, Nonce};
 use argon2::Argon2;
 use rand::RngCore;
 use serde::{Deserialize, Serialize};
+use zeroize::{Zeroize, ZeroizeOnDrop, Zeroizing};
 
 use crate::error::{Result, VgerError};
 
 /// The master key material — never stored in plaintext on disk.
+/// Automatically zeroized on drop to prevent key material from lingering in memory.
+#[derive(Zeroize, ZeroizeOnDrop)]
 pub struct MasterKey {
     pub encryption_key: [u8; 32],
     pub chunk_id_key: [u8; 32],
 }
 
 /// Serialized payload inside the encrypted key blob.
-#[derive(Serialize, Deserialize)]
+/// Zeroized on drop to prevent key material from lingering in memory.
+#[derive(Serialize, Deserialize, Zeroize, ZeroizeOnDrop)]
 struct MasterKeyPayload {
     encryption_key: Vec<u8>,
     chunk_id_key: Vec<u8>,
@@ -38,13 +42,12 @@ pub struct EncryptedKey {
 }
 
 impl MasterKey {
-    /// Generate a new random master key.
+    /// Generate a new random master key using OS entropy.
     pub fn generate() -> Self {
-        let mut rng = rand::thread_rng();
         let mut encryption_key = [0u8; 32];
         let mut chunk_id_key = [0u8; 32];
-        rng.fill_bytes(&mut encryption_key);
-        rng.fill_bytes(&mut chunk_id_key);
+        rand::rngs::OsRng.fill_bytes(&mut encryption_key);
+        rand::rngs::OsRng.fill_bytes(&mut chunk_id_key);
         Self {
             encryption_key,
             chunk_id_key,
@@ -53,11 +56,9 @@ impl MasterKey {
 
     /// Encrypt the master key with a passphrase using Argon2id + AES-256-GCM.
     pub fn to_encrypted(&self, passphrase: &str) -> Result<EncryptedKey> {
-        let mut rng = rand::thread_rng();
-
-        // Generate salt
+        // Generate salt using OS entropy
         let mut salt = vec![0u8; 32];
-        rng.fill_bytes(&mut salt);
+        rand::rngs::OsRng.fill_bytes(&mut salt);
 
         // Derive a wrapping key from the passphrase
         let kdf = KdfParams {
@@ -74,16 +75,24 @@ impl MasterKey {
             encryption_key: self.encryption_key.to_vec(),
             chunk_id_key: self.chunk_id_key.to_vec(),
         };
-        let plaintext = rmp_serde::to_vec(&payload)?;
+        let plaintext = Zeroizing::new(rmp_serde::to_vec(&payload)?);
 
-        // Encrypt with AES-256-GCM
-        let cipher = Aes256Gcm::new_from_slice(&wrapping_key)
+        // Encrypt with AES-256-GCM, binding KDF params as AAD to prevent
+        // parameter substitution attacks on the key blob.
+        let kdf_aad = kdf_params_aad(&kdf)?;
+        let cipher = Aes256Gcm::new_from_slice(wrapping_key.as_ref())
             .map_err(|e| VgerError::KeyDerivation(format!("cipher init: {e}")))?;
         let mut nonce_bytes = [0u8; 12];
-        rng.fill_bytes(&mut nonce_bytes);
+        rand::thread_rng().fill_bytes(&mut nonce_bytes);
         let nonce = Nonce::from_slice(&nonce_bytes);
         let ciphertext = cipher
-            .encrypt(nonce, plaintext.as_ref())
+            .encrypt(
+                nonce,
+                Payload {
+                    msg: plaintext.as_ref(),
+                    aad: &kdf_aad,
+                },
+            )
             .map_err(|e| VgerError::KeyDerivation(format!("encrypt: {e}")))?;
 
         Ok(EncryptedKey {
@@ -94,15 +103,37 @@ impl MasterKey {
     }
 
     /// Decrypt the master key from its on-disk format.
+    ///
+    /// Tries decryption with KDF-params AAD first (new format), then falls back
+    /// to no-AAD decryption for repositories created before AAD was added.
     pub fn from_encrypted(encrypted: &EncryptedKey, passphrase: &str) -> Result<Self> {
         let wrapping_key = derive_key_from_passphrase(passphrase, &encrypted.kdf)?;
 
-        let cipher =
-            Aes256Gcm::new_from_slice(&wrapping_key).map_err(|_| VgerError::DecryptionFailed)?;
-        let nonce = Nonce::from_slice(&encrypted.nonce);
-        let plaintext = cipher
-            .decrypt(nonce, encrypted.encrypted_payload.as_ref())
+        let cipher = Aes256Gcm::new_from_slice(wrapping_key.as_ref())
             .map_err(|_| VgerError::DecryptionFailed)?;
+        let nonce = Nonce::from_slice(&encrypted.nonce);
+
+        // Try with AAD first (new format)
+        let plaintext = if let Ok(kdf_aad) = kdf_params_aad(&encrypted.kdf) {
+            cipher
+                .decrypt(
+                    nonce,
+                    Payload {
+                        msg: encrypted.encrypted_payload.as_ref(),
+                        aad: &kdf_aad,
+                    },
+                )
+                .or_else(|_| {
+                    // Fall back to no-AAD for pre-AAD repositories
+                    cipher.decrypt(nonce, encrypted.encrypted_payload.as_ref())
+                })
+                .map_err(|_| VgerError::DecryptionFailed)?
+        } else {
+            cipher
+                .decrypt(nonce, encrypted.encrypted_payload.as_ref())
+                .map_err(|_| VgerError::DecryptionFailed)?
+        };
+        let plaintext = Zeroizing::new(plaintext);
 
         let payload: MasterKeyPayload =
             rmp_serde::from_slice(&plaintext).map_err(|_| VgerError::DecryptionFailed)?;
@@ -122,15 +153,22 @@ impl MasterKey {
     }
 }
 
+/// Compute deterministic AAD bytes from KDF parameters.
+/// This binds the encrypted key blob to its KDF parameters, preventing
+/// an attacker from swapping parameters without detection.
+fn kdf_params_aad(kdf: &KdfParams) -> Result<Vec<u8>> {
+    rmp_serde::to_vec(kdf).map_err(|e| VgerError::KeyDerivation(format!("serialize kdf aad: {e}")))
+}
+
 /// Derive a 32-byte key from a passphrase using Argon2id.
-fn derive_key_from_passphrase(passphrase: &str, kdf: &KdfParams) -> Result<[u8; 32]> {
+fn derive_key_from_passphrase(passphrase: &str, kdf: &KdfParams) -> Result<Zeroizing<[u8; 32]>> {
     let params = argon2::Params::new(kdf.memory_cost, kdf.time_cost, kdf.parallelism, Some(32))
         .map_err(|e| VgerError::KeyDerivation(format!("argon2 params: {e}")))?;
     let argon2 = Argon2::new(argon2::Algorithm::Argon2id, argon2::Version::V0x13, params);
 
-    let mut output = [0u8; 32];
+    let mut output = Zeroizing::new([0u8; 32]);
     argon2
-        .hash_password_into(passphrase.as_bytes(), &kdf.salt, &mut output)
+        .hash_password_into(passphrase.as_bytes(), &kdf.salt, output.as_mut())
         .map_err(|e| VgerError::KeyDerivation(format!("argon2 hash: {e}")))?;
     Ok(output)
 }

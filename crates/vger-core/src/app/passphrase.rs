@@ -1,6 +1,13 @@
+use std::time::Duration;
+
+use zeroize::{Zeroize, Zeroizing};
+
 use crate::config::{EncryptionModeConfig, VgerConfig};
 use crate::error::{Result, VgerError};
 use crate::platform::shell;
+
+/// Default timeout for passcommand execution (60 seconds).
+const PASSCOMMAND_TIMEOUT: Duration = Duration::from_secs(60);
 
 #[derive(Debug, Clone)]
 pub struct PassphrasePrompt {
@@ -9,13 +16,14 @@ pub struct PassphrasePrompt {
     pub timeout_seconds: u64,
 }
 
-pub fn configured_passphrase(config: &VgerConfig) -> Result<Option<String>> {
+pub fn configured_passphrase(config: &VgerConfig) -> Result<Option<Zeroizing<String>>> {
     if let Some(ref p) = config.encryption.passphrase {
-        return Ok(Some(p.clone()));
+        return Ok(Some(Zeroizing::new(p.clone())));
     }
 
     if let Some(ref cmd) = config.encryption.passcommand {
-        let output = shell::run_script(cmd).map_err(VgerError::Io)?;
+        let output =
+            shell::run_script_with_timeout(cmd, PASSCOMMAND_TIMEOUT).map_err(VgerError::Io)?;
 
         if !output.status.success() {
             return Err(VgerError::Config(format!(
@@ -24,10 +32,10 @@ pub fn configured_passphrase(config: &VgerConfig) -> Result<Option<String>> {
             )));
         }
 
-        let pass = String::from_utf8(output.stdout)
-            .map_err(|e| VgerError::Config(format!("passcommand output is not UTF-8: {e}")))?
-            .trim()
-            .to_string();
+        let mut raw = String::from_utf8(output.stdout)
+            .map_err(|e| VgerError::Config(format!("passcommand output is not UTF-8: {e}")))?;
+        let pass = Zeroizing::new(raw.trim().to_string());
+        raw.zeroize();
 
         if pass.is_empty() {
             return Err(VgerError::Config(
@@ -40,7 +48,7 @@ pub fn configured_passphrase(config: &VgerConfig) -> Result<Option<String>> {
 
     if let Ok(pass) = std::env::var("VGER_PASSPHRASE") {
         if !pass.is_empty() {
-            return Ok(Some(pass));
+            return Ok(Some(Zeroizing::new(pass)));
         }
     }
 
@@ -51,9 +59,9 @@ pub fn resolve_passphrase<F>(
     config: &VgerConfig,
     label: Option<&str>,
     mut prompt: F,
-) -> Result<Option<String>>
+) -> Result<Option<Zeroizing<String>>>
 where
-    F: FnMut(PassphrasePrompt) -> Result<Option<String>>,
+    F: FnMut(PassphrasePrompt) -> Result<Option<Zeroizing<String>>>,
 {
     if config.encryption.mode == EncryptionModeConfig::None {
         return Ok(None);

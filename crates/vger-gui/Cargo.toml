@@ -16,4 +16,5 @@ notify = "6.1"
 crossbeam-channel = "0.5"
 tinyfiledialogs = "3"
 chrono = "0.4"
+zeroize = { version = "1", features = ["derive"] }
 image = { version = "0.25", default-features = false, features = ["png"] }

@@ -1,5 +1,7 @@
 use std::sync::Mutex;
 
+use zeroize::Zeroizing;
+
 use crate::app::passphrase::{resolve_passphrase, PassphrasePrompt};
 use crate::config::EncryptionModeConfig;
 
@@ -40,7 +42,7 @@ fn resolve_passphrase_returns_none_when_encryption_mode_is_none() {
     let mut prompted = false;
     let pass = resolve_passphrase(&config, Some("repo-a"), |_prompt| {
         prompted = true;
-        Ok(Some("prompt-pass".into()))
+        Ok(Some(Zeroizing::new("prompt-pass".into())))
     })
     .unwrap();
 
@@ -61,20 +63,32 @@ fn resolve_passphrase_uses_expected_precedence() {
     set_vger_passphrase(Some("env-pass"));
     config.encryption.passphrase = Some("inline-pass".into());
     config.encryption.passcommand = Some(print_script("cmd-pass"));
-    let pass = resolve_passphrase(&config, None, |_prompt| Ok(Some("prompt-pass".into()))).unwrap();
-    assert_eq!(pass.as_deref(), Some("inline-pass"));
+    let pass = resolve_passphrase(&config, None, |_prompt| {
+        Ok(Some(Zeroizing::new("prompt-pass".into())))
+    })
+    .unwrap();
+    assert_eq!(pass.as_deref().map(String::as_str), Some("inline-pass"));
 
     config.encryption.passphrase = None;
-    let pass = resolve_passphrase(&config, None, |_prompt| Ok(Some("prompt-pass".into()))).unwrap();
-    assert_eq!(pass.as_deref(), Some("cmd-pass"));
+    let pass = resolve_passphrase(&config, None, |_prompt| {
+        Ok(Some(Zeroizing::new("prompt-pass".into())))
+    })
+    .unwrap();
+    assert_eq!(pass.as_deref().map(String::as_str), Some("cmd-pass"));
 
     config.encryption.passcommand = None;
-    let pass = resolve_passphrase(&config, None, |_prompt| Ok(Some("prompt-pass".into()))).unwrap();
-    assert_eq!(pass.as_deref(), Some("env-pass"));
+    let pass = resolve_passphrase(&config, None, |_prompt| {
+        Ok(Some(Zeroizing::new("prompt-pass".into())))
+    })
+    .unwrap();
+    assert_eq!(pass.as_deref().map(String::as_str), Some("env-pass"));
 
     set_vger_passphrase(None);
-    let pass = resolve_passphrase(&config, None, |_prompt| Ok(Some("prompt-pass".into()))).unwrap();
-    assert_eq!(pass.as_deref(), Some("prompt-pass"));
+    let pass = resolve_passphrase(&config, None, |_prompt| {
+        Ok(Some(Zeroizing::new("prompt-pass".into())))
+    })
+    .unwrap();
+    assert_eq!(pass.as_deref().map(String::as_str), Some("prompt-pass"));
 }
 
 #[test]
@@ -89,9 +103,11 @@ fn resolve_passphrase_surfaces_passcommand_failure() {
     config.encryption.passcommand = Some("exit 7".into());
     set_vger_passphrase(None);
 
-    let err = resolve_passphrase(&config, None, |_prompt| Ok(Some("prompt-pass".into())))
-        .err()
-        .unwrap();
+    let err = resolve_passphrase(&config, None, |_prompt| {
+        Ok(Some(Zeroizing::new("prompt-pass".into())))
+    })
+    .err()
+    .unwrap();
     assert!(format!("{err}").contains("passcommand failed"));
 }
 
@@ -111,11 +127,11 @@ fn resolve_passphrase_passes_prompt_context() {
     let mut seen_prompt: Option<PassphrasePrompt> = None;
     let pass = resolve_passphrase(&config, Some("repo-1"), |prompt| {
         seen_prompt = Some(prompt);
-        Ok(Some("prompt-pass".into()))
+        Ok(Some(Zeroizing::new("prompt-pass".into())))
     })
     .unwrap();
 
-    assert_eq!(pass.as_deref(), Some("prompt-pass"));
+    assert_eq!(pass.as_deref().map(String::as_str), Some("prompt-pass"));
     let prompt = seen_prompt.expect("prompt should have been invoked");
     assert_eq!(prompt.repository_label.as_deref(), Some("repo-1"));
     assert_eq!(prompt.repository_url, config.repository.url);

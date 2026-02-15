@@ -279,8 +279,11 @@ pub fn read_pack_header(
 
     // Read header length from last 4 bytes
     let len_offset = pack_data.len() - 4;
-    let header_len =
-        u32::from_le_bytes(pack_data[len_offset..len_offset + 4].try_into().unwrap()) as usize;
+    let header_len = u32::from_le_bytes(
+        pack_data[len_offset..len_offset + 4]
+            .try_into()
+            .map_err(|_| VgerError::InvalidFormat("invalid pack header length field".into()))?,
+    ) as usize;
 
     if header_len + 4 > pack_data.len() - PACK_HEADER_SIZE {
         return Err(VgerError::InvalidFormat(
@@ -315,14 +318,32 @@ pub fn scan_pack_blobs(storage: &dyn StorageBackend, pack_id: &PackId) -> Result
     let mut pos = PACK_HEADER_SIZE;
     let mut blobs = Vec::new();
 
+    if pack_data.len() < PACK_HEADER_SIZE + 4 {
+        return Err(VgerError::InvalidFormat("pack too small for header".into()));
+    }
+
     // Read header length from last 4 bytes to know where blobs end
     let len_offset = pack_data.len() - 4;
-    let header_len =
-        u32::from_le_bytes(pack_data[len_offset..len_offset + 4].try_into().unwrap()) as usize;
+    let header_len = u32::from_le_bytes(
+        pack_data[len_offset..len_offset + 4]
+            .try_into()
+            .map_err(|_| VgerError::InvalidFormat("invalid pack header length field".into()))?,
+    ) as usize;
+
+    if header_len > len_offset.saturating_sub(PACK_HEADER_SIZE) {
+        return Err(VgerError::InvalidFormat(
+            "invalid pack header length".into(),
+        ));
+    }
+
     let blobs_end = len_offset - header_len;
 
     while pos + 4 <= blobs_end {
-        let blob_len = u32::from_le_bytes(pack_data[pos..pos + 4].try_into().unwrap());
+        let blob_len = u32::from_le_bytes(
+            pack_data[pos..pos + 4]
+                .try_into()
+                .map_err(|_| VgerError::InvalidFormat("invalid blob length field".into()))?,
+        );
         let blob_offset = (pos + 4) as u64;
         if pos + 4 + blob_len as usize > blobs_end {
             break;

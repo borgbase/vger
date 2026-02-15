@@ -480,14 +480,18 @@ fn build_transform_pool(max_threads: usize) -> Result<Option<rayon::ThreadPool>>
         .map_err(|e| VgerError::Other(format!("failed to create rayon thread pool: {e}")))
 }
 
+/// Default timeout for command_dump execution (1 hour).
+const COMMAND_DUMP_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(3600);
+
 /// Execute a shell command and capture its stdout.
 fn execute_dump_command(dump: &CommandDump) -> Result<Vec<u8>> {
-    let output = shell::run_script(&dump.command).map_err(|e| {
-        VgerError::Other(format!(
-            "failed to execute command_dump '{}': {}",
-            dump.name, e
-        ))
-    })?;
+    let output =
+        shell::run_script_with_timeout(&dump.command, COMMAND_DUMP_TIMEOUT).map_err(|e| {
+            VgerError::Other(format!(
+                "failed to execute command_dump '{}': {}",
+                dump.name, e
+            ))
+        })?;
 
     if !output.status.success() {
         let code = output

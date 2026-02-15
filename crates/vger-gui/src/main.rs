@@ -1313,7 +1313,7 @@ fn send_structured_data(ui_tx: &Sender<UiEvent>, repos: &[ResolvedRepo]) {
 
 fn resolve_passphrase_for_repo(repo: &ResolvedRepo) -> Result<Option<String>, VgerError> {
     let repo_name = format_repo_name(repo);
-    passphrase::resolve_passphrase(&repo.config, repo.label.as_deref(), |prompt| {
+    let pass = passphrase::resolve_passphrase(&repo.config, repo.label.as_deref(), |prompt| {
         let title = format!("V'Ger Passphrase ({repo_name})");
         let message = format!(
             "Enter passphrase for {}\nRepository: {}",
@@ -1324,8 +1324,11 @@ fn resolve_passphrase_for_repo(repo: &ResolvedRepo) -> Result<Option<String>, Vg
             prompt.repository_url,
         );
         let value = tinyfiledialogs::password_box(&title, &message);
-        Ok(value.filter(|v| !v.is_empty()))
-    })
+        Ok(value.filter(|v| !v.is_empty()).map(zeroize::Zeroizing::new))
+    })?;
+    // Convert Zeroizing<String> -> String for the GUI cache layer.
+    // GUI passphrase caching keeps a plain String in memory for the session.
+    Ok(pass.map(|z| (*z).clone()))
 }
 
 fn get_or_resolve_passphrase(
@@ -2427,11 +2430,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let tx = app_tx.clone();
     let rl = repo_labels.clone();
     ui.on_backup_repo_clicked(move |idx| {
-        if idx < 0 {
+        let Some(i) = usize::try_from(idx).ok() else {
             return;
-        }
+        };
         if let Ok(labels) = rl.lock() {
-            if let Some(name) = labels.get(idx as usize) {
+            if let Some(name) = labels.get(i) {
                 let _ = tx.send(AppCommand::RunBackupRepo {
                     repo_name: name.clone(),
                 });
@@ -2442,11 +2445,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let tx = app_tx.clone();
     let rl = repo_labels.clone();
     ui.on_check_repo_clicked(move |idx| {
-        if idx < 0 {
+        let Some(i) = usize::try_from(idx).ok() else {
             return;
-        }
+        };
         if let Ok(labels) = rl.lock() {
-            if let Some(name) = labels.get(idx as usize) {
+            if let Some(name) = labels.get(i) {
                 let _ = tx.send(AppCommand::CheckRepo {
                     repo_name: name.clone(),
                 });
@@ -2457,11 +2460,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let tx = app_tx.clone();
     let rl = repo_labels.clone();
     ui.on_compact_repo_clicked(move |idx| {
-        if idx < 0 {
+        let Some(i) = usize::try_from(idx).ok() else {
             return;
-        }
+        };
         if let Ok(labels) = rl.lock() {
-            if let Some(name) = labels.get(idx as usize) {
+            if let Some(name) = labels.get(i) {
                 let _ = tx.send(AppCommand::CompactRepo {
                     repo_name: name.clone(),
                 });
@@ -2472,11 +2475,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let tx = app_tx.clone();
     let sl = source_labels.clone();
     ui.on_backup_source_clicked(move |idx| {
-        if idx < 0 {
+        let Some(i) = usize::try_from(idx).ok() else {
             return;
-        }
+        };
         if let Ok(labels) = sl.lock() {
-            if let Some(label) = labels.get(idx as usize) {
+            if let Some(label) = labels.get(i) {
                 let _ = tx.send(AppCommand::RunBackupSource {
                     source_label: label.clone(),
                 });
@@ -2530,13 +2533,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let sr = snapshot_repo_names.clone();
     let rw_weak = restore_win.as_weak();
     ui.on_restore_selected_snapshot_clicked(move |row| {
-        if row < 0 {
+        let Some(r) = usize::try_from(row).ok() else {
             return;
-        }
+        };
         let (snap_name, rname) = {
             let ids = si.lock().unwrap_or_else(|e| e.into_inner());
             let rnames = sr.lock().unwrap_or_else(|e| e.into_inner());
-            match (ids.get(row as usize), rnames.get(row as usize)) {
+            match (ids.get(r), rnames.get(r)) {
                 (Some(id), Some(rn)) => (id.clone(), rn.clone()),
                 _ => return,
             }
@@ -2561,13 +2564,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let si = snapshot_ids.clone();
     let sr = snapshot_repo_names.clone();
     ui.on_delete_selected_snapshot_clicked(move |row| {
-        if row < 0 {
+        let Some(r) = usize::try_from(row).ok() else {
             return;
-        }
+        };
         let (snap_name, rname) = {
             let ids = si.lock().unwrap_or_else(|e| e.into_inner());
             let rnames = sr.lock().unwrap_or_else(|e| e.into_inner());
-            match (ids.get(row as usize), rnames.get(row as usize)) {
+            match (ids.get(r), rnames.get(r)) {
                 (Some(id), Some(rn)) => (id.clone(), rn.clone()),
                 _ => return,
             }
@@ -2588,9 +2591,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             let Some(rw) = rw_weak.upgrade() else {
                 return;
             };
+            let Some(ni) = usize::try_from(node_index).ok() else {
+                return;
+            };
             FILE_TREE.with(|cell| {
                 if let Some(ref mut tree) = *cell.borrow_mut() {
-                    tree.toggle_expanded(node_index as usize);
+                    tree.toggle_expanded(ni);
                 }
             });
             refresh_tree_view(&rw);
@@ -2604,9 +2610,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             let Some(rw) = rw_weak.upgrade() else {
                 return;
             };
+            let Some(ni) = usize::try_from(node_index).ok() else {
+                return;
+            };
             FILE_TREE.with(|cell| {
                 if let Some(ref mut tree) = *cell.borrow_mut() {
-                    tree.toggle_check(node_index as usize);
+                    tree.toggle_check(ni);
                 }
             });
             refresh_tree_view(&rw);

@@ -1,8 +1,13 @@
+use std::time::Duration;
+
 use crate::config::HooksConfig;
 use crate::error::{Result, VgerError};
 use crate::platform::shell;
 
 use crate::config::SourceHooksConfig;
+
+/// Default timeout for hook command execution (5 minutes).
+const HOOK_TIMEOUT: Duration = Duration::from_secs(300);
 
 /// Context passed to hook commands via environment variables and variable substitution.
 pub struct HookContext {
@@ -124,8 +129,7 @@ fn execute_hook_command(cmd: &str, ctx: &HookContext) -> Result<()> {
         );
     }
 
-    let output = child
-        .output()
+    let output = shell::run_command_with_timeout(&mut child, HOOK_TIMEOUT)
         .map_err(|e| VgerError::Hook(format!("failed to execute '{expanded}': {e}")))?;
 
     if !output.status.success() {

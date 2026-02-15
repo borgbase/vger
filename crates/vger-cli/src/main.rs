@@ -4,12 +4,12 @@ use std::time::{Duration, Instant};
 use clap::{Parser, Subcommand};
 use comfy_table::{presets::NOTHING, Attribute, Cell, Table};
 use rand::RngCore;
+use zeroize::Zeroizing;
 
 use vger_core::commands;
 use vger_core::compress::Compression;
 use vger_core::config::{self, EncryptionModeConfig, ResolvedRepo, SourceEntry, VgerConfig};
 use vger_core::hooks::{self, HookContext};
-use vger_core::platform::shell;
 use vger_core::storage::{parse_repo_url, ParsedUrl};
 
 const PROGRESS_REDRAW_INTERVAL: Duration = Duration::from_millis(100);
@@ -844,7 +844,7 @@ fn with_repo_passphrase<T>(
     action: impl FnOnce(Option<&str>) -> Result<T, Box<dyn std::error::Error>>,
 ) -> Result<T, Box<dyn std::error::Error>> {
     let passphrase = get_passphrase(config, label)?;
-    action(passphrase.as_deref())
+    action(passphrase.as_deref().map(|s| s.as_str()))
 }
 
 fn dispatch_command(
@@ -918,7 +918,7 @@ fn dispatch_command(
 fn get_passphrase(
     config: &VgerConfig,
     label: Option<&str>,
-) -> Result<Option<String>, Box<dyn std::error::Error>> {
+) -> Result<Option<Zeroizing<String>>, Box<dyn std::error::Error>> {
     if config.encryption.mode == EncryptionModeConfig::None {
         return Ok(None);
     }
@@ -932,40 +932,21 @@ fn get_passphrase(
         Some(l) => format!("Enter passphrase for '{l}': "),
         None => "Enter passphrase: ".to_string(),
     };
-    let pass = rpassword::prompt_password(prompt)?;
+    let pass = Zeroizing::new(rpassword::prompt_password(prompt)?);
     Ok(Some(pass))
 }
 
 fn configured_passphrase(
     config: &VgerConfig,
-) -> Result<Option<String>, Box<dyn std::error::Error>> {
-    if let Some(ref p) = config.encryption.passphrase {
-        return Ok(Some(p.clone()));
-    }
-    if let Some(ref cmd) = config.encryption.passcommand {
-        let output = shell::run_script(cmd)?;
-        if !output.status.success() {
-            return Err(format!(
-                "passcommand failed: {}",
-                String::from_utf8_lossy(&output.stderr)
-            )
-            .into());
-        }
-        let pass = String::from_utf8(output.stdout)?.trim().to_string();
-        return Ok(Some(pass));
-    }
-    if let Ok(pass) = std::env::var("VGER_PASSPHRASE") {
-        if !pass.is_empty() {
-            return Ok(Some(pass));
-        }
-    }
-    Ok(None)
+) -> Result<Option<Zeroizing<String>>, Box<dyn std::error::Error>> {
+    vger_core::app::passphrase::configured_passphrase(config)
+        .map_err(|e| -> Box<dyn std::error::Error> { Box::new(e) })
 }
 
 fn get_init_passphrase(
     config: &VgerConfig,
     label: Option<&str>,
-) -> Result<Option<String>, Box<dyn std::error::Error>> {
+) -> Result<Option<Zeroizing<String>>, Box<dyn std::error::Error>> {
     if config.encryption.mode == EncryptionModeConfig::None {
         return Ok(None);
     }
@@ -974,9 +955,13 @@ fn get_init_passphrase(
     }
 
     let suffix = label.map(|l| format!(" for '{l}'")).unwrap_or_default();
-    let p1 = rpassword::prompt_password(format!("Enter new passphrase{suffix}: "))?;
-    let p2 = rpassword::prompt_password(format!("Confirm passphrase{suffix}: "))?;
-    if p1 != p2 {
+    let p1 = Zeroizing::new(rpassword::prompt_password(format!(
+        "Enter new passphrase{suffix}: "
+    ))?);
+    let p2 = Zeroizing::new(rpassword::prompt_password(format!(
+        "Confirm passphrase{suffix}: "
+    ))?);
+    if *p1 != *p2 {
         return Err("passphrases do not match".into());
     }
     Ok(Some(p1))
@@ -985,7 +970,7 @@ fn get_init_passphrase(
 fn run_init(config: &VgerConfig, label: Option<&str>) -> Result<(), Box<dyn std::error::Error>> {
     let passphrase = get_init_passphrase(config, label)?;
 
-    let repo = commands::init::run(config, passphrase.as_deref())?;
+    let repo = commands::init::run(config, passphrase.as_deref().map(|s| s.as_str()))?;
     println!("Repository initialized at: {}", config.repository.url);
     println!("Encryption mode: {}", repo.config.encryption.as_str());
     Ok(())
