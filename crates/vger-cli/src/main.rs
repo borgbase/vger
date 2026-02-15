@@ -304,18 +304,15 @@ enum Commands {
         pattern: Option<String>,
     },
 
-    /// Delete a specific snapshot
+    /// Delete an entire repository permanently
     Delete {
         /// Select repository by label or path
         #[arg(short = 'R', long = "repo")]
         repo: Option<String>,
 
-        /// Snapshot name to delete
-        snapshot: String,
-
-        /// Only show what would be deleted, don't actually delete
-        #[arg(short = 'n', long)]
-        dry_run: bool,
+        /// Skip interactive confirmation (for scripting)
+        #[arg(long)]
+        yes_delete_this_repo: bool,
     },
 
     /// Prune snapshots according to retention policy
@@ -436,6 +433,14 @@ enum SnapshotCommand {
     Info {
         /// Snapshot to inspect
         snapshot: String,
+    },
+    /// Delete a specific snapshot
+    Delete {
+        /// Snapshot name to delete
+        snapshot: String,
+        /// Only show what would be deleted, don't actually delete
+        #[arg(short = 'n', long)]
+        dry_run: bool,
     },
     /// Find files across snapshots
     Find {
@@ -865,8 +870,9 @@ fn dispatch_command(
             ..
         } => run_extract(cfg, label, snapshot.clone(), dest.clone(), pattern.clone()),
         Commands::Delete {
-            snapshot, dry_run, ..
-        } => run_delete(cfg, label, snapshot.clone(), *dry_run),
+            yes_delete_this_repo,
+            ..
+        } => run_delete_repo(cfg, label, *yes_delete_this_repo),
         Commands::Prune {
             dry_run,
             list,
@@ -1260,6 +1266,9 @@ fn run_snapshot_command(
             }
             Ok(())
         }
+        SnapshotCommand::Delete { snapshot, dry_run } => {
+            run_delete(config, label, snapshot.clone(), *dry_run)
+        }
         SnapshotCommand::Find {
             path,
             source,
@@ -1520,6 +1529,59 @@ fn run_delete(
         );
     }
 
+    Ok(())
+}
+
+fn run_delete_repo(
+    config: &VgerConfig,
+    label: Option<&str>,
+    yes_delete_this_repo: bool,
+) -> Result<(), Box<dyn std::error::Error>> {
+    // Verify the repo exists before prompting
+    let backend = vger_core::storage::backend_from_config(&config.repository, None)
+        .map_err(|e| -> Box<dyn std::error::Error> { Box::new(e) })?;
+    if !backend
+        .exists("config")
+        .map_err(|e| -> Box<dyn std::error::Error> { Box::new(e) })?
+    {
+        return Err(format!("no repository found at '{}'", config.repository.url).into());
+    }
+    drop(backend);
+
+    if !yes_delete_this_repo {
+        if !std::io::stdin().is_terminal() {
+            return Err(
+                "refusing to delete repository without confirmation in non-interactive mode; \
+                 use --yes-delete-this-repo to skip the prompt"
+                    .into(),
+            );
+        }
+
+        let repo_name = label.unwrap_or(&config.repository.url);
+        eprintln!(
+            "WARNING: This will permanently delete the entire repository '{repo_name}' \
+             and ALL its snapshots."
+        );
+        eprintln!();
+        eprint!("Type 'delete' to confirm: ");
+        std::io::Write::flush(&mut std::io::stderr())?;
+
+        let mut input = String::new();
+        std::io::stdin().read_line(&mut input)?;
+        if input.trim() != "delete" {
+            eprintln!("Aborted.");
+            return Ok(());
+        }
+    }
+
+    let stats = commands::delete_repo::run(config)
+        .map_err(|e| -> Box<dyn std::error::Error> { Box::new(e) })?;
+
+    let repo_name = label.unwrap_or(&config.repository.url);
+    println!(
+        "Repository '{repo_name}' deleted ({} keys removed).",
+        stats.keys_deleted
+    );
     Ok(())
 }
 

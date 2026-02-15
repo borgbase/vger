@@ -217,14 +217,21 @@ fn cli_delete_dry_run_then_real_delete() {
     let backup_out = fx.run_ok(&["--config", &cfg, "backup", &source]);
     let snapshot = parse_snapshot_name(&backup_out);
 
-    let dry_run_out = fx.run_ok(&["--config", &cfg, "delete", &snapshot, "--dry-run"]);
+    let dry_run_out = fx.run_ok(&[
+        "--config",
+        &cfg,
+        "snapshot",
+        "delete",
+        &snapshot,
+        "--dry-run",
+    ]);
     assert!(dry_run_out.contains("Dry run: would delete snapshot"));
     assert!(dry_run_out.contains(&snapshot));
 
     let list_before = fx.run_ok(&["--config", &cfg, "list"]);
     assert!(list_before.contains(&snapshot));
 
-    let delete_out = fx.run_ok(&["--config", &cfg, "delete", &snapshot]);
+    let delete_out = fx.run_ok(&["--config", &cfg, "snapshot", "delete", &snapshot]);
     assert!(delete_out.contains("Deleted snapshot"));
     assert!(delete_out.contains(&snapshot));
 
@@ -408,6 +415,25 @@ fn cli_snapshot_find_timeline_and_filters() {
         stderr.contains("positive") || stderr.contains("must be"),
         "--since 0h should be rejected"
     );
+}
+
+#[test]
+fn cli_delete_repo_with_flag() {
+    let fx = CliFixture::new();
+    write_plain_config(&fx.config_path, &fx.repo_dir);
+    std::fs::write(fx.source_a.join("repo-del.txt"), b"delete repo\n").unwrap();
+
+    let cfg = fx.config_path.to_string_lossy().to_string();
+    let source = fx.source_a.to_string_lossy().to_string();
+
+    fx.run_ok(&["--config", &cfg, "init"]);
+    fx.run_ok(&["--config", &cfg, "backup", &source]);
+
+    assert!(fx.repo_dir.join("config").exists());
+
+    let delete_out = fx.run_ok(&["--config", &cfg, "delete", "--yes-delete-this-repo"]);
+    assert!(delete_out.contains("deleted"));
+    assert!(!fx.repo_dir.exists());
 }
 
 #[test]

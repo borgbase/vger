@@ -2,6 +2,7 @@ pub mod backup;
 pub mod check;
 pub mod compact;
 pub mod delete;
+pub mod delete_repo;
 pub mod extract;
 pub mod find;
 pub mod info;

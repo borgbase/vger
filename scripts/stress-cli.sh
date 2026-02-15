@@ -492,7 +492,7 @@ main() {
 
     log "[$i/$ITERATIONS] delete"
     CURRENT_STEP="delete"
-    LAST_DELETE_LOG="$(run_vger "$i" delete delete "$snapshot")"
+    LAST_DELETE_LOG="$(run_vger "$i" delete snapshot delete "$snapshot")"
     deletes=$((deletes + 1))
     check_locks_clear
 

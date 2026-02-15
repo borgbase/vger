@@ -6,6 +6,7 @@ mod compact;
 mod compress;
 mod crypto;
 mod delete;
+mod delete_repo;
 mod format;
 mod helpers;
 mod index;
