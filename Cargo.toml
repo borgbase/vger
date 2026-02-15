@@ -38,3 +38,7 @@ tokio = "1"
 
 # Testing
 tempfile = "3"
+
+[workspace.lints.rust]
+
+[workspace.lints.clippy]

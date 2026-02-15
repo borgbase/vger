@@ -4,6 +4,9 @@ version = "0.6.0"
 edition = "2021"
 license = "GPL-3.0-only"
 
+[lints]
+workspace = true
+
 [dependencies]
 # Serialization
 serde.workspace = true

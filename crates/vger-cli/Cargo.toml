@@ -8,6 +8,9 @@ license = "GPL-3.0-only"
 name = "vger"
 path = "src/main.rs"
 
+[lints]
+workspace = true
+
 [dependencies]
 vger-core = { workspace = true, features = ["mount", "backend-sftp"] }
 clap.workspace = true
