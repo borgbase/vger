@@ -146,7 +146,7 @@ sources:
     label: myapp
 ```
 
-> **Note:** The default volume path `/var/lib/docker/volumes/` applies to standard Docker installs on Linux. It differs for Docker Desktop on macOS/Windows, rootless Docker, and custom `data-root` configurations. Run `docker volume inspect <n>` to find the actual path.
+> **Note:** The default volume path `/var/lib/docker/volumes/` applies to standard Docker installs on Linux. It differs for Docker Desktop on macOS/Windows, rootless Docker, Podman (`/var/lib/containers/storage/volumes/` for root, `~/.local/share/containers/storage/volumes/` for rootless), and custom `data-root` configurations. Run `docker volume inspect <n>` or `podman volume inspect <n>` to find the actual path.
 
 
 ### Docker volumes with brief downtime
@@ -237,6 +237,12 @@ sources:
       after:  "btrfs subvolume delete /mnt/.snapshots/data-backup"
 ```
 
+The snapshot parent directory (`/mnt/.snapshots/`) must exist before the first backup. Create it once:
+
+```bash
+mkdir -p /mnt/.snapshots
+```
+
 
 ### ZFS
 
@@ -249,7 +255,11 @@ sources:
       after:  "zfs destroy tank/data@vger-tmp"
 ```
 
-The `.zfs/snapshot` directory is automatically available on ZFS datasets without mounting.
+> **Important:** The `.zfs/snapshot` directory is only accessible if `snapdir` is set to `visible` on the dataset. This is not the default. Set it before using this recipe:
+>
+> ```bash
+> zfs set snapdir=visible tank/data
+> ```
 
 
 ### LVM
