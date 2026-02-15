@@ -9,7 +9,7 @@ name = "vger"
 path = "src/main.rs"
 
 [dependencies]
-vger-core = { path = "../vger-core", features = ["mount", "backend-sftp"] }
+vger-core = { path = "../vger-core", features = ["mount"] }
 clap = { version = "4", features = ["derive"] }
 serde = { version = "1", features = ["derive"] }
 serde_yaml = "0.9"
@@ -23,6 +23,9 @@ hostname = "0.4"
 hex = "0.4"
 rand = "0.8"
 dialoguer = "0.11"
+
+[target.'cfg(unix)'.dependencies]
+vger-core = { path = "../vger-core", features = ["backend-sftp"] }
 
 [dev-dependencies]
 tempfile = "3"
