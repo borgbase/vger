@@ -6,19 +6,19 @@ license = "GPL-3.0-only"
 
 [dependencies]
 # Serialization
-serde = { version = "1", features = ["derive"] }
-serde_json = "1"
-serde_yaml = "0.9"
+serde.workspace = true
+serde_json.workspace = true
+serde_yaml.workspace = true
 rmp-serde = "1"
 
 # Crypto
 aes-gcm = "0.10"
 chacha20poly1305 = "0.10"
-blake2 = "0.10"
+blake2.workspace = true
 argon2 = "0.5"
-rand = "0.8"
-zeroize = { version = "1", features = ["derive"] }
-hex = "0.4"
+rand.workspace = true
+zeroize.workspace = true
+hex.workspace = true
 
 # Compression
 lz4_flex = "0.11"
@@ -32,13 +32,13 @@ opendal = { version = "0.51", features = ["services-s3", "layers-blocking", "lay
 url = "2"
 
 # Filesystem
-tempfile = "3"
+tempfile.workspace = true
 globset = "0.4"
 ignore = "0.4"
 filetime = "0.2"
 
 # Time
-chrono = { version = "0.4", features = ["serde"] }
+chrono.workspace = true
 
 # OS
 dirs = "6"
@@ -47,9 +47,12 @@ dirs = "6"
 thiserror = "2"
 
 # Logging
-tracing = "0.1"
+tracing.workspace = true
 rayon = "1"
-crossbeam-channel = "0.5"
+crossbeam-channel.workspace = true
+
+# Async runtime
+tokio = { workspace = true, features = ["rt-multi-thread"] }
 
 # HTTP client (REST backend)
 ureq = { version = "2", features = ["json"], optional = true }
@@ -60,7 +63,6 @@ russh-sftp = { version = "2.1", optional = true }
 
 # Mount (WebDAV server)
 dav-server = { version = "0.10", optional = true }
-tokio = { version = "1", features = ["rt-multi-thread"] }
 hyper = { version = "1", features = ["server", "http1"], optional = true }
 hyper-util = { version = "0.1", features = ["tokio"], optional = true }
 lru = { version = "0.12", optional = true }

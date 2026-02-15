@@ -9,18 +9,18 @@ name = "vger"
 path = "src/main.rs"
 
 [dependencies]
-vger-core = { path = "../vger-core", features = ["mount", "backend-sftp"] }
-clap = { version = "4", features = ["derive"] }
-serde = { version = "1", features = ["derive"] }
-serde_yaml = "0.9"
+vger-core = { workspace = true, features = ["mount", "backend-sftp"] }
+clap.workspace = true
+serde.workspace = true
+serde_yaml.workspace = true
 rpassword = "7"
-tracing = "0.1"
-tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+tracing.workspace = true
+tracing-subscriber.workspace = true
 comfy-table = "7"
-chrono = "0.4"
-hex = "0.4"
-rand = "0.8"
-zeroize = { version = "1", features = ["derive"] }
+chrono.workspace = true
+hex.workspace = true
+rand.workspace = true
+zeroize.workspace = true
 
 [dev-dependencies]
-tempfile = "3"
+tempfile.workspace = true

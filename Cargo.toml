@@ -6,3 +6,35 @@ members = [
     "crates/vger-gui",
 ]
 resolver = "2"
+
+[workspace.dependencies]
+# Internal crates
+vger-core = { path = "crates/vger-core" }
+
+# Serialization
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+serde_yaml = "0.9"
+
+# Crypto
+blake2 = "0.10"
+rand = "0.8"
+zeroize = { version = "1", features = ["derive"] }
+hex = "0.4"
+
+# CLI
+clap = { version = "4", features = ["derive"] }
+
+# Time
+chrono = { version = "0.4", features = ["serde"] }
+
+# Logging
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+# Concurrency
+crossbeam-channel = "0.5"
+tokio = "1"
+
+# Testing
+tempfile = "3"

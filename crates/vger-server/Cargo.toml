@@ -11,31 +11,31 @@ path = "src/main.rs"
 [dependencies]
 # Web framework
 axum = "0.8"
-tokio = { version = "1", features = ["full"] }
+tokio = { workspace = true, features = ["full"] }
 tower = "0.5"
 tower-http = { version = "0.6", features = ["trace"] }
 
 # Serialization
-serde = { version = "1", features = ["derive"] }
-serde_json = "1"
+serde.workspace = true
+serde_json.workspace = true
 toml = "0.8"
 
 # CLI
-clap = { version = "4", features = ["derive"] }
+clap.workspace = true
 
 # Logging
-tracing = "0.1"
-tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
+tracing.workspace = true
+tracing-subscriber = { workspace = true, features = ["json"] }
 
 # Time
-chrono = { version = "0.4", features = ["serde"] }
+chrono.workspace = true
 
 # Crypto (constant-time compare for auth token)
 subtle = "2"
-blake2 = "0.10"
+blake2.workspace = true
 
 # System info
 sysinfo = "0.32"
 
 # Hex encoding
-hex = "0.4"
+hex.workspace = true
