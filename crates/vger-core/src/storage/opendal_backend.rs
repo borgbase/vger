@@ -6,9 +6,9 @@ use opendal::{BlockingOperator, Operator};
 use crate::error::{Result, VgerError};
 use crate::storage::StorageBackend;
 
-/// Tokio runtime used by `BlockingLayer` to bridge async OpenDAL services
-/// (S3, SFTP) into synchronous calls. Created lazily on first use.
-static ASYNC_RUNTIME: LazyLock<tokio::runtime::Runtime> = LazyLock::new(|| {
+/// Tokio runtime used by async-backed storage adapters (OpenDAL S3 and native
+/// SFTP) to bridge into synchronous call sites. Created lazily on first use.
+pub(crate) static ASYNC_RUNTIME: LazyLock<tokio::runtime::Runtime> = LazyLock::new(|| {
     let worker_threads = std::thread::available_parallelism()
         .map(|n| n.get().clamp(4, 8))
         .unwrap_or(4);
@@ -30,7 +30,7 @@ impl OpendalBackend {
         Self { op: op.blocking() }
     }
 
-    /// Create a backend from an async-only operator (S3, SFTP).
+    /// Create a backend from an async-only OpenDAL operator (S3).
     /// Adds a `BlockingLayer` to bridge async → blocking.
     ///
     /// All write tuning (multipart chunking, concurrency, throttling,
@@ -103,43 +103,6 @@ impl OpendalBackend {
             access_key_id,
             secret_access_key,
         )?)
-    }
-
-    /// Build an `Operator` for SFTP (without blocking conversion).
-    #[cfg(feature = "backend-sftp")]
-    pub fn sftp_operator(
-        host: &str,
-        user: Option<&str>,
-        port: Option<u16>,
-        root: &str,
-        key: Option<&str>,
-    ) -> Result<Operator> {
-        let port = port.unwrap_or(22);
-        let endpoint = format!("ssh://{host}:{port}");
-        let mut builder = opendal::services::Sftp::default()
-            .endpoint(&endpoint)
-            .root(root);
-        if let Some(u) = user {
-            builder = builder.user(u);
-        }
-        if let Some(k) = key {
-            builder = builder.key(k);
-        }
-        Operator::new(builder)
-            .map_err(|e| VgerError::Other(format!("opendal sftp init: {e}")))
-            .map(|b| b.finish())
-    }
-
-    /// Create a backend backed by SFTP.
-    #[cfg(feature = "backend-sftp")]
-    pub fn sftp(
-        host: &str,
-        user: Option<&str>,
-        port: Option<u16>,
-        root: &str,
-        key: Option<&str>,
-    ) -> Result<Self> {
-        Self::from_async_operator(Self::sftp_operator(host, user, port, root, key)?)
     }
 }
 

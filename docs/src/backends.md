@@ -60,7 +60,9 @@ repositories:
 
 ## SFTP
 
-Store backups on a remote server via SFTP.
+Store backups on a remote server via SFTP. Uses a direct [russh](https://github.com/Eugeny/russh) implementation (pure Rust SSH/SFTP) — no system `ssh` binary required. Works on all platforms including Windows.
+
+Host keys are verified with an OpenSSH `known_hosts` file. Unknown hosts use TOFU (trust-on-first-use): the first key is stored, and later key changes fail connection.
 
 > Requires building with the `backend-sftp` feature flag (see [Building with optional backends](#building-with-optional-backends) below).
 
@@ -69,6 +71,8 @@ repositories:
   - url: "sftp://backup@nas.local/backups/vger"
     label: "nas"
     # sftp_key: "/home/user/.ssh/id_rsa"  # Path to private key (optional)
+    # sftp_known_hosts: "/home/user/.ssh/known_hosts"  # Optional known_hosts path
+    # sftp_max_connections: 4  # Optional concurrency limit (1..=32)
 ```
 
 URL format: `sftp://[user@]host[:port]/path`. Default port is 22.
@@ -77,7 +81,9 @@ URL format: `sftp://[user@]host[:port]/path`. Default port is 22.
 
 | Field | Description |
 |-------|-------------|
-| `sftp_key` | Path to SSH private key (defaults to `~/.ssh/id_rsa`) |
+| `sftp_key` | Path to SSH private key (auto-detects `~/.ssh/id_ed25519`, `id_rsa`, `id_ecdsa`) |
+| `sftp_known_hosts` | Path to OpenSSH `known_hosts` file (default: `~/.ssh/known_hosts`) |
+| `sftp_max_connections` | Max concurrent SFTP connections (default: `4`, clamped to `1..=32`) |
 
 ## REST (vger-server)
 

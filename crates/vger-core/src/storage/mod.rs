@@ -1,6 +1,8 @@
 pub mod opendal_backend;
 #[cfg(feature = "backend-rest")]
 pub mod rest_backend;
+#[cfg(feature = "backend-sftp")]
+pub mod sftp_backend;
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -328,9 +330,9 @@ fn apply_throttle(op: Operator, throttle_bytes_per_sec: Option<u32>) -> Operator
 
 /// Build a storage backend from the repository configuration.
 ///
-/// `throttle_bytes_per_sec` applies OpenDAL's `ThrottleLayer` for S3/SFTP
-/// backends. For local and REST backends this parameter is ignored (use
-/// `limits::wrap_backup_storage_backend` to throttle those).
+/// `throttle_bytes_per_sec` applies OpenDAL's `ThrottleLayer` for S3.
+/// For local, SFTP, and REST backends this parameter is ignored (use
+/// `limits::wrap_backup_storage_backend` for per-operation throttling).
 pub fn backend_from_config(
     cfg: &RepositoryConfig,
     throttle_bytes_per_sec: Option<u32>,
@@ -373,20 +375,16 @@ pub fn backend_from_config(
             host,
             port,
             path,
-        } => {
-            let op = opendal_backend::OpendalBackend::sftp_operator(
-                &host,
-                user.as_deref(),
-                port,
-                &path,
-                cfg.sftp_key.as_deref(),
-            )?;
-            let op = apply_retry(op, &cfg.retry);
-            let op = apply_throttle(op, throttle_bytes_per_sec);
-            Ok(Box::new(
-                opendal_backend::OpendalBackend::from_async_operator(op)?,
-            ))
-        }
+        } => Ok(Box::new(sftp_backend::SftpBackend::new(
+            &host,
+            user.as_deref(),
+            port,
+            &path,
+            cfg.sftp_key.as_deref(),
+            cfg.sftp_known_hosts.as_deref(),
+            cfg.sftp_max_connections,
+            cfg.retry.clone(),
+        )?)),
         #[cfg(not(feature = "backend-sftp"))]
         ParsedUrl::Sftp { .. } => Err(VgerError::UnsupportedBackend(
             "sftp (compile with feature 'backend-sftp')".into(),

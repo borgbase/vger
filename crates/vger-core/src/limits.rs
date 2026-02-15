@@ -154,9 +154,9 @@ pub fn network_write_throttle_bps(limits: &ResourceLimitsConfig) -> Option<u32> 
 
 /// Wrap a storage backend with rate limiting for backup.
 ///
-/// For S3/SFTP backends the OpenDAL `ThrottleLayer` handles bandwidth limiting,
-/// so this function returns the backend unchanged. For local and REST backends
-/// a `ThrottledStorageBackend` wrapper is applied.
+/// For S3 backends the OpenDAL `ThrottleLayer` handles bandwidth limiting, so
+/// this function returns the backend unchanged. For local, SFTP, and REST
+/// backends a `ThrottledStorageBackend` wrapper is applied.
 pub fn wrap_backup_storage_backend(
     inner: Box<dyn StorageBackend>,
     repo_url: &str,
@@ -164,8 +164,8 @@ pub fn wrap_backup_storage_backend(
 ) -> Result<Box<dyn StorageBackend>> {
     let parsed = parse_repo_url(repo_url)?;
 
-    // S3/SFTP: throttle handled at the OpenDAL operator level via ThrottleLayer
-    if matches!(parsed, ParsedUrl::S3 { .. } | ParsedUrl::Sftp { .. }) {
+    // S3: throttle handled at the OpenDAL operator level via ThrottleLayer.
+    if matches!(parsed, ParsedUrl::S3 { .. }) {
         return Ok(inner);
     }
 

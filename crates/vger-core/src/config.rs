@@ -632,6 +632,10 @@ pub struct RepositoryConfig {
     pub endpoint: Option<String>,
     /// Path to SSH private key for SFTP backend.
     pub sftp_key: Option<String>,
+    /// Path to OpenSSH known_hosts file for SFTP host key verification.
+    pub sftp_known_hosts: Option<String>,
+    /// Maximum concurrent SFTP connections (default: 4, clamped to 1..=32).
+    pub sftp_max_connections: Option<usize>,
     /// Bearer token for REST backend authentication.
     pub rest_token: Option<String>,
     #[serde(default = "default_min_pack_size")]
@@ -899,6 +903,10 @@ pub struct RepositoryEntry {
     #[serde(default, deserialize_with = "deserialize_optional_strict_string")]
     pub sftp_key: Option<String>,
     #[serde(default, deserialize_with = "deserialize_optional_strict_string")]
+    pub sftp_known_hosts: Option<String>,
+    #[serde(default)]
+    pub sftp_max_connections: Option<usize>,
+    #[serde(default, deserialize_with = "deserialize_optional_strict_string")]
     pub rest_token: Option<String>,
     pub min_pack_size: Option<u32>,
     pub max_pack_size: Option<u32>,
@@ -932,6 +940,8 @@ impl RepositoryEntry {
             secret_access_key: self.secret_access_key.clone(),
             endpoint: self.endpoint.clone(),
             sftp_key: self.sftp_key.clone(),
+            sftp_known_hosts: self.sftp_known_hosts.clone(),
+            sftp_max_connections: self.sftp_max_connections,
             rest_token: self.rest_token.clone(),
             min_pack_size: self.min_pack_size.unwrap_or_else(default_min_pack_size),
             max_pack_size: self.max_pack_size.unwrap_or_else(default_max_pack_size),
@@ -1845,6 +1855,41 @@ repositories:
     }
 
     #[test]
+    fn test_sftp_repository_options_parse() {
+        let yaml = r#"
+repositories:
+  - url: sftp://backup@nas.local/backups/vger
+    sftp_key: /tmp/id_ed25519
+    sftp_known_hosts: /tmp/known_hosts
+    sftp_max_connections: 8
+sources:
+  - /home/user
+"#;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.yaml");
+        fs::write(&path, yaml).unwrap();
+
+        let repos = load_and_resolve(&path).unwrap();
+        assert_eq!(repos.len(), 1);
+        let repo = &repos[0].config.repository;
+        assert_eq!(
+            repo.sftp_key.as_deref(),
+            Some("/tmp/id_ed25519"),
+            "sftp_key should be parsed"
+        );
+        assert_eq!(
+            repo.sftp_known_hosts.as_deref(),
+            Some("/tmp/known_hosts"),
+            "sftp_known_hosts should be parsed"
+        );
+        assert_eq!(
+            repo.sftp_max_connections,
+            Some(8),
+            "sftp_max_connections should be parsed"
+        );
+    }
+
+    #[test]
     fn test_encryption_mode_defaults_to_auto_when_omitted() {
         let yaml = r#"
 repositories:
@@ -2129,6 +2174,8 @@ repositories:
                     secret_access_key: None,
                     endpoint: None,
                     sftp_key: None,
+                    sftp_known_hosts: None,
+                    sftp_max_connections: None,
                     rest_token: None,
                     min_pack_size: default_min_pack_size(),
                     max_pack_size: default_max_pack_size(),

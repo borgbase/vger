@@ -37,6 +37,8 @@ pub fn make_test_config(repo_dir: &Path) -> VgerConfig {
             secret_access_key: None,
             endpoint: None,
             sftp_key: None,
+            sftp_known_hosts: None,
+            sftp_max_connections: None,
             rest_token: None,
             min_pack_size: 32 * 1024 * 1024,
             max_pack_size: 512 * 1024 * 1024,

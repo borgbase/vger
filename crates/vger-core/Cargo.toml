@@ -54,6 +54,10 @@ crossbeam-channel = "0.5"
 # HTTP client (REST backend)
 ureq = { version = "2", features = ["json"], optional = true }
 
+# SSH/SFTP (direct russh implementation)
+russh = { version = "0.54", default-features = false, features = ["aws-lc-rs"], optional = true }
+russh-sftp = { version = "2.1", optional = true }
+
 # Mount (WebDAV server)
 dav-server = { version = "0.10", optional = true }
 tokio = { version = "1", features = ["rt-multi-thread"] }
@@ -66,7 +70,7 @@ futures-util = { version = "0.3", optional = true }
 [features]
 default = ["backend-rest"]
 backend-rest = ["ureq"]
-backend-sftp = ["opendal/services-sftp"]
+backend-sftp = ["russh", "russh-sftp"]
 mount = ["dav-server", "tokio/rt-multi-thread", "tokio/macros", "tokio/signal", "tokio/net", "hyper", "hyper-util", "lru", "bytes", "futures-util"]
 
 [dev-dependencies]
