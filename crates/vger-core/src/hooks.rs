@@ -129,18 +129,18 @@ fn execute_hook_command(cmd: &str, ctx: &HookContext) -> Result<()> {
         );
     }
 
-    let output = shell::run_command_with_timeout(&mut child, HOOK_TIMEOUT)
+    // Use the non-capturing variant: hooks inherit stdout/stderr so output
+    // goes directly to the user's terminal (better UX than capturing).
+    let status = shell::run_command_status_with_timeout(&mut child, HOOK_TIMEOUT)
         .map_err(|e| VgerError::Hook(format!("failed to execute '{expanded}': {e}")))?;
 
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        let code = output
-            .status
+    if !status.success() {
+        let code = status
             .code()
             .map(|c| c.to_string())
             .unwrap_or_else(|| "signal".to_string());
         return Err(VgerError::Hook(format!(
-            "hook '{expanded}' exited with {code}: {stderr}"
+            "hook '{expanded}' exited with {code}"
         )));
     }
 

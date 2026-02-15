@@ -1311,7 +1311,9 @@ fn send_structured_data(ui_tx: &Sender<UiEvent>, repos: &[ResolvedRepo]) {
     let _ = ui_tx.send(UiEvent::SourceModelData { items, labels });
 }
 
-fn resolve_passphrase_for_repo(repo: &ResolvedRepo) -> Result<Option<String>, VgerError> {
+fn resolve_passphrase_for_repo(
+    repo: &ResolvedRepo,
+) -> Result<Option<zeroize::Zeroizing<String>>, VgerError> {
     let repo_name = format_repo_name(repo);
     let pass = passphrase::resolve_passphrase(&repo.config, repo.label.as_deref(), |prompt| {
         let title = format!("V'Ger Passphrase ({repo_name})");
@@ -1326,15 +1328,13 @@ fn resolve_passphrase_for_repo(repo: &ResolvedRepo) -> Result<Option<String>, Vg
         let value = tinyfiledialogs::password_box(&title, &message);
         Ok(value.filter(|v| !v.is_empty()).map(zeroize::Zeroizing::new))
     })?;
-    // Convert Zeroizing<String> -> String for the GUI cache layer.
-    // GUI passphrase caching keeps a plain String in memory for the session.
-    Ok(pass.map(|z| (*z).clone()))
+    Ok(pass)
 }
 
 fn get_or_resolve_passphrase(
     repo: &ResolvedRepo,
-    cache: &mut HashMap<String, String>,
-) -> Result<Option<String>, VgerError> {
+    cache: &mut HashMap<String, zeroize::Zeroizing<String>>,
+) -> Result<Option<zeroize::Zeroizing<String>>, VgerError> {
     let key = &repo.config.repository.url;
     if let Some(existing) = cache.get(key) {
         return Ok(Some(existing.clone()));
@@ -1364,8 +1364,8 @@ fn find_repo_for_snapshot<'a>(
     repos: &'a [ResolvedRepo],
     selector: &str,
     snapshot: &str,
-    passphrases: &mut HashMap<String, String>,
-) -> Result<(&'a ResolvedRepo, Option<String>), VgerError> {
+    passphrases: &mut HashMap<String, zeroize::Zeroizing<String>>,
+) -> Result<(&'a ResolvedRepo, Option<zeroize::Zeroizing<String>>), VgerError> {
     for repo in select_repos(repos, selector)? {
         let key = repo.config.repository.url.clone();
         let pass = if let Some(cached) = passphrases.get(&key) {
@@ -1378,7 +1378,11 @@ fn find_repo_for_snapshot<'a>(
             p
         };
 
-        match operations::list_snapshot_items(&repo.config, pass.as_deref(), snapshot) {
+        match operations::list_snapshot_items(
+            &repo.config,
+            pass.as_deref().map(|s| s.as_str()),
+            snapshot,
+        ) {
             Ok(_) => return Ok((repo, pass)),
             Err(VgerError::SnapshotNotFound(_)) => continue,
             Err(e) => return Err(e),
@@ -1431,7 +1435,7 @@ fn run_worker(
     backup_running: Arc<AtomicBool>,
     mut runtime: app::RuntimeConfig,
 ) {
-    let mut passphrases: HashMap<String, String> = HashMap::new();
+    let mut passphrases: HashMap<String, zeroize::Zeroizing<String>> = HashMap::new();
 
     let config_display_path = std::fs::canonicalize(runtime.source.path())
         .unwrap_or_else(|_| runtime.source.path().to_path_buf());
@@ -1506,7 +1510,7 @@ fn run_worker(
                     match operations::run_backup_for_repo(
                         &repo.config,
                         &repo.sources,
-                        passphrase.as_deref(),
+                        passphrase.as_deref().map(|s| s.as_str()),
                     ) {
                         Ok(report) => log_backup_report(&ui_tx, &repo_name, &report),
                         Err(e) => {
@@ -1562,7 +1566,7 @@ fn run_worker(
                 match operations::run_backup_for_repo(
                     &repo.config,
                     &repo.sources,
-                    passphrase.as_deref(),
+                    passphrase.as_deref().map(|s| s.as_str()),
                 ) {
                     Ok(report) => log_backup_report(&ui_tx, &rn, &report),
                     Err(e) => send_log(&ui_tx, format!("[{rn}] backup failed: {e}")),
@@ -1618,7 +1622,7 @@ fn run_worker(
                     match operations::run_backup_for_repo(
                         &repo.config,
                         &matching_sources,
-                        passphrase.as_deref(),
+                        passphrase.as_deref().map(|s| s.as_str()),
                     ) {
                         Ok(report) => {
                             any_backed_up = true;
@@ -1657,7 +1661,10 @@ fn run_worker(
                         }
                     };
 
-                    match vger_core::commands::info::run(&repo.config, passphrase.as_deref()) {
+                    match vger_core::commands::info::run(
+                        &repo.config,
+                        passphrase.as_deref().map(|s| s.as_str()),
+                    ) {
                         Ok(stats) => {
                             let last_snapshot = stats
                                 .last_snapshot_time
@@ -1708,7 +1715,10 @@ fn run_worker(
                         }
                     };
 
-                    match operations::list_snapshots(&repo.config, passphrase.as_deref()) {
+                    match operations::list_snapshots(
+                        &repo.config,
+                        passphrase.as_deref().map(|s| s.as_str()),
+                    ) {
                         Ok(mut snapshots) => {
                             snapshots.sort_by_key(|s| s.time);
                             for s in snapshots {
@@ -1764,7 +1774,7 @@ fn run_worker(
                     Ok((repo, passphrase)) => {
                         match operations::list_snapshot_items(
                             &repo.config,
-                            passphrase.as_deref(),
+                            passphrase.as_deref().map(|s| s.as_str()),
                             &snapshot_name,
                         ) {
                             Ok(items) => {
@@ -1811,7 +1821,7 @@ fn run_worker(
                             paths.into_iter().collect();
                         match operations::extract_selected(
                             &repo.config,
-                            passphrase.as_deref(),
+                            passphrase.as_deref().map(|s| s.as_str()),
                             &snapshot,
                             &dest,
                             &path_set,
@@ -1868,7 +1878,11 @@ fn run_worker(
                     }
                 };
 
-                match operations::check_repo(&repo.config, passphrase.as_deref(), false) {
+                match operations::check_repo(
+                    &repo.config,
+                    passphrase.as_deref().map(|s| s.as_str()),
+                    false,
+                ) {
                     Ok(result) => {
                         send_log(
                             &ui_tx,
@@ -1911,7 +1925,7 @@ fn run_worker(
 
                 match vger_core::commands::compact::run(
                     &repo.config,
-                    passphrase.as_deref(),
+                    passphrase.as_deref().map(|s| s.as_str()),
                     10.0,
                     None,
                     false,
@@ -1972,7 +1986,7 @@ fn run_worker(
 
                 match operations::delete_snapshot(
                     &repo.config,
-                    passphrase.as_deref(),
+                    passphrase.as_deref().map(|s| s.as_str()),
                     &snapshot_name,
                 ) {
                     Ok(stats) => {
@@ -2044,7 +2058,7 @@ fn run_worker(
 
                 match vger_core::commands::find::run(
                     &repo.config,
-                    passphrase.as_deref(),
+                    passphrase.as_deref().map(|s| s.as_str()),
                     &scope,
                     &filter,
                 ) {

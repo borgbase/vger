@@ -76,5 +76,5 @@ mount = ["dav-server", "tokio/rt-multi-thread", "tokio/macros", "tokio/signal", 
 tempfile = "3"
 
 [target.'cfg(unix)'.dependencies]
-nix = { version = "0.29", features = ["fs", "hostname", "user"] }
+nix = { version = "0.29", features = ["fs", "hostname", "user", "signal", "process"] }
 xattr = "1"
