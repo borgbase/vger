@@ -445,12 +445,7 @@ fn join_root_key(root: &str, key: &str) -> String {
     if key.is_empty() {
         return root.to_string();
     }
-
-    if root == "/" {
-        format!("/{key}")
-    } else {
-        format!("{root}/{key}")
-    }
+    Path::new(root).join(key).to_string_lossy().to_string()
 }
 
 fn resolve_known_hosts_path(explicit: Option<&str>) -> Result<PathBuf> {
@@ -730,11 +725,10 @@ async fn list_recursive(
             if name == "." || name == ".." {
                 continue;
             }
-            let full = if current_dir == "/" {
-                format!("/{name}")
-            } else {
-                format!("{current_dir}/{name}")
-            };
+            let full = Path::new(&*current_dir)
+                .join(&name)
+                .to_string_lossy()
+                .to_string();
             let file_type = entry.metadata().file_type();
             if file_type.is_dir() {
                 dirs_to_visit.push(full);
