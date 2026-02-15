@@ -139,7 +139,11 @@ struct ConnGuard<'a> {
 
 impl<'a> ConnGuard<'a> {
     fn sftp(&self) -> &SftpSession {
-        &self.conn.as_ref().unwrap().sftp
+        &self
+            .conn
+            .as_ref()
+            .expect("invariant: ConnGuard holds connection until release/discard")
+            .sftp
     }
 
     /// Return connection to the idle pool (it's still healthy).

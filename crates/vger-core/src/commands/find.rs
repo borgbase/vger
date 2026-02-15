@@ -234,7 +234,7 @@ fn annotate_hits(hits: Vec<FindHit>) -> Vec<AnnotatedHit> {
 
         annotated.push(AnnotatedHit { hit, status });
 
-        let last = annotated.last().unwrap();
+        let last = annotated.last().expect("invariant: just pushed");
         prev_chunk_ids = Some(&last.hit.chunk_ids);
         prev_size = Some(last.hit.size);
     }

@@ -488,26 +488,18 @@ impl Repository {
                 }
                 return Some(stored_size);
             }
-        } else if self.chunk_index.contains(chunk_id) {
-            let stored_size = self.chunk_index.get(chunk_id).unwrap().stored_size;
+        } else if let Some(entry) = self.chunk_index.get(chunk_id) {
+            let stored_size = entry.stored_size;
             self.chunk_index.increment_refcount(chunk_id);
             return Some(stored_size);
         }
 
         // Dedup check against pending blobs in both pack writers
-        if self.data_pack_writer.contains_pending(chunk_id) {
-            let stored_size = self
-                .data_pack_writer
-                .get_pending_stored_size(chunk_id)
-                .unwrap();
+        if let Some(stored_size) = self.data_pack_writer.get_pending_stored_size(chunk_id) {
             self.data_pack_writer.increment_pending(chunk_id);
             return Some(stored_size);
         }
-        if self.tree_pack_writer.contains_pending(chunk_id) {
-            let stored_size = self
-                .tree_pack_writer
-                .get_pending_stored_size(chunk_id)
-                .unwrap();
+        if let Some(stored_size) = self.tree_pack_writer.get_pending_stored_size(chunk_id) {
             self.tree_pack_writer.increment_pending(chunk_id);
             return Some(stored_size);
         }
