@@ -32,6 +32,29 @@
   mask-repeat: no-repeat;
 }
 
+/* Logo icon in the header bar beside the book title. */
+.menu-title::before {
+  content: "";
+  display: inline-block;
+  width: 1.2em;
+  height: 1.2em;
+  margin-right: 0.4em;
+  vertical-align: middle;
+  background: url("images/logo-simple.svg") no-repeat center / contain;
+  opacity: 0.4;
+}
+.coal .menu-title::before,
+.navy .menu-title::before,
+.ayu .menu-title::before,
+.rust .menu-title::before {
+  filter: invert(1);
+}
+@media (prefers-color-scheme: dark) {
+  html:not(.js) .menu-title::before {
+    filter: invert(1);
+  }
+}
+
 /* Keep command names readable in Command Reference. */
 h1#command-reference + .table-wrapper table th:first-child,
 h1#command-reference + .table-wrapper table td:first-child,
