@@ -19,7 +19,7 @@ use crate::repo::format::{unpack_object_expect, ObjectType};
 use crate::snapshot::item::{Item, ItemType};
 use crate::storage::StorageBackend;
 
-use super::util::open_repo;
+use super::util::open_repo_without_index;
 
 // ---------------------------------------------------------------------------
 // Constants for coalesced parallel restore
@@ -150,7 +150,7 @@ fn extract_with_filter<F>(
 where
     F: FnMut(&str) -> bool,
 {
-    let mut repo = open_repo(config, passphrase)?;
+    let mut repo = open_repo_without_index(config, passphrase)?;
     // Shrink blob cache for restore — the parallel pipeline reads pack data
     // directly via storage.get_range(), so the cache only serves the small
     // item-stream tree-pack chunks. 2 MiB is plenty.
@@ -228,6 +228,9 @@ where
     }
 
     if !file_items.is_empty() {
+        // Load the chunk index (was skipped by open_without_index).
+        repo.load_chunk_index()?;
+
         // Phase 2: Plan reads — group chunks by pack, coalesce adjacent ranges.
         let (planned_files, groups) = plan_reads(&file_items, repo.chunk_index())?;
         drop(file_items); // release borrows on sorted_items

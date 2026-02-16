@@ -10,6 +10,16 @@ pub fn open_repo(config: &VgerConfig, passphrase: Option<&str>) -> Result<Reposi
     Repository::open(backend, passphrase)
 }
 
+/// Open a repository without loading the chunk index.
+/// Suitable for read-only operations that load or filter the index lazily.
+pub fn open_repo_without_index(
+    config: &VgerConfig,
+    passphrase: Option<&str>,
+) -> Result<Repository> {
+    let backend = storage::backend_from_config(&config.repository, None)?;
+    Repository::open_without_index(backend, passphrase)
+}
+
 /// Open a repository and execute a mutation while holding an advisory lock.
 pub fn with_open_repo_lock<T>(
     config: &VgerConfig,

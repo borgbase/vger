@@ -285,6 +285,36 @@ impl Repository {
 
     /// Open an existing repository.
     pub fn open(storage: Box<dyn StorageBackend>, passphrase: Option<&str>) -> Result<Self> {
+        let mut repo = Self::open_base(storage, passphrase)?;
+
+        // Read chunk index
+        repo.load_chunk_index()?;
+
+        // Compute dynamic pack target sizes from the loaded index.
+        let num_data_packs = repo.chunk_index.count_distinct_packs();
+        let data_target = compute_data_pack_target(
+            num_data_packs,
+            repo.config.min_pack_size,
+            repo.config.max_pack_size,
+        );
+        repo.data_pack_writer = PackWriter::new(PackType::Data, data_target);
+
+        Ok(repo)
+    }
+
+    /// Open a repository without loading the chunk index.
+    /// Suitable for read-only operations (extract, list) that either don't need
+    /// the index or will load it lazily via `load_chunk_index()`.
+    pub fn open_without_index(
+        storage: Box<dyn StorageBackend>,
+        passphrase: Option<&str>,
+    ) -> Result<Self> {
+        Self::open_base(storage, passphrase)
+    }
+
+    /// Shared open logic: reads config, builds crypto, loads manifest and file cache.
+    /// Does NOT load the chunk index — callers either load it themselves or skip it.
+    fn open_base(storage: Box<dyn StorageBackend>, passphrase: Option<&str>) -> Result<Self> {
         let storage: Arc<dyn StorageBackend> = Arc::from(storage);
 
         // Read config
@@ -348,32 +378,18 @@ impl Repository {
             unpack_object_expect(&manifest_data, ObjectType::Manifest, crypto.as_ref())?;
         let manifest: Manifest = rmp_serde::from_slice(&manifest_bytes)?;
 
-        // Read chunk index
-        let chunk_index = if let Some(index_data) = storage.get("index")? {
-            let index_bytes =
-                unpack_object_expect(&index_data, ObjectType::ChunkIndex, crypto.as_ref())?;
-            rmp_serde::from_slice(&index_bytes)?
-        } else {
-            ChunkIndex::new()
-        };
-
         // Load file cache from local disk (not from the repo).
         let file_cache = FileCache::load(&repo_config.id, crypto.as_ref());
 
-        // Compute dynamic pack target sizes
-        let num_data_packs = chunk_index.count_distinct_packs();
-        let data_target = compute_data_pack_target(
-            num_data_packs,
-            repo_config.min_pack_size,
-            repo_config.max_pack_size,
-        );
+        // Use min_pack_size as default pack target (recalculated after index load).
+        let data_target = repo_config.min_pack_size as usize;
         let tree_target = compute_tree_pack_target(repo_config.min_pack_size);
 
         Ok(Repository {
             storage,
             crypto,
             manifest,
-            chunk_index,
+            chunk_index: ChunkIndex::new(),
             config: repo_config,
             file_cache,
             data_pack_writer: PackWriter::new(PackType::Data, data_target),
@@ -389,6 +405,13 @@ impl Repository {
             file_cache_dirty: false,
             rebuild_dedup_cache: false,
         })
+    }
+
+    /// Load the chunk index from storage on demand.
+    /// Can be called after `open_without_index()` to lazily load the index.
+    pub fn load_chunk_index(&mut self) -> Result<()> {
+        self.chunk_index = self.reload_full_index()?;
+        Ok(())
     }
 
     /// Mark the manifest as needing persistence on the next `save_state()`.
