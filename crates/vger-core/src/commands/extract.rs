@@ -288,46 +288,28 @@ fn plan_reads(
 ) -> Result<(Vec<PlannedFile>, Vec<ReadGroup>)> {
     let mut files: Vec<PlannedFile> = Vec::with_capacity(file_items.len());
 
-    // Build pack_blobs inline while traversing file chunks.
-    let mut pack_blobs: HashMap<PackId, Vec<PlannedBlob>> = HashMap::new();
-    let mut blob_positions: HashMap<ChunkId, (PackId, usize)> = HashMap::new();
+    // Collect all (ChunkId → Vec<WriteTarget>) across all files.
+    let mut chunk_targets: HashMap<ChunkId, Vec<WriteTarget>> = HashMap::new();
+    let mut chunk_sizes: HashMap<ChunkId, u32> = HashMap::new();
 
     for (file_idx, (item, target_path)) in file_items.iter().enumerate() {
         let mut file_offset: u64 = 0;
         for chunk_ref in &item.chunks {
-            if let Some((pack_id, blob_idx)) = blob_positions.get(&chunk_ref.id).copied() {
-                let blob = pack_blobs
-                    .get_mut(&pack_id)
-                    .and_then(|blobs| blobs.get_mut(blob_idx))
-                    .expect("blob_positions must reference an existing planned blob");
-                if blob.expected_size != chunk_ref.size {
+            if let Some(prev_size) = chunk_sizes.insert(chunk_ref.id, chunk_ref.size) {
+                if prev_size != chunk_ref.size {
                     return Err(VgerError::InvalidFormat(format!(
                         "chunk {} has inconsistent logical sizes in snapshot metadata: {} vs {}",
-                        chunk_ref.id, blob.expected_size, chunk_ref.size
+                        chunk_ref.id, prev_size, chunk_ref.size
                     )));
                 }
-                blob.targets.push(WriteTarget {
+            }
+            chunk_targets
+                .entry(chunk_ref.id)
+                .or_default()
+                .push(WriteTarget {
                     file_idx,
                     file_offset,
                 });
-            } else {
-                let entry = chunk_index.get(&chunk_ref.id).ok_or_else(|| {
-                    VgerError::Other(format!("chunk not found in index: {}", chunk_ref.id))
-                })?;
-                let blobs = pack_blobs.entry(entry.pack_id).or_default();
-                let blob_idx = blobs.len();
-                blobs.push(PlannedBlob {
-                    chunk_id: chunk_ref.id,
-                    pack_offset: entry.pack_offset,
-                    stored_size: entry.stored_size,
-                    expected_size: chunk_ref.size,
-                    targets: vec![WriteTarget {
-                        file_idx,
-                        file_offset,
-                    }],
-                });
-                blob_positions.insert(chunk_ref.id, (entry.pack_id, blob_idx));
-            }
             file_offset += chunk_ref.size as u64;
         }
         files.push(PlannedFile {
@@ -338,6 +320,30 @@ fn plan_reads(
             xattrs: item.xattrs.clone(),
         });
     }
+
+    // Look up each unique chunk's pack location and group by pack.
+    let mut pack_blobs: HashMap<PackId, Vec<PlannedBlob>> = HashMap::new();
+
+    for (chunk_id, targets) in chunk_targets {
+        let entry = chunk_index
+            .get(&chunk_id)
+            .ok_or_else(|| VgerError::Other(format!("chunk not found in index: {chunk_id}")))?;
+        let expected_size = *chunk_sizes.get(&chunk_id).ok_or_else(|| {
+            VgerError::Other(format!("missing logical chunk size for {chunk_id}"))
+        })?;
+        pack_blobs
+            .entry(entry.pack_id)
+            .or_default()
+            .push(PlannedBlob {
+                chunk_id,
+                pack_offset: entry.pack_offset,
+                stored_size: entry.stored_size,
+                expected_size,
+                targets,
+            });
+    }
+
+    drop(chunk_sizes); // no longer needed — free before coalescing
 
     // For each pack: sort blobs by offset, then coalesce into ReadGroups.
     let mut groups: Vec<ReadGroup> = Vec::new();
