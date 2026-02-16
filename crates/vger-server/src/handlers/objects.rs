@@ -2,6 +2,8 @@ use axum::body::Body;
 use axum::extract::{Path, Query, State};
 use axum::http::{HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
+use tokio::io::{AsyncReadExt, AsyncSeekExt, SeekFrom};
+use tokio_util::io::ReaderStream;
 
 use crate::error::ServerError;
 use crate::state::AppState;
@@ -28,21 +30,12 @@ pub async fn get_or_list(
         .file_path(&repo, &key)
         .ok_or_else(|| ServerError::BadRequest("invalid path".into()))?;
 
-    if !file_path.exists() {
-        return Err(ServerError::NotFound(key));
-    }
-
     // Check for Range header
     if let Some(range_header) = headers.get("Range").and_then(|v| v.to_str().ok()) {
-        return handle_range_read(&file_path, range_header).await;
+        return handle_range_read(&file_path, range_header, &key).await;
     }
 
-    let data = tokio::task::spawn_blocking(move || std::fs::read(file_path))
-        .await
-        .map_err(|e| ServerError::Internal(e.to_string()))?
-        .map_err(ServerError::from)?;
-
-    Ok((StatusCode::OK, data).into_response())
+    stream_full_read(&file_path, &key).await
 }
 
 /// HEAD /{repo}/{*path} — check existence, return Content-Length.
@@ -81,8 +74,14 @@ pub async fn put_object(
         .file_path(&repo, &key)
         .ok_or_else(|| ServerError::BadRequest("invalid path".into()))?;
 
+    let existing_meta = match tokio::fs::metadata(&file_path).await {
+        Ok(meta) => Some(meta),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
+        Err(e) => return Err(ServerError::from(e)),
+    };
+
     // Append-only: reject overwrites of pack files
-    if state.inner.config.append_only && key.starts_with("packs/") && file_path.exists() {
+    if state.inner.config.append_only && key.starts_with("packs/") && existing_meta.is_some() {
         return Err(ServerError::Forbidden(
             "append-only: cannot overwrite pack files".into(),
         ));
@@ -101,7 +100,7 @@ pub async fn put_object(
     }
 
     // Track old file size for quota accounting
-    let old_size = file_path.metadata().map(|m| m.len()).unwrap_or(0);
+    let old_size = existing_meta.as_ref().map_or(0, |m| m.len());
 
     // Ensure parent directory exists
     if let Some(parent) = file_path.parent() {
@@ -111,9 +110,8 @@ pub async fn put_object(
     }
 
     let data_len = body.len() as u64;
-    tokio::task::spawn_blocking(move || std::fs::write(file_path, &body))
+    tokio::fs::write(&file_path, &body)
         .await
-        .map_err(|e| ServerError::Internal(e.to_string()))?
         .map_err(ServerError::from)?;
 
     // Update quota
@@ -151,7 +149,13 @@ pub async fn delete_object(
         .file_path(&repo, &key)
         .ok_or_else(|| ServerError::BadRequest("invalid path".into()))?;
 
-    let old_size = file_path.metadata().map(|m| m.len()).unwrap_or(0);
+    let old_size = match tokio::fs::metadata(&file_path).await {
+        Ok(meta) => meta.len(),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            return Ok(StatusCode::NOT_FOUND.into_response());
+        }
+        Err(e) => return Err(ServerError::from(e)),
+    };
 
     match tokio::fs::remove_file(&file_path).await {
         Ok(()) => {
@@ -163,6 +167,25 @@ pub async fn delete_object(
         }
         Err(e) => Err(ServerError::from(e)),
     }
+}
+
+async fn stream_full_read(file_path: &std::path::Path, key: &str) -> Result<Response, ServerError> {
+    let file = match tokio::fs::File::open(file_path).await {
+        Ok(file) => file,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            return Err(ServerError::NotFound(key.to_string()));
+        }
+        Err(e) => return Err(ServerError::from(e)),
+    };
+
+    let file_len = file.metadata().await.map_err(ServerError::from)?.len();
+    let body = Body::from_stream(ReaderStream::new(file));
+    Ok((
+        StatusCode::OK,
+        [("Content-Length", file_len.to_string())],
+        body,
+    )
+        .into_response())
 }
 
 /// POST /{repo}/{*path}?mkdir — create directory.
@@ -221,6 +244,7 @@ fn list_files_recursive(dir: &std::path::Path, prefix: &str) -> Vec<String> {
 async fn handle_range_read(
     file_path: &std::path::Path,
     range_header: &str,
+    key: &str,
 ) -> Result<Response, ServerError> {
     // Parse "bytes=<start>-<end>"
     let range_str = range_header
@@ -248,36 +272,29 @@ async fn handle_range_read(
         .checked_sub(start)
         .and_then(|d| d.checked_add(1))
         .ok_or_else(|| ServerError::BadRequest("invalid Range header".into()))?;
-    let file_path = file_path.to_path_buf();
-
-    let data = tokio::task::spawn_blocking(move || {
-        use std::io::{Read, Seek, SeekFrom};
-        let mut f = std::fs::File::open(&file_path)?;
-        let file_len = f.metadata()?.len();
-        if start >= file_len {
-            return Err(std::io::Error::new(
-                std::io::ErrorKind::InvalidInput,
-                "range start beyond file size",
-            ));
+    let mut file = match tokio::fs::File::open(file_path).await {
+        Ok(f) => f,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            return Err(ServerError::NotFound(key.to_string()));
         }
-        f.seek(SeekFrom::Start(start))?;
-        let to_read_u64 = length.min(file_len - start);
-        let to_read: usize = to_read_u64.try_into().map_err(|_| {
-            std::io::Error::new(
-                std::io::ErrorKind::InvalidInput,
-                "requested range too large",
-            )
-        })?;
-        let mut buf = vec![0u8; to_read];
-        f.read_exact(&mut buf)?;
-        Ok::<_, std::io::Error>((buf, file_len))
-    })
-    .await
-    .map_err(|e| ServerError::Internal(e.to_string()))?
-    .map_err(ServerError::from)?;
+        Err(e) => return Err(ServerError::from(e)),
+    };
+    let file_len = file.metadata().await.map_err(ServerError::from)?.len();
 
-    let (buf, file_len) = data;
-    let actual_end = start + buf.len() as u64 - 1;
+    if start >= file_len {
+        return Err(ServerError::from(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "range start beyond file size",
+        )));
+    }
+
+    file.seek(SeekFrom::Start(start))
+        .await
+        .map_err(ServerError::from)?;
+
+    let to_read_u64 = length.min(file_len - start);
+    let actual_end = start + to_read_u64 - 1;
+    let body = Body::from_stream(ReaderStream::new(file.take(to_read_u64)));
 
     Ok((
         StatusCode::PARTIAL_CONTENT,
@@ -286,9 +303,9 @@ async fn handle_range_read(
                 "Content-Range",
                 format!("bytes {start}-{actual_end}/{file_len}"),
             ),
-            ("Content-Length", buf.len().to_string()),
+            ("Content-Length", to_read_u64.to_string()),
         ],
-        buf,
+        body,
     )
         .into_response())
 }
