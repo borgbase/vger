@@ -35,26 +35,38 @@ Use a unique REST repo name per run (recommended), or delete previous server-sid
 
 ## Test Procedure
 
-1. Initialize REST repo:
+1. Delete REST repo from previous runs (best effort):
    ```bash
-   vger init -c <config> -R rest
+   vger -c <config> delete -R rest --yes-delete-this-repo || true
    ```
-2. Run backup:
+2. Initialize REST repo:
    ```bash
-   vger backup -c <config> -R rest -l rest-corpus ~/corpus-remote
+   vger -c <config> init -R rest
    ```
-3. Confirm snapshot:
+3. Run backup:
    ```bash
-   vger list -c <config> -R rest
+   vger -c <config> backup -R rest -l rest-corpus ~/corpus-remote
    ```
-4. Capture latest snapshot ID.
-5. Restore to empty temp directory:
+4. Confirm snapshot:
    ```bash
-   vger extract -c <config> -R rest --dest <restore_dir> <snapshot_id>
+   vger -c <config> list -R rest
    ```
-6. Integrity check:
+5. Capture latest snapshot ID.
+6. Restore to empty temp directory:
    ```bash
-   vger check -c <config> -R rest
+   vger -c <config> restore -R rest --dest <restore_dir> <snapshot_id>
+   ```
+7. Integrity check:
+   ```bash
+   vger -c <config> check -R rest
+   ```
+8. Delete the tested snapshot:
+   ```bash
+   vger -c <config> snapshot -R rest delete <snapshot_id>
+   ```
+9. Compact repository packs:
+   ```bash
+   vger -c <config> compact -R rest
    ```
 
 ## Validation
@@ -62,7 +74,9 @@ Use a unique REST repo name per run (recommended), or delete previous server-sid
 1. Snapshot exists for label `rest-corpus`
 2. Restore completes successfully
 3. `diff -qr ~/corpus-remote <restore_dir>` reports no differences
-4. Optional: SHA256 manifest comparison
+4. `vger snapshot ... delete <snapshot_id>` exits 0
+5. `vger compact` exits 0
+6. Optional: SHA256 manifest comparison
 
 ## Failure Cases to Record
 
@@ -71,6 +85,7 @@ Use a unique REST repo name per run (recommended), or delete previous server-sid
 - Server-side connection resets (`broken pipe`) during pack uploads
 - Restore mismatch vs source
 - `vger check` failures
+- `vger snapshot delete` or `vger compact` failures
 
 ## Cleanup
 

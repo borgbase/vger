@@ -83,13 +83,16 @@ Every test must verify:
 5. Optional: SHA256 manifest comparison for stronger content verification
 
 ### Cleanup Standard
-1. **Local**: remove temporary directories (dumps, restores, configs)
-2. **Local REST server data**: remove test repos from server data directory between runs when reusing repo names
-3. **Remote storage**: `rclone delete --rmdirs <remote:path>` between runs
+1. **Reset repo before reruns**: run `vger -c <config> delete -R <repo> --yes-delete-this-repo` before `init`
+   - Treat `not found`/missing repo as non-fatal
+   - REST backends may return `404` on delete; if so, continue with `init`/`backup` and record it
+2. **Local**: remove temporary directories (dumps, restores, configs)
+3. **Local REST server data**: remove test repos from server data directory between runs when reusing repo names
+4. **Remote storage**: `rclone delete --rmdirs <remote:path>` between runs
    - Do NOT use `rclone purge` (may fail with 403 on restricted buckets)
    - Treat `directory not found` from rclone as non-fatal
-4. **Containers**: stop and remove after each scenario
-5. **Filesystems**: unmount/destroy test pools after runs
+5. **Containers**: stop and remove after each scenario
+6. **Filesystems**: unmount/destroy test pools after runs
 
 ### Run Matrix
 For tests that span multiple backends, run in this order:

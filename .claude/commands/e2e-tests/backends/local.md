@@ -27,26 +27,38 @@ Validate vger filesystem backup and restore correctness on the local backend usi
    ```bash
    rm -rf ~/runtime/repos/local
    ```
-2. Initialize repo:
+2. Delete repo from previous runs (best effort):
    ```bash
-   vger init -c <config> -R local
+   vger -c <config> delete -R local --yes-delete-this-repo || true
    ```
-3. Run backup:
+3. Initialize repo:
    ```bash
-   vger backup -c <config> -R local -l local-corpus ~/corpus-local
+   vger -c <config> init -R local
    ```
-4. Confirm snapshot:
+4. Run backup:
    ```bash
-   vger list -c <config> -R local --last 3
+   vger -c <config> backup -R local -l local-corpus ~/corpus-local
    ```
-5. Capture latest snapshot ID from output.
-6. Restore into empty temp directory:
+5. Confirm snapshot:
    ```bash
-   vger extract -c <config> -R local --dest <restore_dir> <snapshot_id>
+   vger -c <config> list -R local --last 3
    ```
-7. Integrity check:
+6. Capture latest snapshot ID from output.
+7. Restore into empty temp directory:
    ```bash
-   vger check -c <config> -R local
+   vger -c <config> restore -R local --dest <restore_dir> <snapshot_id>
+   ```
+8. Integrity check:
+   ```bash
+   vger -c <config> check -R local
+   ```
+9. Delete the tested snapshot:
+   ```bash
+   vger -c <config> snapshot -R local delete <snapshot_id>
+   ```
+10. Compact repository packs:
+   ```bash
+   vger -c <config> compact -R local
    ```
 
 ## Validation
@@ -54,7 +66,9 @@ Validate vger filesystem backup and restore correctness on the local backend usi
 1. Snapshot exists for label `local-corpus`
 2. Restore command exits 0
 3. `diff -qr ~/corpus-local <restore_dir>` produces no differences
-4. Optional: compare sorted SHA256 manifests from both trees
+4. `vger snapshot ... delete <snapshot_id>` exits 0
+5. `vger compact` exits 0
+6. Optional: compare sorted SHA256 manifests from both trees
 
 ## Failure Cases to Record
 
@@ -62,6 +76,7 @@ Validate vger filesystem backup and restore correctness on the local backend usi
 - Insufficient disk space during backup or restore
 - Restore completes but diff reports missing or changed files
 - `vger check` reports repository issues
+- `vger snapshot delete` or `vger compact` fails
 
 ## Cleanup
 

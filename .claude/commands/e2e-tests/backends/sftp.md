@@ -39,26 +39,38 @@ timeout 180 rclone delete <sftp_remote:path> --rmdirs
 
 ## Test Procedure
 
-1. Initialize repo:
+1. Delete repo from previous runs (best effort):
    ```bash
-   timeout 120 vger init -c <config> -R sftp
+   timeout 180 vger -c <config> delete -R sftp --yes-delete-this-repo || true
    ```
-2. Run backup:
+2. Initialize repo:
    ```bash
-   timeout 3600 vger backup -c <config> -R sftp -l remote-corpus ~/corpus-remote
+   timeout 120 vger -c <config> init -R sftp
    ```
-3. Confirm snapshot:
+3. Run backup:
    ```bash
-   timeout 120 vger list -c <config> -R sftp --last 3
+   timeout 3600 vger -c <config> backup -R sftp -l remote-corpus ~/corpus-remote
    ```
-4. Capture latest snapshot ID.
-5. Restore to empty temp directory:
+4. Confirm snapshot:
    ```bash
-   timeout 3600 vger extract -c <config> -R sftp --dest <restore_dir> <snapshot_id>
+   timeout 120 vger -c <config> list -R sftp --last 3
    ```
-6. Integrity check:
+5. Capture latest snapshot ID.
+6. Restore to empty temp directory:
    ```bash
-   timeout 300 vger check -c <config> -R sftp
+   timeout 3600 vger -c <config> restore -R sftp --dest <restore_dir> <snapshot_id>
+   ```
+7. Integrity check:
+   ```bash
+   timeout 300 vger -c <config> check -R sftp
+   ```
+8. Delete the tested snapshot:
+   ```bash
+   timeout 300 vger -c <config> snapshot -R sftp delete <snapshot_id>
+   ```
+9. Compact repository packs:
+   ```bash
+   timeout 300 vger -c <config> compact -R sftp
    ```
 
 ## Validation
@@ -66,7 +78,9 @@ timeout 180 rclone delete <sftp_remote:path> --rmdirs
 1. Snapshot exists for label `remote-corpus`
 2. Restore exits 0 (not timeout 124)
 3. `diff -qr ~/corpus-remote <restore_dir>` reports no differences
-4. Optional: SHA256 manifest comparison
+4. `vger snapshot ... delete <snapshot_id>` exits 0 (not timeout 124)
+5. `vger compact` exits 0 (not timeout 124)
+6. Optional: SHA256 manifest comparison
 
 ## Failure Cases to Record
 
@@ -74,6 +88,7 @@ timeout 180 rclone delete <sftp_remote:path> --rmdirs
 - Connection retries that never converge
 - Restore mismatch vs source
 - Repository check failures
+- `vger snapshot delete` or `vger compact` failures/timeouts
 - False lock detection (locks/ directory empty but lock error reported)
 
 ## Cleanup
