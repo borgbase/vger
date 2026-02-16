@@ -114,8 +114,12 @@ async fn repo_stats(state: AppState, repo: &str) -> Result<Response, ServerError
         .repo_path(repo)
         .ok_or_else(|| ServerError::BadRequest("invalid repo".into()))?;
 
-    if !repo_dir.exists() {
-        return Err(ServerError::NotFound(format!("repo '{repo}' not found")));
+    match tokio::fs::metadata(&repo_dir).await {
+        Ok(_) => {}
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            return Err(ServerError::NotFound(format!("repo '{repo}' not found")));
+        }
+        Err(e) => return Err(ServerError::from(e)),
     }
 
     let repo_name = repo.to_string();
@@ -153,10 +157,14 @@ async fn repo_init(state: AppState, repo: &str) -> Result<Response, ServerError>
         .repo_path(repo)
         .ok_or_else(|| ServerError::BadRequest("invalid repo".into()))?;
 
-    if repo_dir.exists() {
-        return Err(ServerError::Conflict(format!(
-            "repo '{repo}' already exists"
-        )));
+    match tokio::fs::metadata(&repo_dir).await {
+        Ok(_) => {
+            return Err(ServerError::Conflict(format!(
+                "repo '{repo}' already exists"
+            )));
+        }
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+        Err(e) => return Err(ServerError::from(e)),
     }
 
     let repo_dir_clone = repo_dir.clone();
@@ -201,7 +209,11 @@ async fn batch_delete(
             .file_path(&repo_name, &key)
             .ok_or_else(|| ServerError::BadRequest("invalid path".into()))?;
 
-        let old_size = file_path.metadata().map(|m| m.len()).unwrap_or(0);
+        let old_size = match tokio::fs::metadata(&file_path).await {
+            Ok(meta) => meta.len(),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => 0,
+            Err(e) => return Err(ServerError::from(e)),
+        };
         if let Err(e) = tokio::fs::remove_file(&file_path).await {
             if e.kind() != std::io::ErrorKind::NotFound {
                 return Err(ServerError::from(e));
@@ -246,8 +258,12 @@ async fn verify_structure(state: AppState, repo: &str) -> Result<Response, Serve
         .repo_path(repo)
         .ok_or_else(|| ServerError::BadRequest("invalid repo".into()))?;
 
-    if !repo_dir.exists() {
-        return Err(ServerError::NotFound(format!("repo '{repo}' not found")));
+    match tokio::fs::metadata(&repo_dir).await {
+        Ok(_) => {}
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            return Err(ServerError::NotFound(format!("repo '{repo}' not found")));
+        }
+        Err(e) => return Err(ServerError::from(e)),
     }
 
     let repo_dir_clone = repo_dir.clone();

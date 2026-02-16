@@ -42,3 +42,10 @@ tempfile = "3"
 [workspace.lints.rust]
 
 [workspace.lints.clippy]
+
+[profile.release]
+opt-level = 3
+lto = "fat"
+codegen-units = 1
+panic = "abort"
+strip = "symbols"
