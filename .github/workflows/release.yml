@@ -10,6 +10,11 @@ on:
         description: "Artifact version label (for manual runs)"
         required: false
         default: "manual"
+      linux_only:
+        description: "Build only Linux (skip macOS + Windows)"
+        type: boolean
+        required: false
+        default: true
       publish_release:
         description: "Publish a GitHub Release (true/false)"
         required: false
@@ -54,6 +59,7 @@ jobs:
 
   build-macos:
     name: macos-aarch64-apple-darwin
+    if: github.event_name != 'workflow_dispatch' || github.event.inputs.linux_only != 'true'
     runs-on: macos-14
     steps:
       - uses: actions/checkout@v4
@@ -83,6 +89,7 @@ jobs:
 
   build-windows:
     name: windows-x86_64-pc-windows-msvc
+    if: github.event_name != 'workflow_dispatch' || github.event.inputs.linux_only != 'true'
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
