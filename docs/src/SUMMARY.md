@@ -20,3 +20,7 @@
 - [Server Mode](server-mode.md)
 - [Design Goals](goals.md)
 - [Architecture](architecture.md)
+
+# Contribute
+
+- [GitHub](https://github.com/borgbase/vger)

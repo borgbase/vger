@@ -8,6 +8,8 @@ title = "V'Ger Backup Documentation"
 build-dir = "book"
 
 [output.html]
+no-section-label = true
+git-repository-url = "https://github.com/borgbase/vger"
 # Cloudflare Pages can serve extensionless chapter routes (/backup) while
 # mdBook links chapters as .html files; this shim normalizes active-page
 # matching so current-page headers still appear in sidebar navigation.
