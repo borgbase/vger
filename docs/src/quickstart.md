@@ -68,7 +68,7 @@ vger snapshot find --name '*.txt' --since 7d
 Restore files from a snapshot to a directory:
 
 ```bash
-vger restore --snapshot a1b2c3d4 --dest /tmp/restored
+vger restore a1b2c3d4 /tmp/restored
 ```
 
 For backup options, snapshot browsing, and maintenance tasks, see the [workflow guides](backup.md).

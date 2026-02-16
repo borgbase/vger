@@ -54,7 +54,7 @@ Use a unique REST repo name per run (recommended), or delete previous server-sid
 5. Capture latest snapshot ID.
 6. Restore to empty temp directory:
    ```bash
-   vger -c <config> restore -R rest --dest <restore_dir> <snapshot_id>
+   vger -c <config> restore -R rest <snapshot_id> <restore_dir>
    ```
 7. Integrity check:
    ```bash

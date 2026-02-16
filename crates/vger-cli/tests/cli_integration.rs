@@ -184,14 +184,7 @@ fn cli_init_backup_list_restore_info_roundtrip() {
     let list_out = fx.run_ok(&["--config", &cfg, "list"]);
     assert!(list_out.contains(&snapshot));
 
-    let restore_out = fx.run_ok(&[
-        "--config",
-        &cfg,
-        "restore",
-        &snapshot,
-        "--dest",
-        &restore_str,
-    ]);
+    let restore_out = fx.run_ok(&["--config", &cfg, "restore", &snapshot, &restore_str]);
     assert!(restore_out.contains("Restored:"));
 
     assert_eq!(
@@ -455,4 +448,41 @@ fn cli_check_verify_data_detects_tampered_pack() {
     let (stdout_err, _stderr_err) = fx.run_err(&["--config", &cfg, "check", "--verify-data"]);
     assert!(stdout_err.contains("Errors found:"));
     assert!(stdout_err.contains("missing from storage"));
+}
+
+#[test]
+fn cli_restore_latest_alias() {
+    let fx = CliFixture::new();
+    write_plain_config(&fx.config_path, &fx.repo_dir);
+    std::fs::write(fx.source_a.join("latest.txt"), b"latest test\n").unwrap();
+
+    let cfg = fx.config_path.to_string_lossy().to_string();
+    let source = fx.source_a.to_string_lossy().to_string();
+    let restore = fx._tmp.path().join("restore-latest");
+    let restore_str = restore.to_string_lossy().to_string();
+
+    fx.run_ok(&["--config", &cfg, "init"]);
+    fx.run_ok(&["--config", &cfg, "backup", &source]);
+
+    let restore_out = fx.run_ok(&["--config", &cfg, "restore", "latest", &restore_str]);
+    assert!(restore_out.contains("Restored:"));
+
+    assert_eq!(
+        std::fs::read_to_string(restore.join("latest.txt")).unwrap(),
+        "latest test\n"
+    );
+}
+
+#[test]
+fn cli_restore_missing_dest_fails() {
+    let fx = CliFixture::new();
+    write_plain_config(&fx.config_path, &fx.repo_dir);
+    let cfg = fx.config_path.to_string_lossy().to_string();
+
+    // "restore latest" without a dest should fail with a usage error
+    let (_stdout, stderr) = fx.run_err(&["--config", &cfg, "restore", "latest"]);
+    assert!(
+        stderr.contains("DEST") || stderr.contains("required"),
+        "expected usage error about missing dest, got:\n{stderr}"
+    );
 }

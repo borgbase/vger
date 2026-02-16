@@ -341,14 +341,8 @@ fn memory_restore_peak_rss_under_cap() {
 
     let restore = fx._tmp.path().join("restore");
     let restore_str = restore.to_string_lossy().to_string();
-    let (_restore_out, peak_rss_bytes, saw_rss_sample) = fx.run_monitored_ok(&[
-        "--config",
-        &cfg,
-        "restore",
-        &snapshot,
-        "--dest",
-        &restore_str,
-    ]);
+    let (_restore_out, peak_rss_bytes, saw_rss_sample) =
+        fx.run_monitored_ok(&["--config", &cfg, "restore", &snapshot, &restore_str]);
 
     assert_peak_under_cap(
         "memory_restore_peak_rss_under_cap",

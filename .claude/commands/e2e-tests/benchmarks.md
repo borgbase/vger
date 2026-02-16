@@ -107,7 +107,7 @@ Test each tool through four phases:
 
 ### Phase 4: Full Restore
 ```bash
-/usr/bin/time -v <tool> restore ... --dest <restore_dir>
+/usr/bin/time -v <tool> restore ... <restore_dir>
 ```
 
 ## Tool Setup
@@ -117,7 +117,7 @@ Test each tool through four phases:
 export VGER_PASSPHRASE=123
 vger init -c <config> -R local
 vger backup -c <config> -R local -l bench ~/corpus-local
-vger restore -c <config> -R local --dest <restore_dir> <snapshot_id>
+vger restore -c <config> -R local <snapshot_id> <restore_dir>
 ```
 
 ### restic

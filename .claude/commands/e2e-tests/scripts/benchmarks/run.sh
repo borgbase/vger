@@ -108,7 +108,7 @@ mkdir -p "$RESTORE_VGER" "$RESTORE_RESTIC" "$RESTORE_RUSTIC" "$RESTORE_BORG"
 vger_backup_cmd="$DROP_CACHES_CMD; vger backup -R bench -l bench '$DATASET_DIR'"
 # NB: 'vger list' uses comfy_table NOTHING preset — when stdout is not a TTY
 # (piped to awk), output is plain space-padded columns with a header row.
-vger_restore_cmd="$DROP_CACHES_CMD; rm -rf '$RESTORE_VGER'/*; SNAP=\$(vger list -R bench --last 1 | awk 'NR==2{print \$1}'); vger restore -R bench --dest '$RESTORE_VGER' \"\$SNAP\""
+vger_restore_cmd="$DROP_CACHES_CMD; rm -rf '$RESTORE_VGER'/*; SNAP=\$(vger list -R bench --last 1 | awk 'NR==2{print \$1}'); vger restore -R bench \"\$SNAP\" '$RESTORE_VGER'"
 
 # restic: backup into repo, then restore latest snapshot
 restic_backup_cmd="$DROP_CACHES_CMD; restic backup '$DATASET_DIR'"

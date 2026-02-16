@@ -298,7 +298,7 @@ main() {
 
     log "[$i/$ITERATIONS] restore"
     CURRENT_STEP="restore"
-    LAST_RESTORE_LOG="$(run_vger "$i" restore restore "$snapshot" --dest "$restore_target")"
+    LAST_RESTORE_LOG="$(run_vger "$i" restore restore "$snapshot" "$restore_target")"
 
     log "[$i/$ITERATIONS] verify"
     CURRENT_STEP="verify"

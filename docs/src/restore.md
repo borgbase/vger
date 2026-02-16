@@ -61,7 +61,10 @@ vger snapshot find --type f --larger 1M --smaller 20M --since 30d
 
 ```bash
 # Restore all files from a snapshot
-vger restore --snapshot a1b2c3d4 --dest /tmp/restored
+vger restore a1b2c3d4 /tmp/restored
+
+# Restore the most recent snapshot
+vger restore latest /tmp/restored
 ```
 
 Restore applies extended attributes (`xattrs`) by default. Control this with the top-level `xattrs.enabled` config setting.

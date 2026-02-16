@@ -166,7 +166,17 @@ where
         xattrs_enabled
     };
 
-    let items = super::list::load_snapshot_items(&mut repo, snapshot_name)?;
+    // Resolve "latest" or exact snapshot name
+    let resolved_name = repo
+        .manifest()
+        .resolve_snapshot(snapshot_name)?
+        .name
+        .clone();
+    if resolved_name != snapshot_name {
+        info!("Resolved '{}' to snapshot {}", snapshot_name, resolved_name);
+    }
+
+    let items = super::list::load_snapshot_items(&mut repo, &resolved_name)?;
 
     let dest_path = Path::new(dest);
     std::fs::create_dir_all(dest_path)?;

@@ -1,6 +1,8 @@
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
+use crate::error::{Result, VgerError};
+
 /// The manifest — list of all snapshots in the repository.
 /// Stored encrypted at the `manifest` key.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -41,6 +43,24 @@ impl Manifest {
     /// Find a snapshot by name.
     pub fn find_snapshot(&self, name: &str) -> Option<&SnapshotEntry> {
         self.snapshots.iter().find(|a| a.name == name)
+    }
+
+    /// Resolve a snapshot query to a concrete entry.
+    ///
+    /// Resolution order:
+    /// 1. `"latest"` (case-insensitive) → snapshot with the most recent `time`
+    /// 2. Exact name match
+    pub fn resolve_snapshot(&self, query: &str) -> Result<&SnapshotEntry> {
+        if query.eq_ignore_ascii_case("latest") {
+            return self
+                .snapshots
+                .iter()
+                .max_by_key(|s| s.time)
+                .ok_or_else(|| VgerError::SnapshotNotFound("latest".into()));
+        }
+
+        self.find_snapshot(query)
+            .ok_or_else(|| VgerError::SnapshotNotFound(query.into()))
     }
 
     /// Remove a snapshot by name. Returns the removed entry, or None if not found.

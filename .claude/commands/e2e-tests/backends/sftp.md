@@ -58,7 +58,7 @@ timeout 180 rclone delete <sftp_remote:path> --rmdirs
 5. Capture latest snapshot ID.
 6. Restore to empty temp directory:
    ```bash
-   timeout 3600 vger -c <config> restore -R sftp --dest <restore_dir> <snapshot_id>
+   timeout 3600 vger -c <config> restore -R sftp <snapshot_id> <restore_dir>
    ```
 7. Integrity check:
    ```bash

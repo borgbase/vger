@@ -92,11 +92,10 @@ pub(crate) enum Commands {
         #[arg(short = 'R', long = "repo")]
         repo: Option<String>,
 
-        /// Snapshot to restore from
+        /// Snapshot to restore from (name or "latest")
         snapshot: String,
 
-        /// Destination directory
-        #[arg(long, default_value = ".")]
+        /// Destination directory to restore into
         dest: String,
 
         /// Only restore paths matching this glob pattern

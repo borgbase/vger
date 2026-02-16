@@ -46,7 +46,7 @@ Validate vger filesystem backup and restore correctness on the local backend usi
 6. Capture latest snapshot ID from output.
 7. Restore into empty temp directory:
    ```bash
-   vger -c <config> restore -R local --dest <restore_dir> <snapshot_id>
+   vger -c <config> restore -R local <snapshot_id> <restore_dir>
    ```
 8. Integrity check:
    ```bash

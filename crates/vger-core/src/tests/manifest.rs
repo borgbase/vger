@@ -1,4 +1,4 @@
-use chrono::Utc;
+use chrono::{Duration, Utc};
 
 use crate::repo::manifest::{Manifest, SnapshotEntry};
 
@@ -7,6 +7,17 @@ fn make_entry(name: &str) -> SnapshotEntry {
         name: name.to_string(),
         id: vec![0u8; 32],
         time: Utc::now(),
+        source_label: String::new(),
+        label: String::new(),
+        source_paths: Vec::new(),
+    }
+}
+
+fn make_entry_at(name: &str, offset_secs: i64) -> SnapshotEntry {
+    SnapshotEntry {
+        name: name.to_string(),
+        id: vec![0u8; 32],
+        time: Utc::now() + Duration::seconds(offset_secs),
         source_label: String::new(),
         label: String::new(),
         source_paths: Vec::new(),
@@ -70,4 +81,55 @@ fn serde_roundtrip() {
     assert_eq!(deserialized.snapshots.len(), 2);
     assert_eq!(deserialized.snapshots[0].name, "backup-1");
     assert_eq!(deserialized.snapshots[1].name, "backup-2");
+}
+
+// ---------------------------------------------------------------------------
+// resolve_snapshot tests
+// ---------------------------------------------------------------------------
+
+#[test]
+fn resolve_snapshot_latest_returns_most_recent() {
+    let mut m = Manifest::new();
+    m.snapshots.push(make_entry_at("aaa11111", -10));
+    m.snapshots.push(make_entry_at("bbb22222", 0));
+    m.snapshots.push(make_entry_at("ccc33333", -5));
+
+    let entry = m.resolve_snapshot("latest").unwrap();
+    assert_eq!(entry.name, "bbb22222");
+}
+
+#[test]
+fn resolve_snapshot_latest_case_insensitive() {
+    let mut m = Manifest::new();
+    m.snapshots.push(make_entry("aaa11111"));
+
+    assert_eq!(m.resolve_snapshot("Latest").unwrap().name, "aaa11111");
+    assert_eq!(m.resolve_snapshot("LATEST").unwrap().name, "aaa11111");
+}
+
+#[test]
+fn resolve_snapshot_latest_empty_repo_returns_snapshot_not_found() {
+    let m = Manifest::new();
+    let err = m.resolve_snapshot("latest").unwrap_err().to_string();
+    assert!(err.contains("snapshot not found"));
+    assert!(err.contains("latest"));
+}
+
+#[test]
+fn resolve_snapshot_exact_match() {
+    let mut m = Manifest::new();
+    m.snapshots.push(make_entry("aaa11111"));
+    m.snapshots.push(make_entry("bbb22222"));
+
+    let entry = m.resolve_snapshot("aaa11111").unwrap();
+    assert_eq!(entry.name, "aaa11111");
+}
+
+#[test]
+fn resolve_snapshot_not_found() {
+    let mut m = Manifest::new();
+    m.snapshots.push(make_entry("aaa11111"));
+
+    let err = m.resolve_snapshot("zzz").unwrap_err().to_string();
+    assert!(err.contains("snapshot not found"));
 }
