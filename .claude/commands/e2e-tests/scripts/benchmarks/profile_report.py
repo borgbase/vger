@@ -95,6 +95,8 @@ def main(root: str) -> int:
         "restic_restore",
         "rustic_backup",
         "rustic_restore",
+        "borg_backup",
+        "borg_restore",
     ]
 
     print(f"root: {r}")
@@ -164,4 +166,3 @@ if __name__ == "__main__":
         print(f"usage: {sys.argv[0]} <benchmark_root>", file=sys.stderr)
         raise SystemExit(2)
     raise SystemExit(main(sys.argv[1]))
-

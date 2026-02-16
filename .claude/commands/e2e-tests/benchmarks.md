@@ -1,19 +1,19 @@
 ---
 name: benchmarks
-description: "Compare vger performance against restic and rustic on local backend"
+description: "Compare vger performance against restic, rustic, and borg on local backend"
 ---
 
 # Performance Benchmarks
 
 ## Goal
 
-Compare vger against two established backup tools — restic and rustic — on a local backend. Measure wall-clock time, peak memory usage, and CPU usage across common backup operations.
+Compare vger against three established backup tools — restic, rustic, and borg — on a local backend. Measure wall-clock time, peak memory usage, and CPU usage across common backup operations.
 
 ## Scope
 
 - **Backend**: local only (eliminates network variability)
 - **Source dataset**: default `~/corpus-remote` (smaller, faster iteration). Optionally `~/corpus-local` for stress.
-- **Tools under test**: `vger`, `restic`, `rustic`
+- **Tools under test**: `vger`, `restic`, `rustic`, `borg`
 
 ## Prerequisites
 
@@ -23,11 +23,12 @@ Compare vger against two established backup tools — restic and rustic — on a
    sudo apt-get install -y restic hyperfine time strace linux-perf
    # rustic is typically preinstalled in this sandbox; otherwise install it.
    ```
-2. Verify all three tools are available:
+2. Verify all tools are available:
    ```bash
    vger --version
    restic version
    rustic --version
+   borg --version
    ```
 3. Ensure `/usr/bin/time` exists (not the shell builtin `time`).
 
@@ -40,11 +41,11 @@ Scripts live under `scripts/benchmarks/` relative to this skill directory.
 ```bash
 SKILL_DIR="$(dirname "$(readlink -f "$0")")"  # or set manually
 
-# Basic: timing + repo size + tool stats
+# Basic (includes profiling): timing + repo size + tool stats + /usr/bin/time -v profiles
 RUNS=5 "$SKILL_DIR/scripts/benchmarks/run.sh" ~/corpus-remote
 
-# Add profiling: /usr/bin/time -v + strace summaries + perf (if allowed on host)
-PROFILE=1 PROFILE_STRACE=1 PROFILE_PERF=1 RUNS=3 "$SKILL_DIR/scripts/benchmarks/run.sh" ~/corpus-remote
+# Add strace/perf on top of default profiling (if allowed on host)
+PROFILE_STRACE=1 PROFILE_PERF=1 RUNS=3 "$SKILL_DIR/scripts/benchmarks/run.sh" ~/corpus-remote
 ```
 
 The harness writes to `~/runtime/benchmarks/<UTC_STAMP>/`.
@@ -57,7 +58,7 @@ python3 "$SKILL_DIR/scripts/benchmarks/profile_report.py" ~/runtime/benchmarks/<
 
 ## What To Look At (Actionable Signals)
 
-From `profile_report.py` (when `PROFILE=1`):
+From `profile_report.py`:
 - `maxrss_kb`: memory spikes (often restore path)
 - `user` vs `sys`: CPU vs kernel/IO bound work
 - `cswV`/`cswI`: scheduling overhead and contention
@@ -72,6 +73,7 @@ From tool stats:
 - vger: `vger.info.txt`
 - restic: `restic.stats.txt` (includes `restic stats --mode raw-data`)
 - rustic: `rustic.stats.txt`
+- borg: `borg.stats.txt`
 
 ## Full vs Incremental
 
@@ -131,6 +133,16 @@ rustic backup --repo ~/runtime/repos/rustic-bench ~/corpus-local
 rustic restore latest --repo ~/runtime/repos/rustic-bench <restore_dir>
 ```
 
+### borg
+```bash
+export BORG_PASSPHRASE=123
+export BORG_REPO=~/runtime/repos/borg-bench
+borg init --encryption=repokey-blake2
+borg create --compression zstd,3 ::bench-1 ~/corpus-local
+mkdir -p <restore_dir>
+(cd <restore_dir> && borg extract ::bench-1)
+```
+
 Adjust command syntax as needed — consult each tool's `--help` for exact flags.
 
 ## Metrics to Capture
@@ -152,14 +164,14 @@ From `perf stat` (optional):
 
 Produce a comparison table:
 
-| Phase | Metric | vger | restic | rustic |
-|-------|--------|------|--------|--------|
-| Init | Wall time | ... | ... | ... |
-| First backup | Wall time | ... | ... | ... |
-| First backup | Peak RSS | ... | ... | ... |
-| Second backup | Wall time | ... | ... | ... |
-| Restore | Wall time | ... | ... | ... |
-| Restore | Peak RSS | ... | ... | ... |
+| Phase | Metric | vger | restic | rustic | borg |
+|-------|--------|------|--------|--------|------|
+| Init | Wall time | ... | ... | ... | ... |
+| First backup | Wall time | ... | ... | ... | ... |
+| First backup | Peak RSS | ... | ... | ... | ... |
+| Second backup | Wall time | ... | ... | ... | ... |
+| Restore | Wall time | ... | ... | ... | ... |
+| Restore | Peak RSS | ... | ... | ... | ... |
 
 Also note:
 - Repository size on disk after first backup
@@ -170,7 +182,7 @@ Also note:
 
 1. Remove all benchmark repositories:
    ```bash
-   rm -rf ~/runtime/repos/restic-bench ~/runtime/repos/rustic-bench
+   rm -rf ~/runtime/repos/restic-bench ~/runtime/repos/rustic-bench ~/runtime/repos/borg-bench
    ```
 2. Remove restore directories
 3. Keep timing logs under `~/runtime/logs/`
