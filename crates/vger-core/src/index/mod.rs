@@ -1,3 +1,5 @@
+pub mod dedup_cache;
+
 use std::collections::HashMap;
 
 use serde::{Deserialize, Serialize};

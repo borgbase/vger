@@ -7411,6 +7411,7 @@ dependencies = [
  "ignore",
  "lru 0.12.5",
  "lz4_flex",
+ "memmap2",
  "nix 0.29.0",
  "opendal",
  "pariter",
@@ -7429,6 +7430,7 @@ dependencies = [
  "ureq",
  "url",
  "xattr",
+ "xorf",
  "zeroize",
  "zstd",
 ]
@@ -8693,6 +8695,16 @@ name = "xmlwriter"
 version = "0.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "ec7a2a501ed189703dba8b08142f057e887dfc4b2cc4db2d343ac6376ba3e0b9"
+
+[[package]]
+name = "xorf"
+version = "0.12.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "45e820b97864028eb5069aabf2d90ad7bc279a0ed0292f1306451ce4b91adc13"
+dependencies = [
+ "libm",
+ "rand 0.8.5",
+]
 
 [[package]]
 name = "yazi"

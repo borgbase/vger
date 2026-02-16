@@ -46,6 +46,12 @@ chrono.workspace = true
 # OS
 dirs = "6"
 
+# Memory-mapped I/O
+memmap2 = "0.9"
+
+# Probabilistic filter
+xorf = "0.12"
+
 # Error handling
 thiserror = "2"
 

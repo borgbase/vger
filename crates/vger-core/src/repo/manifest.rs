@@ -10,6 +10,11 @@ pub struct Manifest {
     pub version: u32,
     pub timestamp: DateTime<Utc>,
     pub snapshots: Vec<SnapshotEntry>,
+    /// Cache-validity token for the local dedup cache.
+    /// A random u64 written each time the index is saved.
+    /// Old manifests deserialize with `index_generation = 0` (cache stale → safe fallback).
+    #[serde(default)]
+    pub index_generation: u64,
 }
 
 /// A single entry in the manifest's snapshot list.
@@ -37,6 +42,7 @@ impl Manifest {
             version: 1,
             timestamp: Utc::now(),
             snapshots: Vec::new(),
+            index_generation: 0,
         }
     }
 

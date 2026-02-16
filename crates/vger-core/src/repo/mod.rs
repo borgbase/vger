@@ -12,12 +12,15 @@ use chrono::{DateTime, Utc};
 use rand::RngCore;
 use serde::{Deserialize, Serialize};
 
+use tracing::debug;
+
 use crate::compress;
 use crate::config::{ChunkerConfig, RepositoryConfig};
 use crate::crypto::chunk_id::ChunkId;
 use crate::crypto::key::{EncryptedKey, MasterKey};
 use crate::crypto::{self, CryptoEngine, PlaintextEngine};
 use crate::error::{Result, VgerError};
+use crate::index::dedup_cache::{self, TieredDedupIndex};
 use crate::index::{ChunkIndex, DedupIndex, IndexDelta};
 use crate::storage::StorageBackend;
 
@@ -133,6 +136,9 @@ pub struct Repository {
     /// Lightweight dedup-only index used during backup to save memory.
     /// When active, `chunk_index` is empty and all lookups go through this.
     dedup_index: Option<DedupIndex>,
+    /// Three-tier dedup index (xor filter + mmap + session HashMap).
+    /// When active, both `chunk_index` and `dedup_index` are empty.
+    tiered_dedup: Option<TieredDedupIndex>,
     /// Tracks index mutations while in dedup mode, applied at save time.
     index_delta: Option<IndexDelta>,
     /// Weight-bounded cache for decrypted chunks (used during restore).
@@ -145,6 +151,8 @@ pub struct Repository {
     index_dirty: bool,
     /// Whether the file cache has been modified since last persist.
     file_cache_dirty: bool,
+    /// Whether to rebuild the local dedup cache at save time.
+    rebuild_dedup_cache: bool,
 }
 
 impl Repository {
@@ -264,12 +272,14 @@ impl Repository {
             tree_pack_writer: PackWriter::new(PackType::Tree, tree_target),
             pending_uploads: VecDeque::new(),
             dedup_index: None,
+            tiered_dedup: None,
             index_delta: None,
             blob_cache: BlobCache::new(BLOB_CACHE_MAX_BYTES),
             max_in_flight_uploads: DEFAULT_IN_FLIGHT_PACK_UPLOADS,
             manifest_dirty: false,
             index_dirty: false,
             file_cache_dirty: false,
+            rebuild_dedup_cache: false,
         })
     }
 
@@ -370,12 +380,14 @@ impl Repository {
             tree_pack_writer: PackWriter::new(PackType::Tree, tree_target),
             pending_uploads: VecDeque::new(),
             dedup_index: None,
+            tiered_dedup: None,
             index_delta: None,
             blob_cache: BlobCache::new(BLOB_CACHE_MAX_BYTES),
             max_in_flight_uploads: DEFAULT_IN_FLIGHT_PACK_UPLOADS,
             manifest_dirty: false,
             index_dirty: false,
             file_cache_dirty: false,
+            rebuild_dedup_cache: false,
         })
     }
 
@@ -501,8 +513,40 @@ impl Repository {
         self.index_delta = Some(IndexDelta::new());
     }
 
-    /// Check if a chunk exists in the index (works in both normal and dedup modes).
+    /// Switch to tiered dedup mode for minimal memory usage during backup.
+    ///
+    /// Tries to open a local mmap'd dedup cache validated against the manifest's
+    /// `index_generation`. On success: builds an xor filter, drops the full
+    /// `ChunkIndex`, and routes all lookups through the three-tier structure
+    /// (~12 MB RSS for 10M chunks instead of ~680 MB).
+    ///
+    /// On failure (no cache, stale generation, corrupt file): falls back to the
+    /// existing `DedupIndex` HashMap path.
+    pub fn enable_tiered_dedup_mode(&mut self) {
+        if self.tiered_dedup.is_some() || self.dedup_index.is_some() {
+            return; // already in a dedup mode
+        }
+
+        self.rebuild_dedup_cache = true;
+        let generation = self.manifest.index_generation;
+        if let Some(mmap_cache) = dedup_cache::MmapDedupCache::open(&self.config.id, generation) {
+            let tiered = TieredDedupIndex::new(mmap_cache);
+            debug!(?tiered, "tiered dedup mode: using mmap cache");
+            // Drop the full index to reclaim memory.
+            self.chunk_index = ChunkIndex::new();
+            self.tiered_dedup = Some(tiered);
+            self.index_delta = Some(IndexDelta::new());
+        } else {
+            debug!("tiered dedup mode: no valid cache, falling back to DedupIndex");
+            self.enable_dedup_mode();
+        }
+    }
+
+    /// Check if a chunk exists in the index (works in normal, dedup, and tiered modes).
     pub fn chunk_exists(&self, id: &ChunkId) -> bool {
+        if let Some(ref tiered) = self.tiered_dedup {
+            return tiered.contains(id);
+        }
         if let Some(ref dedup) = self.dedup_index {
             return dedup.contains(id);
         }
@@ -527,9 +571,10 @@ impl Repository {
         // Flush any pending packs
         self.flush_packs()?;
 
-        // If in dedup mode, reload the full index and apply our delta.
-        // Always restore chunk_index (it's empty during dedup mode).
-        // Only mark index_dirty if the delta has actual mutations.
+        // Drop tiered dedup index (releases mmap) before reloading full index.
+        self.tiered_dedup.take();
+        // If in dedup mode (either tiered or HashMap), reload the full index
+        // and apply our delta. Only mark index_dirty if the delta has mutations.
         if let Some(delta) = self.index_delta.take() {
             self.dedup_index = None;
             let mut full_index = self.reload_full_index()?;
@@ -538,6 +583,13 @@ impl Repository {
                 self.index_dirty = true;
             }
             self.chunk_index = full_index;
+        }
+
+        // When the index changes, rotate index_generation so the local dedup
+        // cache is invalidated.  Must happen before the manifest write below.
+        if self.index_dirty {
+            self.manifest.index_generation = rand::thread_rng().next_u64();
+            self.manifest_dirty = true;
         }
 
         if self.manifest_dirty {
@@ -554,6 +606,20 @@ impl Repository {
                 pack_object(ObjectType::ChunkIndex, &index_bytes, self.crypto.as_ref())?;
             self.storage.put("index", &index_packed)?;
             self.index_dirty = false;
+        }
+
+        // Rebuild the local dedup cache for next backup so tiered mode can
+        // activate. Written on first backup (bootstrap) and every subsequent
+        // backup that used tiered/dedup mode. Non-fatal on error.
+        if self.rebuild_dedup_cache {
+            if let Err(e) = dedup_cache::build_dedup_cache(
+                &self.chunk_index,
+                self.manifest.index_generation,
+                &self.config.id,
+            ) {
+                tracing::warn!("failed to rebuild dedup cache: {e}");
+            }
+            self.rebuild_dedup_cache = false;
         }
 
         if self.file_cache_dirty {
@@ -577,10 +643,18 @@ impl Repository {
     }
 
     /// Increment refcount if this chunk already exists in committed or pending state.
-    /// Returns stored size when found. Works in both normal and dedup modes.
+    /// Returns stored size when found. Works in normal, dedup, and tiered modes.
     pub fn bump_ref_if_exists(&mut self, chunk_id: &ChunkId) -> Option<u32> {
-        // Dedup check against committed index (or dedup index in dedup mode)
-        if let Some(ref dedup) = self.dedup_index {
+        // Tiered dedup mode: check xor filter + mmap + session_new
+        if let Some(ref tiered) = self.tiered_dedup {
+            if let Some(stored_size) = tiered.get_stored_size(chunk_id) {
+                if let Some(ref mut delta) = self.index_delta {
+                    delta.bump_refcount(chunk_id);
+                }
+                return Some(stored_size);
+            }
+        } else if let Some(ref dedup) = self.dedup_index {
+            // DedupIndex HashMap mode
             if let Some(stored_size) = dedup.get_stored_size(chunk_id) {
                 if let Some(ref mut delta) = self.index_delta {
                     delta.bump_refcount(chunk_id);
@@ -653,7 +727,17 @@ impl Repository {
         };
 
         // Update index immediately — offsets and PackId are known before upload
-        if self.dedup_index.is_some() {
+        if self.tiered_dedup.is_some() {
+            // Tiered mode: insert into session_new + record in delta
+            for (chunk_id, stored_size, offset, refcount) in entries {
+                if let Some(ref mut tiered) = self.tiered_dedup {
+                    tiered.insert(chunk_id, stored_size);
+                }
+                if let Some(ref mut delta) = self.index_delta {
+                    delta.add_new_entry(chunk_id, stored_size, pack_id, offset, refcount);
+                }
+            }
+        } else if self.dedup_index.is_some() {
             // Dedup mode: update lightweight index + record in delta
             for (chunk_id, stored_size, offset, refcount) in entries {
                 if let Some(ref mut dedup) = self.dedup_index {

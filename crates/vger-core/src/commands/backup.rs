@@ -1234,9 +1234,11 @@ pub fn run_with_progress(
             repo.restore_file_cache(cache);
         }
 
-        // Switch to dedup-only index mode to reduce memory during backup.
+        // Switch to tiered dedup mode to minimize memory during backup.
+        // Uses mmap'd cache + xor filter when available, falls back to
+        // DedupIndex HashMap on first backup or after index changes.
         // The full index is reloaded and updated at save_state time.
-        repo.enable_dedup_mode();
+        repo.enable_tiered_dedup_mode();
 
         let time_start = Utc::now();
         let mut stats = SnapshotStats::default();
