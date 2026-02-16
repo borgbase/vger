@@ -14,6 +14,7 @@
 | `vger snapshot delete` | Delete a specific snapshot |
 | `vger delete` | Delete an entire repository permanently |
 | `vger prune` | Prune snapshots according to retention policy |
+| `vger break-lock` | Remove stale repository locks left by interrupted processes when lock conflicts block operations |
 | `vger check` | Verify repository integrity (`--verify-data` for full content verification) |
 | `vger info` | Show repository statistics (snapshot counts and size totals) |
 | `vger compact` | Free space by repacking pack files after delete/prune |
