@@ -53,6 +53,41 @@ log_format = "pretty"           # "json" for structured logging
 vger-server --config vger-server.toml
 ```
 
+## Run as a systemd service
+
+Create `/etc/systemd/system/vger-server.service`:
+
+```ini
+[Unit]
+Description=V'Ger backup REST server
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=vger
+Group=vger
+ExecStart=/usr/local/bin/vger-server --config /etc/vger/vger-server.toml
+Restart=on-failure
+RestartSec=2
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=full
+ProtectHome=true
+ReadWritePaths=/var/lib/vger
+
+[Install]
+WantedBy=multi-user.target
+```
+
+Then reload and enable:
+
+```bash
+sudo systemctl daemon-reload
+sudo systemctl enable --now vger-server.service
+sudo systemctl status vger-server.service
+```
+
 ## Client configuration (REST backend)
 
 ```yaml
