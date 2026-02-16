@@ -5,7 +5,7 @@
 Run the install script:
 
 ```bash
-curl -fsSL https://vger.pages.dev/install.sh | sh
+curl -fsSL https://vger.borgbase.com/install.sh | sh
 ```
 
 Or download a pre-built binary from the [releases page](https://github.com/borgbase/vger/releases). See [Installing](install.md) for more details.

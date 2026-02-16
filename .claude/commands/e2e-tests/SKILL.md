@@ -18,7 +18,7 @@ The test server provides:
 | Large corpus | `~/corpus-local` | Test data for local backend (large) |
 | Small corpus | `~/corpus-remote` | Test data for S3/SFTP/REST backends (bandwidth-aware) |
 | Base config | `~/vger.sample.yaml` | Repo definitions, credentials, and connection details |
-| Vger docs | https://vger.pages.dev/ | Recipe reference for hooks, command_dumps, etc. |
+| Vger docs | https://vger.borgbase.com/ | Recipe reference for hooks, command_dumps, etc. |
 
 **Installed tools**: `vger`, `vger-server`, `rclone`, `docker`, `podman`, database clients (pg, mariadb, mongo).
 Install missing packages with `sudo apt-get install ...`.

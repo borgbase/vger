@@ -12,7 +12,7 @@ Validate vger's filesystem snapshot backup pattern for ZFS using hooks:
 2. Back up the `.zfs/snapshot/...` path
 3. Destroy the snapshot after backup
 
-Recipe reference: https://vger.pages.dev/recipes#filesystem-snapshots (ZFS section)
+Recipe reference: https://vger.borgbase.com/recipes#filesystem-snapshots (ZFS section)
 
 ## Safety Gate (REQUIRED)
 

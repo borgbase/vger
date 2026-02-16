@@ -12,7 +12,7 @@ Validate vger's filesystem snapshot backup pattern for Btrfs using hooks:
 2. Back up the snapshot path
 3. Delete the snapshot after backup
 
-Recipe reference: https://vger.pages.dev/recipes#filesystem-snapshots (Btrfs section)
+Recipe reference: https://vger.borgbase.com/recipes#filesystem-snapshots (Btrfs section)
 
 ## Safety Gate (REQUIRED)
 

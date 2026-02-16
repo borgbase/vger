@@ -34,7 +34,7 @@ V'Ger achieves the best speed and throughput of any comparable backup tool, whil
 ## Quick start
 
 ```bash
-curl -fsSL https://vger.pages.dev/install.sh | sh
+curl -fsSL https://vger.borgbase.com/install.sh | sh
 ```
 
 Or download the latest release for your platform from the [releases page](https://github.com/borgbase/vger/releases).

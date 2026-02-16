@@ -7,7 +7,7 @@ description: "Test PostgreSQL backups using hooks and command_dumps patterns"
 
 ## Goal
 
-Test PostgreSQL backups using both recipe patterns from [vger docs](https://vger.pages.dev/recipes#databases):
+Test PostgreSQL backups using both recipe patterns from [vger docs](https://vger.borgbase.com/recipes#databases):
 1. **Hooks** that write dump files to disk
 2. **command_dumps** that stream stdout directly
 
