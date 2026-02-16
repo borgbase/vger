@@ -55,6 +55,9 @@ pub enum VgerError {
     #[error("repository is locked by another process (lock: {0})")]
     Locked(String),
 
+    #[error("chunk not found in index: {0}")]
+    ChunkNotInIndex(crate::crypto::chunk_id::ChunkId),
+
     #[error("decompression error: {0}")]
     Decompression(String),
 

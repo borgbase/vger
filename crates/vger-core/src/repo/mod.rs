@@ -429,6 +429,12 @@ impl Repository {
         self.file_cache_dirty = true;
     }
 
+    /// Try to open the mmap'd restore cache for this repository.
+    /// Returns `None` if the cache is missing, stale, or corrupt.
+    pub fn open_restore_cache(&self) -> Option<dedup_cache::MmapRestoreCache> {
+        dedup_cache::MmapRestoreCache::open(&self.config.id, self.manifest.index_generation)
+    }
+
     // ----- Accessors for private fields -----
 
     /// Read-only access to the manifest.
@@ -461,7 +467,10 @@ impl Repository {
 
     /// Filter the chunk index to only retain entries for the given chunks.
     /// Does not mark dirty — this is a read-only memory optimization.
-    pub fn retain_chunk_index(&mut self, needed: &std::collections::HashSet<crate::crypto::chunk_id::ChunkId>) {
+    pub fn retain_chunk_index(
+        &mut self,
+        needed: &std::collections::HashSet<crate::crypto::chunk_id::ChunkId>,
+    ) {
         self.chunk_index.retain_chunks(needed);
     }
 
@@ -647,6 +656,13 @@ impl Repository {
                 &self.config.id,
             ) {
                 tracing::warn!("failed to rebuild dedup cache: {e}");
+            }
+            if let Err(e) = dedup_cache::build_restore_cache(
+                &self.chunk_index,
+                self.manifest.index_generation,
+                &self.config.id,
+            ) {
+                tracing::warn!("failed to rebuild restore cache: {e}");
             }
             self.rebuild_dedup_cache = false;
         }

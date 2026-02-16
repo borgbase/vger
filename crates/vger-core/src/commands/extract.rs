@@ -13,7 +13,6 @@ use crate::crypto::chunk_id::ChunkId;
 use crate::crypto::pack_id::PackId;
 use crate::crypto::CryptoEngine;
 use crate::error::{Result, VgerError};
-use crate::index::ChunkIndex;
 use crate::platform::fs;
 use crate::repo::file_cache::FileCache;
 use crate::repo::format::{unpack_object_expect, ObjectType};
@@ -168,6 +167,9 @@ where
         xattrs_enabled
     };
 
+    // Try to open the mmap restore cache before loading the index.
+    let restore_cache = repo.open_restore_cache();
+
     // Resolve "latest" or exact snapshot name
     let resolved_name = repo
         .manifest()
@@ -178,6 +180,8 @@ where
         info!("Resolved '{}' to snapshot {}", snapshot_name, resolved_name);
     }
 
+    // Load snapshot items — requires the chunk index for tree-pack chunks.
+    repo.load_chunk_index()?;
     let items = super::list::load_snapshot_items(&mut repo, &resolved_name)?;
 
     let dest_path = Path::new(dest);
@@ -231,23 +235,52 @@ where
     }
 
     if !file_items.is_empty() {
-        // Collect all unique ChunkIds needed for this snapshot.
-        let needed_chunks: HashSet<ChunkId> = file_items
-            .iter()
-            .flat_map(|(item, _)| item.chunks.iter().map(|c| c.id))
-            .collect();
-
-        // Load and filter the chunk index to only snapshot-relevant entries.
-        repo.load_chunk_index()?;
-        repo.retain_chunk_index(&needed_chunks);
-        drop(needed_chunks);
-        info!(
-            "loaded filtered chunk index ({} entries)",
-            repo.chunk_index().len()
-        );
+        // Try the mmap restore cache first — avoids keeping the full index in memory.
+        let plan_result = if let Some(ref cache) = restore_cache {
+            info!("using mmap restore cache ({} entries)", cache.entry_count());
+            // Free the full index before planning — the mmap cache has all pack locations.
+            repo.clear_chunk_index();
+            let result = plan_reads(&file_items, |id| cache.lookup(id));
+            match &result {
+                Ok(_) => Some(result),
+                Err(VgerError::ChunkNotInIndex(_)) => {
+                    // Cache is stale — fall through to filtered index path.
+                    info!("restore cache lookup failed, falling back to filtered index");
+                    None
+                }
+                Err(_) => Some(result), // Real error — propagate immediately.
+            }
+        } else {
+            info!("restore cache unavailable, using filtered index");
+            None
+        };
 
         // Phase 2: Plan reads — group chunks by pack, coalesce adjacent ranges.
-        let (planned_files, groups) = plan_reads(&file_items, repo.chunk_index())?;
+        let (planned_files, groups) = if let Some(result) = plan_result {
+            result?
+        } else {
+            // Fallback: reload/filter the index and plan from there.
+            if repo.chunk_index().is_empty() {
+                repo.load_chunk_index()?;
+            }
+            let needed_chunks: HashSet<ChunkId> = file_items
+                .iter()
+                .flat_map(|(item, _)| item.chunks.iter().map(|c| c.id))
+                .collect();
+            repo.retain_chunk_index(&needed_chunks);
+            drop(needed_chunks);
+            info!(
+                "loaded filtered chunk index ({} entries)",
+                repo.chunk_index().len()
+            );
+            let index = repo.chunk_index();
+            plan_reads(&file_items, |id| {
+                index
+                    .get(id)
+                    .map(|e| (e.pack_id, e.pack_offset, e.stored_size))
+            })?
+        };
+
         drop(file_items); // release borrows on sorted_items
         drop(sorted_items); // free all Item memory
                             // Free chunk index memory — all pack locations are now in PlannedBlob structs.
@@ -306,10 +339,15 @@ struct ChunkTargets {
     targets: SmallVec<[WriteTarget; 1]>,
 }
 
-fn plan_reads(
+/// Plan reads using a lookup closure that returns `(pack_id, pack_offset, stored_size)`.
+/// The closure abstracts over ChunkIndex vs MmapRestoreCache.
+fn plan_reads<L>(
     file_items: &[(&Item, PathBuf)],
-    chunk_index: &ChunkIndex,
-) -> Result<(Vec<PlannedFile>, Vec<ReadGroup>)> {
+    lookup: L,
+) -> Result<(Vec<PlannedFile>, Vec<ReadGroup>)>
+where
+    L: Fn(&ChunkId) -> Option<(PackId, u64, u32)>,
+{
     let mut files: Vec<PlannedFile> = Vec::with_capacity(file_items.len());
 
     // Collect all (ChunkId → ChunkTargets) across all files.
@@ -318,12 +356,12 @@ fn plan_reads(
     for (file_idx, (item, target_path)) in file_items.iter().enumerate() {
         let mut file_offset: u64 = 0;
         for chunk_ref in &item.chunks {
-            let entry = chunk_targets.entry(chunk_ref.id).or_insert_with(|| {
-                ChunkTargets {
+            let entry = chunk_targets
+                .entry(chunk_ref.id)
+                .or_insert_with(|| ChunkTargets {
                     expected_size: chunk_ref.size,
                     targets: SmallVec::new(),
-                }
-            });
+                });
             if entry.expected_size != chunk_ref.size {
                 return Err(VgerError::InvalidFormat(format!(
                     "chunk {} has inconsistent logical sizes in snapshot metadata: {} vs {}",
@@ -349,19 +387,15 @@ fn plan_reads(
     let mut pack_blobs: HashMap<PackId, Vec<PlannedBlob>> = HashMap::new();
 
     for (chunk_id, ct) in chunk_targets {
-        let index_entry = chunk_index
-            .get(&chunk_id)
-            .ok_or_else(|| VgerError::Other(format!("chunk not found in index: {chunk_id}")))?;
-        pack_blobs
-            .entry(index_entry.pack_id)
-            .or_default()
-            .push(PlannedBlob {
-                chunk_id,
-                pack_offset: index_entry.pack_offset,
-                stored_size: index_entry.stored_size,
-                expected_size: ct.expected_size,
-                targets: ct.targets,
-            });
+        let (pack_id, pack_offset, stored_size) =
+            lookup(&chunk_id).ok_or(VgerError::ChunkNotInIndex(chunk_id))?;
+        pack_blobs.entry(pack_id).or_default().push(PlannedBlob {
+            chunk_id,
+            pack_offset,
+            stored_size,
+            expected_size: ct.expected_size,
+            targets: ct.targets,
+        });
     }
 
     // For each pack: sort blobs by offset, then coalesce into ReadGroups.
@@ -737,6 +771,15 @@ mod tests {
         PackId([byte; 32])
     }
 
+    /// Helper: create a lookup closure from a ChunkIndex.
+    fn index_lookup(index: &ChunkIndex) -> impl Fn(&ChunkId) -> Option<(PackId, u64, u32)> + '_ {
+        move |id| {
+            index
+                .get(id)
+                .map(|e| (e.pack_id, e.pack_offset, e.stored_size))
+        }
+    }
+
     fn make_file_item(path: &str, chunks: Vec<(u8, u32)>) -> Item {
         Item {
             path: path.to_string(),
@@ -772,7 +815,7 @@ mod tests {
         let item = make_file_item("a.txt", vec![(0xAA, 200)]);
         let file_items = vec![(&item, PathBuf::from("/tmp/out/a.txt"))];
 
-        let (files, groups) = plan_reads(&file_items, &index).unwrap();
+        let (files, groups) = plan_reads(&file_items, index_lookup(&index)).unwrap();
         assert_eq!(files.len(), 1);
         assert_eq!(files[0].total_size, 200);
         assert_eq!(groups.len(), 1);
@@ -792,7 +835,7 @@ mod tests {
         let item = make_file_item("a.txt", vec![(0xAA, 200), (0xBB, 300)]);
         let file_items = vec![(&item, PathBuf::from("/tmp/out/a.txt"))];
 
-        let (files, groups) = plan_reads(&file_items, &index).unwrap();
+        let (files, groups) = plan_reads(&file_items, index_lookup(&index)).unwrap();
         assert_eq!(files.len(), 1);
         assert_eq!(files[0].total_size, 500);
         // Both blobs should be coalesced into one ReadGroup
@@ -818,7 +861,7 @@ mod tests {
         let item = make_file_item("a.txt", vec![(0xAA, 200), (0xBB, 300)]);
         let file_items = vec![(&item, PathBuf::from("/tmp/out/a.txt"))];
 
-        let (_files, groups) = plan_reads(&file_items, &index).unwrap();
+        let (_files, groups) = plan_reads(&file_items, index_lookup(&index)).unwrap();
         // Should be split into two ReadGroups
         assert_eq!(groups.len(), 2);
         assert_eq!(groups[0].blobs.len(), 1);
@@ -837,7 +880,7 @@ mod tests {
         let item = make_file_item("a.txt", vec![(0xAA, 5000), (0xBB, 300)]);
         let file_items = vec![(&item, PathBuf::from("/tmp/out/a.txt"))];
 
-        let (_files, groups) = plan_reads(&file_items, &index).unwrap();
+        let (_files, groups) = plan_reads(&file_items, index_lookup(&index)).unwrap();
         // Should be split because merged_size > MAX_READ_SIZE
         assert_eq!(groups.len(), 2);
     }
@@ -856,7 +899,7 @@ mod tests {
             (&item_b, PathBuf::from("/tmp/out/b.txt")),
         ];
 
-        let (files, groups) = plan_reads(&file_items, &index).unwrap();
+        let (files, groups) = plan_reads(&file_items, index_lookup(&index)).unwrap();
         assert_eq!(files.len(), 2);
         // Only one ReadGroup since it's the same chunk
         assert_eq!(groups.len(), 1);
@@ -878,7 +921,7 @@ mod tests {
             (&item_b, PathBuf::from("/tmp/out/b.txt")),
         ];
 
-        let err = match plan_reads(&file_items, &index) {
+        let err = match plan_reads(&file_items, index_lookup(&index)) {
             Ok(_) => panic!("expected inconsistent logical size error"),
             Err(e) => e.to_string(),
         };
@@ -891,7 +934,7 @@ mod tests {
         let item = make_file_item("empty.txt", vec![]);
         let file_items = vec![(&item, PathBuf::from("/tmp/out/empty.txt"))];
 
-        let (files, groups) = plan_reads(&file_items, &index).unwrap();
+        let (files, groups) = plan_reads(&file_items, index_lookup(&index)).unwrap();
         assert_eq!(files.len(), 1);
         assert_eq!(files[0].total_size, 0);
         assert_eq!(groups.len(), 0);
@@ -908,7 +951,7 @@ mod tests {
         let item = make_file_item("a.txt", vec![(0xAA, 200), (0xBB, 300)]);
         let file_items = vec![(&item, PathBuf::from("/tmp/out/a.txt"))];
 
-        let (_files, groups) = plan_reads(&file_items, &index).unwrap();
+        let (_files, groups) = plan_reads(&file_items, index_lookup(&index)).unwrap();
         // Separate packs → separate ReadGroups
         assert_eq!(groups.len(), 2);
     }
