@@ -4,6 +4,7 @@ use std::path::{Component, Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
+use smallvec::SmallVec;
 use tracing::{debug, info};
 
 use crate::compress;
@@ -55,7 +56,9 @@ struct PlannedBlob {
     pack_offset: u64,
     stored_size: u32,
     expected_size: u32,
-    targets: Vec<WriteTarget>,
+    /// Most chunks are referenced by exactly one file, so SmallVec stores
+    /// the single target inline without a heap allocation.
+    targets: SmallVec<[WriteTarget; 1]>,
 }
 
 /// A coalesced read — maps to a single storage range GET.
@@ -297,34 +300,40 @@ where
 // Read planning — group chunks by pack and coalesce adjacent ranges
 // ---------------------------------------------------------------------------
 
+/// Aggregated write targets and expected logical size for a single chunk.
+struct ChunkTargets {
+    expected_size: u32,
+    targets: SmallVec<[WriteTarget; 1]>,
+}
+
 fn plan_reads(
     file_items: &[(&Item, PathBuf)],
     chunk_index: &ChunkIndex,
 ) -> Result<(Vec<PlannedFile>, Vec<ReadGroup>)> {
     let mut files: Vec<PlannedFile> = Vec::with_capacity(file_items.len());
 
-    // Collect all (ChunkId → Vec<WriteTarget>) across all files.
-    let mut chunk_targets: HashMap<ChunkId, Vec<WriteTarget>> = HashMap::new();
-    let mut chunk_sizes: HashMap<ChunkId, u32> = HashMap::new();
+    // Collect all (ChunkId → ChunkTargets) across all files.
+    let mut chunk_targets: HashMap<ChunkId, ChunkTargets> = HashMap::new();
 
     for (file_idx, (item, target_path)) in file_items.iter().enumerate() {
         let mut file_offset: u64 = 0;
         for chunk_ref in &item.chunks {
-            if let Some(prev_size) = chunk_sizes.insert(chunk_ref.id, chunk_ref.size) {
-                if prev_size != chunk_ref.size {
-                    return Err(VgerError::InvalidFormat(format!(
-                        "chunk {} has inconsistent logical sizes in snapshot metadata: {} vs {}",
-                        chunk_ref.id, prev_size, chunk_ref.size
-                    )));
+            let entry = chunk_targets.entry(chunk_ref.id).or_insert_with(|| {
+                ChunkTargets {
+                    expected_size: chunk_ref.size,
+                    targets: SmallVec::new(),
                 }
+            });
+            if entry.expected_size != chunk_ref.size {
+                return Err(VgerError::InvalidFormat(format!(
+                    "chunk {} has inconsistent logical sizes in snapshot metadata: {} vs {}",
+                    chunk_ref.id, entry.expected_size, chunk_ref.size
+                )));
             }
-            chunk_targets
-                .entry(chunk_ref.id)
-                .or_default()
-                .push(WriteTarget {
-                    file_idx,
-                    file_offset,
-                });
+            entry.targets.push(WriteTarget {
+                file_idx,
+                file_offset,
+            });
             file_offset += chunk_ref.size as u64;
         }
         files.push(PlannedFile {
@@ -339,26 +348,21 @@ fn plan_reads(
     // Look up each unique chunk's pack location and group by pack.
     let mut pack_blobs: HashMap<PackId, Vec<PlannedBlob>> = HashMap::new();
 
-    for (chunk_id, targets) in chunk_targets {
-        let entry = chunk_index
+    for (chunk_id, ct) in chunk_targets {
+        let index_entry = chunk_index
             .get(&chunk_id)
             .ok_or_else(|| VgerError::Other(format!("chunk not found in index: {chunk_id}")))?;
-        let expected_size = *chunk_sizes.get(&chunk_id).ok_or_else(|| {
-            VgerError::Other(format!("missing logical chunk size for {chunk_id}"))
-        })?;
         pack_blobs
-            .entry(entry.pack_id)
+            .entry(index_entry.pack_id)
             .or_default()
             .push(PlannedBlob {
                 chunk_id,
-                pack_offset: entry.pack_offset,
-                stored_size: entry.stored_size,
-                expected_size,
-                targets,
+                pack_offset: index_entry.pack_offset,
+                stored_size: index_entry.stored_size,
+                expected_size: ct.expected_size,
+                targets: ct.targets,
             });
     }
-
-    drop(chunk_sizes); // no longer needed — free before coalescing
 
     // For each pack: sort blobs by offset, then coalesce into ReadGroups.
     let mut groups: Vec<ReadGroup> = Vec::new();
@@ -943,7 +947,7 @@ mod tests {
                 pack_offset: 0,
                 stored_size: packed.len() as u32,
                 expected_size: 5,
-                targets: vec![WriteTarget {
+                targets: smallvec::smallvec![WriteTarget {
                     file_idx: 0,
                     file_offset: 0,
                 }],

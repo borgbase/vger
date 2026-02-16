@@ -52,6 +52,9 @@ memmap2 = "0.9"
 # Probabilistic filter
 xorf = "0.12"
 
+# Small-vec optimization
+smallvec = "1"
+
 # Error handling
 thiserror = "2"
 
