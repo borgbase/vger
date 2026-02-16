@@ -17,16 +17,14 @@ V'Ger is a fast, encrypted, deduplicated backup tool written in Rust. It's cente
 - **Built-in WebDAV and desktop GUI** to browse and restore snapshots
 - **Rate limiting** for CPU, disk I/O, and network bandwidth
 
-<p align="center">
-  <img src="images/gui-screenshot.png" alt="V'Ger Backup Logo" width="400">
-</p>
 
-## Inspired by
+## Benchmarks
 
-- [BorgBackup](https://github.com/borgbackup/borg/): architecture, chunking strategy, repository concept, and overall backup pipeline.
-- [Borgmatic](https://torsion.org/borgmatic/): YAML configuration approach, pipe-based database dumps.
-- [Rustic](https://github.com/rustic-rs/rustic): storage backend abstraction via Apache OpenDAL, pack file design, and architectural references from a mature Rust backup tool.
-- [V'Ger](https://memory-alpha.fandom.com/wiki/V%27Ger) from *Star Trek: The Motion Picture* — a probe that assimilated everything it encountered and returned as something far more powerful.
+V'Ger achieves the best speed and throughput of any comparable backup tool, while using fewer CPU cycles.
+
+![Backup Tool Benchmark](images/benchmark.summary.png)
+
+<small>See our [e2e testing skill](https://github.com/borgbase/vger/blob/main/.claude/commands/e2e-tests/benchmarks.md) for full benchmark details. All benchmarks were run on the same Intel i7-6700 CPU @ 3.40GHz machine with 2x Samsung PM981.</small>
 
 ## Comparison
 
@@ -47,6 +45,15 @@ V'Ger is a fast, encrypted, deduplicated backup tool written in Rust. It's cente
 | Serialization | msgpack | JSON + Protocol Buffers | JSON + Protocol Buffers | msgpack |
 | Storage | borgstore + SSH RPC | Local, S3, SFTP, REST, rclone | OpenDAL (local, S3, many more) | OpenDAL (local, S3, SFTP) + vger-server |
 | Repo compatibility | Borg v1/v2/v3 | Restic format | Restic-compatible | Own format |
+
+
+## Inspired by
+
+- [BorgBackup](https://github.com/borgbackup/borg/): architecture, chunking strategy, repository concept, and overall backup pipeline.
+- [Borgmatic](https://torsion.org/borgmatic/): YAML configuration approach, pipe-based database dumps.
+- [Rustic](https://github.com/rustic-rs/rustic): storage backend abstraction via Apache OpenDAL, pack file design, and architectural references from a mature Rust backup tool.
+- [V'Ger](https://memory-alpha.fandom.com/wiki/V%27Ger) from *Star Trek: The Motion Picture* — a probe that assimilated everything it encountered and returned as something far more powerful.
+
 
 ## Usage
 

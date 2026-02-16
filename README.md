@@ -21,6 +21,16 @@ Inspired by [BorgBackup](https://github.com/borgbackup/borg/), [Borgmatic](https
 - **Built-in WebDAV and desktop GUI** to browse and restore snapshots
 - **Rate limiting** for CPU, disk I/O, and network bandwidth
 
+
+## Benchmarks
+
+V'Ger achieves the best speed and throughput of any comparable backup tool, while using fewer CPU cycles.
+
+![Backup Tool Benchmark](docs/src/images/benchmark.summary.png)
+
+<small>See our [e2e testing skill](https://github.com/borgbase/vger/blob/main/.claude/commands/e2e-tests/benchmarks.md) for full benchmark details. All benchmarks were run on the same Intel i7-6700 CPU @ 3.40GHz machine with 2x Samsung PM981.</small>
+
+
 ## Quick start
 
 ```bash
