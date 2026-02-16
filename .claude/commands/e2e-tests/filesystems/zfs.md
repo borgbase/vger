@@ -71,8 +71,9 @@ Use `sudo vger` since the source path is root-owned.
 ## Run Matrix
 
 1. `local` repository first
-2. `s3` second
-3. `sftp` optional and last (use `timeout` wrappers, skip if unstable)
+2. `rest` second (local `vger-server`)
+3. `s3` third
+4. `sftp` optional and last (use `timeout` wrappers, skip if unstable)
 
 ## Validation
 
@@ -97,7 +98,7 @@ Use `sudo vger` since the source path is root-owned.
 
 - **Always** verify `snapdir=visible` before running backups — without it, the snapshot path is invisible
 - Keep explicit snapshot existence checks after each run
-- Isolate SFTP failures from local/s3 results
+- Isolate SFTP failures from local/rest/s3 results
 - After `zpool destroy`, partition may still show `zfs_member` — next FS test can safely overwrite
 
 ## Cleanup

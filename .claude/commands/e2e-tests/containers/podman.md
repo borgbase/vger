@@ -64,15 +64,16 @@ Validate artifact naming and size.
 
 Run at least one Podman scenario per backend:
 1. **local** — full matrix
-2. **s3** — at least one scenario
-3. **sftp** — bounded probe with timeouts
+2. **rest** — at least one scenario against local `vger-server`
+3. **s3** — at least one scenario
+4. **sftp** — bounded probe with timeouts
 
 ## Common Issues
 
 - Same permission gotchas as Docker: mixing root/non-root creates ownership issues
 - Rootless Podman may not work without `newuidmap` — fallback to `sudo podman`
 - `rclone purge` may return `directory not found` — treat as non-fatal
-- Keep SFTP failures isolated from local/s3 results
+- Keep SFTP failures isolated from local/rest/s3 results
 
 ## Cleanup
 

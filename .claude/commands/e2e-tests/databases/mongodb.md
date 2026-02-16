@@ -44,8 +44,9 @@ Additional run capturing all databases:
 ## Run Matrix
 
 1. `local` first with full restore validation
-2. Clean S3 with `rclone delete --rmdirs`, run `s3` second
-3. `sftp` last (or skip when investigating unrelated scenarios)
+2. `rest` second (local `vger-server`)
+3. Clean S3 with `rclone delete --rmdirs`, run `s3` third
+4. `sftp` last (or skip when investigating unrelated scenarios)
 
 ## Integrity Check
 

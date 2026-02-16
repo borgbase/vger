@@ -47,9 +47,10 @@ Run backup and validate artifact exists and is non-empty.
 ## Run Matrix
 
 1. Initialize local repo, run both variants + restore check
-2. Clean S3 with `rclone delete --rmdirs`, run both variants
-3. Run SFTP variants last with timeouts — mark BLOCKED on timeout
-4. Do NOT rerun full plan for SFTP-only failures
+2. Run REST backend variants second (local `vger-server`)
+3. Clean S3 with `rclone delete --rmdirs`, run both variants
+4. Run SFTP variants last with timeouts — mark BLOCKED on timeout
+5. Do NOT rerun full plan for SFTP-only failures
 
 ## Integrity Check
 

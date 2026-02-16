@@ -47,8 +47,9 @@ Run backup and validate artifact exists under `.vger-dumps/` in snapshot listing
 
 Run both variants against each backend:
 1. `local` first
-2. `s3` second
-3. `sftp` last (with timeouts, mark BLOCKED on failure)
+2. `rest` second
+3. `s3` third
+4. `sftp` last (with timeouts, mark BLOCKED on failure)
 
 Clean remote storage with `rclone delete --rmdirs` between backend runs.
 

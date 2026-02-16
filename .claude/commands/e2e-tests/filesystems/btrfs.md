@@ -62,8 +62,9 @@ Use `sudo vger` since the source path is root-owned.
 ## Run Matrix
 
 1. `local` repository first
-2. `s3` second
-3. `sftp` optional and last (use `timeout` wrappers, skip if unstable)
+2. `rest` second (local `vger-server`)
+3. `s3` third
+4. `sftp` optional and last (use `timeout` wrappers, skip if unstable)
 
 ## Validation
 
@@ -87,7 +88,7 @@ Use `sudo vger` since the source path is root-owned.
 
 - Keep snapshot existence checks explicit after each backup
 - Restore validation catches hook misconfiguration early
-- Isolate SFTP failures from local/s3 results
+- Isolate SFTP failures from local/rest/s3 results
 
 ## Cleanup
 

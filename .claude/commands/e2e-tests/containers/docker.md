@@ -63,14 +63,15 @@ Run backup and verify each artifact is present and labeled correctly.
 
 Run at least one Docker scenario per backend:
 1. **local** — full matrix (all three scenarios)
-2. **s3** — at least one scenario
-3. **sftp** — bounded probe with timeouts (mark BLOCKED on failure)
+2. **rest** — at least one scenario against local `vger-server`
+3. **s3** — at least one scenario
+4. **sftp** — bounded probe with timeouts (mark BLOCKED on failure)
 
 ## Common Issues
 
 - Mixing `sudo vger` and regular `vger` creates root-owned repo files — reset with `sudo rm -rf` before reruns
 - `rclone purge` may return `directory not found` — treat as non-fatal
-- Keep SFTP failures isolated — do NOT rerun local/s3 if only SFTP probe failed
+- Keep SFTP failures isolated — do NOT rerun local/rest/s3 if only SFTP probe failed
 - MariaDB images use `mariadb-dump` (not `mysqldump`)
 
 ## Cleanup

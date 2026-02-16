@@ -16,11 +16,11 @@ The test server provides:
 | Resource | Path | Purpose |
 |----------|------|---------|
 | Large corpus | `~/corpus-local` | Test data for local backend (large) |
-| Small corpus | `~/corpus-remote` | Test data for S3/SFTP backends (bandwidth-aware) |
+| Small corpus | `~/corpus-remote` | Test data for S3/SFTP/REST backends (bandwidth-aware) |
 | Base config | `~/vger.sample.yaml` | Repo definitions, credentials, and connection details |
 | Vger docs | https://vger.pages.dev/ | Recipe reference for hooks, command_dumps, etc. |
 
-**Installed tools**: `vger`, `rclone`, `docker`, `podman`, database clients (pg, mariadb, mongo).
+**Installed tools**: `vger`, `vger-server`, `rclone`, `docker`, `podman`, database clients (pg, mariadb, mongo).
 Install missing packages with `sudo apt-get install ...`.
 
 ## Sub-skills
@@ -29,6 +29,7 @@ Run each sub-skill to execute a specific test area. Results go to `~/runtime/`.
 
 ### Backends — Corpus backup + restore validation
 - **`e2e-tests:backends:local`** — Full backup/restore with large corpus on local backend
+- **`e2e-tests:backends:rest`** — Backup/restore against local `vger-server` REST backend
 - **`e2e-tests:backends:s3`** — Backup/restore with small corpus on S3 backend
 - **`e2e-tests:backends:sftp`** — Backup/restore with small corpus on SFTP backend (timeout-bounded)
 
@@ -69,7 +70,7 @@ export VGER_PASSPHRASE=123    # non-interactive passphrase
 1. Copy `~/vger.sample.yaml` to a scenario-specific config (e.g., `config.postgres.yaml`)
 2. Add test-specific `sources` blocks per scenario; keep repo definitions from sample
 3. Keep each scenario in a separate config file to avoid source overlap
-4. Reference repos by label: `-R local`, `-R s3`, `-R sftp`
+4. Reference repos by label: `-R local`, `-R rest`, `-R s3`, `-R sftp`
 
 ### Validation Standard
 Every test must verify:
@@ -83,17 +84,19 @@ Every test must verify:
 
 ### Cleanup Standard
 1. **Local**: remove temporary directories (dumps, restores, configs)
-2. **Remote storage**: `rclone delete --rmdirs <remote:path>` between runs
+2. **Local REST server data**: remove test repos from server data directory between runs when reusing repo names
+3. **Remote storage**: `rclone delete --rmdirs <remote:path>` between runs
    - Do NOT use `rclone purge` (may fail with 403 on restricted buckets)
    - Treat `directory not found` from rclone as non-fatal
-3. **Containers**: stop and remove after each scenario
-4. **Filesystems**: unmount/destroy test pools after runs
+4. **Containers**: stop and remove after each scenario
+5. **Filesystems**: unmount/destroy test pools after runs
 
 ### Run Matrix
 For tests that span multiple backends, run in this order:
 1. **local** first (fast feedback loop)
-2. **s3** second
-3. **sftp** last (known instability, use timeouts)
+2. **rest** second (local server path, still exercises HTTP backend)
+3. **s3** third
+4. **sftp** last (known instability, use timeouts)
 
 ### SFTP Guardrails
 SFTP can be intermittent even when rclone works fine against the same server:
