@@ -198,6 +198,8 @@ pub(crate) fn dispatch_command(
             dry_run,
             ..
         } => cmd::compact::run_compact(cfg, label, *threshold, max_repack_size.clone(), *dry_run),
-        Commands::Config { .. } => Err("'config' command should be handled before config resolution".into()),
+        Commands::Config { .. } => {
+            Err("'config' command should be handled before config resolution".into())
+        }
     }
 }
