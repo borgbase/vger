@@ -1,3 +1,22 @@
+/* Brand accent — override mdBook theme accent colors. */
+.light, html:not(.js) {
+  --sidebar-active: #fb8c00;
+  --sidebar-header-border-color: #fb8c00;
+  --links: #fb8c00;
+}
+.coal, .navy, .ayu, .rust {
+  --sidebar-active: #fb8c00;
+  --sidebar-header-border-color: #fb8c00;
+  --links: #fb8c00;
+}
+@media (prefers-color-scheme: dark) {
+  html:not(.js) {
+    --sidebar-active: #fb8c00;
+    --sidebar-header-border-color: #fb8c00;
+    --links: #fb8c00;
+  }
+}
+
 /* Keep command names readable in Command Reference. */
 h1#command-reference + .table-wrapper table th:first-child,
 h1#command-reference + .table-wrapper table td:first-child,

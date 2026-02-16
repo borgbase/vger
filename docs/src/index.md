@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="images/vger-color-rounded.webp" alt="V'Ger Backup Logo" width="350">
+  <img src="images/vger-color-rounded.webp" alt="V'Ger Backup Logo" width="380">
 </p>
 
 V'Ger is a fast, encrypted, deduplicated backup tool written in Rust. It's centered around a simple YAML config format and includes a desktop GUI and webDAV server to browse snapshots. More about [design goals](goals.md).

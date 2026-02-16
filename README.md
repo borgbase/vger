@@ -1,7 +1,7 @@
 # V'Ger Backup
 
 <p align="center">
-  <img src="docs/src/images/vger-color-rounded.webp" alt="V'Ger Backup Logo" width="350">
+  <img src="docs/src/images/vger-color-rounded.webp" alt="V'Ger Backup Logo" width="380">
 </p>
 
 A fast, encrypted, deduplicated backup tool written in Rust centered around a friendly YAML config file.
