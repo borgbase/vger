@@ -25,6 +25,10 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: release-linux
+          cache-on-failure: true
       - name: Install Linux GUI deps
         run: |
           sudo apt-get update
@@ -56,6 +60,10 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: aarch64-apple-darwin
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: release-macos
+          cache-on-failure: true
       - name: Build
         run: cargo build --release --target aarch64-apple-darwin -p vger-cli -p vger-server -p vger-gui
       - name: Package
@@ -81,6 +89,10 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: x86_64-pc-windows-msvc
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: release-windows
+          cache-on-failure: true
       - name: Build
         run: cargo build --release --target x86_64-pc-windows-msvc -p vger-cli -p vger-server -p vger-gui
       - name: Package
