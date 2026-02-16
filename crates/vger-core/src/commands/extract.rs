@@ -228,8 +228,20 @@ where
     }
 
     if !file_items.is_empty() {
-        // Load the chunk index (was skipped by open_without_index).
+        // Collect all unique ChunkIds needed for this snapshot.
+        let needed_chunks: HashSet<ChunkId> = file_items
+            .iter()
+            .flat_map(|(item, _)| item.chunks.iter().map(|c| c.id))
+            .collect();
+
+        // Load and filter the chunk index to only snapshot-relevant entries.
         repo.load_chunk_index()?;
+        repo.retain_chunk_index(&needed_chunks);
+        drop(needed_chunks);
+        info!(
+            "loaded filtered chunk index ({} entries)",
+            repo.chunk_index().len()
+        );
 
         // Phase 2: Plan reads — group chunks by pack, coalesce adjacent ranges.
         let (planned_files, groups) = plan_reads(&file_items, repo.chunk_index())?;

@@ -1,6 +1,6 @@
 pub mod dedup_cache;
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use serde::{Deserialize, Serialize};
 use tracing::debug;
@@ -105,6 +105,13 @@ impl ChunkIndex {
         } else {
             false
         }
+    }
+
+    /// Retain only entries whose ChunkId is in `needed`, then shrink to fit.
+    /// Used to reduce memory after loading the full index for a restore.
+    pub fn retain_chunks(&mut self, needed: &HashSet<ChunkId>) {
+        self.entries.retain(|id, _| needed.contains(id));
+        self.entries.shrink_to_fit();
     }
 
     /// Count distinct pack IDs across all entries.

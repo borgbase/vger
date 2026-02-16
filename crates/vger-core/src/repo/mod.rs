@@ -459,6 +459,12 @@ impl Repository {
         self.chunk_index = ChunkIndex::new();
     }
 
+    /// Filter the chunk index to only retain entries for the given chunks.
+    /// Does not mark dirty — this is a read-only memory optimization.
+    pub fn retain_chunk_index(&mut self, needed: &std::collections::HashSet<crate::crypto::chunk_id::ChunkId>) {
+        self.chunk_index.retain_chunks(needed);
+    }
+
     /// Read-only access to the file cache.
     pub fn file_cache(&self) -> &FileCache {
         &self.file_cache
