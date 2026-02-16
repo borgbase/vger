@@ -1,3 +1,4 @@
 /target
 /docs/book
 /dist
+__pycache__

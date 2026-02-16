@@ -50,19 +50,22 @@ PROFILE_STRACE=1 PROFILE_PERF=1 RUNS=3 "$SKILL_DIR/scripts/benchmarks/run.sh" ~/
 
 The harness writes to `~/runtime/benchmarks/<UTC_STAMP>/`.
 
-Summaries:
+Post-processing (summary table + chart):
 ```bash
-python3 "$SKILL_DIR/scripts/benchmarks/summarize.py" ~/runtime/benchmarks/<UTC_STAMP>
-python3 "$SKILL_DIR/scripts/benchmarks/profile_report.py" ~/runtime/benchmarks/<UTC_STAMP>
+python3 "$SKILL_DIR/scripts/benchmarks/bench_report.py" all ~/runtime/benchmarks/<UTC_STAMP>
 ```
+
+`run.sh` now calls the reporter automatically at the end of each run and writes:
+- `~/runtime/benchmarks/<UTC_STAMP>/reports/summary.tsv`
+- `~/runtime/benchmarks/<UTC_STAMP>/reports/summary.md`
+- `~/runtime/benchmarks/<UTC_STAMP>/reports/summary.json`
+- `~/runtime/benchmarks/<UTC_STAMP>/reports/benchmark.summary.png`
 
 ## What To Look At (Actionable Signals)
 
-From `profile_report.py`:
+From `reports/summary.tsv`:
 - `maxrss_kb`: memory spikes (often restore path)
 - `user` vs `sys`: CPU vs kernel/IO bound work
-- `cswV`/`cswI`: scheduling overhead and contention
-- `minF`: page faults, often tracks allocator/memory behavior
 - `fs_out`: write amplification during restore
 
 From `strace.summary.txt` (when `PROFILE_STRACE=1`):

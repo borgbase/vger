@@ -11,6 +11,7 @@ set -euo pipefail
 DATASET_DIR=${1:-"$HOME/corpus-remote"}
 RUNS=${RUNS:-3}
 PASSPHRASE=${PASSPHRASE:-123}
+SCRIPT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 
 if [[ ! -d "$DATASET_DIR" ]]; then
   echo "dataset dir not found: $DATASET_DIR" >&2
@@ -31,6 +32,17 @@ STAMP=$(date -u +%Y%m%dT%H%M%SZ)
 OUT_ROOT="$HOME/runtime/benchmarks/$STAMP"
 LOGS="$OUT_ROOT/logs"
 mkdir -p "$LOGS"
+
+cleanup_restore_dirs() {
+  # Always remove restore artifacts from runtime after run completion/failure.
+  # Keep benchmark metrics/logs/reports intact.
+  local dirs=("${RESTORE_VGER:-}" "${RESTORE_RESTIC:-}" "${RESTORE_RUSTIC:-}" "${RESTORE_BORG:-}")
+  local d=""
+  for d in "${dirs[@]}"; do
+    [[ -n "$d" ]] && rm -rf "$d"
+  done
+}
+trap cleanup_restore_dirs EXIT
 
 # Repos on fast local mount. Keep paths stable for easier diffing across runs.
 # Override with REPO_ROOT env var if /mnt/repos is not available.
@@ -228,6 +240,11 @@ Outputs:
 - vger.info.txt / restic.stats.txt / rustic.stats.txt / borg.stats.txt
 - logs/ (hyperfine stdout/stderr)
 - profile.<op>/
+- reports/summary.tsv / reports/summary.md / reports/summary.json
+- reports/benchmark.summary.png
 EOF
+
+# Post-processing outputs (summary + chart)
+python3 "$SCRIPT_DIR/bench_report.py" all "$OUT_ROOT" --out-dir "$OUT_ROOT/reports"
 
 echo "OK: results in $OUT_ROOT"
