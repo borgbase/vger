@@ -665,39 +665,35 @@ fn process_regular_file_item(
     if let Some(cached_refs) = cache_hit {
         // Clone to release the borrow on file_cache so we can mutate repo below.
         let cached_refs = cached_refs.to_vec();
-        // Verify all referenced chunks still exist in the index.
-        let all_present = cached_refs.iter().all(|cr| repo.chunk_exists(&cr.id));
-        if all_present {
-            // Bump refcounts for all cached chunks.
-            let mut file_original: u64 = 0;
-            let mut file_compressed: u64 = 0;
-            for cr in &cached_refs {
-                repo.increment_chunk_ref(&cr.id);
-                file_original += cr.size as u64;
-                file_compressed += cr.csize as u64;
-            }
-
-            stats.nfiles += 1;
-            stats.original_size += file_original;
-            stats.compressed_size += file_compressed;
-            // No deduplicated_size contribution — all chunks already existed.
-
-            item.chunks = cached_refs;
-
-            new_file_cache.insert(
-                abs_path,
-                metadata_summary.device,
-                metadata_summary.inode,
-                metadata_summary.mtime_ns,
-                metadata_summary.ctime_ns,
-                file_size,
-                item.chunks.clone(),
-            );
-
-            debug!(path = %item.path, "file cache hit");
-            emit_stats_progress(progress, stats, Some(item.path.clone()));
-            return Ok(());
+        // Cache entries were pre-sanitized against the index before backup.
+        let mut file_original: u64 = 0;
+        let mut file_compressed: u64 = 0;
+        for cr in &cached_refs {
+            repo.increment_chunk_ref(&cr.id);
+            file_original += cr.size as u64;
+            file_compressed += cr.csize as u64;
         }
+
+        stats.nfiles += 1;
+        stats.original_size += file_original;
+        stats.compressed_size += file_compressed;
+        // No deduplicated_size contribution — all chunks already existed.
+
+        item.chunks = cached_refs;
+
+        new_file_cache.insert(
+            abs_path,
+            metadata_summary.device,
+            metadata_summary.inode,
+            metadata_summary.mtime_ns,
+            metadata_summary.ctime_ns,
+            file_size,
+            item.chunks.clone(),
+        );
+
+        debug!(path = %item.path, "file cache hit");
+        emit_stats_progress(progress, stats, Some(item.path.clone()));
+        return Ok(());
     }
 
     let chunk_id_key = *repo.crypto.chunk_id_key();
@@ -999,51 +995,31 @@ fn process_source_path(
                         },
                     );
 
-                    let all_present = cached_refs.iter().all(|cr| repo.chunk_exists(&cr.id));
-                    if all_present {
-                        let mut file_original: u64 = 0;
-                        let mut file_compressed: u64 = 0;
-                        for cr in &cached_refs {
-                            repo.increment_chunk_ref(&cr.id);
-                            file_original += cr.size as u64;
-                            file_compressed += cr.csize as u64;
-                        }
-                        stats.nfiles += 1;
-                        stats.original_size += file_original;
-                        stats.compressed_size += file_compressed;
-                        item.chunks = cached_refs;
-
-                        new_file_cache.insert(
-                            abs_path,
-                            metadata_summary.device,
-                            metadata_summary.inode,
-                            metadata_summary.mtime_ns,
-                            metadata_summary.ctime_ns,
-                            metadata_summary.size,
-                            item.chunks.clone(),
-                        );
-
-                        debug!(path = %item.path, "file cache hit (sequential small)");
-                        emit_stats_progress(progress, stats, Some(item.path.clone()));
-                    } else {
-                        // Stale cache — read and process normally (rare after sanitization).
-                        let data = std::fs::read(entry.path()).map_err(VgerError::Io)?;
-                        cross_batch.add_file(item.clone(), data, metadata_summary, abs_path);
-                        flush_cross_file_batch(
-                            &mut cross_batch,
-                            repo,
-                            compression,
-                            &chunk_id_key,
-                            transform_pool,
-                            items_config,
-                            item_stream,
-                            item_ptrs,
-                            stats,
-                            new_file_cache,
-                            progress,
-                        )?;
-                        continue; // item already appended by flush
+                    // Cache entries were pre-sanitized against the index before backup.
+                    let mut file_original: u64 = 0;
+                    let mut file_compressed: u64 = 0;
+                    for cr in &cached_refs {
+                        repo.increment_chunk_ref(&cr.id);
+                        file_original += cr.size as u64;
+                        file_compressed += cr.csize as u64;
                     }
+                    stats.nfiles += 1;
+                    stats.original_size += file_original;
+                    stats.compressed_size += file_compressed;
+                    item.chunks = cached_refs;
+
+                    new_file_cache.insert(
+                        abs_path,
+                        metadata_summary.device,
+                        metadata_summary.inode,
+                        metadata_summary.mtime_ns,
+                        metadata_summary.ctime_ns,
+                        metadata_summary.size,
+                        item.chunks.clone(),
+                    );
+
+                    debug!(path = %item.path, "file cache hit (sequential small)");
+                    emit_stats_progress(progress, stats, Some(item.path.clone()));
                 } else {
                     // Cache miss — read and add to batch.
                     let data = std::fs::read(entry.path()).map_err(VgerError::Io)?;
@@ -1246,98 +1222,31 @@ fn run_pipeline_backup(
                     },
                 );
 
-                // Verify all referenced chunks still exist in the index.
-                let all_present = cached_refs.iter().all(|cr| repo.chunk_exists(&cr.id));
-                if all_present {
-                    let mut file_original: u64 = 0;
-                    let mut file_compressed: u64 = 0;
-                    for cr in &cached_refs {
-                        repo.increment_chunk_ref(&cr.id);
-                        file_original += cr.size as u64;
-                        file_compressed += cr.csize as u64;
-                    }
-                    stats.nfiles += 1;
-                    stats.original_size += file_original;
-                    stats.compressed_size += file_compressed;
-                    item.chunks = cached_refs.clone();
-
-                    new_file_cache.insert(
-                        abs_path,
-                        metadata_summary.device,
-                        metadata_summary.inode,
-                        metadata_summary.mtime_ns,
-                        metadata_summary.ctime_ns,
-                        metadata_summary.size,
-                        item.chunks.clone(),
-                    );
-
-                    debug!(path = %item.path, "file cache hit (pipeline)");
-                    emit_stats_progress(progress, stats, Some(item.path.clone()));
-                } else {
-                    // Cache hit but chunks were pruned — re-read and re-chunk the file.
-                    warn!(
-                        path = %item.path,
-                        "file cache hit but chunks missing from index; re-reading file"
-                    );
-
-                    let file = File::open(&abs_path).map_err(VgerError::Io)?;
-                    let chunk_stream = chunker::chunk_stream(
-                        limits::LimitedReader::new(file, None),
-                        &repo.config.chunker_params,
-                    );
-
-                    let mut raw_chunks: Vec<Vec<u8>> = Vec::new();
-                    let mut pending_bytes: usize = 0;
-
-                    for chunk_result in chunk_stream {
-                        let chunk = chunk_result.map_err(|e| {
-                            VgerError::Other(format!("chunking failed for {}: {e}", abs_path))
-                        })?;
-
-                        let data_len = chunk.data.len();
-                        pending_bytes = pending_bytes.saturating_add(data_len);
-                        raw_chunks.push(chunk.data);
-
-                        if pending_bytes >= max_pending_transform_bytes
-                            || raw_chunks.len() >= max_pending_file_actions
-                        {
-                            flush_regular_file_batch(
-                                repo,
-                                compression,
-                                &chunk_id_key,
-                                transform_pool,
-                                &mut raw_chunks,
-                                &mut item,
-                                stats,
-                            )?;
-                            pending_bytes = 0;
-                        }
-                    }
-
-                    flush_regular_file_batch(
-                        repo,
-                        compression,
-                        &chunk_id_key,
-                        transform_pool,
-                        &mut raw_chunks,
-                        &mut item,
-                        stats,
-                    )?;
-
-                    stats.nfiles += 1;
-
-                    new_file_cache.insert(
-                        abs_path,
-                        metadata_summary.device,
-                        metadata_summary.inode,
-                        metadata_summary.mtime_ns,
-                        metadata_summary.ctime_ns,
-                        metadata_summary.size,
-                        item.chunks.clone(),
-                    );
-
-                    emit_stats_progress(progress, stats, Some(item.path.clone()));
+                // Cache entries were pre-sanitized against the index before backup.
+                let mut file_original: u64 = 0;
+                let mut file_compressed: u64 = 0;
+                for cr in &cached_refs {
+                    repo.increment_chunk_ref(&cr.id);
+                    file_original += cr.size as u64;
+                    file_compressed += cr.csize as u64;
                 }
+                stats.nfiles += 1;
+                stats.original_size += file_original;
+                stats.compressed_size += file_compressed;
+                item.chunks = cached_refs;
+
+                new_file_cache.insert(
+                    abs_path,
+                    metadata_summary.device,
+                    metadata_summary.inode,
+                    metadata_summary.mtime_ns,
+                    metadata_summary.ctime_ns,
+                    metadata_summary.size,
+                    item.chunks.clone(),
+                );
+
+                debug!(path = %item.path, "file cache hit (pipeline)");
+                emit_stats_progress(progress, stats, Some(item.path.clone()));
 
                 append_item_to_stream(
                     repo,
@@ -1613,6 +1522,10 @@ pub fn run_with_progress(
         // delete+compact. Must happen before enable_dedup_mode() which drops
         // the full chunk index. We temporarily take the cache to avoid
         // simultaneous mutable + immutable borrows of `repo`.
+        //
+        // INVARIANT: After this step, all remaining cache entries reference only
+        // chunks present in the index. Cache-hit paths rely on this and skip
+        // per-file existence checks for throughput.
         {
             let mut cache = repo.take_file_cache();
             let pruned = cache.prune_stale_entries(&|id| repo.chunk_exists(id));

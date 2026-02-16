@@ -99,6 +99,10 @@ impl FileCache {
 
     /// Remove entries whose chunk IDs are not present in the index.
     /// Returns the number of entries removed.
+    ///
+    /// SAFETY INVARIANT: This must be called before backup begins. Cache-hit
+    /// paths skip per-file `chunk_exists` checks and rely on this pre-sanitization
+    /// to guarantee that every ChunkRef in every surviving entry is valid.
     pub fn prune_stale_entries(
         &mut self,
         chunk_exists: &dyn Fn(&crate::crypto::chunk_id::ChunkId) -> bool,

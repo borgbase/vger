@@ -95,18 +95,8 @@ impl PackWriter {
         uncompressed_size: u32,
     ) -> u64 {
         let blob_len = encrypted_blob.len() as u32;
-        // Offset accounts for: pack header (9B) + all previous blobs (each: 4B len + data)
-        let offset = if self.buffer.is_empty() {
-            PACK_HEADER_SIZE as u64 + 4 // 4B length prefix for this blob
-        } else {
-            PACK_HEADER_SIZE as u64
-                + self
-                    .buffer
-                    .iter()
-                    .map(|b| 4 + b.encrypted_data.len() as u64)
-                    .sum::<u64>()
-                + 4 // 4B length prefix for this blob
-        };
+        // Offset accounts for: pack header + bytes already buffered + this blob's 4B len prefix.
+        let offset = PACK_HEADER_SIZE as u64 + self.current_size as u64 + 4;
 
         self.current_size += 4 + encrypted_blob.len(); // 4B length prefix + blob data
         if self.first_blob_time.is_none() {
