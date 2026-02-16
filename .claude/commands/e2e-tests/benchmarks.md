@@ -15,12 +15,16 @@ Compare vger against three established backup tools — restic, rustic, and borg
 - **Source dataset**: default `~/corpus-remote` (smaller, faster iteration). Optionally `~/corpus-local` for stress.
 - **Tools under test**: `vger`, `restic`, `rustic`, `borg`
 
+Dataset layout expected by the harness:
+- `<dataset>/snapshot-1` (untimed seed snapshot)
+- `<dataset>/snapshot-2` (second-state content included in benchmark dataset)
+
 ## Prerequisites
 
 1. Install required tools if not present:
    ```bash
    sudo apt-get update -y
-   sudo apt-get install -y restic hyperfine time strace linux-perf
+   sudo apt-get install -y restic time strace linux-perf
    # rustic is typically preinstalled in this sandbox; otherwise install it.
    ```
 2. Verify all tools are available:
@@ -41,11 +45,11 @@ Scripts live under `scripts/benchmarks/` relative to this skill directory.
 ```bash
 SKILL_DIR="$(dirname "$(readlink -f "$0")")"  # or set manually
 
-# Basic (includes profiling): timing + repo size + tool stats + /usr/bin/time -v profiles
-RUNS=5 "$SKILL_DIR/scripts/benchmarks/run.sh" ~/corpus-remote
+# Basic: repeated /usr/bin/time -v runs + averaged report metrics
+RUNS=5 WARMUP_RUNS=1 "$SKILL_DIR/scripts/benchmarks/run.sh" ~/corpus-remote
 
 # Add strace/perf on top of default profiling (if allowed on host)
-PROFILE_STRACE=1 PROFILE_PERF=1 RUNS=3 "$SKILL_DIR/scripts/benchmarks/run.sh" ~/corpus-remote
+PROFILE_STRACE=1 PROFILE_PERF=1 RUNS=3 WARMUP_RUNS=1 "$SKILL_DIR/scripts/benchmarks/run.sh" ~/corpus-remote
 ```
 
 The harness writes to `~/runtime/benchmarks/<UTC_STAMP>/`.
@@ -65,8 +69,10 @@ python3 "$SKILL_DIR/scripts/benchmarks/bench_report.py" all ~/runtime/benchmarks
 
 From `reports/summary.tsv`:
 - `maxrss_kb`: memory spikes (often restore path)
+- `*_std` columns: run-to-run variability per metric
 - `user` vs `sys`: CPU vs kernel/IO bound work
 - `fs_out`: write amplification during restore
+- `throughput_mib_s`: based on top-level dataset size (`snapshot-1 + snapshot-2`)
 
 From `strace.summary.txt` (when `PROFILE_STRACE=1`):
 - Heavy `futex` can indicate contention/over-threading.
@@ -85,6 +91,17 @@ Decide what you are measuring:
 - **Full**: wipe/re-init the repo before each backup run (measures ingest/pack performance).
 
 The harness defaults to an “incremental-like” loop once initialized, but you can rerun it multiple times and compare across stamps. For full-ingest benchmarks, patch the harness to re-init repos per run or wrap each command with repo wipe + init.
+
+Run controls:
+- `RUNS` (default `3`): number of measured runs per operation.
+- `WARMUP_RUNS` (default `1`): unmeasured warmup runs per operation.
+
+Per warmup/measured run workflow:
+1. Drop cache and reset/init the tool repo.
+2. Create an untimed backup of `snapshot-1`.
+3. Timed benchmark step:
+   - backup ops: backup the top-level dataset (contains both snapshots)
+   - restore ops: create untimed backup of top-level dataset, then timed restore
 
 ## Benchmark Phases
 

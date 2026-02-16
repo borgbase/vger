@@ -6,6 +6,7 @@ import json
 import math
 import pathlib
 import shutil
+import statistics
 import subprocess
 import sys
 from typing import Dict, List
@@ -123,19 +124,63 @@ def parse_cpu_pct_value(s: str) -> float | None:
     return parse_float(clean)
 
 
+def mean_std(values: List[float | None]) -> tuple[float | None, float | None]:
+    clean = [v for v in values if v is not None]
+    if not clean:
+        return None, None
+    mean = float(statistics.fmean(clean))
+    if len(clean) == 1:
+        return mean, 0.0
+    return mean, float(statistics.stdev(clean))
+
+
+def parse_run_rc(timev_path: pathlib.Path) -> int | None:
+    rc_file = pathlib.Path(str(timev_path).replace(".timev.txt", ".rc"))
+    if not rc_file.exists():
+        return None
+    try:
+        return int(rc_file.read_text(errors="replace").strip())
+    except ValueError:
+        return None
+
+
+def list_timev_files(op_dir: pathlib.Path) -> List[pathlib.Path]:
+    runs_dir = op_dir / "runs"
+    if runs_dir.is_dir():
+        return sorted(runs_dir.glob("run-*.timev.txt"))
+    single = op_dir / "timev.txt"
+    if single.exists():
+        return [single]
+    return []
+
+
+def fmt_cpu_pct(v: float | None) -> str:
+    if v is None:
+        return "NA"
+    return f"{v:.1f}%"
+
+
 def get_dataset_bytes(root: pathlib.Path) -> int | None:
     meta = root / "profile.vger_backup" / "meta.txt"
     if not meta.exists():
         return None
     dataset: str | None = None
+    benchmark_root: str | None = None
+    benchmark_dataset: str | None = None
     for line in meta.read_text(errors="replace").splitlines():
+        if line.startswith("dataset_benchmark="):
+            benchmark_root = line.split("=", 1)[1].strip()
+            break
+        if line.startswith("dataset_snapshot_2="):
+            benchmark_dataset = line.split("=", 1)[1].strip()
+            break
         if line.startswith("dataset="):
             dataset = line.split("=", 1)[1].strip()
-            break
-    if not dataset:
+    dataset_path = benchmark_root or benchmark_dataset or dataset
+    if not dataset_path:
         return None
     try:
-        out = subprocess.check_output(["du", "-sb", dataset], text=True).strip()
+        out = subprocess.check_output(["du", "-sb", dataset_path], text=True).strip()
         return int(out.split()[0])
     except Exception:
         return None
@@ -149,28 +194,87 @@ def build_records(root: pathlib.Path) -> tuple[List[dict], int | None]:
     records: List[dict] = []
     for op in OPS:
         tool, phase = op.split("_", 1)
-        t = parse_timev(root / f"profile.{op}" / "timev.txt")
-        duration_s = parse_elapsed_seconds(t.get("elapsed", "NA"))
-        throughput_mib_s: float | None = None
-        if dataset_mib is not None and duration_s and duration_s > 0:
-            throughput_mib_s = dataset_mib / duration_s
+        op_dir = root / f"profile.{op}"
+        run_files = list_timev_files(op_dir)
+        run_metrics: List[dict] = []
+        for run_file in run_files:
+            t = parse_timev(run_file)
+            duration_s = parse_elapsed_seconds(t.get("elapsed", "NA"))
+            throughput_mib_s: float | None = None
+            if dataset_mib is not None and duration_s and duration_s > 0:
+                throughput_mib_s = dataset_mib / duration_s
+            exit_status = parse_int(t.get("exit_status", "NA"))
+            if exit_status is None:
+                exit_status = parse_run_rc(run_file)
+            run_metrics.append(
+                {
+                    "duration_s": duration_s,
+                    "throughput_mib_s": throughput_mib_s,
+                    "cpu_pct_value": parse_cpu_pct_value(t.get("cpu_pct", "NA")),
+                    "user_s": parse_float(t.get("user_s", "NA")),
+                    "sys_s": parse_float(t.get("sys_s", "NA")),
+                    "maxrss_kb": parse_int(t.get("max_rss_kb", "NA")),
+                    "fs_in": parse_int(t.get("fs_in", "NA")),
+                    "fs_out": parse_int(t.get("fs_out", "NA")),
+                    "exit_status": exit_status,
+                }
+            )
 
+        duration_s, duration_s_std = mean_std([r["duration_s"] for r in run_metrics])
+        throughput_mib_s, throughput_mib_s_std = mean_std([r["throughput_mib_s"] for r in run_metrics])
+        cpu_pct_value, cpu_pct_std = mean_std([r["cpu_pct_value"] for r in run_metrics])
+        user_s, user_s_std = mean_std([r["user_s"] for r in run_metrics])
+        sys_s, sys_s_std = mean_std([r["sys_s"] for r in run_metrics])
+        maxrss_kb, maxrss_kb_std = mean_std(
+            [float(r["maxrss_kb"]) if r["maxrss_kb"] is not None else None for r in run_metrics]
+        )
+        fs_in, fs_in_std = mean_std([float(r["fs_in"]) if r["fs_in"] is not None else None for r in run_metrics])
+        fs_out, fs_out_std = mean_std(
+            [float(r["fs_out"]) if r["fs_out"] is not None else None for r in run_metrics]
+        )
+        run_count = len(run_metrics)
+        failed_runs = 0
+        nonzero_exits: List[int] = []
+        for r in run_metrics:
+            ex = r["exit_status"]
+            if ex is None or ex != 0:
+                failed_runs += 1
+            if ex not in (None, 0):
+                nonzero_exits.append(ex)
+        if run_count == 0:
+            exit_status = None
+        elif nonzero_exits:
+            exit_status = max(nonzero_exits)
+        elif failed_runs > 0:
+            exit_status = 1
+        else:
+            exit_status = 0
         records.append(
             {
                 "op": op,
                 "tool": tool,
                 "phase": phase,
                 "duration_s": duration_s,
+                "duration_s_std": duration_s_std,
                 "throughput_mib_s": throughput_mib_s,
-                "cpu_pct_raw": t.get("cpu_pct", "NA"),
-                "cpu_pct_value": parse_cpu_pct_value(t.get("cpu_pct", "NA")),
-                "user_s": parse_float(t.get("user_s", "NA")),
-                "sys_s": parse_float(t.get("sys_s", "NA")),
-                "maxrss_kb": parse_int(t.get("max_rss_kb", "NA")),
-                "fs_in": parse_int(t.get("fs_in", "NA")),
-                "fs_out": parse_int(t.get("fs_out", "NA")),
+                "throughput_mib_s_std": throughput_mib_s_std,
+                "cpu_pct_raw": fmt_cpu_pct(cpu_pct_value),
+                "cpu_pct_value": cpu_pct_value,
+                "cpu_pct_std": cpu_pct_std,
+                "user_s": user_s,
+                "user_s_std": user_s_std,
+                "sys_s": sys_s,
+                "sys_s_std": sys_s_std,
+                "maxrss_kb": maxrss_kb,
+                "maxrss_kb_std": maxrss_kb_std,
+                "fs_in": fs_in,
+                "fs_in_std": fs_in_std,
+                "fs_out": fs_out,
+                "fs_out_std": fs_out_std,
                 "repo_size": repo_sizes.get(tool, "NA"),
-                "exit_status": parse_int(t.get("exit_status", "NA")),
+                "run_count": run_count,
+                "failed_runs": failed_runs,
+                "exit_status": exit_status,
             }
         )
     return records, dataset_bytes
@@ -190,21 +294,35 @@ def fmt_int(v: int | None) -> str:
 
 def records_tsv(records: List[dict]) -> str:
     lines = [
-        "op\tduration_s\tthroughput_mib_s\tcpu%\tuser_s\tsys_s\tmaxrss_kb\tfs_in\tfs_out\trepo_size\texit"
+        (
+            "op\truns\tfailed_runs\tduration_s\tduration_s_std\tthroughput_mib_s\tthroughput_mib_s_std\tcpu%"
+            "\tcpu_pct_std\tuser_s\tuser_s_std\tsys_s\tsys_s_std\tmaxrss_kb\tmaxrss_kb_std\tfs_in\tfs_in_std"
+            "\tfs_out\tfs_out_std\trepo_size\texit"
+        )
     ]
     for r in records:
         lines.append(
             "\t".join(
                 [
                     r["op"],
+                    fmt_int(r["run_count"]),
+                    fmt_int(r["failed_runs"]),
                     fmt_float(r["duration_s"], 2),
+                    fmt_float(r["duration_s_std"], 2),
                     fmt_float(r["throughput_mib_s"], 1),
+                    fmt_float(r["throughput_mib_s_std"], 1),
                     r["cpu_pct_raw"],
+                    fmt_float(r["cpu_pct_std"], 1),
                     fmt_float(r["user_s"], 2),
+                    fmt_float(r["user_s_std"], 2),
                     fmt_float(r["sys_s"], 2),
-                    fmt_int(r["maxrss_kb"]),
-                    fmt_int(r["fs_in"]),
-                    fmt_int(r["fs_out"]),
+                    fmt_float(r["sys_s_std"], 2),
+                    fmt_float(r["maxrss_kb"], 0),
+                    fmt_float(r["maxrss_kb_std"], 0),
+                    fmt_float(r["fs_in"], 0),
+                    fmt_float(r["fs_in_std"], 0),
+                    fmt_float(r["fs_out"], 0),
+                    fmt_float(r["fs_out_std"], 0),
                     r["repo_size"],
                     fmt_int(r["exit_status"]),
                 ]
@@ -215,8 +333,12 @@ def records_tsv(records: List[dict]) -> str:
 
 def records_markdown(records: List[dict]) -> str:
     lines = [
-        "| op | duration_s | throughput_mib_s | cpu% | user_s | sys_s | maxrss_kb | fs_in | fs_out | repo_size | exit |",
-        "|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|",
+        (
+            "| op | runs | failed_runs | duration_s | duration_s_std | throughput_mib_s | throughput_mib_s_std | "
+            "cpu% | cpu_pct_std | user_s | user_s_std | sys_s | sys_s_std | maxrss_kb | maxrss_kb_std | fs_in | "
+            "fs_in_std | fs_out | fs_out_std | repo_size | exit |"
+        ),
+        "|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|",
     ]
     for r in records:
         lines.append(
@@ -224,14 +346,24 @@ def records_markdown(records: List[dict]) -> str:
             + " | ".join(
                 [
                     r["op"],
+                    fmt_int(r["run_count"]),
+                    fmt_int(r["failed_runs"]),
                     fmt_float(r["duration_s"], 2),
+                    fmt_float(r["duration_s_std"], 2),
                     fmt_float(r["throughput_mib_s"], 1),
+                    fmt_float(r["throughput_mib_s_std"], 1),
                     r["cpu_pct_raw"],
+                    fmt_float(r["cpu_pct_std"], 1),
                     fmt_float(r["user_s"], 2),
+                    fmt_float(r["user_s_std"], 2),
                     fmt_float(r["sys_s"], 2),
-                    fmt_int(r["maxrss_kb"]),
-                    fmt_int(r["fs_in"]),
-                    fmt_int(r["fs_out"]),
+                    fmt_float(r["sys_s_std"], 2),
+                    fmt_float(r["maxrss_kb"], 0),
+                    fmt_float(r["maxrss_kb_std"], 0),
+                    fmt_float(r["fs_in"], 0),
+                    fmt_float(r["fs_in_std"], 0),
+                    fmt_float(r["fs_out"], 0),
+                    fmt_float(r["fs_out_std"], 0),
                     r["repo_size"],
                     fmt_int(r["exit_status"]),
                 ]
@@ -257,21 +389,35 @@ def print_summary(root: pathlib.Path, records: List[dict], dataset_bytes: int | 
     if dataset_bytes is not None:
         print(f"dataset_bytes: {dataset_bytes}")
     print(
-        "op\tduration_s\tthroughput_mib_s\tcpu%\tuser_s\tsys_s\tmaxrss_kb\tfs_in\tfs_out\trepo_size\texit"
+        (
+            "op\truns\tfailed_runs\tduration_s\tduration_s_std\tthroughput_mib_s\tthroughput_mib_s_std\tcpu%"
+            "\tcpu_pct_std\tuser_s\tuser_s_std\tsys_s\tsys_s_std\tmaxrss_kb\tmaxrss_kb_std\tfs_in\tfs_in_std"
+            "\tfs_out\tfs_out_std\trepo_size\texit"
+        )
     )
     for r in records:
         print(
             "\t".join(
                 [
                     r["op"],
+                    fmt_int(r["run_count"]),
+                    fmt_int(r["failed_runs"]),
                     fmt_float(r["duration_s"], 2),
+                    fmt_float(r["duration_s_std"], 2),
                     fmt_float(r["throughput_mib_s"], 1),
+                    fmt_float(r["throughput_mib_s_std"], 1),
                     r["cpu_pct_raw"],
+                    fmt_float(r["cpu_pct_std"], 1),
                     fmt_float(r["user_s"], 2),
+                    fmt_float(r["user_s_std"], 2),
                     fmt_float(r["sys_s"], 2),
-                    fmt_int(r["maxrss_kb"]),
-                    fmt_int(r["fs_in"]),
-                    fmt_int(r["fs_out"]),
+                    fmt_float(r["sys_s_std"], 2),
+                    fmt_float(r["maxrss_kb"], 0),
+                    fmt_float(r["maxrss_kb_std"], 0),
+                    fmt_float(r["fs_in"], 0),
+                    fmt_float(r["fs_in_std"], 0),
+                    fmt_float(r["fs_out"], 0),
+                    fmt_float(r["fs_out_std"], 0),
                     r["repo_size"],
                     fmt_int(r["exit_status"]),
                 ]
