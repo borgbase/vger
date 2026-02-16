@@ -48,6 +48,7 @@ Run each sub-skill to execute a specific test area. Results go to `~/runtime/`.
 
 ### Benchmarks
 - **`e2e-tests:benchmarks`** — Compare vger performance against restic and rustic (use `benchmarks.md` + bundled scripts under `scripts/benchmarks/`)
+- **`e2e-tests:stress`** — Run long-loop backup/restore/delete stress validation against local corpus (use `stress.md` + `scripts/stress/run.sh`)
 
 ## Recommended Execution Order
 
@@ -55,7 +56,8 @@ Run each sub-skill to execute a specific test area. Results go to `~/runtime/`.
 2. **Databases** (lighter, container-based tests)
 3. **Containers** (reuses DB patterns with volume workflows)
 4. **Filesystems** (requires disk/partition setup)
-5. **Benchmarks** last (long-running, independent)
+5. **Stress** next (long-loop correctness/locking pressure on local backend)
+6. **Benchmarks** last (long-running, independent)
 
 ## Shared Conventions
 
