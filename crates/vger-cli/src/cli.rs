@@ -1,0 +1,323 @@
+use clap::{Parser, Subcommand};
+
+#[derive(Parser)]
+#[command(
+    name = "vger",
+    version,
+    about = "Fast, encrypted, deduplicated backups",
+    after_help = "\
+Configuration file lookup order:
+  1. --config <path>             (explicit flag)
+  2. $VGER_CONFIG                (environment variable)
+  3. ./vger.yaml                 (project)
+  4. Platform user config dir + /vger/config.yaml (e.g. ~/.config or %APPDATA%)
+  5. Platform system config path (Unix: /etc/vger/config.yaml, Windows: %PROGRAMDATA%/vger/config.yaml)
+
+Environment variables:
+  VGER_CONFIG       Path to configuration file (overrides default search)
+  VGER_PASSPHRASE   Repository passphrase (skips interactive prompt)"
+)]
+pub(crate) struct Cli {
+    /// Path to configuration file (overrides VGER_CONFIG and default search)
+    #[arg(short, long)]
+    pub config: Option<String>,
+
+    /// Verbosity level (-v, -vv, -vvv)
+    #[arg(short, long, action = clap::ArgAction::Count)]
+    pub verbose: u8,
+
+    #[command(subcommand)]
+    pub command: Option<Commands>,
+}
+
+#[derive(Subcommand)]
+pub(crate) enum Commands {
+    /// Initialize a new repository
+    Init {
+        /// Select repository by label or path
+        #[arg(short = 'R', long = "repo")]
+        repo: Option<String>,
+    },
+
+    /// Back up files to a new snapshot
+    Backup {
+        /// Select repository by label or path
+        #[arg(short = 'R', long = "repo")]
+        repo: Option<String>,
+
+        /// Label for the snapshot (sets source_label for ad-hoc backups)
+        #[arg(short = 'l', long)]
+        label: Option<String>,
+
+        /// Compression algorithm override (lz4, zstd, none)
+        #[arg(long)]
+        compression: Option<String>,
+
+        /// Filter which configured sources to back up (by label)
+        #[arg(short = 'S', long = "source")]
+        source: Vec<String>,
+
+        /// Ad-hoc paths to back up (grouped into a single snapshot)
+        paths: Vec<String>,
+    },
+
+    /// List snapshots
+    List {
+        /// Select repository by label or path
+        #[arg(short = 'R', long = "repo")]
+        repo: Option<String>,
+
+        /// Filter displayed snapshots by source label
+        #[arg(short = 'S', long = "source")]
+        source: Vec<String>,
+
+        /// Show only the N most recent snapshots
+        #[arg(long)]
+        last: Option<usize>,
+    },
+
+    /// Inspect snapshot contents and metadata
+    Snapshot {
+        /// Select repository by label or path
+        #[arg(short = 'R', long = "repo")]
+        repo: Option<String>,
+
+        #[command(subcommand)]
+        command: SnapshotCommand,
+    },
+
+    /// Restore files from a snapshot
+    Restore {
+        /// Select repository by label or path
+        #[arg(short = 'R', long = "repo")]
+        repo: Option<String>,
+
+        /// Snapshot to restore from
+        snapshot: String,
+
+        /// Destination directory
+        #[arg(long, default_value = ".")]
+        dest: String,
+
+        /// Only restore paths matching this glob pattern
+        #[arg(long)]
+        pattern: Option<String>,
+    },
+
+    /// Delete an entire repository permanently
+    Delete {
+        /// Select repository by label or path
+        #[arg(short = 'R', long = "repo")]
+        repo: Option<String>,
+
+        /// Skip interactive confirmation (for scripting)
+        #[arg(long)]
+        yes_delete_this_repo: bool,
+    },
+
+    /// Prune snapshots according to retention policy
+    Prune {
+        /// Select repository by label or path
+        #[arg(short = 'R', long = "repo")]
+        repo: Option<String>,
+
+        /// Only show what would be pruned, don't actually prune
+        #[arg(short = 'n', long)]
+        dry_run: bool,
+
+        /// Show detailed list of kept/pruned snapshots with reasons
+        #[arg(long)]
+        list: bool,
+
+        /// Apply retention only to snapshots matching these source labels
+        #[arg(short = 'S', long = "source")]
+        source: Vec<String>,
+
+        /// Run compact after pruning to reclaim space from orphaned blobs
+        #[arg(long)]
+        compact: bool,
+    },
+
+    /// Verify repository integrity
+    Check {
+        /// Select repository by label or path
+        #[arg(short = 'R', long = "repo")]
+        repo: Option<String>,
+
+        /// Read and verify all data chunks (slow but thorough)
+        #[arg(long)]
+        verify_data: bool,
+    },
+
+    /// Show repository statistics and snapshot totals
+    Info {
+        /// Select repository by label or path
+        #[arg(short = 'R', long = "repo")]
+        repo: Option<String>,
+    },
+
+    /// Generate a minimal configuration file
+    Config {
+        /// Destination path (skips interactive prompt)
+        #[arg(short, long)]
+        dest: Option<String>,
+    },
+
+    /// Browse snapshots via a local WebDAV server
+    Mount {
+        /// Select repository by label or path
+        #[arg(short = 'R', long = "repo")]
+        repo: Option<String>,
+
+        /// Serve a single snapshot (omit for all snapshots)
+        #[arg(long)]
+        snapshot: Option<String>,
+
+        /// Expose only snapshots matching these source labels
+        #[arg(short = 'S', long = "source")]
+        source: Vec<String>,
+
+        /// Listen address (default: 127.0.0.1:8080)
+        #[arg(long, default_value = "127.0.0.1:8080")]
+        address: String,
+
+        /// LRU chunk cache size in entries (default: 256)
+        #[arg(long, default_value = "256")]
+        cache_size: usize,
+    },
+
+    /// Remove stale repository locks left by killed processes
+    BreakLock {
+        /// Select repository by label or path
+        #[arg(short = 'R', long = "repo")]
+        repo: Option<String>,
+    },
+
+    /// Free repository space by compacting pack files
+    Compact {
+        /// Select repository by label or path
+        #[arg(short = 'R', long = "repo")]
+        repo: Option<String>,
+
+        /// Minimum percentage of unused space to trigger repack (default: 10)
+        #[arg(long, default_value = "10")]
+        threshold: f64,
+
+        /// Maximum total bytes to repack (e.g. 500M, 2G)
+        #[arg(long)]
+        max_repack_size: Option<String>,
+
+        /// Only show what would be compacted, don't actually do it
+        #[arg(short = 'n', long)]
+        dry_run: bool,
+    },
+}
+
+#[derive(Clone, clap::ValueEnum)]
+pub(crate) enum SortField {
+    Name,
+    Size,
+    Mtime,
+}
+
+#[derive(Subcommand)]
+pub(crate) enum SnapshotCommand {
+    /// Show contents of a snapshot
+    List {
+        /// Snapshot to inspect
+        snapshot: String,
+        /// Show only files under this subtree
+        #[arg(long)]
+        path: Option<String>,
+        /// Show permissions, size, mtime
+        #[arg(long)]
+        long: bool,
+        /// Sort output (default: name)
+        #[arg(long, value_enum, default_value_t = SortField::Name)]
+        sort: SortField,
+    },
+    /// Show metadata of a snapshot
+    Info {
+        /// Snapshot to inspect
+        snapshot: String,
+    },
+    /// Delete a specific snapshot
+    Delete {
+        /// Snapshot name to delete
+        snapshot: String,
+        /// Only show what would be deleted, don't actually delete
+        #[arg(short = 'n', long)]
+        dry_run: bool,
+    },
+    /// Find files across snapshots
+    Find {
+        /// Starting directory (default: root)
+        path: Option<String>,
+        /// Filter by source label
+        #[arg(short = 'S', long = "source", help_heading = "Scope Options")]
+        source: Option<String>,
+        /// Search only the last N snapshots (must be >= 1)
+        #[arg(
+            long,
+            value_parser = clap::value_parser!(u64).range(1..),
+            help_heading = "Scope Options"
+        )]
+        last: Option<u64>,
+        /// Match filename by glob pattern (case-sensitive)
+        #[arg(long = "name", help_heading = "Filter Options")]
+        name: Option<String>,
+        /// Match filename by glob pattern (case-insensitive)
+        #[arg(long = "iname", help_heading = "Filter Options")]
+        iname: Option<String>,
+        /// Filter by entry type: f (file), d (directory), l (symlink)
+        #[arg(long = "type", value_name = "TYPE", help_heading = "Filter Options")]
+        entry_type: Option<String>,
+        /// Only include items modified within this time span (e.g. 24h, 7d, 2w)
+        #[arg(long, help_heading = "Filter Options")]
+        since: Option<String>,
+        /// Only include items at least this size (e.g. 1M, 500K)
+        #[arg(long, help_heading = "Filter Options")]
+        larger: Option<String>,
+        /// Only include items at most this size (e.g. 10M, 1G)
+        #[arg(long, help_heading = "Filter Options")]
+        smaller: Option<String>,
+    },
+}
+
+impl Commands {
+    pub(crate) fn repo(&self) -> Option<&str> {
+        match self {
+            Self::Init { repo, .. }
+            | Self::Backup { repo, .. }
+            | Self::List { repo, .. }
+            | Self::Snapshot { repo, .. }
+            | Self::Restore { repo, .. }
+            | Self::Delete { repo, .. }
+            | Self::Prune { repo, .. }
+            | Self::Check { repo, .. }
+            | Self::Info { repo, .. }
+            | Self::Mount { repo, .. }
+            | Self::BreakLock { repo, .. }
+            | Self::Compact { repo, .. } => repo.as_deref(),
+            Self::Config { .. } => None,
+        }
+    }
+
+    pub(crate) fn name(&self) -> &'static str {
+        match self {
+            Self::Init { .. } => "init",
+            Self::Backup { .. } => "backup",
+            Self::List { .. } => "list",
+            Self::Restore { .. } => "restore",
+            Self::Delete { .. } => "delete",
+            Self::Prune { .. } => "prune",
+            Self::Check { .. } => "check",
+            Self::Info { .. } => "info",
+            Self::Mount { .. } => "mount",
+            Self::BreakLock { .. } => "break-lock",
+            Self::Compact { .. } => "compact",
+            Self::Snapshot { .. } => "snapshot",
+            Self::Config { .. } => "config",
+        }
+    }
+}

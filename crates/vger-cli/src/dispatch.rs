@@ -1,0 +1,203 @@
+use vger_core::config::{EncryptionModeConfig, SourceEntry, VgerConfig};
+use vger_core::storage::{parse_repo_url, ParsedUrl};
+
+use crate::cli::Commands;
+use crate::cmd;
+
+pub(crate) fn warn_if_untrusted_rest(config: &VgerConfig, label: Option<&str>) {
+    let Ok(parsed) = parse_repo_url(&config.repository.url) else {
+        return;
+    };
+    let ParsedUrl::Rest { url } = parsed else {
+        return;
+    };
+
+    let repo_name = label.unwrap_or(&config.repository.url);
+    if config.encryption.mode == EncryptionModeConfig::None {
+        eprintln!(
+            "Warning: repository '{repo_name}' uses REST with plaintext mode (encryption.mode=none)."
+        );
+    }
+    if url.starts_with("http://") {
+        eprintln!(
+            "Warning: repository '{repo_name}' uses non-HTTPS REST URL '{url}'. Transport is not TLS-protected."
+        );
+    }
+}
+
+enum StepResult {
+    Ok,
+    Failed(String),
+    Skipped(&'static str),
+}
+
+pub(crate) fn run_default_actions(
+    cfg: &VgerConfig,
+    label: Option<&str>,
+    sources: &[SourceEntry],
+) -> Result<(), Box<dyn std::error::Error>> {
+    let start = std::time::Instant::now();
+    let mut steps: Vec<(&str, StepResult)> = Vec::new();
+
+    // 1. Backup
+    eprintln!("==> Starting backup");
+    let backup_ok = match cmd::backup::run_backup(cfg, label, None, None, vec![], sources, &[]) {
+        Ok(()) => {
+            steps.push(("backup", StepResult::Ok));
+            true
+        }
+        Err(e) => {
+            eprintln!("Error: {e}");
+            steps.push(("backup", StepResult::Failed(e.to_string())));
+            false
+        }
+    };
+
+    // 2. Prune — skip if no retention rules configured
+    let has_retention = cfg.retention.has_any_rule()
+        || sources
+            .iter()
+            .any(|s| s.retention.as_ref().is_some_and(|r| r.has_any_rule()));
+
+    if !has_retention {
+        steps.push(("prune", StepResult::Skipped("no retention rules")));
+    } else if !backup_ok {
+        steps.push(("prune", StepResult::Skipped("backup failed")));
+    } else {
+        eprintln!("==> Starting prune");
+        match cmd::prune::run_prune(cfg, label, false, false, sources, &[], false) {
+            Ok(()) => steps.push(("prune", StepResult::Ok)),
+            Err(e) => {
+                eprintln!("Error: {e}");
+                steps.push(("prune", StepResult::Failed(e.to_string())));
+            }
+        }
+    }
+
+    // 3. Compact
+    if !backup_ok {
+        steps.push(("compact", StepResult::Skipped("backup failed")));
+    } else {
+        eprintln!("==> Starting compact");
+        match cmd::compact::run_compact(cfg, label, 10.0, None, false) {
+            Ok(()) => steps.push(("compact", StepResult::Ok)),
+            Err(e) => {
+                eprintln!("Error: {e}");
+                steps.push(("compact", StepResult::Failed(e.to_string())));
+            }
+        }
+    }
+
+    // 4. Check (metadata-only)
+    eprintln!("==> Starting check");
+    match cmd::check::run_check(cfg, label, false) {
+        Ok(()) => steps.push(("check", StepResult::Ok)),
+        Err(e) => {
+            eprintln!("Error: {e}");
+            steps.push(("check", StepResult::Failed(e.to_string())));
+        }
+    }
+
+    // Print summary
+    let elapsed = start.elapsed();
+    let mut had_failure = false;
+
+    eprintln!();
+    eprintln!("=== Summary ===");
+    for (name, result) in &steps {
+        match result {
+            StepResult::Ok => eprintln!("  {name:<12} ok"),
+            StepResult::Failed(e) => {
+                had_failure = true;
+                eprintln!("  {name:<12} FAILED: {e}");
+            }
+            StepResult::Skipped(reason) => eprintln!("  {name:<12} skipped ({reason})"),
+        }
+    }
+
+    let secs = elapsed.as_secs();
+    let mins = secs / 60;
+    let secs = secs % 60;
+    if mins > 0 {
+        eprintln!("  Duration:    {mins}m {secs:02}s");
+    } else {
+        eprintln!("  Duration:    {secs}s");
+    }
+
+    if had_failure {
+        Err("one or more steps failed".into())
+    } else {
+        Ok(())
+    }
+}
+
+pub(crate) fn dispatch_command(
+    command: &Commands,
+    cfg: &VgerConfig,
+    label: Option<&str>,
+    sources: &[SourceEntry],
+) -> Result<(), Box<dyn std::error::Error>> {
+    match command {
+        Commands::Init { .. } => cmd::init::run_init(cfg, label),
+        Commands::Backup {
+            label: user_label,
+            compression,
+            source,
+            paths,
+            ..
+        } => cmd::backup::run_backup(
+            cfg,
+            label,
+            user_label.clone(),
+            compression.clone(),
+            paths.clone(),
+            sources,
+            source,
+        ),
+        Commands::List { source, last, .. } => cmd::list::run_list(cfg, label, source, *last),
+        Commands::Snapshot { command, .. } => {
+            cmd::snapshot::run_snapshot_command(command, cfg, label)
+        }
+        Commands::Restore {
+            snapshot,
+            dest,
+            pattern,
+            ..
+        } => cmd::extract::run_extract(cfg, label, snapshot.clone(), dest.clone(), pattern.clone()),
+        Commands::Delete {
+            yes_delete_this_repo,
+            ..
+        } => cmd::delete::run_delete_repo(cfg, label, *yes_delete_this_repo),
+        Commands::Prune {
+            dry_run,
+            list,
+            source,
+            compact,
+            ..
+        } => cmd::prune::run_prune(cfg, label, *dry_run, *list, sources, source, *compact),
+        Commands::Check { verify_data, .. } => cmd::check::run_check(cfg, label, *verify_data),
+        Commands::Info { .. } => cmd::info::run_info(cfg, label),
+        Commands::Mount {
+            snapshot,
+            source,
+            address,
+            cache_size,
+            ..
+        } => cmd::mount::run_mount(
+            cfg,
+            label,
+            snapshot.clone(),
+            address.clone(),
+            *cache_size,
+            source,
+        ),
+        Commands::BreakLock { .. } => cmd::break_lock::run_break_lock(cfg, label),
+        Commands::Compact {
+            threshold,
+            max_repack_size,
+            dry_run,
+            ..
+        } => cmd::compact::run_compact(cfg, label, *threshold, max_repack_size.clone(), *dry_run),
+        Commands::Config { .. } => Err("'config' command should be handled before config resolution".into()),
+    }
+}
