@@ -35,8 +35,8 @@ fn delete_dry_run_reports_impact_without_mutation() {
     backup_single_source(&config, &source_dir, "src-a", "snap-delete-dry");
 
     let before = open_local_repo(&repo_dir);
-    let snapshots_before = before.manifest.snapshots.len();
-    let chunks_before = before.chunk_index.len();
+    let snapshots_before = before.manifest().snapshots.len();
+    let chunks_before = before.chunk_index().len();
     drop(before);
 
     let stats = commands::delete::run(&config, None, "snap-delete-dry", true).unwrap();
@@ -45,8 +45,8 @@ fn delete_dry_run_reports_impact_without_mutation() {
     assert!(stats.space_freed > 0);
 
     let after = open_local_repo(&repo_dir);
-    assert_eq!(after.manifest.snapshots.len(), snapshots_before);
-    assert_eq!(after.chunk_index.len(), chunks_before);
+    assert_eq!(after.manifest().snapshots.len(), snapshots_before);
+    assert_eq!(after.chunk_index().len(), chunks_before);
 }
 
 #[test]
@@ -62,8 +62,11 @@ fn delete_snapshot_removes_manifest_entry_and_chunk_refs() {
     backup_single_source(&config, &source_dir, "src-a", "snap-delete-live");
 
     let before = open_local_repo(&repo_dir);
-    assert!(before.manifest.find_snapshot("snap-delete-live").is_some());
-    let chunks_before = before.chunk_index.len();
+    assert!(before
+        .manifest()
+        .find_snapshot("snap-delete-live")
+        .is_some());
+    let chunks_before = before.chunk_index().len();
     assert!(chunks_before > 0);
     drop(before);
 
@@ -72,6 +75,6 @@ fn delete_snapshot_removes_manifest_entry_and_chunk_refs() {
     assert!(stats.chunks_deleted > 0);
 
     let after = open_local_repo(&repo_dir);
-    assert!(after.manifest.find_snapshot("snap-delete-live").is_none());
-    assert_eq!(after.chunk_index.len(), 0);
+    assert!(after.manifest().find_snapshot("snap-delete-live").is_none());
+    assert_eq!(after.chunk_index().len(), 0);
 }

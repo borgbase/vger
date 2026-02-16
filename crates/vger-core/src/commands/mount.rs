@@ -688,9 +688,9 @@ pub fn run(
     } else {
         let mut root_children = HashMap::new();
         let entries: Vec<_> = if source_filter.is_empty() {
-            repo.manifest.snapshots.clone()
+            repo.manifest().snapshots.clone()
         } else {
-            repo.manifest
+            repo.manifest()
                 .snapshots
                 .iter()
                 .filter(|e| source_filter.contains(&e.source_label))

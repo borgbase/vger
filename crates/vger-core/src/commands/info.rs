@@ -31,7 +31,7 @@ pub fn run(config: &VgerConfig, passphrase: Option<&str>) -> Result<InfoStats> {
     let mut deduplicated_size = 0u64;
     let mut last_snapshot_time = None;
 
-    for entry in &repo.manifest.snapshots {
+    for entry in &repo.manifest().snapshots {
         if last_snapshot_time.is_none_or(|current| entry.time > current) {
             last_snapshot_time = Some(entry.time);
         }
@@ -44,21 +44,21 @@ pub fn run(config: &VgerConfig, passphrase: Option<&str>) -> Result<InfoStats> {
 
     let mut unique_stored_size = 0u64;
     let mut referenced_stored_size = 0u64;
-    for (_chunk_id, chunk) in repo.chunk_index.iter() {
+    for (_chunk_id, chunk) in repo.chunk_index().iter() {
         unique_stored_size = unique_stored_size.saturating_add(chunk.stored_size as u64);
         referenced_stored_size =
             referenced_stored_size.saturating_add(chunk.stored_size as u64 * chunk.refcount as u64);
     }
 
     Ok(InfoStats {
-        snapshot_count: repo.manifest.snapshots.len(),
+        snapshot_count: repo.manifest().snapshots.len(),
         last_snapshot_time,
         raw_size,
         compressed_size,
         deduplicated_size,
         unique_stored_size,
         referenced_stored_size,
-        unique_chunks: repo.chunk_index.len(),
+        unique_chunks: repo.chunk_index().len(),
         repo_created: repo.config.created,
         encryption: repo.config.encryption.clone(),
     })

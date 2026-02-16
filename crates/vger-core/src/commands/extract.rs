@@ -151,6 +151,10 @@ where
     F: FnMut(&str) -> bool,
 {
     let mut repo = open_repo(config, passphrase)?;
+    // Shrink blob cache for restore — the parallel pipeline reads pack data
+    // directly via storage.get_range(), so the cache only serves the small
+    // item-stream tree-pack chunks. 2 MiB is plenty.
+    repo.set_blob_cache_max_bytes(2 * 1024 * 1024);
     let xattrs_enabled = if xattrs_enabled && !fs::xattrs_supported() {
         tracing::warn!(
             "xattrs requested but not supported on this platform; continuing without xattrs"
@@ -214,7 +218,10 @@ where
 
     if !file_items.is_empty() {
         // Phase 2: Plan reads — group chunks by pack, coalesce adjacent ranges.
-        let (planned_files, groups) = plan_reads(&file_items, &repo.chunk_index)?;
+        let (planned_files, groups) = plan_reads(&file_items, repo.chunk_index())?;
+        // Free chunk index memory — all pack locations are now in PlannedBlob structs.
+        // After this point repo is only used for .storage and .crypto.
+        repo.clear_chunk_index();
 
         debug!(
             "planned {} coalesced read groups for {} files",

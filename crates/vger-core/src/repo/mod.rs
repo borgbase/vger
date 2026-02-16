@@ -122,10 +122,10 @@ impl EncryptionMode {
 pub struct Repository {
     pub storage: Arc<dyn StorageBackend>,
     pub crypto: Box<dyn CryptoEngine>,
-    pub manifest: Manifest,
-    pub chunk_index: ChunkIndex,
+    manifest: Manifest,
+    chunk_index: ChunkIndex,
     pub config: RepoConfig,
-    pub file_cache: FileCache,
+    file_cache: FileCache,
     data_pack_writer: PackWriter,
     tree_pack_writer: PackWriter,
     /// Background pack upload threads waiting to be joined.
@@ -139,6 +139,12 @@ pub struct Repository {
     blob_cache: BlobCache,
     /// Configurable limit for in-flight background pack uploads.
     max_in_flight_uploads: usize,
+    /// Whether the manifest has been modified since last persist.
+    manifest_dirty: bool,
+    /// Whether the chunk index has been modified since last persist.
+    index_dirty: bool,
+    /// Whether the file cache has been modified since last persist.
+    file_cache_dirty: bool,
 }
 
 impl Repository {
@@ -261,6 +267,9 @@ impl Repository {
             index_delta: None,
             blob_cache: BlobCache::new(BLOB_CACHE_MAX_BYTES),
             max_in_flight_uploads: DEFAULT_IN_FLIGHT_PACK_UPLOADS,
+            manifest_dirty: false,
+            index_dirty: false,
+            file_cache_dirty: false,
         })
     }
 
@@ -364,7 +373,78 @@ impl Repository {
             index_delta: None,
             blob_cache: BlobCache::new(BLOB_CACHE_MAX_BYTES),
             max_in_flight_uploads: DEFAULT_IN_FLIGHT_PACK_UPLOADS,
+            manifest_dirty: false,
+            index_dirty: false,
+            file_cache_dirty: false,
         })
+    }
+
+    /// Mark the manifest as needing persistence on the next `save_state()`.
+    pub fn mark_manifest_dirty(&mut self) {
+        self.manifest_dirty = true;
+    }
+
+    /// Mark the chunk index as needing persistence on the next `save_state()`.
+    pub fn mark_index_dirty(&mut self) {
+        self.index_dirty = true;
+    }
+
+    /// Mark the file cache as needing persistence on the next `save_state()`.
+    pub fn mark_file_cache_dirty(&mut self) {
+        self.file_cache_dirty = true;
+    }
+
+    // ----- Accessors for private fields -----
+
+    /// Read-only access to the manifest.
+    pub fn manifest(&self) -> &Manifest {
+        &self.manifest
+    }
+
+    /// Mutable access to the manifest. Automatically marks it dirty.
+    pub fn manifest_mut(&mut self) -> &mut Manifest {
+        self.manifest_dirty = true;
+        &mut self.manifest
+    }
+
+    /// Read-only access to the chunk index.
+    pub fn chunk_index(&self) -> &ChunkIndex {
+        &self.chunk_index
+    }
+
+    /// Mutable access to the chunk index. Automatically marks it dirty.
+    pub fn chunk_index_mut(&mut self) -> &mut ChunkIndex {
+        self.index_dirty = true;
+        &mut self.chunk_index
+    }
+
+    /// Replace the chunk index with an empty one (frees memory).
+    /// Does not mark dirty — intended for memory optimization (e.g. extract).
+    pub fn clear_chunk_index(&mut self) {
+        self.chunk_index = ChunkIndex::new();
+    }
+
+    /// Read-only access to the file cache.
+    pub fn file_cache(&self) -> &FileCache {
+        &self.file_cache
+    }
+
+    /// Temporarily take the file cache out of the repository.
+    /// Does not mark dirty — use `restore_file_cache` to put it back,
+    /// or `set_file_cache` to replace it (which marks dirty).
+    pub fn take_file_cache(&mut self) -> FileCache {
+        std::mem::take(&mut self.file_cache)
+    }
+
+    /// Put a previously-taken file cache back without marking dirty.
+    pub fn restore_file_cache(&mut self, cache: FileCache) {
+        self.file_cache = cache;
+    }
+
+    /// Replace the file cache and mark it dirty.
+    pub fn set_file_cache(&mut self, cache: FileCache) {
+        self.file_cache = cache;
+        self.file_cache_dirty = true;
     }
 
     /// Wait for one background pack upload to finish (if any).
@@ -396,6 +476,11 @@ impl Repository {
     /// Set the maximum number of in-flight background pack uploads.
     pub fn set_max_in_flight_uploads(&mut self, n: usize) {
         self.max_in_flight_uploads = n.max(1);
+    }
+
+    /// Replace the blob cache with a new one of the given capacity.
+    pub fn set_blob_cache_max_bytes(&mut self, max_bytes: usize) {
+        self.blob_cache = BlobCache::new(max_bytes);
     }
 
     /// Switch to dedup-only index mode to reduce memory during backup.
@@ -431,37 +516,51 @@ impl Repository {
             return;
         }
         self.chunk_index.increment_refcount(id);
+        self.index_dirty = true;
     }
 
     /// Save the manifest and chunk index back to storage.
     /// Flushes any pending pack writes first.
+    /// Only writes components that have been marked dirty.
     /// In dedup mode, reloads the full index from storage and applies the delta.
     pub fn save_state(&mut self) -> Result<()> {
         // Flush any pending packs
         self.flush_packs()?;
 
-        // If in dedup mode, reload the full index and apply our delta
+        // If in dedup mode, reload the full index and apply our delta.
+        // Always restore chunk_index (it's empty during dedup mode).
+        // Only mark index_dirty if the delta has actual mutations.
         if let Some(delta) = self.index_delta.take() {
             self.dedup_index = None;
             let mut full_index = self.reload_full_index()?;
-            delta.apply_to(&mut full_index);
+            if !delta.is_empty() {
+                delta.apply_to(&mut full_index);
+                self.index_dirty = true;
+            }
             self.chunk_index = full_index;
         }
 
-        // Save manifest
-        let manifest_bytes = rmp_serde::to_vec(&self.manifest)?;
-        let manifest_packed =
-            pack_object(ObjectType::Manifest, &manifest_bytes, self.crypto.as_ref())?;
-        self.storage.put("manifest", &manifest_packed)?;
+        if self.manifest_dirty {
+            let manifest_bytes = rmp_serde::to_vec(&self.manifest)?;
+            let manifest_packed =
+                pack_object(ObjectType::Manifest, &manifest_bytes, self.crypto.as_ref())?;
+            self.storage.put("manifest", &manifest_packed)?;
+            self.manifest_dirty = false;
+        }
 
-        // Save chunk index
-        let index_bytes = rmp_serde::to_vec(&self.chunk_index)?;
-        let index_packed = pack_object(ObjectType::ChunkIndex, &index_bytes, self.crypto.as_ref())?;
-        self.storage.put("index", &index_packed)?;
+        if self.index_dirty {
+            let index_bytes = rmp_serde::to_vec(&self.chunk_index)?;
+            let index_packed =
+                pack_object(ObjectType::ChunkIndex, &index_bytes, self.crypto.as_ref())?;
+            self.storage.put("index", &index_packed)?;
+            self.index_dirty = false;
+        }
 
-        // Save file cache to local disk (not to the repo).
-        self.file_cache
-            .save(&self.config.id, self.crypto.as_ref())?;
+        if self.file_cache_dirty {
+            self.file_cache
+                .save(&self.config.id, self.crypto.as_ref())?;
+            self.file_cache_dirty = false;
+        }
 
         Ok(())
     }
@@ -491,6 +590,7 @@ impl Repository {
         } else if let Some(entry) = self.chunk_index.get(chunk_id) {
             let stored_size = entry.stored_size;
             self.chunk_index.increment_refcount(chunk_id);
+            self.index_dirty = true;
             return Some(stored_size);
         }
 
@@ -571,6 +671,7 @@ impl Repository {
                     self.chunk_index.increment_refcount(&chunk_id);
                 }
             }
+            self.index_dirty = true;
         }
 
         // Upload in background thread

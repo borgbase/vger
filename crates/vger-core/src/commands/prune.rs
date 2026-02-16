@@ -38,9 +38,9 @@ pub fn run(
 
         // When --source is given, restrict to matching snapshots only
         let target_snapshots = if source_filter.is_empty() {
-            repo.manifest.snapshots.clone()
+            repo.manifest().snapshots.clone()
         } else {
-            repo.manifest
+            repo.manifest()
                 .snapshots
                 .iter()
                 .filter(|e| source_filter.contains(&e.source_label))
@@ -132,7 +132,7 @@ pub fn run(
         for snapshot_name in &to_prune {
             // Get snapshot ID before we modify manifest
             let snapshot_id_hex = repo
-                .manifest
+                .manifest()
                 .find_snapshot(snapshot_name)
                 .map(|e| hex::encode(&e.id))
                 .ok_or_else(|| VgerError::SnapshotNotFound(snapshot_name.clone()))?;
@@ -148,7 +148,7 @@ pub fn run(
             total_space_freed += impact.space_freed;
 
             // Remove from manifest
-            repo.manifest.remove_snapshot(snapshot_name);
+            repo.manifest_mut().remove_snapshot(snapshot_name);
             metadata_keys_to_delete.push((snapshot_name.clone(), snapshot_key));
         }
 

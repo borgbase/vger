@@ -9,7 +9,7 @@ use crate::storage::StorageBackend;
 
 static TEST_ENV_INIT: Once = Once::new();
 
-fn init_test_environment() {
+pub fn init_test_environment() {
     TEST_ENV_INIT.call_once(|| {
         let base = std::env::temp_dir().join(format!("vger-tests-{}", std::process::id()));
         let home = base.join("home");
@@ -112,4 +112,78 @@ pub fn test_repo_plaintext() -> Repository {
 /// Fixed chunk ID key for deterministic tests.
 pub fn test_chunk_id_key() -> [u8; 32] {
     [0xAA; 32]
+}
+
+/// Shared handle to inspect which keys were written via `put()`.
+#[derive(Clone)]
+pub struct PutLog(std::sync::Arc<Mutex<Vec<String>>>);
+
+impl PutLog {
+    fn new() -> Self {
+        Self(std::sync::Arc::new(Mutex::new(Vec::new())))
+    }
+
+    /// Return all keys that were written via `put()` since the last `clear()`.
+    pub fn entries(&self) -> Vec<String> {
+        self.0.lock().unwrap().clone()
+    }
+
+    /// Clear the recorded log.
+    pub fn clear(&self) {
+        self.0.lock().unwrap().clear();
+    }
+
+    fn record(&self, key: &str) {
+        self.0.lock().unwrap().push(key.to_string());
+    }
+}
+
+/// Storage wrapper that records which keys were passed to `put()`.
+/// Delegates all operations to an inner `MemoryBackend`.
+/// Use `RecordingBackend::new()` to get the backend and a shared `PutLog`.
+pub struct RecordingBackend {
+    inner: MemoryBackend,
+    log: PutLog,
+}
+
+impl RecordingBackend {
+    pub fn new() -> (Self, PutLog) {
+        let log = PutLog::new();
+        (
+            Self {
+                inner: MemoryBackend::new(),
+                log: log.clone(),
+            },
+            log,
+        )
+    }
+}
+
+impl StorageBackend for RecordingBackend {
+    fn get(&self, key: &str) -> Result<Option<Vec<u8>>> {
+        self.inner.get(key)
+    }
+    fn put(&self, key: &str, data: &[u8]) -> Result<()> {
+        self.log.record(key);
+        self.inner.put(key, data)
+    }
+    fn delete(&self, key: &str) -> Result<()> {
+        self.inner.delete(key)
+    }
+    fn exists(&self, key: &str) -> Result<bool> {
+        self.inner.exists(key)
+    }
+    fn list(&self, prefix: &str) -> Result<Vec<String>> {
+        self.inner.list(prefix)
+    }
+    fn get_range(&self, key: &str, offset: u64, length: u64) -> Result<Option<Vec<u8>>> {
+        self.inner.get_range(key, offset, length)
+    }
+    fn create_dir(&self, key: &str) -> Result<()> {
+        self.inner.create_dir(key)
+    }
+    fn put_owned(&self, key: &str, data: Vec<u8>) -> Result<()> {
+        self.log.record(key);
+        self.inner.put(key, &data)
+    }
 }

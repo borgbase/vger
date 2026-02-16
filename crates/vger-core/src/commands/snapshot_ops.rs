@@ -20,7 +20,7 @@ pub fn count_snapshot_chunk_impact(
 
     list::for_each_decoded_item(items_stream, |item| {
         for chunk_ref in &item.chunks {
-            if let Some(entry) = repo.chunk_index.get(&chunk_ref.id) {
+            if let Some(entry) = repo.chunk_index().get(&chunk_ref.id) {
                 if entry.refcount == 1 {
                     impact.chunks_deleted += 1;
                     impact.space_freed += entry.stored_size as u64;
@@ -31,7 +31,7 @@ pub fn count_snapshot_chunk_impact(
     })?;
 
     for chunk_id in item_ptrs {
-        if let Some(entry) = repo.chunk_index.get(chunk_id) {
+        if let Some(entry) = repo.chunk_index().get(chunk_id) {
             if entry.refcount == 1 {
                 impact.chunks_deleted += 1;
                 impact.space_freed += entry.stored_size as u64;
@@ -52,7 +52,7 @@ pub fn decrement_snapshot_chunk_refs(
 
     list::for_each_decoded_item(items_stream, |item| {
         for chunk_ref in &item.chunks {
-            if let Some((rc, size)) = repo.chunk_index.decrement(&chunk_ref.id) {
+            if let Some((rc, size)) = repo.chunk_index_mut().decrement(&chunk_ref.id) {
                 if rc == 0 {
                     impact.chunks_deleted += 1;
                     impact.space_freed += size as u64;
@@ -63,7 +63,7 @@ pub fn decrement_snapshot_chunk_refs(
     })?;
 
     for chunk_id in item_ptrs {
-        if let Some((rc, size)) = repo.chunk_index.decrement(chunk_id) {
+        if let Some((rc, size)) = repo.chunk_index_mut().decrement(chunk_id) {
             if rc == 0 {
                 impact.chunks_deleted += 1;
                 impact.space_freed += size as u64;

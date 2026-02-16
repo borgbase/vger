@@ -653,7 +653,7 @@ fn process_regular_file_item(
     let abs_path = entry_path.to_string_lossy().to_string();
     let file_size = metadata_summary.size;
 
-    let cache_hit = repo.file_cache.lookup(
+    let cache_hit = repo.file_cache().lookup(
         &abs_path,
         metadata_summary.device,
         metadata_summary.inode,
@@ -663,7 +663,7 @@ fn process_regular_file_item(
     );
 
     if let Some(cached_refs) = cache_hit {
-        // Clone to release the borrow on repo.file_cache so we can mutate repo below.
+        // Clone to release the borrow on file_cache so we can mutate repo below.
         let cached_refs = cached_refs.to_vec();
         // Verify all referenced chunks still exist in the index.
         let all_present = cached_refs.iter().all(|cr| repo.chunk_exists(&cr.id));
@@ -966,7 +966,7 @@ fn process_source_path(
                 // Flush batch before cache-hit check since it may need walk-order items.
                 let abs_path = entry.path().to_string_lossy().to_string();
 
-                let cache_hit = repo.file_cache.lookup(
+                let cache_hit = repo.file_cache().lookup(
                     &abs_path,
                     metadata_summary.device,
                     metadata_summary.inode,
@@ -1605,7 +1605,7 @@ pub fn run_with_progress(
 
     with_repo_lock(&mut repo, |repo| {
         // Check snapshot name is unique while holding the lock.
-        if repo.manifest.find_snapshot(snapshot_name).is_some() {
+        if repo.manifest().find_snapshot(snapshot_name).is_some() {
             return Err(VgerError::SnapshotAlreadyExists(snapshot_name.into()));
         }
 
@@ -1614,7 +1614,7 @@ pub fn run_with_progress(
         // the full chunk index. We temporarily take the cache to avoid
         // simultaneous mutable + immutable borrows of `repo`.
         {
-            let mut cache = std::mem::take(&mut repo.file_cache);
+            let mut cache = repo.take_file_cache();
             let pruned = cache.prune_stale_entries(&|id| repo.chunk_exists(id));
             if pruned > 0 {
                 info!(
@@ -1622,7 +1622,7 @@ pub fn run_with_progress(
                     "removed stale file cache entries referencing pruned chunks"
                 );
             }
-            repo.file_cache = cache;
+            repo.restore_file_cache(cache);
         }
 
         // Switch to dedup-only index mode to reduce memory during backup.
@@ -1658,7 +1658,7 @@ pub fn run_with_progress(
             // Pipeline mode: overlap I/O (producer) with CPU work (consumer).
             // Extract file_cache before the scope so we can lend it immutably
             // to the producer while the consumer mutates repo.
-            let file_cache_snapshot = std::mem::take(&mut repo.file_cache);
+            let file_cache_snapshot = repo.take_file_cache();
             let chunker_config = repo.config.chunker_params.clone();
             let byte_budget =
                 std::sync::Arc::new(super::pipeline::ByteBudget::new(pipeline_buffer_bytes));
@@ -1761,8 +1761,8 @@ pub fn run_with_progress(
             .put(&format!("snapshots/{snapshot_id_hex}"), &meta_packed)?;
 
         // Update manifest
-        repo.manifest.timestamp = Utc::now();
-        repo.manifest.snapshots.push(SnapshotEntry {
+        repo.manifest_mut().timestamp = Utc::now();
+        repo.manifest_mut().snapshots.push(SnapshotEntry {
             name: snapshot_name.to_string(),
             id: snapshot_id,
             time: time_start,
@@ -1772,7 +1772,7 @@ pub fn run_with_progress(
         });
 
         // Replace file cache with the freshly-built one (drops stale entries).
-        repo.file_cache = new_file_cache;
+        repo.set_file_cache(new_file_cache);
 
         // Save manifest, index, and file cache
         repo.save_state()?;

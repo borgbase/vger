@@ -46,7 +46,7 @@ fn check_reports_missing_pack_file_in_storage() {
     backup_single_source(&config, &source_dir, "src-a", "snap-check-pack");
 
     let repo = open_local_repo(&repo_dir);
-    let (_chunk_id, entry) = repo.chunk_index.iter().next().unwrap();
+    let (_chunk_id, entry) = repo.chunk_index().iter().next().unwrap();
     let pack_key = entry.pack_id.storage_key();
     let pack_path = repo_dir.join(&pack_key);
     assert!(pack_path.exists());
@@ -81,7 +81,7 @@ fn check_reports_snapshot_metadata_load_failures() {
     backup_single_source(&config, &source_dir, "src-a", "snap-check-meta");
 
     let repo = open_local_repo(&repo_dir);
-    let entry = repo.manifest.find_snapshot("snap-check-meta").unwrap();
+    let entry = repo.manifest().find_snapshot("snap-check-meta").unwrap();
     let snapshot_path = repo_dir.join("snapshots").join(hex::encode(&entry.id));
     assert!(snapshot_path.exists());
     std::fs::remove_file(snapshot_path).unwrap();

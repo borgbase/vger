@@ -182,8 +182,8 @@ fn lifecycle_delete_compact_check_and_restore() {
     );
 
     let repo = open_local_repo(&repo_dir, None);
-    assert!(repo.manifest.find_snapshot("snap-v1").is_none());
-    assert!(repo.manifest.find_snapshot("snap-v2").is_some());
+    assert!(repo.manifest().find_snapshot("snap-v1").is_none());
+    assert!(repo.manifest().find_snapshot("snap-v2").is_some());
 }
 
 #[test]
@@ -238,12 +238,12 @@ fn prune_compact_check_and_restore_kept_snapshots() {
 
     let repo = open_local_repo(&repo_dir, None);
     let names: Vec<_> = repo
-        .manifest
+        .manifest()
         .snapshots
         .iter()
         .map(|e| e.name.as_str())
         .collect();
-    assert_eq!(repo.manifest.snapshots.len(), 2);
+    assert_eq!(repo.manifest().snapshots.len(), 2);
     assert!(!names.contains(&"snap-a1"));
     assert!(names.contains(&"snap-a2"));
     assert!(names.contains(&"snap-b1"));
@@ -370,8 +370,8 @@ fn command_dump_failure_does_not_mutate_repository_state() {
     backup_source(&config, &source_dir, "src-a", "snap-baseline", None);
 
     let before = open_local_repo(&repo_dir, None);
-    let snapshots_before = before.manifest.snapshots.len();
-    let chunks_before = before.chunk_index.len();
+    let snapshots_before = before.manifest().snapshots.len();
+    let chunks_before = before.chunk_index().len();
     drop(before);
 
     let source_paths = vec![source_dir.to_string_lossy().to_string()];
@@ -401,10 +401,10 @@ fn command_dump_failure_does_not_mutate_repository_state() {
     assert!(result.is_err());
 
     let after = open_local_repo(&repo_dir, None);
-    assert_eq!(after.manifest.snapshots.len(), snapshots_before);
-    assert_eq!(after.chunk_index.len(), chunks_before);
-    assert!(after.manifest.find_snapshot("snap-atomic-fail").is_none());
-    assert!(after.manifest.find_snapshot("snap-baseline").is_some());
+    assert_eq!(after.manifest().snapshots.len(), snapshots_before);
+    assert_eq!(after.chunk_index().len(), chunks_before);
+    assert!(after.manifest().find_snapshot("snap-atomic-fail").is_none());
+    assert!(after.manifest().find_snapshot("snap-baseline").is_some());
 }
 
 #[test]
@@ -448,5 +448,5 @@ fn backup_fails_when_repository_lock_is_held_by_another_process() {
 
     backup_source(&config, &source_dir, "src-a", "snap-after-lock", None);
     let repo = open_local_repo(&repo_dir, None);
-    assert!(repo.manifest.find_snapshot("snap-after-lock").is_some());
+    assert!(repo.manifest().find_snapshot("snap-after-lock").is_some());
 }

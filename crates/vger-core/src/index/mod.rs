@@ -190,6 +190,11 @@ impl IndexDelta {
         Self::default()
     }
 
+    /// Returns true if this delta contains no mutations.
+    pub fn is_empty(&self) -> bool {
+        self.new_entries.is_empty() && self.refcount_bumps.is_empty()
+    }
+
     /// Record a refcount bump for an existing chunk.
     pub fn bump_refcount(&mut self, id: &ChunkId) {
         *self.refcount_bumps.entry(*id).or_insert(0) += 1;

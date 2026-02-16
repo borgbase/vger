@@ -107,7 +107,7 @@ pub fn run(
     let mut repo = open_repo(config, passphrase)?;
 
     // Select and sort snapshots chronologically
-    let mut entries: Vec<_> = repo.manifest.snapshots.clone();
+    let mut entries: Vec<_> = repo.manifest().snapshots.clone();
 
     if let Some(ref source) = scope.source_label {
         entries.retain(|e| &e.source_label == source);

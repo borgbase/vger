@@ -48,7 +48,7 @@ fn compact_after_delete_repacks() {
     let (id_a, id_b) = store_two_chunks(&mut repo);
 
     // Remove chunk A from the index (simulates delete decrementing refcount to 0)
-    repo.chunk_index.decrement(&id_a);
+    repo.chunk_index_mut().decrement(&id_a);
     repo.save_state().unwrap();
 
     // Compact should detect the dead blob and repack
@@ -83,7 +83,7 @@ fn compact_threshold_filters() {
     repo.save_state().unwrap();
 
     // Remove one chunk
-    repo.chunk_index.decrement(&ids[0]);
+    repo.chunk_index_mut().decrement(&ids[0]);
     repo.save_state().unwrap();
 
     // With a very high threshold (90%), nothing should be repacked
@@ -98,7 +98,7 @@ fn compact_dry_run_does_not_modify() {
     let (id_a, id_b) = store_two_chunks(&mut repo);
 
     // Remove chunk A to create dead blobs
-    repo.chunk_index.decrement(&id_a);
+    repo.chunk_index_mut().decrement(&id_a);
     repo.save_state().unwrap();
 
     // Count packs before
@@ -134,7 +134,7 @@ fn compact_empty_pack_deleted() {
     repo.save_state().unwrap();
 
     // Remove it — the pack is now entirely dead
-    repo.chunk_index.decrement(&id_a);
+    repo.chunk_index_mut().decrement(&id_a);
     repo.save_state().unwrap();
 
     let stats = compact_repo(&mut repo, 1.0, None, false).unwrap();

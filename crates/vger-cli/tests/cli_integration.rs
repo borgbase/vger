@@ -152,7 +152,7 @@ fn delete_pack_for_first_chunk(repo_dir: &Path) {
     let storage = Box::new(LocalBackend::new(repo_dir.to_str().unwrap()).unwrap());
     let repo = Repository::open(storage, None).unwrap();
     let (_chunk_id, entry) = repo
-        .chunk_index
+        .chunk_index()
         .iter()
         .next()
         .expect("repo must contain at least one chunk");

@@ -13,7 +13,7 @@ use super::util::open_repo;
 /// List all snapshots in the repository.
 pub fn list_snapshots(config: &VgerConfig, passphrase: Option<&str>) -> Result<Vec<SnapshotEntry>> {
     let repo = open_repo(config, passphrase)?;
-    Ok(repo.manifest.snapshots.clone())
+    Ok(repo.manifest().snapshots.clone())
 }
 
 /// List all items in a specific snapshot.
@@ -39,7 +39,7 @@ pub fn get_snapshot_meta(
 /// Load the SnapshotMeta for a snapshot by name.
 pub fn load_snapshot_meta(repo: &Repository, snapshot_name: &str) -> Result<SnapshotMeta> {
     let entry = repo
-        .manifest
+        .manifest()
         .find_snapshot(snapshot_name)
         .ok_or_else(|| VgerError::SnapshotNotFound(snapshot_name.into()))?;
 

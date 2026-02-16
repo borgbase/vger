@@ -52,7 +52,7 @@ fn prune_dry_run_reports_without_mutating_state() {
     backup_single_source(&config, &source_dir, "src-a", "snap-a-2");
 
     let before = open_local_repo(&repo_dir);
-    assert_eq!(before.manifest.snapshots.len(), 2);
+    assert_eq!(before.manifest().snapshots.len(), 2);
     drop(before);
 
     let sources = vec![source_entry(&source_dir, "src-a")];
@@ -66,7 +66,7 @@ fn prune_dry_run_reports_without_mutating_state() {
     assert_eq!(list_entries.len(), 2);
 
     let after = open_local_repo(&repo_dir);
-    assert_eq!(after.manifest.snapshots.len(), 2);
+    assert_eq!(after.manifest().snapshots.len(), 2);
 }
 
 #[test]
@@ -107,12 +107,12 @@ fn prune_source_filter_only_prunes_matching_label() {
 
     let after = open_local_repo(&repo_dir);
     let names: Vec<_> = after
-        .manifest
+        .manifest()
         .snapshots
         .iter()
         .map(|e| e.name.as_str())
         .collect();
-    assert_eq!(after.manifest.snapshots.len(), 2);
+    assert_eq!(after.manifest().snapshots.len(), 2);
     assert!(names.contains(&"snap-a-2"));
     assert!(names.contains(&"snap-b-1"));
 }

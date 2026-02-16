@@ -60,7 +60,7 @@ pub fn compact_repo(
 
     // Build a set of (pack_id, offset) pairs from the chunk index for fast lookup
     let live_set: HashSet<(PackId, u64)> = repo
-        .chunk_index
+        .chunk_index()
         .iter()
         .map(|(_, entry)| (entry.pack_id, entry.pack_offset))
         .collect();
@@ -221,7 +221,7 @@ pub fn compact_repo(
             writer.flush(repo.storage.as_ref(), repo.crypto.as_ref())?;
 
         for (chunk_id, stored_size, offset, _refcount) in &new_entries {
-            repo.chunk_index
+            repo.chunk_index_mut()
                 .update_location(chunk_id, new_pack_id, *offset, *stored_size);
         }
 
@@ -340,7 +340,7 @@ fn try_server_side_repack(
         }
 
         for (entry, new_offset) in analysis.live_entries.iter().zip(result.new_offsets.iter()) {
-            repo.chunk_index.update_location(
+            repo.chunk_index_mut().update_location(
                 &entry.chunk_id,
                 new_pack_id,
                 *new_offset,

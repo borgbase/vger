@@ -79,7 +79,7 @@ pub fn run_with_progress(
     let mut items_checked: usize = 0;
 
     // Step 1: Check each snapshot in manifest
-    let snapshot_entries = repo.manifest.snapshots.clone();
+    let snapshot_entries = repo.manifest().snapshots.clone();
     let snapshot_count = snapshot_entries.len();
     for (i, entry) in snapshot_entries.iter().enumerate() {
         emit_progress(
@@ -105,7 +105,7 @@ pub fn run_with_progress(
 
         // Verify item_ptrs exist in chunk index
         for chunk_id in &meta.item_ptrs {
-            if !repo.chunk_index.contains(chunk_id) {
+            if !repo.chunk_index().contains(chunk_id) {
                 errors.push(CheckError {
                     context: format!("snapshot '{}' item_ptrs", entry.name),
                     message: format!("chunk {chunk_id} not in index"),
@@ -131,7 +131,7 @@ pub fn run_with_progress(
             per_snapshot_items += 1;
             if item.entry_type == ItemType::RegularFile {
                 for chunk_ref in &item.chunks {
-                    if !repo.chunk_index.contains(&chunk_ref.id) {
+                    if !repo.chunk_index().contains(&chunk_ref.id) {
                         errors.push(CheckError {
                             context: format!("snapshot '{}' file '{}'", entry_name, item.path),
                             message: format!("chunk {} not in index", chunk_ref.id),
@@ -153,13 +153,13 @@ pub fn run_with_progress(
     }
 
     // Step 2: Verify all chunks' pack files exist in storage
-    let total_chunks = repo.chunk_index.len();
+    let total_chunks = repo.chunk_index().len();
     emit_progress(
         &mut progress,
         CheckProgressEvent::ChunksExistencePhaseStarted { total_chunks },
     );
     let mut chunks_existence_checked: usize = 0;
-    for (_chunk_id, entry) in repo.chunk_index.iter() {
+    for (_chunk_id, entry) in repo.chunk_index().iter() {
         let pack_key = entry.pack_id.storage_key();
         if !repo.storage.exists(&pack_key)? {
             errors.push(CheckError {
@@ -187,7 +187,7 @@ pub fn run_with_progress(
             CheckProgressEvent::ChunksDataPhaseStarted { total_chunks },
         );
         let chunk_id_key = repo.crypto.chunk_id_key();
-        for (chunk_id, entry) in repo.chunk_index.iter() {
+        for (chunk_id, entry) in repo.chunk_index().iter() {
             let raw = match read_blob_from_pack(
                 repo.storage.as_ref(),
                 &entry.pack_id,

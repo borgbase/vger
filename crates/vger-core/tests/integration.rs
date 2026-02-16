@@ -122,7 +122,7 @@ fn init_store_reopen_read() {
 
     // Reopen and verify
     let mut repo = open_local_repo(dir);
-    assert_eq!(repo.chunk_index.len(), 2);
+    assert_eq!(repo.chunk_index().len(), 2);
     let read1 = repo.read_chunk(&id1).unwrap();
     let read2 = repo.read_chunk(&id2).unwrap();
     assert_eq!(read1, data1);
@@ -137,7 +137,7 @@ fn manifest_survives_reopen() {
     // Init and add a snapshot entry to manifest
     {
         let mut repo = init_local_repo(dir);
-        repo.manifest.snapshots.push(SnapshotEntry {
+        repo.manifest_mut().snapshots.push(SnapshotEntry {
             name: "test-snapshot".to_string(),
             id: vec![0x42; 32],
             time: Utc::now(),
@@ -150,8 +150,8 @@ fn manifest_survives_reopen() {
 
     // Reopen and check manifest
     let repo = open_local_repo(dir);
-    assert_eq!(repo.manifest.snapshots.len(), 1);
-    assert_eq!(repo.manifest.snapshots[0].name, "test-snapshot");
+    assert_eq!(repo.manifest().snapshots.len(), 1);
+    assert_eq!(repo.manifest().snapshots[0].name, "test-snapshot");
 }
 
 #[test]
@@ -334,7 +334,7 @@ fn backup_deduplicates_identical_files_and_extracts_correctly() {
     assert_eq!(first_ids, second_ids);
 
     for chunk_id in first_ids {
-        let entry = repo.chunk_index.get(&chunk_id).unwrap();
+        let entry = repo.chunk_index().get(&chunk_id).unwrap();
         assert_eq!(entry.refcount, 2);
     }
 
@@ -612,7 +612,7 @@ fn file_cache_persists_and_matches_snapshot_items() {
         for file_item in &files {
             let abs_path = source_dir.join(&file_item.path);
             let cache_entry = repo
-                .file_cache
+                .file_cache()
                 .get(abs_path.to_str().unwrap())
                 .unwrap_or_else(|| panic!("cache should have entry for {}", file_item.path));
             let cached_ids: Vec<_> = cache_entry.chunk_refs.iter().map(|c| c.id).collect();
@@ -668,7 +668,7 @@ fn file_cache_persists_and_matches_snapshot_items() {
     // Every chunk should have refcount 2 (one per snapshot).
     for file_item in &files1 {
         for cr in &file_item.chunks {
-            let entry = repo.chunk_index.get(&cr.id).unwrap();
+            let entry = repo.chunk_index().get(&cr.id).unwrap();
             assert_eq!(entry.refcount, 2, "chunk {} refcount", cr.id);
         }
     }
@@ -775,7 +775,7 @@ fn file_cache_misses_on_modified_file() {
     // The cache should now reflect the new content for modified.bin.
     let abs_modified = source_dir.join("modified.bin");
     let cache_entry = repo
-        .file_cache
+        .file_cache()
         .get(abs_modified.to_str().unwrap())
         .expect("cache should have entry for modified.bin after re-backup");
     let cached_ids: Vec<_> = cache_entry.chunk_refs.iter().map(|c| c.id).collect();

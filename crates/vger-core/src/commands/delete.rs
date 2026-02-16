@@ -21,7 +21,7 @@ pub fn run(
     with_open_repo_lock(config, passphrase, |repo| {
         // Verify snapshot exists
         let entry = repo
-            .manifest
+            .manifest()
             .find_snapshot(snapshot_name)
             .ok_or_else(|| crate::error::VgerError::SnapshotNotFound(snapshot_name.into()))?;
         let snapshot_id_hex = hex::encode(&entry.id);
@@ -45,7 +45,7 @@ pub fn run(
         let impact = decrement_snapshot_chunk_refs(repo, &items_stream, &snapshot_meta.item_ptrs)?;
 
         // Remove from manifest
-        repo.manifest.remove_snapshot(snapshot_name);
+        repo.manifest_mut().remove_snapshot(snapshot_name);
 
         // Persist state
         repo.save_state()?;
