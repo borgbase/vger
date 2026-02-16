@@ -3,7 +3,7 @@ pub mod locks;
 pub mod objects;
 
 use axum::body::Body;
-use axum::extract::State;
+use axum::extract::{DefaultBodyLimit, State};
 use axum::http::{Request, StatusCode};
 use axum::middleware::{self, Next};
 use axum::response::{IntoResponse, Response};
@@ -12,6 +12,9 @@ use subtle::ConstantTimeEq;
 use tower_http::trace::TraceLayer;
 
 use crate::state::AppState;
+
+// High default to support large pack uploads while still preventing unlimited bodies.
+const MAX_REQUEST_BODY_BYTES: usize = 512 * 1024 * 1024; // 512 MiB
 
 pub fn router(state: AppState) -> Router {
     let authed = Router::new()
@@ -47,6 +50,8 @@ pub fn router(state: AppState) -> Router {
 
     public
         .merge(authed)
+        // vger uploads pack files that exceed Axum's tiny default body limit.
+        .layer(DefaultBodyLimit::max(MAX_REQUEST_BODY_BYTES))
         .layer(TraceLayer::new_for_http())
         .with_state(state)
 }
