@@ -21,6 +21,8 @@ pub struct CompactStats {
     pub blobs_live: u64,
     pub blobs_dead: u64,
     pub space_freed: u64,
+    pub packs_corrupt: u64,
+    pub packs_orphan: u64,
 }
 
 /// Per-pack analysis of live vs dead blobs.
@@ -65,6 +67,8 @@ pub fn compact_repo(
         .map(|(_, entry)| (entry.pack_id, entry.pack_offset))
         .collect();
 
+    let mut discovered_pack_ids: HashSet<PackId> = HashSet::new();
+
     for shard in 0u16..256 {
         let prefix = format!("packs/{:02x}/", shard);
         let keys = repo.storage.list(&prefix)?;
@@ -83,12 +87,14 @@ pub fn compact_repo(
             };
 
             stats.packs_total += 1;
+            discovered_pack_ids.insert(pack_id);
 
             let entries =
                 match read_pack_header(repo.storage.as_ref(), &pack_id, repo.crypto.as_ref()) {
                     Ok(e) => e,
                     Err(e) => {
                         warn!("Skipping corrupt pack {}: {}", pack_id, e);
+                        stats.packs_corrupt += 1;
                         continue;
                     }
                 };
@@ -131,6 +137,27 @@ pub fn compact_repo(
                 });
             }
         }
+    }
+
+    // Detect orphan packs: packs on disk but not referenced by the chunk index
+    let indexed_packs: HashSet<PackId> = live_set.iter().map(|(pack_id, _)| *pack_id).collect();
+    for pack_id in &discovered_pack_ids {
+        if !indexed_packs.contains(pack_id) {
+            stats.packs_orphan += 1;
+        }
+    }
+
+    if stats.packs_corrupt > 0 {
+        warn!(
+            "{} corrupt pack(s) found; run `vger check --verify-data` for details",
+            stats.packs_corrupt
+        );
+    }
+    if stats.packs_orphan > 0 {
+        info!(
+            "{} orphan pack(s) found (present on disk but not referenced by index)",
+            stats.packs_orphan
+        );
     }
 
     // Sort by most wasteful first (highest dead bytes)

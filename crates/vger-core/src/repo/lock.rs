@@ -104,6 +104,44 @@ pub fn release_lock(storage: &dyn StorageBackend, guard: LockGuard) -> Result<()
     }
 }
 
+/// Forcibly remove all advisory locks from the repository.
+///
+/// This is a recovery mechanism for stale locks left by killed processes.
+/// No passphrase is needed — lock files are unencrypted JSON.
+/// Returns the number of locks removed.
+pub fn break_lock(storage: &dyn StorageBackend) -> Result<usize> {
+    let mut removed: usize = 0;
+
+    // Probe backend-native lock: try to acquire it. If we succeed, no stale
+    // lock existed — release our own acquire and don't count it. If we get
+    // `Locked`, a stale lock exists — force-release it and count 1.
+    let dummy_info = BackendLockInfo {
+        hostname: String::new(),
+        pid: 0,
+    };
+    match storage.acquire_advisory_lock(BACKEND_LOCK_ID, &dummy_info) {
+        Ok(()) => {
+            // No stale lock — undo our probe acquire.
+            let _ = storage.release_advisory_lock(BACKEND_LOCK_ID);
+        }
+        Err(VgerError::Locked(_)) => {
+            // Stale lock exists — force-release it.
+            storage.release_advisory_lock(BACKEND_LOCK_ID)?;
+            removed += 1;
+        }
+        Err(VgerError::UnsupportedBackend(_)) => {}
+        Err(err) => return Err(err),
+    }
+
+    // Remove all object-based lock files.
+    for key in list_lock_keys(storage)? {
+        storage.delete(&key)?;
+        removed += 1;
+    }
+
+    Ok(removed)
+}
+
 fn list_lock_keys(storage: &dyn StorageBackend) -> Result<Vec<String>> {
     let mut keys = storage.list(LOCKS_PREFIX)?;
     keys.retain(|k| k.starts_with(LOCKS_PREFIX) && k.ends_with(".json"));

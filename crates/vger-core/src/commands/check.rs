@@ -1,6 +1,9 @@
+use std::collections::HashMap;
+
 use crate::compress;
 use crate::config::VgerConfig;
 use crate::crypto::chunk_id::ChunkId;
+use crate::crypto::pack_id::PackId;
 use crate::error::Result;
 use crate::repo::format::{unpack_object_expect, ObjectType};
 use crate::repo::pack::read_blob_from_pack;
@@ -21,6 +24,7 @@ pub struct CheckResult {
     pub snapshots_checked: usize,
     pub items_checked: usize,
     pub chunks_existence_checked: usize,
+    pub packs_existence_checked: usize,
     pub chunks_data_verified: usize,
     pub errors: Vec<CheckError>,
 }
@@ -32,12 +36,12 @@ pub enum CheckProgressEvent {
         total: usize,
         name: String,
     },
-    ChunksExistencePhaseStarted {
-        total_chunks: usize,
+    PacksExistencePhaseStarted {
+        total_packs: usize,
     },
-    ChunksExistenceProgress {
+    PacksExistenceProgress {
         checked: usize,
-        total_chunks: usize,
+        total_packs: usize,
     },
     ChunksDataPhaseStarted {
         total_chunks: usize,
@@ -152,28 +156,35 @@ pub fn run_with_progress(
         snapshots_checked += 1;
     }
 
-    // Step 2: Verify all chunks' pack files exist in storage
-    let total_chunks = repo.chunk_index().len();
+    // Step 2: Verify all unique pack files exist in storage (deduplicated)
+    let chunks_existence_checked = repo.chunk_index().len();
+    let mut pack_chunk_counts: HashMap<PackId, usize> = HashMap::new();
+    for (_chunk_id, entry) in repo.chunk_index().iter() {
+        *pack_chunk_counts.entry(entry.pack_id).or_insert(0) += 1;
+    }
+    let total_packs = pack_chunk_counts.len();
     emit_progress(
         &mut progress,
-        CheckProgressEvent::ChunksExistencePhaseStarted { total_chunks },
+        CheckProgressEvent::PacksExistencePhaseStarted { total_packs },
     );
-    let mut chunks_existence_checked: usize = 0;
-    for (_chunk_id, entry) in repo.chunk_index().iter() {
-        let pack_key = entry.pack_id.storage_key();
+    let mut packs_existence_checked: usize = 0;
+    for (pack_id, chunk_count) in &pack_chunk_counts {
+        let pack_key = pack_id.storage_key();
         if !repo.storage.exists(&pack_key)? {
             errors.push(CheckError {
                 context: "chunk index".into(),
-                message: format!("pack {} missing from storage", entry.pack_id),
+                message: format!(
+                    "pack {pack_id} missing from storage (referenced by {chunk_count} chunks)"
+                ),
             });
         }
-        chunks_existence_checked += 1;
-        if chunks_existence_checked.is_multiple_of(1000) {
+        packs_existence_checked += 1;
+        if packs_existence_checked.is_multiple_of(100) {
             emit_progress(
                 &mut progress,
-                CheckProgressEvent::ChunksExistenceProgress {
-                    checked: chunks_existence_checked,
-                    total_chunks,
+                CheckProgressEvent::PacksExistenceProgress {
+                    checked: packs_existence_checked,
+                    total_packs,
                 },
             );
         }
@@ -184,7 +195,9 @@ pub fn run_with_progress(
     if verify_data {
         emit_progress(
             &mut progress,
-            CheckProgressEvent::ChunksDataPhaseStarted { total_chunks },
+            CheckProgressEvent::ChunksDataPhaseStarted {
+                total_chunks: chunks_existence_checked,
+            },
         );
         let chunk_id_key = repo.crypto.chunk_id_key();
         for (chunk_id, entry) in repo.chunk_index().iter() {
@@ -244,7 +257,7 @@ pub fn run_with_progress(
                     &mut progress,
                     CheckProgressEvent::ChunksDataProgress {
                         verified: chunks_data_verified,
-                        total_chunks,
+                        total_chunks: chunks_existence_checked,
                     },
                 );
             }
@@ -255,6 +268,7 @@ pub fn run_with_progress(
         snapshots_checked,
         items_checked,
         chunks_existence_checked,
+        packs_existence_checked,
         chunks_data_verified,
         errors,
     })

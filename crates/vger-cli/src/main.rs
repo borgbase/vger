@@ -386,6 +386,13 @@ enum Commands {
         cache_size: usize,
     },
 
+    /// Remove stale repository locks left by killed processes
+    BreakLock {
+        /// Select repository by label or path
+        #[arg(short = 'R', long = "repo")]
+        repo: Option<String>,
+    },
+
     /// Free repository space by compacting pack files
     Compact {
         /// Select repository by label or path
@@ -490,6 +497,7 @@ impl Commands {
             | Self::Check { repo, .. }
             | Self::Info { repo, .. }
             | Self::Mount { repo, .. }
+            | Self::BreakLock { repo, .. }
             | Self::Compact { repo, .. } => repo.as_deref(),
             Self::Config { .. } => None,
         }
@@ -506,6 +514,7 @@ impl Commands {
             Self::Check { .. } => "check",
             Self::Info { .. } => "info",
             Self::Mount { .. } => "mount",
+            Self::BreakLock { .. } => "break-lock",
             Self::Compact { .. } => "compact",
             Self::Snapshot { .. } => "snapshot",
             Self::Config { .. } => "config",
@@ -905,6 +914,7 @@ fn dispatch_command(
             *cache_size,
             source,
         ),
+        Commands::BreakLock { .. } => run_break_lock(cfg, label),
         Commands::Compact {
             threshold,
             max_repack_size,
@@ -1645,14 +1655,14 @@ fn run_check(
             } => {
                 eprintln!("[{current}/{total}] Checking snapshot '{name}'...");
             }
-            commands::check::CheckProgressEvent::ChunksExistencePhaseStarted { total_chunks } => {
-                eprintln!("Verifying existence of {total_chunks} chunks in pack files...");
+            commands::check::CheckProgressEvent::PacksExistencePhaseStarted { total_packs } => {
+                eprintln!("Verifying existence of {total_packs} packs in storage...");
             }
-            commands::check::CheckProgressEvent::ChunksExistenceProgress {
+            commands::check::CheckProgressEvent::PacksExistenceProgress {
                 checked,
-                total_chunks,
+                total_packs,
             } => {
-                eprintln!("  existence: {checked}/{total_chunks}");
+                eprintln!("  existence: {checked}/{total_packs} packs");
             }
             commands::check::CheckProgressEvent::ChunksDataPhaseStarted { total_chunks } => {
                 eprintln!("Verifying data integrity of {total_chunks} chunks...");
@@ -1678,9 +1688,10 @@ fn run_check(
     }
 
     println!(
-        "Check complete: {} snapshots, {} items, {} chunks existence-checked, {} chunks data-verified, {} errors",
+        "Check complete: {} snapshots, {} items, {} packs existence-checked ({} chunks), {} chunks data-verified, {} errors",
         result.snapshots_checked,
         result.items_checked,
+        result.packs_existence_checked,
         result.chunks_existence_checked,
         result.chunks_data_verified,
         result.errors.len(),
@@ -1782,6 +1793,23 @@ fn run_mount(
     Ok(())
 }
 
+fn run_break_lock(
+    config: &VgerConfig,
+    _label: Option<&str>,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let storage = vger_core::storage::backend_from_config(&config.repository, None)
+        .map_err(|e| -> Box<dyn std::error::Error> { Box::new(e) })?;
+    let removed = vger_core::repo::lock::break_lock(storage.as_ref())
+        .map_err(|e| -> Box<dyn std::error::Error> { Box::new(e) })?;
+
+    if removed == 0 {
+        println!("No locks found.");
+    } else {
+        println!("Removed {removed} lock(s).");
+    }
+    Ok(())
+}
+
 fn run_compact(
     config: &VgerConfig,
     label: Option<&str>,
@@ -1813,6 +1841,19 @@ fn run_compact(
             stats.packs_repacked,
             stats.packs_deleted_empty,
             format_bytes(stats.space_freed),
+        );
+    }
+
+    if stats.packs_corrupt > 0 {
+        println!(
+            "  Warning: {} corrupt pack(s) found; run `vger check --verify-data` for details",
+            stats.packs_corrupt,
+        );
+    }
+    if stats.packs_orphan > 0 {
+        println!(
+            "  {} orphan pack(s) (present on disk but not in index)",
+            stats.packs_orphan,
         );
     }
 

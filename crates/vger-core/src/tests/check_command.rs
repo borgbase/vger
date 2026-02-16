@@ -26,11 +26,13 @@ fn check_verify_data_flag_controls_data_verification_counters() {
     assert!(without_verify.errors.is_empty());
     assert_eq!(without_verify.chunks_data_verified, 0);
     assert!(without_verify.chunks_existence_checked > 0);
+    assert!(without_verify.packs_existence_checked > 0);
 
     let with_verify = commands::check::run(&config, None, true).unwrap();
     assert!(with_verify.errors.is_empty());
     assert!(with_verify.chunks_data_verified > 0);
     assert!(with_verify.chunks_existence_checked > 0);
+    assert!(with_verify.packs_existence_checked > 0);
 }
 
 #[test]
@@ -54,6 +56,7 @@ fn check_reports_missing_pack_file_in_storage() {
 
     let result = commands::check::run(&config, None, false).unwrap();
     assert!(result.chunks_existence_checked > 0);
+    assert!(result.packs_existence_checked > 0);
     assert!(
         result
             .errors
@@ -127,6 +130,39 @@ fn check_with_progress_emits_phase_events() {
     )));
     assert!(events.iter().any(|e| matches!(
         e,
-        commands::check::CheckProgressEvent::ChunksExistencePhaseStarted { .. }
+        commands::check::CheckProgressEvent::PacksExistencePhaseStarted { .. }
     )));
+}
+
+#[test]
+fn check_deduplicates_pack_existence_checks() {
+    let tmp = tempfile::tempdir().unwrap();
+    let repo_dir = tmp.path().join("repo");
+    let source_dir = tmp.path().join("source");
+    std::fs::create_dir_all(&repo_dir).unwrap();
+    std::fs::create_dir_all(&source_dir).unwrap();
+
+    // Write multiple small files — chunks will land in the same pack
+    for i in 0..5 {
+        std::fs::write(
+            source_dir.join(format!("file{i}.txt")),
+            format!("dedup-check-test-content-{i}"),
+        )
+        .unwrap();
+    }
+
+    let config = init_repo(&repo_dir);
+    backup_single_source(&config, &source_dir, "src-dedup", "snap-dedup");
+
+    let result = commands::check::run(&config, None, false).unwrap();
+    assert!(result.errors.is_empty());
+    assert!(result.chunks_existence_checked > 0);
+    assert!(result.packs_existence_checked > 0);
+    // Multiple chunks should share packs, so packs checked < chunks checked
+    assert!(
+        result.packs_existence_checked < result.chunks_existence_checked,
+        "expected fewer packs ({}) than chunks ({})",
+        result.packs_existence_checked,
+        result.chunks_existence_checked,
+    );
 }

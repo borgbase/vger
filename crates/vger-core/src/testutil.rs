@@ -1,11 +1,11 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::Mutex;
 use std::sync::Once;
 
 use crate::config::ChunkerConfig;
-use crate::error::Result;
+use crate::error::{Result, VgerError};
 use crate::repo::{EncryptionMode, Repository};
-use crate::storage::StorageBackend;
+use crate::storage::{BackendLockInfo, StorageBackend};
 
 static TEST_ENV_INIT: Once = Once::new();
 
@@ -185,5 +185,60 @@ impl StorageBackend for RecordingBackend {
     fn put_owned(&self, key: &str, data: Vec<u8>) -> Result<()> {
         self.log.record(key);
         self.inner.put(key, &data)
+    }
+}
+
+/// In-memory storage backend that supports backend-native advisory locks.
+/// Mimics REST-server lock semantics: release of a non-held lock returns Ok(()).
+pub struct LockableMemoryBackend {
+    inner: MemoryBackend,
+    locks: Mutex<HashSet<String>>,
+}
+
+impl LockableMemoryBackend {
+    pub fn new() -> Self {
+        Self {
+            inner: MemoryBackend::new(),
+            locks: Mutex::new(HashSet::new()),
+        }
+    }
+}
+
+impl StorageBackend for LockableMemoryBackend {
+    fn get(&self, key: &str) -> Result<Option<Vec<u8>>> {
+        self.inner.get(key)
+    }
+    fn put(&self, key: &str, data: &[u8]) -> Result<()> {
+        self.inner.put(key, data)
+    }
+    fn delete(&self, key: &str) -> Result<()> {
+        self.inner.delete(key)
+    }
+    fn exists(&self, key: &str) -> Result<bool> {
+        self.inner.exists(key)
+    }
+    fn list(&self, prefix: &str) -> Result<Vec<String>> {
+        self.inner.list(prefix)
+    }
+    fn get_range(&self, key: &str, offset: u64, length: u64) -> Result<Option<Vec<u8>>> {
+        self.inner.get_range(key, offset, length)
+    }
+    fn create_dir(&self, key: &str) -> Result<()> {
+        self.inner.create_dir(key)
+    }
+    fn acquire_advisory_lock(&self, lock_id: &str, _info: &BackendLockInfo) -> Result<()> {
+        let mut locks = self.locks.lock().unwrap();
+        if locks.contains(lock_id) {
+            Err(VgerError::Locked(lock_id.to_string()))
+        } else {
+            locks.insert(lock_id.to_string());
+            Ok(())
+        }
+    }
+    fn release_advisory_lock(&self, lock_id: &str) -> Result<()> {
+        // Mimics REST backend: returns Ok(()) even if no lock was held (404 → Ok).
+        let mut locks = self.locks.lock().unwrap();
+        locks.remove(lock_id);
+        Ok(())
     }
 }
