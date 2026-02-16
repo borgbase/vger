@@ -28,7 +28,7 @@ V'Ger achieves the best speed and throughput of any comparable backup tool, whil
 
 ![Backup Tool Benchmark](docs/src/images/benchmark.summary.png)
 
-<small>See our [e2e testing skill](https://github.com/borgbase/vger/blob/main/.claude/commands/e2e-tests/benchmarks.md) for full benchmark details. All benchmarks were run on the same Intel i7-6700 CPU @ 3.40GHz machine with 2x Samsung PM981.</small>
+<small>See our [e2e testing skill](https://github.com/borgbase/vger/blob/main/.claude/commands/e2e-tests/benchmarks.md) for full benchmark details. All benchmarks were run on the same Intel i7-6700 CPU @ 3.40GHz machine with 2x Samsung PM981 NVMe. Compression and resulting repository sizes were comparable. Sample corpus is a mix of files including the Linux kernel, a Wikipedia dump and an Ubuntu ISO.</small>
 
 
 ## Quick start
