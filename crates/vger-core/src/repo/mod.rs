@@ -286,19 +286,7 @@ impl Repository {
     /// Open an existing repository.
     pub fn open(storage: Box<dyn StorageBackend>, passphrase: Option<&str>) -> Result<Self> {
         let mut repo = Self::open_base(storage, passphrase)?;
-
-        // Read chunk index
         repo.load_chunk_index()?;
-
-        // Compute dynamic pack target sizes from the loaded index.
-        let num_data_packs = repo.chunk_index.count_distinct_packs();
-        let data_target = compute_data_pack_target(
-            num_data_packs,
-            repo.config.min_pack_size,
-            repo.config.max_pack_size,
-        );
-        repo.data_pack_writer = PackWriter::new(PackType::Data, data_target);
-
         Ok(repo)
     }
 
@@ -409,8 +397,16 @@ impl Repository {
 
     /// Load the chunk index from storage on demand.
     /// Can be called after `open_without_index()` to lazily load the index.
+    /// Also recalculates the data pack writer target from the loaded index.
     pub fn load_chunk_index(&mut self) -> Result<()> {
         self.chunk_index = self.reload_full_index()?;
+        let num_data_packs = self.chunk_index.count_distinct_packs();
+        let data_target = compute_data_pack_target(
+            num_data_packs,
+            self.config.min_pack_size,
+            self.config.max_pack_size,
+        );
+        self.data_pack_writer = PackWriter::new(PackType::Data, data_target);
         Ok(())
     }
 
