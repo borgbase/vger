@@ -121,7 +121,7 @@ impl EncryptionMode {
 /// A handle to an opened repository.
 pub struct Repository {
     pub storage: Arc<dyn StorageBackend>,
-    pub crypto: Box<dyn CryptoEngine>,
+    pub crypto: Arc<dyn CryptoEngine>,
     manifest: Manifest,
     chunk_index: ChunkIndex,
     pub config: RepoConfig,
@@ -186,12 +186,12 @@ impl Repository {
         };
 
         // Generate master key and crypto engine
-        let (crypto, encrypted_key): (Box<dyn CryptoEngine>, Option<EncryptedKey>) =
+        let (crypto, encrypted_key): (Arc<dyn CryptoEngine>, Option<EncryptedKey>) =
             match &encryption {
                 EncryptionMode::None => {
                     let mut chunk_id_key = [0u8; 32];
                     rng.fill_bytes(&mut chunk_id_key);
-                    (Box::new(PlaintextEngine::new(&chunk_id_key)), None)
+                    (Arc::new(PlaintextEngine::new(&chunk_id_key)), None)
                 }
                 EncryptionMode::Aes256Gcm => {
                     let master_key = MasterKey::generate();
@@ -203,7 +203,7 @@ impl Repository {
                         &master_key.encryption_key,
                         &master_key.chunk_id_key,
                     );
-                    (Box::new(engine), Some(enc_key))
+                    (Arc::new(engine), Some(enc_key))
                 }
                 EncryptionMode::Chacha20Poly1305 => {
                     let master_key = MasterKey::generate();
@@ -215,7 +215,7 @@ impl Repository {
                         &master_key.encryption_key,
                         &master_key.chunk_id_key,
                     );
-                    (Box::new(engine), Some(enc_key))
+                    (Arc::new(engine), Some(enc_key))
                 }
             };
 
@@ -288,7 +288,7 @@ impl Repository {
         }
 
         // Build crypto engine
-        let crypto: Box<dyn CryptoEngine> = match &repo_config.encryption {
+        let crypto: Arc<dyn CryptoEngine> = match &repo_config.encryption {
             EncryptionMode::None => {
                 let mut chunk_id_key = [0u8; 32];
                 use blake2::digest::{Update, VariableOutput};
@@ -296,7 +296,7 @@ impl Repository {
                 let mut hasher = Blake2bVar::new(32).unwrap();
                 hasher.update(&repo_config.id);
                 hasher.finalize_variable(&mut chunk_id_key).unwrap();
-                Box::new(PlaintextEngine::new(&chunk_id_key))
+                Arc::new(PlaintextEngine::new(&chunk_id_key))
             }
             EncryptionMode::Aes256Gcm => {
                 let key_data = storage
@@ -311,7 +311,7 @@ impl Repository {
                     &master_key.encryption_key,
                     &master_key.chunk_id_key,
                 );
-                Box::new(engine)
+                Arc::new(engine)
             }
             EncryptionMode::Chacha20Poly1305 => {
                 let key_data = storage
@@ -326,7 +326,7 @@ impl Repository {
                     &master_key.encryption_key,
                     &master_key.chunk_id_key,
                 );
-                Box::new(engine)
+                Arc::new(engine)
             }
         };
 

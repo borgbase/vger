@@ -1177,3 +1177,244 @@ fn backup_many_small_files_plus_large_file_roundtrip() {
         large_payload
     );
 }
+
+/// Verify pipeline threshold splitting: a file above the large_file_threshold
+/// takes the LargeFile (streaming) path while a smaller file takes the
+/// ProcessedFile (buffered) path. Both should round-trip correctly.
+#[test]
+fn backup_pipeline_threshold_splitting_roundtrip() {
+    let tmp = tempfile::tempdir().unwrap();
+    let repo_dir = tmp.path().join("repo");
+    let source_dir = tmp.path().join("source");
+    std::fs::create_dir_all(&repo_dir).unwrap();
+    std::fs::create_dir_all(&source_dir).unwrap();
+
+    // 12 MiB file → should exceed large_file_threshold (LargeFile path).
+    let large_payload: Vec<u8> = (0u32..12 * 1024 * 1024).map(|i| (i % 251) as u8).collect();
+    std::fs::write(source_dir.join("large.bin"), &large_payload).unwrap();
+
+    // 2 MiB file → should stay under threshold (ProcessedFile path).
+    let small_payload: Vec<u8> = (0u32..2 * 1024 * 1024).map(|i| (i % 199) as u8).collect();
+    std::fs::write(source_dir.join("small.bin"), &small_payload).unwrap();
+
+    let mut config = make_test_config(&repo_dir);
+    // pipeline_buffer_mib=32, max_threads=2 → threshold ≈ 8 MiB.
+    config.limits.cpu.pipeline_buffer_mib = Some(32);
+    config.limits.cpu.max_threads = 2;
+    // Ensure pipeline is active.
+    config.limits.cpu.pipeline_depth = Some(4);
+
+    commands::init::run(&config, None).unwrap();
+
+    let source_paths = vec![source_dir.to_string_lossy().to_string()];
+    let exclude_if_present: Vec<String> = Vec::new();
+    let exclude_patterns: Vec<String> = Vec::new();
+
+    let stats = commands::backup::run(
+        &config,
+        commands::backup::BackupRequest {
+            snapshot_name: "snap-threshold",
+            passphrase: None,
+            source_paths: &source_paths,
+            source_label: "source",
+            exclude_patterns: &exclude_patterns,
+            exclude_if_present: &exclude_if_present,
+            one_file_system: true,
+            git_ignore: false,
+            xattrs_enabled: false,
+            compression: Compression::Lz4,
+            command_dumps: &[],
+        },
+    )
+    .unwrap();
+
+    assert_eq!(stats.nfiles, 2);
+    assert!(stats.original_size > 0);
+
+    // Extract and verify contents match.
+    let restore_dir = tmp.path().join("restore");
+    commands::extract::run(
+        &config,
+        None,
+        "snap-threshold",
+        restore_dir.to_str().unwrap(),
+        None,
+        false,
+    )
+    .unwrap();
+
+    assert_eq!(
+        std::fs::read(restore_dir.join("large.bin")).unwrap(),
+        large_payload,
+        "large file content mismatch after pipeline threshold split"
+    );
+    assert_eq!(
+        std::fs::read(restore_dir.join("small.bin")).unwrap(),
+        small_payload,
+        "small file content mismatch after pipeline threshold split"
+    );
+}
+
+/// Verify that pipeline mode preserves deterministic walk order even when
+/// files have very different processing times.
+#[test]
+fn backup_pipeline_preserves_walk_order_with_mixed_file_sizes() {
+    let tmp = tempfile::tempdir().unwrap();
+    let repo_dir = tmp.path().join("repo");
+    let source_dir = tmp.path().join("source");
+    std::fs::create_dir_all(&repo_dir).unwrap();
+    std::fs::create_dir_all(&source_dir).unwrap();
+    std::fs::create_dir_all(source_dir.join("dir")).unwrap();
+
+    // Intentionally vary file sizes so worker completion order differs from path order.
+    let a_large: Vec<u8> = (0u32..12 * 1024 * 1024).map(|i| (i % 251) as u8).collect();
+    let b_small: Vec<u8> = (0u32..64 * 1024).map(|i| (i % 197) as u8).collect();
+    let c_medium: Vec<u8> = (0u32..2 * 1024 * 1024).map(|i| (i % 191) as u8).collect();
+    let d_small: Vec<u8> = (0u32..32 * 1024).map(|i| (i % 173) as u8).collect();
+
+    std::fs::write(source_dir.join("a-large.bin"), &a_large).unwrap();
+    std::fs::write(source_dir.join("b-small.bin"), &b_small).unwrap();
+    std::fs::write(source_dir.join("c-medium.bin"), &c_medium).unwrap();
+    std::fs::write(source_dir.join("dir").join("d-small.bin"), &d_small).unwrap();
+
+    let mut config = make_test_config(&repo_dir);
+    // pipeline_buffer_mib=32, max_threads=2 => large_file_threshold ~= 8 MiB.
+    config.limits.cpu.pipeline_buffer_mib = Some(32);
+    config.limits.cpu.max_threads = 2;
+    config.limits.cpu.pipeline_depth = Some(4);
+
+    commands::init::run(&config, None).unwrap();
+
+    let source_paths = vec![source_dir.to_string_lossy().to_string()];
+    let exclude_if_present: Vec<String> = Vec::new();
+    let exclude_patterns: Vec<String> = Vec::new();
+
+    let stats = commands::backup::run(
+        &config,
+        commands::backup::BackupRequest {
+            snapshot_name: "snap-order",
+            passphrase: None,
+            source_paths: &source_paths,
+            source_label: "source",
+            exclude_patterns: &exclude_patterns,
+            exclude_if_present: &exclude_if_present,
+            one_file_system: true,
+            git_ignore: false,
+            xattrs_enabled: false,
+            compression: Compression::Lz4,
+            command_dumps: &[],
+        },
+    )
+    .unwrap();
+
+    assert_eq!(stats.nfiles, 4);
+
+    let mut repo = open_local_repo(&repo_dir);
+    let items = commands::list::load_snapshot_items(&mut repo, "snap-order").unwrap();
+    let paths: Vec<_> = items.iter().map(|i| i.path.clone()).collect();
+    let mut sorted = paths.clone();
+    sorted.sort();
+    assert_eq!(paths, sorted, "items should remain in sorted walk order");
+}
+
+/// Verify a second pipeline backup that includes all three runtime paths:
+/// cache-hit files, new buffered files (ProcessedFile), and new large streamed files.
+#[test]
+fn backup_pipeline_mixed_cache_hit_processed_and_large_roundtrip() {
+    let tmp = tempfile::tempdir().unwrap();
+    let repo_dir = tmp.path().join("repo");
+    let source_dir = tmp.path().join("source");
+    std::fs::create_dir_all(&repo_dir).unwrap();
+    std::fs::create_dir_all(&source_dir).unwrap();
+
+    let keep_small: Vec<u8> = (0u32..2 * 1024 * 1024).map(|i| (i % 211) as u8).collect();
+    let keep_large: Vec<u8> = (0u32..12 * 1024 * 1024).map(|i| (i % 199) as u8).collect();
+
+    std::fs::write(source_dir.join("keep-small.bin"), &keep_small).unwrap();
+    std::fs::write(source_dir.join("keep-large.bin"), &keep_large).unwrap();
+
+    let mut config = make_test_config(&repo_dir);
+    // Keep threshold around 8 MiB so 2 MiB is buffered and 12 MiB is streamed.
+    config.limits.cpu.pipeline_buffer_mib = Some(32);
+    config.limits.cpu.max_threads = 2;
+    config.limits.cpu.pipeline_depth = Some(4);
+
+    commands::init::run(&config, None).unwrap();
+
+    let source_paths = vec![source_dir.to_string_lossy().to_string()];
+    let exclude_if_present: Vec<String> = Vec::new();
+    let exclude_patterns: Vec<String> = Vec::new();
+
+    commands::backup::run(
+        &config,
+        commands::backup::BackupRequest {
+            snapshot_name: "snap-mixed-1",
+            passphrase: None,
+            source_paths: &source_paths,
+            source_label: "source",
+            exclude_patterns: &exclude_patterns,
+            exclude_if_present: &exclude_if_present,
+            one_file_system: true,
+            git_ignore: false,
+            xattrs_enabled: false,
+            compression: Compression::Lz4,
+            command_dumps: &[],
+        },
+    )
+    .unwrap();
+
+    let new_small: Vec<u8> = (0u32..2 * 1024 * 1024).map(|i| (i % 181) as u8).collect();
+    let new_large: Vec<u8> = (0u32..12 * 1024 * 1024).map(|i| (i % 167) as u8).collect();
+
+    std::fs::write(source_dir.join("new-small.bin"), &new_small).unwrap();
+    std::fs::write(source_dir.join("new-large.bin"), &new_large).unwrap();
+
+    let stats2 = commands::backup::run(
+        &config,
+        commands::backup::BackupRequest {
+            snapshot_name: "snap-mixed-2",
+            passphrase: None,
+            source_paths: &source_paths,
+            source_label: "source",
+            exclude_patterns: &exclude_patterns,
+            exclude_if_present: &exclude_if_present,
+            one_file_system: true,
+            git_ignore: false,
+            xattrs_enabled: false,
+            compression: Compression::Lz4,
+            command_dumps: &[],
+        },
+    )
+    .unwrap();
+
+    assert_eq!(stats2.nfiles, 4);
+    assert!(stats2.original_size > 0);
+
+    let restore_dir = tmp.path().join("restore-mixed");
+    commands::extract::run(
+        &config,
+        None,
+        "snap-mixed-2",
+        restore_dir.to_str().unwrap(),
+        None,
+        false,
+    )
+    .unwrap();
+
+    assert_eq!(
+        std::fs::read(restore_dir.join("keep-small.bin")).unwrap(),
+        keep_small
+    );
+    assert_eq!(
+        std::fs::read(restore_dir.join("keep-large.bin")).unwrap(),
+        keep_large
+    );
+    assert_eq!(
+        std::fs::read(restore_dir.join("new-small.bin")).unwrap(),
+        new_small
+    );
+    assert_eq!(
+        std::fs::read(restore_dir.join("new-large.bin")).unwrap(),
+        new_large
+    );
+}

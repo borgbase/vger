@@ -34,7 +34,7 @@ fn items_chunker_config() -> ChunkerConfig {
     }
 }
 
-fn flush_item_stream_chunk(
+pub(crate) fn flush_item_stream_chunk(
     repo: &mut Repository,
     item_stream: &mut Vec<u8>,
     item_ptrs: &mut Vec<ChunkId>,
@@ -49,7 +49,7 @@ fn flush_item_stream_chunk(
     Ok(())
 }
 
-fn append_item_to_stream(
+pub(crate) fn append_item_to_stream(
     repo: &mut Repository,
     item_stream: &mut Vec<u8>,
     item_ptrs: &mut Vec<ChunkId>,
@@ -141,13 +141,13 @@ fn read_item_xattrs(_path: &Path) -> Option<HashMap<String, Vec<u8>>> {
     None
 }
 
-struct PreparedChunk {
-    chunk_id: ChunkId,
-    uncompressed_size: u32,
-    packed: Vec<u8>,
+pub(crate) struct PreparedChunk {
+    pub(crate) chunk_id: ChunkId,
+    pub(crate) uncompressed_size: u32,
+    pub(crate) packed: Vec<u8>,
 }
 
-fn flush_regular_file_batch(
+pub(crate) fn flush_regular_file_batch(
     repo: &mut Repository,
     compression: Compression,
     chunk_id_key: &[u8; 32],
@@ -417,7 +417,7 @@ pub enum BackupProgressEvent {
     },
 }
 
-fn emit_progress(
+pub(crate) fn emit_progress(
     progress: &mut Option<&mut dyn FnMut(BackupProgressEvent)>,
     event: BackupProgressEvent,
 ) {
@@ -426,7 +426,7 @@ fn emit_progress(
     }
 }
 
-fn emit_stats_progress(
+pub(crate) fn emit_stats_progress(
     progress: &mut Option<&mut dyn FnMut(BackupProgressEvent)>,
     stats: &SnapshotStats,
     current_file: Option<String>,
@@ -478,6 +478,12 @@ fn build_transform_pool(max_threads: usize) -> Result<Option<rayon::ThreadPool>>
         .build()
         .map(Some)
         .map_err(|e| VgerError::Other(format!("failed to create rayon thread pool: {e}")))
+}
+
+fn compute_large_file_threshold(pipeline_buffer_bytes: usize, num_workers: usize) -> u64 {
+    // Avoid potential overflow in `num_workers * 2` for pathological configs.
+    let denom = num_workers.max(1).saturating_mul(2);
+    (pipeline_buffer_bytes / denom.max(1)) as u64
 }
 
 /// Default timeout for command_dump execution (1 hour).
@@ -1126,336 +1132,6 @@ fn process_source_path(
     Ok(())
 }
 
-/// Consumer side of the pipeline: processes messages from the I/O producer thread.
-/// Handles dedup checks, compress+encrypt, packing, and item stream building.
-///
-/// Files are received as a streaming protocol: `FileStart` → N × `FileChunk` → `FileEnd`.
-/// Each `FileChunk` carries one chunk's data which is moved (not cloned) into transform jobs.
-/// The `byte_budget` is released after each chunk is consumed, providing backpressure.
-#[allow(clippy::too_many_arguments)]
-fn run_pipeline_backup(
-    rx: &crossbeam_channel::Receiver<super::pipeline::FileMessage>,
-    repo: &mut Repository,
-    compression: Compression,
-    transform_pool: Option<&rayon::ThreadPool>,
-    items_config: &ChunkerConfig,
-    item_stream: &mut Vec<u8>,
-    item_ptrs: &mut Vec<ChunkId>,
-    stats: &mut SnapshotStats,
-    new_file_cache: &mut FileCache,
-    progress: &mut Option<&mut dyn FnMut(BackupProgressEvent)>,
-    max_pending_transform_bytes: usize,
-    max_pending_file_actions: usize,
-    byte_budget: &super::pipeline::ByteBudget,
-) -> Result<()> {
-    use super::pipeline::FileMessage;
-
-    // Per-file streaming state, initialized on FileStart, consumed on FileEnd.
-    struct StreamingFile {
-        item: Item,
-        metadata_summary: fs::MetadataSummary,
-        abs_path: String,
-        raw_chunks: Vec<Vec<u8>>,
-        pending_bytes: usize,
-    }
-
-    let chunk_id_key = *repo.crypto.chunk_id_key();
-    let mut current_file: Option<StreamingFile> = None;
-    let mut cross_batch = CrossFileBatch::new();
-
-    for msg in rx.iter() {
-        match msg {
-            FileMessage::WholeFile {
-                item,
-                data,
-                metadata_summary,
-                abs_path,
-            } => {
-                // Release byte budget for this file's data.
-                byte_budget.release(data.len());
-
-                // Accumulate into cross-file batch.
-                cross_batch.add_file(item, data, metadata_summary, abs_path);
-
-                if cross_batch.should_flush() {
-                    flush_cross_file_batch(
-                        &mut cross_batch,
-                        repo,
-                        compression,
-                        &chunk_id_key,
-                        transform_pool,
-                        items_config,
-                        item_stream,
-                        item_ptrs,
-                        stats,
-                        new_file_cache,
-                        progress,
-                    )?;
-                }
-            }
-
-            FileMessage::CacheHit {
-                mut item,
-                cached_refs,
-                metadata_summary,
-                abs_path,
-            } => {
-                // Flush cross-file batch to preserve walk order.
-                flush_cross_file_batch(
-                    &mut cross_batch,
-                    repo,
-                    compression,
-                    &chunk_id_key,
-                    transform_pool,
-                    items_config,
-                    item_stream,
-                    item_ptrs,
-                    stats,
-                    new_file_cache,
-                    progress,
-                )?;
-
-                emit_progress(
-                    progress,
-                    BackupProgressEvent::FileStarted {
-                        path: item.path.clone(),
-                    },
-                );
-
-                // Cache entries were pre-sanitized against the index before backup.
-                let mut file_original: u64 = 0;
-                let mut file_compressed: u64 = 0;
-                for cr in &cached_refs {
-                    repo.increment_chunk_ref(&cr.id);
-                    file_original += cr.size as u64;
-                    file_compressed += cr.csize as u64;
-                }
-                stats.nfiles += 1;
-                stats.original_size += file_original;
-                stats.compressed_size += file_compressed;
-                item.chunks = cached_refs;
-
-                new_file_cache.insert(
-                    abs_path,
-                    metadata_summary.device,
-                    metadata_summary.inode,
-                    metadata_summary.mtime_ns,
-                    metadata_summary.ctime_ns,
-                    metadata_summary.size,
-                    item.chunks.clone(),
-                );
-
-                debug!(path = %item.path, "file cache hit (pipeline)");
-                emit_stats_progress(progress, stats, Some(item.path.clone()));
-
-                append_item_to_stream(
-                    repo,
-                    item_stream,
-                    item_ptrs,
-                    &item,
-                    items_config,
-                    compression,
-                )?;
-            }
-
-            FileMessage::FileStart {
-                item,
-                metadata_summary,
-                abs_path,
-            } => {
-                // Flush cross-file batch to preserve walk order.
-                flush_cross_file_batch(
-                    &mut cross_batch,
-                    repo,
-                    compression,
-                    &chunk_id_key,
-                    transform_pool,
-                    items_config,
-                    item_stream,
-                    item_ptrs,
-                    stats,
-                    new_file_cache,
-                    progress,
-                )?;
-
-                emit_progress(
-                    progress,
-                    BackupProgressEvent::FileStarted {
-                        path: item.path.clone(),
-                    },
-                );
-
-                current_file = Some(StreamingFile {
-                    item,
-                    metadata_summary,
-                    abs_path,
-                    raw_chunks: Vec::new(),
-                    pending_bytes: 0,
-                });
-            }
-
-            FileMessage::FileChunk { data } => {
-                let sf = current_file
-                    .as_mut()
-                    .expect("FileChunk without preceding FileStart");
-
-                let data_len = data.len();
-                sf.pending_bytes = sf.pending_bytes.saturating_add(data_len);
-                sf.raw_chunks.push(data);
-
-                // Release byte budget now that we've consumed the chunk data.
-                byte_budget.release(data_len);
-
-                if sf.pending_bytes >= max_pending_transform_bytes
-                    || sf.raw_chunks.len() >= max_pending_file_actions
-                {
-                    flush_regular_file_batch(
-                        repo,
-                        compression,
-                        &chunk_id_key,
-                        transform_pool,
-                        &mut sf.raw_chunks,
-                        &mut sf.item,
-                        stats,
-                    )?;
-                    sf.pending_bytes = 0;
-                }
-            }
-
-            FileMessage::FileEnd => {
-                let mut sf = current_file
-                    .take()
-                    .expect("FileEnd without preceding FileStart");
-
-                flush_regular_file_batch(
-                    repo,
-                    compression,
-                    &chunk_id_key,
-                    transform_pool,
-                    &mut sf.raw_chunks,
-                    &mut sf.item,
-                    stats,
-                )?;
-
-                stats.nfiles += 1;
-
-                new_file_cache.insert(
-                    sf.abs_path,
-                    sf.metadata_summary.device,
-                    sf.metadata_summary.inode,
-                    sf.metadata_summary.mtime_ns,
-                    sf.metadata_summary.ctime_ns,
-                    sf.metadata_summary.size,
-                    sf.item.chunks.clone(),
-                );
-
-                emit_stats_progress(progress, stats, Some(sf.item.path.clone()));
-
-                append_item_to_stream(
-                    repo,
-                    item_stream,
-                    item_ptrs,
-                    &sf.item,
-                    items_config,
-                    compression,
-                )?;
-            }
-
-            FileMessage::NonFileItem { item } => {
-                // Flush cross-file batch to preserve walk order.
-                flush_cross_file_batch(
-                    &mut cross_batch,
-                    repo,
-                    compression,
-                    &chunk_id_key,
-                    transform_pool,
-                    items_config,
-                    item_stream,
-                    item_ptrs,
-                    stats,
-                    new_file_cache,
-                    progress,
-                )?;
-
-                append_item_to_stream(
-                    repo,
-                    item_stream,
-                    item_ptrs,
-                    &item,
-                    items_config,
-                    compression,
-                )?;
-            }
-
-            FileMessage::SourceStarted { source_path } => {
-                // Flush cross-file batch to preserve walk order.
-                flush_cross_file_batch(
-                    &mut cross_batch,
-                    repo,
-                    compression,
-                    &chunk_id_key,
-                    transform_pool,
-                    items_config,
-                    item_stream,
-                    item_ptrs,
-                    stats,
-                    new_file_cache,
-                    progress,
-                )?;
-
-                emit_progress(progress, BackupProgressEvent::SourceStarted { source_path });
-            }
-
-            FileMessage::SourceFinished { source_path } => {
-                // Flush cross-file batch to preserve walk order.
-                flush_cross_file_batch(
-                    &mut cross_batch,
-                    repo,
-                    compression,
-                    &chunk_id_key,
-                    transform_pool,
-                    items_config,
-                    item_stream,
-                    item_ptrs,
-                    stats,
-                    new_file_cache,
-                    progress,
-                )?;
-
-                emit_progress(
-                    progress,
-                    BackupProgressEvent::SourceFinished { source_path },
-                );
-            }
-
-            FileMessage::Done => {
-                // Flush any remaining cross-file batch.
-                flush_cross_file_batch(
-                    &mut cross_batch,
-                    repo,
-                    compression,
-                    &chunk_id_key,
-                    transform_pool,
-                    items_config,
-                    item_stream,
-                    item_ptrs,
-                    stats,
-                    new_file_cache,
-                    progress,
-                )?;
-
-                break;
-            }
-
-            FileMessage::Error(e) => {
-                return Err(e);
-            }
-        }
-    }
-
-    Ok(())
-}
-
 pub fn run_with_progress(
     config: &VgerConfig,
     req: BackupRequest<'_>,
@@ -1500,11 +1176,31 @@ pub fn run_with_progress(
         }
     };
     let read_limiter = ByteRateLimiter::from_mib_per_sec(config.limits.io.read_mib_per_sec);
-    let transform_pool = build_transform_pool(config.limits.cpu.max_threads)?;
     let max_pending_transform_bytes = config.limits.cpu.transform_batch_bytes();
     let max_pending_file_actions = config.limits.cpu.max_pending_actions();
     let upload_concurrency = config.limits.cpu.upload_concurrency();
     let pipeline_depth = config.limits.cpu.effective_pipeline_depth();
+
+    // Resolve effective worker count before building the rayon pool so we
+    // can right-size it in pipeline mode (avoids 2× thread oversubscription).
+    let num_workers = if config.limits.cpu.max_threads == 0 {
+        std::thread::available_parallelism()
+            .map(|n| n.get())
+            .unwrap_or(2)
+    } else {
+        config.limits.cpu.max_threads
+    };
+
+    let transform_pool = if pipeline_depth > 0 {
+        // Pipeline workers handle most parallelism. Size rayon for
+        // large-file inline flushes: half the budget.
+        // build_transform_pool returns None when threads==1,
+        // preserving max_threads=1 → sequential semantics.
+        let rayon_threads = num_workers.div_ceil(2);
+        build_transform_pool(rayon_threads)?
+    } else {
+        build_transform_pool(config.limits.cpu.max_threads)?
+    };
 
     let throttle_bps = limits::network_write_throttle_bps(&config.limits);
     let backend = storage::backend_from_config(&config.repository, throttle_bps)?;
@@ -1568,52 +1264,40 @@ pub fn run_with_progress(
         let pipeline_buffer_bytes = config.limits.cpu.pipeline_buffer_bytes();
 
         if pipeline_depth > 0 && !source_paths.is_empty() {
-            // Pipeline mode: overlap I/O (producer) with CPU work (consumer).
-            // Extract file_cache before the scope so we can lend it immutably
-            // to the producer while the consumer mutates repo.
+            // Parallel pipeline: walk → parallel_map (read+chunk+hash+compress+encrypt)
+            // → readahead → sequential consumer (dedup + pack commit).
             let file_cache_snapshot = repo.take_file_cache();
-            let chunker_config = repo.config.chunker_params.clone();
-            let byte_budget =
-                std::sync::Arc::new(super::pipeline::ByteBudget::new(pipeline_buffer_bytes));
+            let crypto = std::sync::Arc::clone(&repo.crypto);
+            let large_file_threshold =
+                compute_large_file_threshold(pipeline_buffer_bytes, num_workers);
 
-            let pipeline_result: Result<()> = std::thread::scope(|s| {
-                let (tx, rx) = crossbeam_channel::bounded(pipeline_depth);
-                let producer_budget = std::sync::Arc::clone(&byte_budget);
-
-                s.spawn(move || {
-                    super::pipeline::run_producer(
-                        &tx,
-                        source_paths,
-                        multi_path,
-                        exclude_patterns,
-                        exclude_if_present,
-                        one_file_system,
-                        git_ignore,
-                        xattrs_enabled,
-                        &chunker_config,
-                        &file_cache_snapshot,
-                        read_limiter.as_deref(),
-                        &producer_budget,
-                    );
-                });
-
-                run_pipeline_backup(
-                    &rx,
-                    repo,
-                    compression,
-                    transform_pool.as_ref(),
-                    &items_config,
-                    &mut item_stream,
-                    &mut item_ptrs,
-                    &mut stats,
-                    &mut new_file_cache,
-                    &mut progress,
-                    max_pending_transform_bytes,
-                    max_pending_file_actions,
-                    &byte_budget,
-                )
-            });
-            pipeline_result?;
+            super::pipeline::run_parallel_pipeline(
+                repo,
+                source_paths,
+                multi_path,
+                exclude_patterns,
+                exclude_if_present,
+                one_file_system,
+                git_ignore,
+                xattrs_enabled,
+                &file_cache_snapshot,
+                &crypto,
+                compression,
+                read_limiter.as_deref(),
+                num_workers,
+                pipeline_depth,
+                large_file_threshold,
+                &items_config,
+                &mut item_stream,
+                &mut item_ptrs,
+                &mut stats,
+                &mut new_file_cache,
+                &mut progress,
+                transform_pool.as_ref(),
+                max_pending_transform_bytes,
+                max_pending_file_actions,
+                pipeline_buffer_bytes,
+            )?;
         } else {
             // Sequential fallback (pipeline_depth == 0 or no source paths).
             for source_path in source_paths {
@@ -1775,5 +1459,29 @@ mod tests {
         };
         let result = execute_dump_command(&dump).unwrap();
         assert!(result.is_empty());
+    }
+
+    #[test]
+    fn compute_large_file_threshold_scales_with_workers() {
+        let pipeline_buffer_bytes = 32 * 1024 * 1024;
+        assert_eq!(
+            compute_large_file_threshold(pipeline_buffer_bytes, 1),
+            16 * 1024 * 1024
+        );
+        assert_eq!(
+            compute_large_file_threshold(pipeline_buffer_bytes, 2),
+            8 * 1024 * 1024
+        );
+        // 0 workers is treated as "at least one" defensively.
+        assert_eq!(
+            compute_large_file_threshold(pipeline_buffer_bytes, 0),
+            16 * 1024 * 1024
+        );
+    }
+
+    #[test]
+    fn compute_large_file_threshold_handles_overflowing_worker_math() {
+        // Pathological config should not overflow/panic.
+        assert_eq!(compute_large_file_threshold(1024, usize::MAX), 0);
     }
 }

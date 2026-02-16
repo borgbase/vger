@@ -4794,6 +4794,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "pariter"
+version = "0.6.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "4a4548b881022fd7440d48482a4e0a9f2fcdcb43a11be596a297256a1fa8199f"
+dependencies = [
+ "crossbeam-channel",
+]
+
+[[package]]
 name = "parking"
 version = "2.2.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -7390,7 +7399,6 @@ dependencies = [
  "bytes",
  "chacha20poly1305",
  "chrono",
- "crossbeam-channel",
  "dav-server",
  "dirs",
  "fastcdc",
@@ -7405,6 +7413,7 @@ dependencies = [
  "lz4_flex",
  "nix 0.29.0",
  "opendal",
+ "pariter",
  "rand 0.8.5",
  "rayon",
  "rmp-serde",
