@@ -18,6 +18,7 @@ use crate::compress;
 use crate::config::{ChunkerConfig, RepositoryConfig};
 use crate::crypto::chunk_id::ChunkId;
 use crate::crypto::key::{EncryptedKey, MasterKey};
+use crate::crypto::pack_id::PackId;
 use crate::crypto::{self, CryptoEngine, PlaintextEngine};
 use crate::error::{Result, VgerError};
 use crate::index::dedup_cache::{self, TieredDedupIndex};
@@ -838,28 +839,39 @@ impl Repository {
     /// Read and decrypt a chunk from the repository.
     /// Results are cached in a weight-bounded blob cache for faster repeated access.
     pub fn read_chunk(&mut self, chunk_id: &ChunkId) -> Result<Vec<u8>> {
-        // Check cache first
-        if let Some(cached) = self.blob_cache.get(chunk_id) {
-            return Ok(cached.to_vec());
-        }
-
-        let entry = self
+        let entry = *self
             .chunk_index
             .get(chunk_id)
             .ok_or_else(|| VgerError::Other(format!("chunk not found: {chunk_id}")))?;
 
-        let blob_data = read_blob_from_pack(
-            self.storage.as_ref(),
+        self.read_chunk_at(
+            chunk_id,
             &entry.pack_id,
             entry.pack_offset,
             entry.stored_size,
-        )?;
+        )
+    }
 
+    /// Read and decrypt a chunk given explicit pack location coordinates.
+    /// Bypasses the chunk index — the caller supplies (pack_id, offset, stored_size)
+    /// e.g. from the mmap restore cache.
+    pub fn read_chunk_at(
+        &mut self,
+        chunk_id: &ChunkId,
+        pack_id: &PackId,
+        pack_offset: u64,
+        stored_size: u32,
+    ) -> Result<Vec<u8>> {
+        if let Some(cached) = self.blob_cache.get(chunk_id) {
+            return Ok(cached.to_vec());
+        }
+
+        let blob_data =
+            read_blob_from_pack(self.storage.as_ref(), pack_id, pack_offset, stored_size)?;
         let compressed =
             unpack_object_expect(&blob_data, ObjectType::ChunkData, self.crypto.as_ref())?;
         let plaintext = compress::decompress(&compressed)?;
 
-        // Cache the result
         self.blob_cache.insert(*chunk_id, plaintext.clone());
         Ok(plaintext)
     }

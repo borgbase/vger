@@ -1,6 +1,8 @@
 use serde::Deserialize;
 
 use crate::config::VgerConfig;
+use crate::crypto::chunk_id::ChunkId;
+use crate::crypto::pack_id::PackId;
 use crate::error::{Result, VgerError};
 use crate::repo::format::{unpack_object_expect, ObjectType};
 use crate::repo::manifest::SnapshotEntry;
@@ -71,6 +73,40 @@ pub fn load_snapshot_item_stream(repo: &mut Repository, snapshot_name: &str) -> 
     }
 
     Ok(items_stream)
+}
+
+/// Load item stream using a lookup closure instead of the chunk index.
+/// Returns ChunkNotInIndex if any tree-pack chunk is missing from the lookup.
+pub fn load_snapshot_item_stream_via_lookup<L>(
+    repo: &mut Repository,
+    snapshot_name: &str,
+    lookup: L,
+) -> Result<Vec<u8>>
+where
+    L: Fn(&ChunkId) -> Option<(PackId, u64, u32)>,
+{
+    let snapshot_meta = load_snapshot_meta(repo, snapshot_name)?;
+    let mut items_stream = Vec::new();
+    for chunk_id in &snapshot_meta.item_ptrs {
+        let (pack_id, pack_offset, stored_size) =
+            lookup(chunk_id).ok_or(VgerError::ChunkNotInIndex(*chunk_id))?;
+        let chunk_data = repo.read_chunk_at(chunk_id, &pack_id, pack_offset, stored_size)?;
+        items_stream.extend_from_slice(&chunk_data);
+    }
+    Ok(items_stream)
+}
+
+/// Load and deserialize all items using a lookup closure.
+pub fn load_snapshot_items_via_lookup<L>(
+    repo: &mut Repository,
+    snapshot_name: &str,
+    lookup: L,
+) -> Result<Vec<Item>>
+where
+    L: Fn(&ChunkId) -> Option<(PackId, u64, u32)>,
+{
+    let items_stream = load_snapshot_item_stream_via_lookup(repo, snapshot_name, lookup)?;
+    decode_items_stream(&items_stream)
 }
 
 /// Decode item stream bytes and call `visit` for each item in stream order.

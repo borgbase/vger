@@ -130,6 +130,27 @@ fn read_missing_chunk_fails() {
     assert!(result.is_err());
 }
 
+#[test]
+fn read_chunk_at_roundtrip() {
+    let mut repo = test_repo_plaintext();
+    let data = b"chunk data for read_chunk_at test";
+    let (chunk_id, _stored_size, _) = repo
+        .store_chunk(data, Compression::None, PackType::Data)
+        .unwrap();
+    repo.flush_packs().unwrap();
+
+    let entry = *repo.chunk_index().get(&chunk_id).unwrap();
+    let read_back = repo
+        .read_chunk_at(
+            &chunk_id,
+            &entry.pack_id,
+            entry.pack_offset,
+            entry.stored_size,
+        )
+        .unwrap();
+    assert_eq!(read_back, data);
+}
+
 // ---------------------------------------------------------------------------
 // Dirty tracking tests
 // ---------------------------------------------------------------------------

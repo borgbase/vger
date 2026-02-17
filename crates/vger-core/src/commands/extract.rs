@@ -180,9 +180,24 @@ where
         info!("Resolved '{}' to snapshot {}", snapshot_name, resolved_name);
     }
 
-    // Load snapshot items — requires the chunk index for tree-pack chunks.
-    repo.load_chunk_index()?;
-    let items = super::list::load_snapshot_items(&mut repo, &resolved_name)?;
+    // Load snapshot items.  When the restore cache is available, read tree-pack
+    // chunks via the cache to avoid loading the full chunk index.
+    let items = if let Some(ref cache) = restore_cache {
+        match super::list::load_snapshot_items_via_lookup(&mut repo, &resolved_name, |id| {
+            cache.lookup(id)
+        }) {
+            Ok(items) => items,
+            Err(VgerError::ChunkNotInIndex(_)) => {
+                info!("restore cache missing tree-pack chunk, falling back to full index");
+                repo.load_chunk_index()?;
+                super::list::load_snapshot_items(&mut repo, &resolved_name)?
+            }
+            Err(e) => return Err(e),
+        }
+    } else {
+        repo.load_chunk_index()?;
+        super::list::load_snapshot_items(&mut repo, &resolved_name)?
+    };
 
     let dest_path = Path::new(dest);
     std::fs::create_dir_all(dest_path)?;

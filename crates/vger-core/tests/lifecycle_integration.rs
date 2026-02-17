@@ -450,3 +450,135 @@ fn backup_fails_when_repository_lock_is_held_by_another_process() {
     let repo = open_local_repo(&repo_dir, None);
     assert!(repo.manifest().find_snapshot("snap-after-lock").is_some());
 }
+
+// ---------------------------------------------------------------------------
+// Index-free extract via restore cache
+// ---------------------------------------------------------------------------
+
+#[test]
+fn extract_loads_items_via_restore_cache_without_index() {
+    let tmp = tempfile::tempdir().unwrap();
+    let repo_dir = tmp.path().join("repo");
+    let source_dir = tmp.path().join("source");
+    std::fs::create_dir_all(&repo_dir).unwrap();
+    std::fs::create_dir_all(&source_dir).unwrap();
+
+    let config = make_test_config(&repo_dir);
+    commands::init::run(&config, None).unwrap();
+    std::fs::write(source_dir.join("file.txt"), b"hello").unwrap();
+    backup_source(&config, &source_dir, "src", "snap1", None);
+
+    // Open repo WITHOUT loading the chunk index
+    let storage = Box::new(LocalBackend::new(repo_dir.to_str().unwrap()).unwrap());
+    let mut repo = Repository::open_without_index(storage, None).unwrap();
+
+    // Restore cache should exist (built by save_state during backup)
+    let cache = repo
+        .open_restore_cache()
+        .expect("restore cache should exist after backup");
+
+    // Load items via cache — should succeed without loading full index
+    let items =
+        commands::list::load_snapshot_items_via_lookup(&mut repo, "snap1", |id| cache.lookup(id))
+            .unwrap();
+
+    assert!(!items.is_empty());
+    assert!(items.iter().any(|i| i.path.contains("file.txt")));
+
+    // The chunk index must still be empty — never loaded
+    assert!(
+        repo.chunk_index().is_empty(),
+        "chunk index should not have been loaded"
+    );
+}
+
+#[test]
+fn extract_falls_back_to_index_on_cache_miss() {
+    let tmp = tempfile::tempdir().unwrap();
+    let repo_dir = tmp.path().join("repo");
+    let source_dir = tmp.path().join("source");
+    std::fs::create_dir_all(&repo_dir).unwrap();
+    std::fs::create_dir_all(&source_dir).unwrap();
+
+    let config = make_test_config(&repo_dir);
+    commands::init::run(&config, None).unwrap();
+    std::fs::write(source_dir.join("file.txt"), b"hello").unwrap();
+    backup_source(&config, &source_dir, "src", "snap1", None);
+
+    // Read repo_id and index_generation
+    let repo = open_local_repo(&repo_dir, None);
+    let repo_id = repo.config.id.clone();
+    let generation = repo.manifest().index_generation;
+    drop(repo);
+
+    // Overwrite restore cache: valid generation, but 0 entries.
+    // open_restore_cache() will succeed, but every lookup() returns None,
+    // triggering the ChunkNotInIndex fallback in extract.rs.
+    let cache_path =
+        vger_core::index::dedup_cache::restore_cache_path(&repo_id).expect("cache path");
+    let empty_index = vger_core::index::ChunkIndex::new();
+    vger_core::index::dedup_cache::build_restore_cache_to_path(
+        &empty_index,
+        generation,
+        &cache_path,
+    )
+    .unwrap();
+
+    // Run full extract — must succeed via the fallback branch
+    let restore_dir = tmp.path().join("restore");
+    let stats = commands::extract::run(
+        &config,
+        None,
+        "snap1",
+        restore_dir.to_str().unwrap(),
+        None,
+        false,
+    )
+    .unwrap();
+
+    assert_eq!(stats.files, 1);
+    assert_eq!(
+        std::fs::read_to_string(restore_dir.join("file.txt")).unwrap(),
+        "hello"
+    );
+}
+
+#[test]
+fn extract_works_without_restore_cache() {
+    let tmp = tempfile::tempdir().unwrap();
+    let repo_dir = tmp.path().join("repo");
+    let source_dir = tmp.path().join("source");
+    std::fs::create_dir_all(&repo_dir).unwrap();
+    std::fs::create_dir_all(&source_dir).unwrap();
+
+    let config = make_test_config(&repo_dir);
+    commands::init::run(&config, None).unwrap();
+    std::fs::write(source_dir.join("file.txt"), b"hello").unwrap();
+    backup_source(&config, &source_dir, "src", "snap1", None);
+
+    // Delete the restore cache file
+    let repo = open_local_repo(&repo_dir, None);
+    let repo_id = repo.config.id.clone();
+    drop(repo);
+    let cache_path =
+        vger_core::index::dedup_cache::restore_cache_path(&repo_id).expect("cache path");
+    let _ = std::fs::remove_file(&cache_path);
+
+    // Full extract should still work via the no-cache path
+    let restore_dir = tmp.path().join("restore");
+    let stats = commands::extract::run(
+        &config,
+        None,
+        "snap1",
+        restore_dir.to_str().unwrap(),
+        None,
+        false,
+    )
+    .unwrap();
+
+    assert_eq!(stats.files, 1);
+    assert_eq!(
+        std::fs::read_to_string(restore_dir.join("file.txt")).unwrap(),
+        "hello"
+    );
+}
