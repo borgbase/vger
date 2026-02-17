@@ -1,9 +1,12 @@
-use std::collections::{HashMap, VecDeque};
-use std::sync::{Arc, Condvar, Mutex};
+use std::collections::HashMap;
+use std::fs::File;
 use std::time::Instant;
 
+use memmap2::MmapMut;
 use serde::{Deserialize, Serialize};
+use tracing::warn;
 
+use crate::config::CHUNK_MAX_SIZE_HARD_CAP;
 use crate::crypto::chunk_id::ChunkId;
 use crate::crypto::pack_id::PackId;
 use crate::crypto::CryptoEngine;
@@ -36,7 +39,7 @@ pub struct PackHeaderEntry {
     pub uncompressed_size: u32,
 }
 
-/// Lightweight metadata for a blob whose data lives in `PackWriter::pack_bytes`.
+/// Lightweight metadata for a blob whose data lives in the pack buffer.
 struct BlobMeta {
     obj_type: u8,
     chunk_id: ChunkId,
@@ -53,32 +56,86 @@ pub const MAX_BLOBS_PER_PACK: usize = 10_000;
 /// from sitting in memory indefinitely during long backups.
 pub const PACK_MAX_AGE_SECS: u64 = 300;
 
-/// Skip upfront `reserve()` for unreasonably large target sizes (e.g. `usize::MAX`
-/// in tests). Must be >= `max_pack_size` (hard-capped at 512 MiB) so that
-/// pre-allocation fires for all realistic pack targets.
-const MAX_PREALLOC_SIZE: usize = 512 * 1024 * 1024;
+/// Default max blob overhead for the backup path: bounded by the chunk cap,
+/// plus encryption envelope (1-byte type tag + 12-byte nonce + 16-byte GCM tag +
+/// 1-byte compression tag = 30 bytes, rounded up to 1024 for margin), plus
+/// 4-byte length prefix.
+pub const DEFAULT_MAX_BLOB_OVERHEAD: usize = CHUNK_MAX_SIZE_HARD_CAP as usize + 1024 + 4;
+
+/// Headroom for the encrypted pack header trailer.
+/// Conservative estimate: 10K entries × ~73 bytes each + encryption envelope + 4-byte trailer.
+const HEADER_HEADROOM: usize = 1024 * 1024; // 1 MiB
 
 /// Tuple describing one chunk's location and refcount in a sealed/flushed pack.
 pub type PackedChunkEntry = (ChunkId, u32, u64, u32);
 
-/// Result of sealing a pack in-memory: (pack_id, serialized pack bytes, chunk entries).
-pub type SealedPackResult = (PackId, Vec<u8>, Vec<PackedChunkEntry>);
-
 /// Result of flushing a pack to storage: (pack_id, chunk entries).
 pub type FlushedPackResult = (PackId, Vec<PackedChunkEntry>);
 
+/// Mmap-backed buffer for data packs.
+struct MmapBuffer {
+    mmap: MmapMut,
+    _file: File, // keep fd alive (anonymous temp file)
+    write_pos: usize,
+    capacity: usize,
+}
+
+/// Buffer backing a pack writer — mmap'd temp file for data packs, heap Vec for tree packs.
+enum PackBuffer {
+    Mmap(MmapBuffer),
+    Memory(Vec<u8>),
+}
+
+/// A sealed pack ready for upload. Destructurable so callers can split ownership
+/// between the main thread (pack_id + entries) and upload thread (data).
+pub struct SealedPack {
+    pub pack_id: PackId,
+    pub entries: Vec<PackedChunkEntry>,
+    pub data: SealedData,
+}
+
+/// Sealed pack data — either mmap-backed or heap-backed.
+pub enum SealedData {
+    Mmap {
+        mmap: MmapMut,
+        _file: File,
+        len: usize,
+    },
+    Memory(Vec<u8>),
+}
+
+// Compile-time assertion: SealedData must be Send for thread::spawn upload.
+const _: () = {
+    fn _assert_send<T: Send>() {}
+    fn _check() {
+        _assert_send::<SealedData>();
+    }
+};
+
+impl SealedData {
+    pub fn as_slice(&self) -> &[u8] {
+        match self {
+            SealedData::Mmap { mmap, len, .. } => &mmap[..*len],
+            SealedData::Memory(v) => v.as_slice(),
+        }
+    }
+}
+
 /// Accumulates encrypted blobs and flushes them as pack files.
 ///
-/// Blob data is appended directly into a single contiguous `pack_bytes` buffer
-/// during `add_blob`, so `seal_into` only needs to append the header trailer —
-/// no second pack-sized buffer is required. This reduces peak memory from
-/// ~2×pack_size to ~1×pack_size.
+/// Data packs use mmap'd temporary files: the OS kernel manages which pages
+/// stay resident vs. get paged out, giving graceful degradation under memory
+/// pressure instead of fixed heap allocation.
+///
+/// Tree packs stay as `Vec<u8>` — they're capped at ~4 MiB and accessed
+/// frequently during serialization, so mmap overhead isn't worthwhile.
 pub struct PackWriter {
     pack_type: PackType,
     target_size: usize,
-    /// Contiguous buffer accumulating the pack: header + blob data.
-    pack_bytes: Vec<u8>,
-    /// Lightweight metadata per blob (no data — data lives in pack_bytes).
+    max_blob_overhead: usize,
+    /// Data packs: mmap'd temp file. Tree packs: Vec<u8>. None until first blob.
+    buffer: Option<PackBuffer>,
+    /// Lightweight metadata per blob (no data — data lives in the buffer).
     blob_meta: Vec<BlobMeta>,
     current_size: usize,
     /// chunk_id -> (stored_size, refcount) for pending (not-yet-flushed) blobs.
@@ -88,16 +145,115 @@ pub struct PackWriter {
 }
 
 impl PackWriter {
-    pub fn new(pack_type: PackType, target_size: usize) -> Self {
+    /// Create a new pack writer with explicit max_blob_overhead.
+    ///
+    /// `max_blob_overhead` controls the mmap allocation size:
+    ///   `alloc_size = target_size + max_blob_overhead + HEADER_HEADROOM`
+    ///
+    /// For backup, use `DEFAULT_MAX_BLOB_OVERHEAD`. For compact, pre-scan
+    /// existing blobs to find the maximum per-blob append size.
+    pub fn new(pack_type: PackType, target_size: usize, max_blob_overhead: usize) -> Self {
         Self {
             pack_type,
             target_size,
-            pack_bytes: Vec::new(),
+            max_blob_overhead,
+            buffer: None,
             blob_meta: Vec::new(),
             current_size: 0,
             pending: HashMap::new(),
             first_blob_time: None,
         }
+    }
+
+    /// Create a new pack writer using `DEFAULT_MAX_BLOB_OVERHEAD` (for backup).
+    pub fn new_default(pack_type: PackType, target_size: usize) -> Self {
+        Self::new(pack_type, target_size, DEFAULT_MAX_BLOB_OVERHEAD)
+    }
+
+    /// Compute the mmap allocation size for data packs.
+    fn alloc_size(&self) -> usize {
+        self.target_size
+            .saturating_add(self.max_blob_overhead)
+            .saturating_add(HEADER_HEADROOM)
+    }
+
+    /// Initialize the buffer on first blob.
+    fn init_buffer(&mut self) -> Result<()> {
+        let alloc_size = self.alloc_size();
+
+        match self.pack_type {
+            PackType::Data => {
+                // Try mmap'd temp file; fall back to Vec on failure or low disk space.
+                match self.try_create_mmap(alloc_size) {
+                    Ok(buf) => self.buffer = Some(PackBuffer::Mmap(buf)),
+                    Err(e) => {
+                        warn!("mmap pack buffer failed ({e}), falling back to Vec");
+                        let mut v = Vec::with_capacity(self.target_size.min(512 * 1024 * 1024));
+                        v.extend_from_slice(PACK_MAGIC);
+                        v.push(PACK_VERSION);
+                        self.buffer = Some(PackBuffer::Memory(v));
+                        return Ok(());
+                    }
+                }
+            }
+            PackType::Tree => {
+                let mut v = Vec::with_capacity(self.target_size.min(512 * 1024 * 1024));
+                v.extend_from_slice(PACK_MAGIC);
+                v.push(PACK_VERSION);
+                self.buffer = Some(PackBuffer::Memory(v));
+            }
+        }
+
+        // Write pack magic + version into mmap buffer if we used mmap
+        if let Some(PackBuffer::Mmap(ref mut mb)) = self.buffer {
+            mb.mmap[..8].copy_from_slice(PACK_MAGIC);
+            mb.mmap[8] = PACK_VERSION;
+            mb.write_pos = PACK_HEADER_SIZE;
+        }
+
+        Ok(())
+    }
+
+    /// Try to create an mmap'd temp file of the given size.
+    fn try_create_mmap(&self, alloc_size: usize) -> Result<MmapBuffer> {
+        // Best-effort pre-flight check: verify temp dir has enough free space.
+        // This is racy (other processes can consume space between check and use)
+        // and only checks per-pack (not cumulative across concurrent mmaps).
+        // Total temp space needed across all concurrent mmaps:
+        //   (max_in_flight_uploads + 1) × alloc_size
+        if let Some(free) = temp_dir_free_space() {
+            let required = (alloc_size as u64).saturating_mul(2);
+            if free < required {
+                return Err(VgerError::Other(format!(
+                    "temp dir has {free} bytes free, need at least {required}"
+                )));
+            }
+        }
+
+        let file = tempfile::tempfile().map_err(|e| {
+            VgerError::Other(format!("failed to create temp file for pack mmap: {e}"))
+        })?;
+        file.set_len(alloc_size as u64)
+            .map_err(|e| VgerError::Other(format!("failed to set temp file length: {e}")))?;
+
+        // SAFETY: The file is an anonymous temp file exclusively owned by this
+        // process. No other process or thread accesses it. The mmap region is
+        // valid for the lifetime of the file.
+        let mmap = unsafe { MmapMut::map_mut(&file) }
+            .map_err(|e| VgerError::Other(format!("failed to mmap temp file: {e}")))?;
+
+        // Hint to the kernel: we write sequentially.
+        #[cfg(unix)]
+        {
+            let _ = mmap.advise(memmap2::Advice::Sequential);
+        }
+
+        Ok(MmapBuffer {
+            capacity: mmap.len(),
+            mmap,
+            _file: file,
+            write_pos: 0,
+        })
     }
 
     /// Add an encrypted blob to the pack buffer. Returns the offset within the pack
@@ -108,29 +264,39 @@ impl PackWriter {
         chunk_id: ChunkId,
         encrypted_blob: Vec<u8>,
         uncompressed_size: u32,
-    ) -> u64 {
+    ) -> Result<u64> {
         let blob_len = encrypted_blob.len() as u32;
 
-        // On first blob: write pack header and pre-reserve capacity.
+        // On first blob: initialize the buffer.
         if self.blob_meta.is_empty() {
-            let prealloc = self.target_size.min(MAX_PREALLOC_SIZE);
-            if self.pack_bytes.capacity() < prealloc {
-                // len == 0 here (first blob), so reserve(prealloc) guarantees capacity >= prealloc.
-                self.pack_bytes.reserve(prealloc);
-            }
-            self.pack_bytes.extend_from_slice(PACK_MAGIC);
-            self.pack_bytes.push(PACK_VERSION);
+            self.init_buffer()?;
         }
 
         // Offset accounts for: pack header + bytes already buffered + this blob's 4B len prefix.
         let offset = PACK_HEADER_SIZE as u64 + self.current_size as u64 + 4;
 
-        // Append [4B length LE][encrypted_data] directly into pack_bytes.
-        self.pack_bytes.extend_from_slice(&blob_len.to_le_bytes());
-        self.pack_bytes.extend_from_slice(&encrypted_blob);
+        // Append [4B length LE][encrypted_data] into the buffer.
+        match self.buffer.as_mut().expect("buffer initialized above") {
+            PackBuffer::Mmap(mb) => {
+                let needed = 4 + encrypted_blob.len();
+                if mb.write_pos + needed > mb.capacity {
+                    return Err(VgerError::Other(format!(
+                        "blob would overflow mmap buffer: write_pos={}, needed={needed}, capacity={}",
+                        mb.write_pos, mb.capacity
+                    )));
+                }
+                let pos = mb.write_pos;
+                mb.mmap[pos..pos + 4].copy_from_slice(&blob_len.to_le_bytes());
+                mb.mmap[pos + 4..pos + 4 + encrypted_blob.len()].copy_from_slice(&encrypted_blob);
+                mb.write_pos += needed;
+            }
+            PackBuffer::Memory(v) => {
+                v.extend_from_slice(&blob_len.to_le_bytes());
+                v.extend_from_slice(&encrypted_blob);
+            }
+        }
 
-        self.current_size += 4 + encrypted_blob.len(); // 4B length prefix + blob data
-        debug_assert_eq!(self.pack_bytes.len(), PACK_HEADER_SIZE + self.current_size);
+        self.current_size += 4 + encrypted_blob.len();
 
         if self.first_blob_time.is_none() {
             self.first_blob_time = Some(Instant::now());
@@ -143,7 +309,7 @@ impl PackWriter {
             uncompressed_size,
         });
 
-        offset
+        Ok(offset)
     }
 
     /// Check if a chunk is pending in this writer (not yet flushed).
@@ -201,28 +367,22 @@ impl PackWriter {
         self.target_size
     }
 
-    /// Append the encrypted header trailer to the already-accumulated `pack_bytes`,
-    /// compute the PackId, and swap the finalized buffer into `out`.
+    /// Seal the pack: append encrypted header trailer, compute PackId, return
+    /// a `SealedPack` that can be destructured for upload.
     ///
-    /// Because blob data was written into `pack_bytes` during `add_blob`, no second
-    /// pack-sized allocation is needed — peak memory is ~1×pack_size instead of ~2×.
-    ///
-    /// Returns (pack_id, vec of (chunk_id, stored_size, offset, refcount)).
-    pub fn seal_into(
-        &mut self,
-        crypto: &dyn CryptoEngine,
-        out: &mut Vec<u8>,
-    ) -> Result<(PackId, Vec<PackedChunkEntry>)> {
+    /// The only fallible step is header encryption (`pack_object`). On crypto
+    /// failure the buffer is untouched (header not yet written), metadata intact,
+    /// retry safe.
+    pub fn seal(&mut self, crypto: &dyn CryptoEngine) -> Result<SealedPack> {
         if self.blob_meta.is_empty() {
             return Err(VgerError::Other("cannot seal empty pack writer".into()));
         }
 
         // Phase 1: Build header entries and results from blob_meta.
-        // Offsets are derived via running sum — same logic as before.
         let mut header_entries: Vec<PackHeaderEntry> = Vec::with_capacity(self.blob_meta.len());
         let mut running_offset = PACK_HEADER_SIZE;
         for meta in &self.blob_meta {
-            let offset = running_offset as u64 + 4; // past the 4B length prefix
+            let offset = running_offset as u64 + 4;
             running_offset += 4 + meta.stored_size as usize;
 
             header_entries.push(PackHeaderEntry {
@@ -245,38 +405,48 @@ impl PackWriter {
         }
 
         // Phase 2: Fallible work — serialize and encrypt the header.
-        // pack_bytes is untouched until Phase 3; on error the caller can retry.
+        // Buffer is untouched until Phase 3; on error the caller can retry.
         let header_bytes = rmp_serde::to_vec(&header_entries)?;
         let encrypted_header = pack_object(ObjectType::PackHeader, &header_bytes, crypto)?;
 
-        // Phase 3: All fallible ops succeeded — append header trailer to pack_bytes.
+        // Phase 3: All fallible ops succeeded — append header trailer to buffer.
         let header_len = encrypted_header.len() as u32;
-        self.pack_bytes.extend_from_slice(&encrypted_header);
-        self.pack_bytes.extend_from_slice(&header_len.to_le_bytes());
 
-        // Compute pack ID = BLAKE2b-256 of entire pack contents
-        let pack_id = PackId::compute(&self.pack_bytes);
+        let sealed_data = match self.buffer.take().expect("buffer was initialized") {
+            PackBuffer::Mmap(mut mb) => {
+                let needed = encrypted_header.len() + 4;
+                let pos = mb.write_pos;
+                mb.mmap[pos..pos + encrypted_header.len()].copy_from_slice(&encrypted_header);
+                mb.mmap[pos + encrypted_header.len()..pos + needed]
+                    .copy_from_slice(&header_len.to_le_bytes());
+                mb.write_pos += needed;
+                let len = mb.write_pos;
+                SealedData::Mmap {
+                    mmap: mb.mmap,
+                    _file: mb._file,
+                    len,
+                }
+            }
+            PackBuffer::Memory(mut v) => {
+                v.extend_from_slice(&encrypted_header);
+                v.extend_from_slice(&header_len.to_le_bytes());
+                SealedData::Memory(v)
+            }
+        };
 
-        // Swap: finalized data → out, caller's buffer (possibly recycled) → pack_bytes.
-        std::mem::swap(&mut self.pack_bytes, out);
+        let pack_id = PackId::compute(sealed_data.as_slice());
 
         // Clear writer state for reuse
-        self.pack_bytes.clear();
         self.blob_meta.clear();
         self.current_size = 0;
         self.pending.clear();
         self.first_blob_time = None;
 
-        Ok((pack_id, results))
-    }
-
-    /// Assemble buffered blobs into a pack, compute its PackId, and clear internal state.
-    /// Does NOT write to storage — the caller is responsible for uploading `pack_bytes`.
-    /// Returns (pack_id, pack_bytes, vec of (chunk_id, stored_size, offset, refcount)).
-    pub fn seal(&mut self, crypto: &dyn CryptoEngine) -> Result<SealedPackResult> {
-        let mut pack_bytes = Vec::new();
-        let (pack_id, results) = self.seal_into(crypto, &mut pack_bytes)?;
-        Ok((pack_id, pack_bytes, results))
+        Ok(SealedPack {
+            pack_id,
+            entries: results,
+            data: sealed_data,
+        })
     }
 
     /// Flush the buffered blobs into a pack file (seal + upload).
@@ -286,10 +456,37 @@ impl PackWriter {
         storage: &dyn StorageBackend,
         crypto: &dyn CryptoEngine,
     ) -> Result<FlushedPackResult> {
-        let (pack_id, pack_bytes, results) = self.seal(crypto)?;
-        storage.put(&pack_id.storage_key(), &pack_bytes)?;
-        Ok((pack_id, results))
+        let SealedPack {
+            pack_id,
+            entries,
+            data,
+        } = self.seal(crypto)?;
+        storage.put(&pack_id.storage_key(), data.as_slice())?;
+        Ok((pack_id, entries))
     }
+}
+
+/// Best-effort check: return free bytes in the temp directory, or None if
+/// the check is unsupported or fails.
+#[cfg(unix)]
+fn temp_dir_free_space() -> Option<u64> {
+    use std::ffi::CString;
+
+    let tmp = std::env::temp_dir();
+    let c_path = CString::new(tmp.as_os_str().as_encoded_bytes()).ok()?;
+    let mut stat: libc::statvfs = unsafe { std::mem::zeroed() };
+    let ret = unsafe { libc::statvfs(c_path.as_ptr(), &mut stat) };
+    if ret == 0 {
+        #[allow(clippy::unnecessary_cast)] // f_bavail/f_frsize types vary by platform
+        Some(stat.f_bavail as u64 * stat.f_frsize as u64)
+    } else {
+        None
+    }
+}
+
+#[cfg(not(unix))]
+fn temp_dir_free_space() -> Option<u64> {
+    None
 }
 
 /// Read a single blob from a pack file using a range read.
@@ -415,93 +612,6 @@ pub fn compute_tree_pack_target(min_pack_size: u32) -> usize {
     std::cmp::min(min_pack_size as usize, four_mib)
 }
 
-/// A fixed-size pool of reusable `Vec<u8>` buffers for pack seal/upload.
-///
-/// Buffers start as empty `Vec::new()` and grow lazily on first use via
-/// `seal_into()`. After that, they retain their allocation across reuses,
-/// eliminating repeated large alloc/dealloc cycles.
-///
-/// When all buffers are checked out, `checkout()` blocks — providing natural
-/// backpressure that caps pack buffer memory at `pool_size × max_pack_size`.
-pub struct PackBufferPool {
-    inner: Mutex<VecDeque<Vec<u8>>>,
-    available: Condvar,
-    /// Desired buffer capacity. Buffers that grow beyond 125% of this are
-    /// shrunk on return to reclaim memory from oversized final packs.
-    target_capacity: usize,
-}
-
-impl PackBufferPool {
-    /// Create a pool with `count` empty buffers.
-    /// `target_capacity` is the expected buffer size; buffers that grow beyond
-    /// 125% of this value are shrunk on return to reclaim memory.
-    pub fn new(count: usize, target_capacity: usize) -> Self {
-        let mut bufs = VecDeque::with_capacity(count);
-        for _ in 0..count {
-            bufs.push_back(Vec::new());
-        }
-        Self {
-            inner: Mutex::new(bufs),
-            available: Condvar::new(),
-            target_capacity,
-        }
-    }
-
-    /// Check out a buffer from the pool. Blocks if all buffers are in use.
-    pub fn checkout(self: &Arc<Self>) -> PooledBuffer {
-        let mut guard = self.inner.lock().unwrap();
-        loop {
-            if let Some(mut buf) = guard.pop_front() {
-                buf.clear();
-                return PooledBuffer {
-                    buf: Some(buf),
-                    pool: Arc::clone(self),
-                };
-            }
-            guard = self.available.wait(guard).unwrap();
-        }
-    }
-
-    /// Return a buffer to the pool. Private — only called by `PooledBuffer::drop`.
-    fn checkin(&self, mut buf: Vec<u8>) {
-        // Reclaim memory from buffers that grew beyond target (e.g. large final blob).
-        if buf.capacity() > self.target_capacity + self.target_capacity / 4 {
-            buf.shrink_to(self.target_capacity);
-        }
-        let mut guard = self.inner.lock().unwrap();
-        guard.push_back(buf);
-        self.available.notify_one();
-    }
-}
-
-/// RAII guard that returns a buffer to its `PackBufferPool` on drop.
-///
-/// Guarantees buffer return on both success and error paths — if the upload
-/// thread panics or `storage.put()` returns `Err`, the buffer is still
-/// returned to the pool, preventing deadlock from buffer leak.
-pub struct PooledBuffer {
-    buf: Option<Vec<u8>>,
-    pool: Arc<PackBufferPool>,
-}
-
-impl PooledBuffer {
-    pub fn as_slice(&self) -> &[u8] {
-        self.buf.as_ref().expect("buffer already taken")
-    }
-
-    pub fn as_mut_vec(&mut self) -> &mut Vec<u8> {
-        self.buf.as_mut().expect("buffer already taken")
-    }
-}
-
-impl Drop for PooledBuffer {
-    fn drop(&mut self) {
-        if let Some(buf) = self.buf.take() {
-            self.pool.checkin(buf);
-        }
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -512,123 +622,35 @@ mod tests {
 
     #[test]
     fn should_flush_on_size() {
-        let mut w = PackWriter::new(PackType::Data, 100);
+        let mut w = PackWriter::new_default(PackType::Data, 100);
         assert!(!w.should_flush());
-        w.add_blob(1, dummy_chunk_id(0), vec![0u8; 120], 120);
+        w.add_blob(1, dummy_chunk_id(0), vec![0u8; 120], 120)
+            .unwrap();
         assert!(w.should_flush());
     }
 
     #[test]
     fn should_flush_on_blob_count() {
         // Use a very large target size so size-based flush never triggers
-        let mut w = PackWriter::new(PackType::Data, usize::MAX);
+        let mut w = PackWriter::new_default(PackType::Data, usize::MAX);
         for i in 0..MAX_BLOBS_PER_PACK {
             assert!(!w.should_flush(), "should not flush at {i} blobs");
             let mut id_bytes = [0u8; 32];
             id_bytes[0..4].copy_from_slice(&(i as u32).to_le_bytes());
-            w.add_blob(1, ChunkId(id_bytes), vec![1], 1);
+            w.add_blob(1, ChunkId(id_bytes), vec![1], 1).unwrap();
         }
         assert!(w.should_flush());
     }
 
     #[test]
     fn seal_resets_first_blob_time() {
-        let mut w = PackWriter::new(PackType::Data, usize::MAX);
-        w.add_blob(1, dummy_chunk_id(0), vec![0u8; 10], 10);
+        let mut w = PackWriter::new_default(PackType::Data, usize::MAX);
+        w.add_blob(1, dummy_chunk_id(0), vec![0u8; 10], 10).unwrap();
         assert!(w.first_blob_time.is_some());
 
         let engine = crate::crypto::PlaintextEngine::new(&[0u8; 32]);
         let _ = w.seal(&engine).unwrap();
         assert!(w.first_blob_time.is_none());
-    }
-
-    #[test]
-    fn seal_into_matches_seal() {
-        let engine = crate::crypto::PlaintextEngine::new(&[0u8; 32]);
-
-        // Build two identical writers
-        let blobs: Vec<(u8, ChunkId, Vec<u8>, u32)> = vec![
-            (1, dummy_chunk_id(1), vec![10u8; 50], 50),
-            (1, dummy_chunk_id(2), vec![20u8; 80], 80),
-            (1, dummy_chunk_id(3), vec![30u8; 30], 30),
-        ];
-
-        let mut w1 = PackWriter::new(PackType::Data, usize::MAX);
-        let mut w2 = PackWriter::new(PackType::Data, usize::MAX);
-        for (obj_type, chunk_id, data, uncompressed) in &blobs {
-            w1.add_blob(*obj_type, *chunk_id, data.clone(), *uncompressed);
-            w2.add_blob(*obj_type, *chunk_id, data.clone(), *uncompressed);
-        }
-
-        let (id1, bytes1, entries1) = w1.seal(&engine).unwrap();
-        let mut out = Vec::new();
-        let (id2, entries2) = w2.seal_into(&engine, &mut out).unwrap();
-
-        assert_eq!(id1, id2);
-        assert_eq!(bytes1, out);
-        assert_eq!(entries1, entries2);
-    }
-
-    #[test]
-    fn pool_checkout_and_return() {
-        let pool = Arc::new(PackBufferPool::new(2, 128 * 1024));
-
-        // Can check out up to pool size
-        let buf1 = pool.checkout();
-        let buf2 = pool.checkout();
-
-        assert!(buf1.as_slice().is_empty());
-        assert!(buf2.as_slice().is_empty());
-
-        // Drop returns buffers to pool
-        drop(buf1);
-        drop(buf2);
-
-        // Can check out again after return
-        let _buf3 = pool.checkout();
-        let _buf4 = pool.checkout();
-    }
-
-    #[test]
-    fn pool_blocks_when_exhausted() {
-        let pool = Arc::new(PackBufferPool::new(1, 128 * 1024));
-        let _buf1 = pool.checkout();
-
-        // Spawn a thread that tries to checkout — it should block
-        let pool2 = Arc::clone(&pool);
-        let handle = std::thread::spawn(move || {
-            let buf = pool2.checkout();
-            buf.as_slice().len()
-        });
-
-        // Give the thread time to block
-        std::thread::sleep(std::time::Duration::from_millis(50));
-        assert!(!handle.is_finished(), "thread should be blocked waiting");
-
-        // Return our buffer — unblocks the thread
-        drop(_buf1);
-        let result = handle.join().unwrap();
-        assert_eq!(result, 0);
-    }
-
-    #[test]
-    fn pool_retains_buffer_capacity() {
-        let pool = Arc::new(PackBufferPool::new(1, 128 * 1024));
-
-        // Check out, grow the buffer, return it
-        {
-            let mut buf = pool.checkout();
-            let v = buf.as_mut_vec();
-            v.extend_from_slice(&[0u8; 1024]);
-            assert!(v.capacity() >= 1024);
-        }
-
-        // Check out again — buffer should be cleared but retain capacity
-        let buf = pool.checkout();
-        assert_eq!(buf.as_slice().len(), 0);
-        // The underlying Vec should have retained its allocation
-        // (We can't directly inspect capacity through as_slice, but
-        //  the important thing is it's cleared and reusable)
     }
 
     /// Golden-byte regression test using PlaintextEngine (deterministic — no nonces).
@@ -677,13 +699,19 @@ mod tests {
 
         let engine = crate::crypto::PlaintextEngine::new(&[0u8; 32]);
 
-        let mut w = PackWriter::new(PackType::Data, usize::MAX);
-        w.add_blob(1, dummy_chunk_id(0xAA), vec![0xDE, 0xAD], 2);
-        w.add_blob(1, dummy_chunk_id(0xBB), vec![0xBE, 0xEF, 0x42], 3);
+        let mut w = PackWriter::new_default(PackType::Data, usize::MAX);
+        w.add_blob(1, dummy_chunk_id(0xAA), vec![0xDE, 0xAD], 2)
+            .unwrap();
+        w.add_blob(1, dummy_chunk_id(0xBB), vec![0xBE, 0xEF, 0x42], 3)
+            .unwrap();
 
-        let (_pack_id, pack_bytes, _entries) = w.seal(&engine).unwrap();
+        let sealed = w.seal(&engine).unwrap();
 
-        assert_eq!(pack_bytes, EXPECTED, "pack wire format regression");
+        assert_eq!(
+            sealed.data.as_slice(),
+            EXPECTED,
+            "pack wire format regression"
+        );
     }
 
     /// Roundtrip: seal a pack, then parse it back via read_pack_header + scan_pack_blobs.
@@ -700,18 +728,21 @@ mod tests {
             (1, dummy_chunk_id(3), vec![30u8; 30], 30),
         ];
 
-        let mut w = PackWriter::new(PackType::Data, usize::MAX);
+        let mut w = PackWriter::new_default(PackType::Data, usize::MAX);
         for (obj_type, chunk_id, data, uncompressed) in &blobs {
-            w.add_blob(*obj_type, *chunk_id, data.clone(), *uncompressed);
+            w.add_blob(*obj_type, *chunk_id, data.clone(), *uncompressed)
+                .unwrap();
         }
 
-        let (pack_id, pack_bytes, entries) = w.seal(&engine).unwrap();
+        let sealed = w.seal(&engine).unwrap();
 
         // Store the pack so read_pack_header / scan_pack_blobs can access it.
-        storage.put(&pack_id.storage_key(), &pack_bytes).unwrap();
+        storage
+            .put(&sealed.pack_id.storage_key(), sealed.data.as_slice())
+            .unwrap();
 
         // Verify read_pack_header returns matching entries.
-        let header = read_pack_header(&storage, &pack_id, &engine).unwrap();
+        let header = read_pack_header(&storage, &sealed.pack_id, &engine).unwrap();
         assert_eq!(header.len(), blobs.len());
         for (i, he) in header.iter().enumerate() {
             assert_eq!(he.chunk_id, blobs[i].1, "chunk_id mismatch at {i}");
@@ -720,12 +751,12 @@ mod tests {
                 he.uncompressed_size, blobs[i].3,
                 "uncompressed mismatch at {i}"
             );
-            // Verify offset matches what seal_into returned.
-            assert_eq!(he.offset, entries[i].2, "offset mismatch at {i}");
+            // Verify offset matches what seal returned.
+            assert_eq!(he.offset, sealed.entries[i].2, "offset mismatch at {i}");
         }
 
         // Verify scan_pack_blobs returns matching (offset, length) pairs.
-        let scanned = scan_pack_blobs(&storage, &pack_id).unwrap();
+        let scanned = scan_pack_blobs(&storage, &sealed.pack_id).unwrap();
         assert_eq!(scanned.len(), blobs.len());
         for (i, (offset, length)) in scanned.iter().enumerate() {
             assert_eq!(*offset, header[i].offset, "scan offset mismatch at {i}");
@@ -733,12 +764,12 @@ mod tests {
         }
     }
 
-    /// After seal_into fails (crypto error), writer state is intact and retry succeeds.
+    /// After seal fails (crypto error), writer state is intact and retry succeeds.
     #[test]
-    fn seal_into_failure_preserves_state() {
+    fn seal_failure_preserves_state() {
         use crate::crypto::CryptoEngine;
 
-        /// A CryptoEngine that fails on encrypt (used to trigger seal_into error).
+        /// A CryptoEngine that fails on encrypt (used to trigger seal error).
         struct FailingEngine;
 
         impl CryptoEngine for FailingEngine {
@@ -763,113 +794,59 @@ mod tests {
             }
         }
 
-        let mut w = PackWriter::new(PackType::Data, usize::MAX);
-        w.add_blob(1, dummy_chunk_id(1), vec![0xAA; 100], 100);
-        w.add_blob(1, dummy_chunk_id(2), vec![0xBB; 200], 200);
+        let mut w = PackWriter::new_default(PackType::Data, usize::MAX);
+        w.add_blob(1, dummy_chunk_id(1), vec![0xAA; 100], 100)
+            .unwrap();
+        w.add_blob(1, dummy_chunk_id(2), vec![0xBB; 200], 200)
+            .unwrap();
 
-        let pack_bytes_len_before = w.pack_bytes.len();
         let blob_meta_len_before = w.blob_meta.len();
 
         // Attempt seal with failing engine — should error.
-        let mut out = Vec::new();
-        let result = w.seal_into(&FailingEngine, &mut out);
+        let result = w.seal(&FailingEngine);
         assert!(result.is_err());
 
         // Writer state must be intact after failure.
-        assert_eq!(w.pack_bytes.len(), pack_bytes_len_before);
         assert_eq!(w.blob_meta.len(), blob_meta_len_before);
         assert!(w.has_pending());
+        assert!(w.buffer.is_some());
 
         // Retry with working engine — should succeed.
         let good_engine = crate::crypto::PlaintextEngine::new(&[0u8; 32]);
-        let mut out2 = Vec::new();
-        let (pack_id, entries) = w.seal_into(&good_engine, &mut out2).unwrap();
+        let sealed = w.seal(&good_engine).unwrap();
 
-        assert_eq!(entries.len(), 2);
-        assert!(!pack_id.0.iter().all(|&b| b == 0));
+        assert_eq!(sealed.entries.len(), 2);
+        assert!(!sealed.pack_id.0.iter().all(|&b| b == 0));
         // Writer should be clear now.
         assert!(!w.has_pending());
-        assert_eq!(w.pack_bytes.len(), 0);
+        assert!(w.buffer.is_none());
     }
 
+    /// Data packs use mmap, tree packs use Vec.
     #[test]
-    fn prealloc_fires_for_fresh_buffer() {
-        let mut w = PackWriter::new(PackType::Data, 64 * 1024);
-        w.add_blob(1, dummy_chunk_id(0), vec![0u8; 10], 10);
+    fn data_packs_use_mmap_tree_packs_use_vec() {
+        let mut data_w = PackWriter::new_default(PackType::Data, 1024);
+        data_w
+            .add_blob(1, dummy_chunk_id(0), vec![0u8; 10], 10)
+            .unwrap();
         assert!(
-            w.pack_bytes.capacity() >= 64 * 1024,
-            "expected capacity >= 64K, got {}",
-            w.pack_bytes.capacity()
+            matches!(data_w.buffer, Some(PackBuffer::Mmap(_))),
+            "data pack should use mmap buffer"
+        );
+
+        let mut tree_w = PackWriter::new_default(PackType::Tree, 1024);
+        tree_w
+            .add_blob(1, dummy_chunk_id(0), vec![0u8; 10], 10)
+            .unwrap();
+        assert!(
+            matches!(tree_w.buffer, Some(PackBuffer::Memory(_))),
+            "tree pack should use Vec buffer"
         );
     }
 
+    /// Validates `current_size` tracks correctly across add → fail → add → seal.
     #[test]
-    fn prealloc_fires_for_undersized_recycled_buffer() {
-        let target = 128 * 1024;
-        let mut w = PackWriter::new(PackType::Data, target);
-        let engine = crate::crypto::PlaintextEngine::new(&[0u8; 32]);
-
-        // First pack: add a small blob and seal into a small out Vec.
-        w.add_blob(1, dummy_chunk_id(0), vec![0u8; 10], 10);
-        let mut out = Vec::new();
-        let _ = w.seal_into(&engine, &mut out).unwrap();
-
-        // After seal_into, w.pack_bytes got swapped with `out` (which was small).
-        // Its capacity is much less than target_size.
-        assert!(
-            w.pack_bytes.capacity() < target,
-            "recycled buffer should be undersized"
-        );
-
-        // Second pack: add a blob — prealloc should fire for the undersized recycled buffer.
-        w.add_blob(1, dummy_chunk_id(1), vec![0u8; 10], 10);
-        assert!(
-            w.pack_bytes.capacity() >= target,
-            "expected capacity >= {target} after recycled prealloc, got {}",
-            w.pack_bytes.capacity()
-        );
-    }
-
-    #[test]
-    fn prealloc_skipped_for_oversized_target() {
-        let mut w = PackWriter::new(PackType::Data, usize::MAX);
-        // Should not panic or OOM — the MAX_PREALLOC_SIZE guard prevents reserve(usize::MAX).
-        w.add_blob(1, dummy_chunk_id(0), vec![0u8; 10], 10);
-        assert!(!w.pack_bytes.is_empty());
-    }
-
-    #[test]
-    fn small_backup_on_large_target() {
-        let target = 256 * 1024;
-        let mut w = PackWriter::new(PackType::Data, target);
-
-        // Add a single small blob (1 KiB).
-        w.add_blob(1, dummy_chunk_id(0), vec![0xAB; 1024], 1024);
-
-        // Pre-alloc should have fired: capacity >= target.
-        assert!(
-            w.pack_bytes.capacity() >= target,
-            "expected capacity >= {target}, got {}",
-            w.pack_bytes.capacity()
-        );
-
-        // Seal and verify the output is small (just header + 1 blob + trailer).
-        let engine = crate::crypto::PlaintextEngine::new(&[0u8; 32]);
-        let (_, pack_bytes, entries) = w.seal(&engine).unwrap();
-        assert_eq!(entries.len(), 1);
-        // Output should be small: header(9) + len(4) + blob(1024) + trailer < 2 KiB
-        assert!(
-            pack_bytes.len() < 2048,
-            "sealed output unexpectedly large: {}",
-            pack_bytes.len()
-        );
-    }
-
-    /// Validates `pack_bytes.len() == PACK_HEADER_SIZE + current_size` across
-    /// add → fail → add → seal, covering the invariant in all build modes
-    /// (the `debug_assert_eq!` in `add_blob` is stripped in release).
-    #[test]
-    fn pack_bytes_len_invariant() {
+    fn current_size_invariant() {
         use crate::crypto::CryptoEngine;
 
         struct FailingEngine;
@@ -895,30 +872,71 @@ mod tests {
             }
         }
 
-        let mut w = PackWriter::new(PackType::Data, usize::MAX);
+        let mut w = PackWriter::new_default(PackType::Tree, usize::MAX);
 
-        // Add blobs, check invariant after each.
-        w.add_blob(1, dummy_chunk_id(1), vec![0xAA; 100], 100);
-        assert_eq!(w.pack_bytes.len(), PACK_HEADER_SIZE + w.current_size);
+        // Add blobs, check invariant after each (Vec path).
+        w.add_blob(1, dummy_chunk_id(1), vec![0xAA; 100], 100)
+            .unwrap();
+        if let Some(PackBuffer::Memory(ref v)) = w.buffer {
+            assert_eq!(v.len(), PACK_HEADER_SIZE + w.current_size);
+        }
 
-        w.add_blob(1, dummy_chunk_id(2), vec![0xBB; 50], 50);
-        assert_eq!(w.pack_bytes.len(), PACK_HEADER_SIZE + w.current_size);
+        w.add_blob(1, dummy_chunk_id(2), vec![0xBB; 50], 50)
+            .unwrap();
+        if let Some(PackBuffer::Memory(ref v)) = w.buffer {
+            assert_eq!(v.len(), PACK_HEADER_SIZE + w.current_size);
+        }
 
         // Failed seal must not break the invariant.
-        let mut out = Vec::new();
-        assert!(w.seal_into(&FailingEngine, &mut out).is_err());
-        assert_eq!(w.pack_bytes.len(), PACK_HEADER_SIZE + w.current_size);
+        assert!(w.seal(&FailingEngine).is_err());
+        if let Some(PackBuffer::Memory(ref v)) = w.buffer {
+            assert_eq!(v.len(), PACK_HEADER_SIZE + w.current_size);
+        }
 
         // Adding another blob after failure must still hold.
-        w.add_blob(1, dummy_chunk_id(3), vec![0xCC; 25], 25);
-        assert_eq!(w.pack_bytes.len(), PACK_HEADER_SIZE + w.current_size);
+        w.add_blob(1, dummy_chunk_id(3), vec![0xCC; 25], 25)
+            .unwrap();
+        if let Some(PackBuffer::Memory(ref v)) = w.buffer {
+            assert_eq!(v.len(), PACK_HEADER_SIZE + w.current_size);
+        }
 
         // Successful seal clears everything.
         let engine = crate::crypto::PlaintextEngine::new(&[0u8; 32]);
-        let mut out2 = Vec::new();
-        let (_pack_id, entries) = w.seal_into(&engine, &mut out2).unwrap();
-        assert_eq!(entries.len(), 3);
-        assert_eq!(w.pack_bytes.len(), 0);
+        let sealed = w.seal(&engine).unwrap();
+        assert_eq!(sealed.entries.len(), 3);
+        assert!(w.buffer.is_none());
         assert_eq!(w.current_size, 0);
+    }
+
+    /// Bounds-check error when a blob would overflow the mmap buffer.
+    #[test]
+    fn mmap_overflow_returns_error() {
+        // Small target + overhead so the mmap is alloc_size = 64 + 64 + 1 MiB ≈ 1 MiB.
+        let mut w = PackWriter::new(PackType::Data, 64, 64);
+        // First small blob succeeds.
+        w.add_blob(1, dummy_chunk_id(0), vec![0u8; 10], 10).unwrap();
+        // A blob larger than the remaining mmap capacity (~1 MiB) should fail.
+        let big = vec![0u8; 2 * 1024 * 1024];
+        let result = w.add_blob(1, dummy_chunk_id(1), big, 2 * 1024 * 1024);
+        assert!(result.is_err(), "should fail when blob overflows mmap");
+    }
+
+    /// Backup-path writer with small data still seals correctly (mmap path).
+    #[test]
+    fn small_backup_on_mmap() {
+        let mut w = PackWriter::new_default(PackType::Data, 256 * 1024);
+
+        w.add_blob(1, dummy_chunk_id(0), vec![0xAB; 1024], 1024)
+            .unwrap();
+
+        let engine = crate::crypto::PlaintextEngine::new(&[0u8; 32]);
+        let sealed = w.seal(&engine).unwrap();
+        assert_eq!(sealed.entries.len(), 1);
+        // Output should be small: header(9) + len(4) + blob(1024) + trailer < 2 KiB
+        assert!(
+            sealed.data.as_slice().len() < 2048,
+            "sealed output unexpectedly large: {}",
+            sealed.data.as_slice().len()
+        );
     }
 }

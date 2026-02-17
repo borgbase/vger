@@ -187,6 +187,12 @@ impl Default for EncryptionConfig {
     }
 }
 
+/// Hard cap on `ChunkerConfig::max_size`. Any user-configured value above
+/// this is clamped down during validation. This bounds the maximum encrypted
+/// blob size to `CHUNK_MAX_SIZE_HARD_CAP + 1024` (compression tag + encryption
+/// envelope), which is used to size mmap allocations for pack assembly.
+pub const CHUNK_MAX_SIZE_HARD_CAP: u32 = 16 * 1024 * 1024; // 16 MiB
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ChunkerConfig {
     #[serde(default = "default_min_size")]
@@ -203,6 +209,21 @@ impl Default for ChunkerConfig {
             min_size: default_min_size(),
             avg_size: default_avg_size(),
             max_size: default_max_size(),
+        }
+    }
+}
+
+impl ChunkerConfig {
+    /// Clamp `max_size` to `CHUNK_MAX_SIZE_HARD_CAP` with a warning if it
+    /// was configured above the cap.
+    pub fn validate(&mut self) {
+        if self.max_size > CHUNK_MAX_SIZE_HARD_CAP {
+            tracing::warn!(
+                configured = self.max_size,
+                cap = CHUNK_MAX_SIZE_HARD_CAP,
+                "chunker.max_size exceeds hard cap, clamping"
+            );
+            self.max_size = CHUNK_MAX_SIZE_HARD_CAP;
         }
     }
 }

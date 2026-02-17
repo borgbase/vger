@@ -1258,7 +1258,6 @@ pub fn run_with_progress(
 
         // Apply configurable upload concurrency.
         repo.set_max_in_flight_uploads(upload_concurrency);
-        repo.activate_pack_buffer_pool();
 
         let pipeline_buffer_bytes = config.limits.cpu.pipeline_buffer_bytes();
 

@@ -7409,6 +7409,7 @@ dependencies = [
  "hyper",
  "hyper-util",
  "ignore",
+ "libc",
  "lru 0.12.5",
  "lz4_flex",
  "memmap2",

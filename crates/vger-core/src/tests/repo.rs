@@ -350,28 +350,6 @@ fn index_delta_is_empty() {
     assert!(!with_bump.is_empty());
 }
 
-#[test]
-fn save_state_releases_pack_buffer_pool() {
-    let (mut repo, _log) = repo_on_recording_backend();
-
-    // Activate pool as backup command does
-    repo.activate_pack_buffer_pool();
-    assert!(repo.has_pack_buffer_pool());
-
-    // Store a chunk + flush to exercise the pool path
-    repo.store_chunk(b"pool test data", Compression::None, PackType::Data)
-        .unwrap();
-    repo.mark_index_dirty();
-
-    repo.save_state().unwrap();
-
-    // Pool should be released after save_state
-    assert!(
-        !repo.has_pack_buffer_pool(),
-        "pack_buffer_pool should be released after save_state to free buffer memory"
-    );
-}
-
 /// Compute the file cache path the same way `FileCache::cache_path` does.
 fn file_cache_path(repo_id: &[u8]) -> Option<PathBuf> {
     dirs::cache_dir().map(|base| {

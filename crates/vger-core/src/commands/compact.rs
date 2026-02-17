@@ -8,6 +8,7 @@ use crate::crypto::pack_id::PackId;
 use crate::error::{Result, VgerError};
 use crate::repo::pack::{
     read_blob_from_pack, read_pack_header, PackHeaderEntry, PackType, PackWriter,
+    DEFAULT_MAX_BLOB_OVERHEAD,
 };
 use crate::repo::Repository;
 use crate::storage::{RepackBlobRef, RepackOperationRequest, RepackPlanRequest};
@@ -226,7 +227,16 @@ pub fn compact_repo(
             PackType::Data
         };
 
-        let mut writer = PackWriter::new(pack_type, pack_target);
+        // Pre-scan for max blob overhead: legacy repos may contain blobs larger
+        // than the current 16 MiB chunk cap, so the compact path sizes dynamically.
+        let max_blob_overhead = analysis
+            .live_entries
+            .iter()
+            .map(|e| e.length as usize + 4) // 4-byte length prefix + blob data
+            .max()
+            .unwrap_or(DEFAULT_MAX_BLOB_OVERHEAD);
+
+        let mut writer = PackWriter::new(pack_type, pack_target, max_blob_overhead);
 
         for entry in &analysis.live_entries {
             let blob_data = read_blob_from_pack(
@@ -241,7 +251,7 @@ pub fn compact_repo(
                 entry.chunk_id,
                 blob_data,
                 entry.uncompressed_size,
-            );
+            )?;
         }
 
         let (new_pack_id, new_entries) =

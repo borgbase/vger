@@ -29,8 +29,8 @@ use self::file_cache::FileCache;
 use self::format::{pack_object, pack_object_streaming, unpack_object_expect, ObjectType};
 use self::manifest::Manifest;
 use self::pack::{
-    compute_data_pack_target, compute_tree_pack_target, read_blob_from_pack, PackBufferPool,
-    PackType, PackWriter,
+    compute_data_pack_target, compute_tree_pack_target, read_blob_from_pack, PackType, PackWriter,
+    SealedPack,
 };
 
 /// Persisted (unencrypted) at the `config` key.
@@ -142,8 +142,6 @@ pub struct Repository {
     index_delta: Option<IndexDelta>,
     /// Weight-bounded cache for decrypted chunks (used during restore).
     blob_cache: BlobCache,
-    /// Reusable buffer pool for pack seal/upload (activated by backup command).
-    pack_buffer_pool: Option<Arc<PackBufferPool>>,
     /// Configurable limit for in-flight background pack uploads.
     max_in_flight_uploads: usize,
     /// Whether the manifest has been modified since last persist.
@@ -275,14 +273,13 @@ impl Repository {
             chunk_index,
             config: repo_config,
             file_cache: FileCache::new(),
-            data_pack_writer: PackWriter::new(PackType::Data, data_target),
-            tree_pack_writer: PackWriter::new(PackType::Tree, tree_target),
+            data_pack_writer: PackWriter::new_default(PackType::Data, data_target),
+            tree_pack_writer: PackWriter::new_default(PackType::Tree, tree_target),
             pending_uploads: VecDeque::new(),
             dedup_index: None,
             tiered_dedup: None,
             index_delta: None,
             blob_cache: BlobCache::new(BLOB_CACHE_MAX_BYTES),
-            pack_buffer_pool: None,
             max_in_flight_uploads: DEFAULT_UPLOAD_CONCURRENCY,
             manifest_dirty: false,
             index_dirty: false,
@@ -395,14 +392,13 @@ impl Repository {
             chunk_index: ChunkIndex::new(),
             config: repo_config,
             file_cache,
-            data_pack_writer: PackWriter::new(PackType::Data, data_target),
-            tree_pack_writer: PackWriter::new(PackType::Tree, tree_target),
+            data_pack_writer: PackWriter::new_default(PackType::Data, data_target),
+            tree_pack_writer: PackWriter::new_default(PackType::Tree, tree_target),
             pending_uploads: VecDeque::new(),
             dedup_index: None,
             tiered_dedup: None,
             index_delta: None,
             blob_cache: BlobCache::new(BLOB_CACHE_MAX_BYTES),
-            pack_buffer_pool: None,
             max_in_flight_uploads: DEFAULT_UPLOAD_CONCURRENCY,
             manifest_dirty: false,
             index_dirty: false,
@@ -422,7 +418,7 @@ impl Repository {
             self.config.min_pack_size,
             self.config.max_pack_size,
         );
-        self.data_pack_writer = PackWriter::new(PackType::Data, data_target);
+        self.data_pack_writer = PackWriter::new_default(PackType::Data, data_target);
         Ok(())
     }
 
@@ -545,21 +541,6 @@ impl Repository {
         self.blob_cache = BlobCache::new(max_bytes);
     }
 
-    /// Activate the pack buffer pool for reusable seal/upload buffers.
-    ///
-    /// Pool size = `max_in_flight_uploads + 1`: one buffer for the active seal,
-    /// the rest for in-flight uploads. Buffers start empty and grow lazily.
-    pub fn activate_pack_buffer_pool(&mut self) {
-        let pool_size = self.max_in_flight_uploads + 1;
-        let target = self.data_pack_writer.target_size();
-        self.pack_buffer_pool = Some(Arc::new(PackBufferPool::new(pool_size, target)));
-    }
-
-    #[cfg(test)]
-    pub fn has_pack_buffer_pool(&self) -> bool {
-        self.pack_buffer_pool.is_some()
-    }
-
     /// Switch to dedup-only index mode to reduce memory during backup.
     ///
     /// Builds a lightweight `DedupIndex` (chunk_id → stored_size only) from the
@@ -635,11 +616,6 @@ impl Repository {
     pub fn save_state(&mut self) -> Result<()> {
         // Flush any pending packs
         self.flush_packs()?;
-
-        // Release pack buffer pool — all uploads are complete, no more packs
-        // will be written. Frees pool_size × pack_target_size of retained
-        // buffer memory before the memory-intensive index operations below.
-        self.pack_buffer_pool = None;
 
         // Drop tiered dedup index (releases mmap) before reloading full index.
         self.tiered_dedup.take();
@@ -948,7 +924,7 @@ impl Repository {
                 chunk_id,
                 packed,
                 uncompressed_size,
-            );
+            )?;
             writer.should_flush()
         };
 
@@ -994,50 +970,31 @@ impl Repository {
     /// Seal a pack writer and upload in the background.
     /// The index is updated immediately; the upload proceeds in a separate thread.
     ///
-    /// When a `pack_buffer_pool` is active, checks out a pooled buffer, seals into
-    /// it, and the upload thread returns it to the pool on completion. Otherwise
-    /// uses the existing allocation path.
+    /// The `SealedPack` is destructured: `entries` consumed on the main thread
+    /// for index updates, `data` (owning the mmap or Vec) moved into the upload
+    /// thread. `pack_id` is `Copy` so it's used in both places.
     fn flush_writer_async(&mut self, pack_type: PackType) -> Result<()> {
         // Keep upload fan-out bounded to avoid excessive memory/thread pressure.
         self.cap_pending_uploads()?;
 
-        if let Some(ref pool) = self.pack_buffer_pool {
-            // Pool path: checkout a reusable buffer, seal into it, upload via borrow.
-            let mut guard = pool.checkout();
+        let SealedPack {
+            pack_id,
+            entries,
+            data,
+        } = match pack_type {
+            PackType::Data => self.data_pack_writer.seal(self.crypto.as_ref())?,
+            PackType::Tree => self.tree_pack_writer.seal(self.crypto.as_ref())?,
+        };
 
-            let (pack_id, entries) = match pack_type {
-                PackType::Data => self
-                    .data_pack_writer
-                    .seal_into(self.crypto.as_ref(), guard.as_mut_vec())?,
-                PackType::Tree => self
-                    .tree_pack_writer
-                    .seal_into(self.crypto.as_ref(), guard.as_mut_vec())?,
-            };
+        self.apply_sealed_entries(pack_id, entries);
 
-            self.apply_sealed_entries(pack_id, entries);
-
-            let storage = Arc::clone(&self.storage);
-            let key = pack_id.storage_key();
-            self.pending_uploads.push_back(std::thread::spawn(move || {
-                let result = storage.put(&key, guard.as_slice());
-                drop(guard); // return buffer to pool
-                result
-            }));
-        } else {
-            // Non-pool path: allocate fresh buffer, upload via owned transfer.
-            let (pack_id, pack_bytes, entries) = match pack_type {
-                PackType::Data => self.data_pack_writer.seal(self.crypto.as_ref())?,
-                PackType::Tree => self.tree_pack_writer.seal(self.crypto.as_ref())?,
-            };
-
-            self.apply_sealed_entries(pack_id, entries);
-
-            let storage = Arc::clone(&self.storage);
-            let key = pack_id.storage_key();
-            self.pending_uploads.push_back(std::thread::spawn(move || {
-                storage.put_owned(&key, pack_bytes)
-            }));
-        }
+        let storage = Arc::clone(&self.storage);
+        let key = pack_id.storage_key();
+        self.pending_uploads.push_back(std::thread::spawn(move || {
+            let result = storage.put(&key, data.as_slice());
+            drop(data); // releases mmap + temp file
+            result
+        }));
 
         Ok(())
     }

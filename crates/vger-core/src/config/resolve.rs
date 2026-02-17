@@ -271,7 +271,7 @@ pub fn load_and_resolve(path: &Path) -> crate::error::Result<Vec<ResolvedRepo>> 
     resolve_document(raw)
 }
 
-fn resolve_document(raw: ConfigDocument) -> crate::error::Result<Vec<ResolvedRepo>> {
+fn resolve_document(mut raw: ConfigDocument) -> crate::error::Result<Vec<ResolvedRepo>> {
     if raw.repositories.is_empty() {
         return Err(crate::error::VgerError::Config(
             "'repositories:' must not be empty".into(),
@@ -288,9 +288,10 @@ fn resolve_document(raw: ConfigDocument) -> crate::error::Result<Vec<ResolvedRep
         }
     }
 
-    // Validate global hooks
+    // Validate global hooks and chunker params
     raw.hooks.validate()?;
     raw.limits.validate()?;
+    raw.chunker.validate();
 
     // Validate per-repo hooks
     for entry in &raw.repositories {
