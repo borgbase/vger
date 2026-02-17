@@ -1,4 +1,4 @@
-use chacha20poly1305::aead::{Aead, KeyInit};
+use chacha20poly1305::aead::{Aead, AeadInPlace, KeyInit};
 use chacha20poly1305::{ChaCha20Poly1305, Nonce};
 use rand::RngCore;
 
@@ -59,6 +59,30 @@ impl CryptoEngine for ChaCha20Poly1305Engine {
         self.cipher
             .decrypt(nonce, payload)
             .map_err(|_| VgerError::DecryptionFailed)
+    }
+
+    fn encrypt_in_place_detached(
+        &self,
+        buffer: &mut [u8],
+        aad: &[u8],
+    ) -> crate::error::Result<([u8; 12], [u8; 16])> {
+        let mut rng = rand::thread_rng();
+        let mut nonce_bytes = [0u8; 12];
+        rng.fill_bytes(&mut nonce_bytes);
+        let nonce = Nonce::from_slice(&nonce_bytes);
+
+        let tag = self
+            .cipher
+            .encrypt_in_place_detached(nonce, aad, buffer)
+            .map_err(|e| VgerError::Other(format!("ChaCha20-Poly1305 encrypt_in_place: {e}")))?;
+
+        let mut tag_bytes = [0u8; 16];
+        tag_bytes.copy_from_slice(&tag);
+        Ok((nonce_bytes, tag_bytes))
+    }
+
+    fn is_encrypting(&self) -> bool {
+        true
     }
 
     fn chunk_id_key(&self) -> &[u8; 32] {

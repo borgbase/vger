@@ -17,6 +17,18 @@ pub trait CryptoEngine: Send + Sync {
     /// `aad` must match what was passed during encryption.
     fn decrypt(&self, data: &[u8], aad: &[u8]) -> Result<Vec<u8>>;
 
+    /// Encrypt `buffer` in-place and return `(nonce, tag)`.
+    /// Avoids allocating a separate ciphertext buffer.
+    fn encrypt_in_place_detached(
+        &self,
+        buffer: &mut [u8],
+        aad: &[u8],
+    ) -> Result<([u8; 12], [u8; 16])>;
+
+    /// Whether this engine actually encrypts data.
+    /// `PlaintextEngine` returns false; real ciphers return true.
+    fn is_encrypting(&self) -> bool;
+
     /// The key used for computing chunk IDs (keyed BLAKE2b-256).
     fn chunk_id_key(&self) -> &[u8; 32];
 }
@@ -41,6 +53,18 @@ impl CryptoEngine for PlaintextEngine {
 
     fn decrypt(&self, data: &[u8], _aad: &[u8]) -> Result<Vec<u8>> {
         Ok(data.to_vec())
+    }
+
+    fn encrypt_in_place_detached(
+        &self,
+        _buffer: &mut [u8],
+        _aad: &[u8],
+    ) -> Result<([u8; 12], [u8; 16])> {
+        Ok(([0u8; 12], [0u8; 16]))
+    }
+
+    fn is_encrypting(&self) -> bool {
+        false
     }
 
     fn chunk_id_key(&self) -> &[u8; 32] {

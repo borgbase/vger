@@ -1,7 +1,9 @@
 use crate::crypto::aes_gcm::Aes256GcmEngine;
 use crate::crypto::PlaintextEngine;
 use crate::error::VgerError;
-use crate::repo::format::{pack_object, unpack_object, unpack_object_expect, ObjectType};
+use crate::repo::format::{
+    pack_object, pack_object_streaming, unpack_object, unpack_object_expect, ObjectType,
+};
 
 #[test]
 fn roundtrip_plaintext() {
@@ -91,4 +93,45 @@ fn unpack_expect_rejects_wrong_object_type() {
     let err = unpack_object_expect(&packed, ObjectType::ChunkData, &engine).unwrap_err();
     assert!(matches!(err, VgerError::InvalidFormat(_)));
     assert!(err.to_string().contains("unexpected object type"));
+}
+
+#[test]
+fn pack_object_streaming_roundtrip_plaintext() {
+    let engine = PlaintextEngine::new(&[0xAA; 32]);
+    let data = b"streaming plaintext data";
+    let packed = pack_object_streaming(ObjectType::Manifest, data.len(), &engine, |buf| {
+        buf.extend_from_slice(data);
+        Ok(())
+    })
+    .unwrap();
+    let unpacked = unpack_object_expect(&packed, ObjectType::Manifest, &engine).unwrap();
+    assert_eq!(unpacked, data);
+}
+
+#[test]
+fn pack_object_streaming_roundtrip_encrypted() {
+    let engine = Aes256GcmEngine::new(&[0x11; 32], &[0x22; 32]);
+    let data = b"streaming encrypted data";
+    let packed = pack_object_streaming(ObjectType::ChunkIndex, data.len(), &engine, |buf| {
+        buf.extend_from_slice(data);
+        Ok(())
+    })
+    .unwrap();
+    let unpacked = unpack_object_expect(&packed, ObjectType::ChunkIndex, &engine).unwrap();
+    assert_eq!(unpacked, data);
+}
+
+#[test]
+fn pack_object_streaming_matches_pack_object() {
+    // For plaintext, streaming output should be byte-identical to pack_object
+    let engine = PlaintextEngine::new(&[0xBB; 32]);
+    let data = b"verify identical output";
+    let packed_normal = pack_object(ObjectType::ChunkData, data, &engine).unwrap();
+    let packed_streaming =
+        pack_object_streaming(ObjectType::ChunkData, data.len(), &engine, |buf| {
+            buf.extend_from_slice(data);
+            Ok(())
+        })
+        .unwrap();
+    assert_eq!(packed_normal, packed_streaming);
 }

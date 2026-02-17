@@ -12,7 +12,7 @@ use chrono::{DateTime, Utc};
 use rand::RngCore;
 use serde::{Deserialize, Serialize};
 
-use tracing::debug;
+use tracing::{debug, warn};
 
 use crate::compress;
 use crate::config::{ChunkerConfig, RepositoryConfig};
@@ -612,12 +612,73 @@ impl Repository {
         // and apply our delta. Only mark index_dirty if the delta has mutations.
         if let Some(delta) = self.index_delta.take() {
             self.dedup_index = None;
-            let mut full_index = self.reload_full_index()?;
+
             if !delta.is_empty() {
-                delta.apply_to(&mut full_index);
-                self.index_dirty = true;
+                // Non-empty delta: try incremental update first
+                let fast_ok = self
+                    .try_incremental_index_update(&delta)
+                    .unwrap_or_else(|e| {
+                        warn!("incremental index update failed: {e}");
+                        false
+                    });
+
+                if fast_ok {
+                    // Fast path succeeded — index uploaded, caches rebuilt,
+                    // manifest.index_generation and manifest_dirty already set.
+                    // Hydrate chunk_index from LOCAL full_index_cache (no storage round-trip).
+                    self.chunk_index = dedup_cache::load_chunk_index_from_full_cache(
+                        &self.config.id,
+                        self.manifest.index_generation,
+                    )?;
+                    self.rebuild_dedup_cache = false;
+                } else {
+                    // Slow path: full HashMap (first run, stale cache, error)
+                    let mut full_index = self.reload_full_index()?;
+                    delta.apply_to(&mut full_index);
+                    self.chunk_index = full_index;
+                    self.index_dirty = true;
+                }
+            } else if self.rebuild_dedup_cache {
+                // Empty delta: index unchanged, but caches may need rebuilding.
+                // Try to rebuild caches from full_index_cache if available.
+                let mut rebuilt_from_cache = false;
+                if let Some(cache_path) = dedup_cache::full_index_cache_path(&self.config.id) {
+                    if dedup_cache::MmapFullIndexCache::open(
+                        &self.config.id,
+                        self.manifest.index_generation,
+                    )
+                    .is_some()
+                    {
+                        let gen = self.manifest.index_generation;
+                        let id = &self.config.id;
+                        let dedup_ok =
+                            dedup_cache::build_dedup_cache_from_full_cache(&cache_path, gen, id)
+                                .is_ok();
+                        let restore_ok =
+                            dedup_cache::build_restore_cache_from_full_cache(&cache_path, gen, id)
+                                .is_ok();
+                        if dedup_ok && restore_ok {
+                            self.rebuild_dedup_cache = false;
+                            rebuilt_from_cache = true;
+                            // Hydrate chunk_index from local cache to preserve postcondition.
+                            self.chunk_index =
+                                dedup_cache::load_chunk_index_from_full_cache(id, gen)?;
+                        } else {
+                            warn!(
+                                "cache rebuild from full_index_cache partially failed, falling back"
+                            );
+                        }
+                    }
+                }
+                if !rebuilt_from_cache {
+                    // No valid full cache — must reload full index for slow-path cache rebuild.
+                    self.chunk_index = self.reload_full_index()?;
+                }
+            } else {
+                // Empty delta, no cache rebuild needed.
+                // Still must restore chunk_index for postcondition.
+                self.chunk_index = self.reload_full_index()?;
             }
-            self.chunk_index = full_index;
         }
 
         // When the index changes, rotate index_generation so the local dedup
@@ -652,14 +713,22 @@ impl Repository {
                 self.manifest.index_generation,
                 &self.config.id,
             ) {
-                tracing::warn!("failed to rebuild dedup cache: {e}");
+                warn!("failed to rebuild dedup cache: {e}");
             }
             if let Err(e) = dedup_cache::build_restore_cache(
                 &self.chunk_index,
                 self.manifest.index_generation,
                 &self.config.id,
             ) {
-                tracing::warn!("failed to rebuild restore cache: {e}");
+                warn!("failed to rebuild restore cache: {e}");
+            }
+            // Also build the full index cache for next incremental update.
+            if let Err(e) = dedup_cache::build_full_index_cache(
+                &self.chunk_index,
+                self.manifest.index_generation,
+                &self.config.id,
+            ) {
+                warn!("failed to build full index cache: {e}");
             }
             self.rebuild_dedup_cache = false;
         }
@@ -671,6 +740,76 @@ impl Repository {
         }
 
         Ok(())
+    }
+
+    /// Try to perform an incremental index update using the local full_index_cache.
+    /// Returns `Ok(true)` on success (index uploaded, caches rebuilt, manifest updated).
+    /// Returns `Ok(false)` if the cache is missing or stale (caller should use slow path).
+    fn try_incremental_index_update(&mut self, delta: &IndexDelta) -> Result<bool> {
+        let cache_path = match dedup_cache::full_index_cache_path(&self.config.id) {
+            Some(p) => p,
+            None => return Ok(false),
+        };
+
+        let old_cache = match dedup_cache::MmapFullIndexCache::open(
+            &self.config.id,
+            self.manifest.index_generation,
+        ) {
+            Some(c) => c,
+            None => return Ok(false),
+        };
+
+        debug!(
+            old_entries = old_cache.entry_count(),
+            new_entries = delta.new_entries.len(),
+            refcount_bumps = delta.refcount_bumps.len(),
+            "incremental index update: merging delta"
+        );
+
+        let new_gen = rand::thread_rng().next_u64();
+
+        // Merge old cache + delta → new cache file
+        dedup_cache::merge_full_index_cache(&old_cache, delta, new_gen, &cache_path)?;
+
+        // Drop old mmap before we open the new one
+        drop(old_cache);
+
+        // Open the newly merged cache for serialization
+        let new_cache = dedup_cache::MmapFullIndexCache::open_path(&cache_path, new_gen)
+            .ok_or_else(|| {
+                crate::error::VgerError::Other(
+                    "failed to open newly merged full index cache".into(),
+                )
+            })?;
+
+        // Serialize from cache → encrypted packed object
+        let packed =
+            dedup_cache::serialize_full_cache_to_packed_object(&new_cache, self.crypto.as_ref())?;
+
+        // Upload
+        self.storage.put("index", &packed)?;
+
+        // Free upload buffer
+        drop(packed);
+
+        // Rebuild dedup + restore caches from full cache (streaming)
+        if let Err(e) =
+            dedup_cache::build_dedup_cache_from_full_cache(&cache_path, new_gen, &self.config.id)
+        {
+            warn!("failed to rebuild dedup cache from full cache: {e}");
+        }
+        if let Err(e) =
+            dedup_cache::build_restore_cache_from_full_cache(&cache_path, new_gen, &self.config.id)
+        {
+            warn!("failed to rebuild restore cache from full cache: {e}");
+        }
+
+        // Update manifest generation — must happen before return so
+        // load_chunk_index_from_full_cache uses the correct generation.
+        self.manifest.index_generation = new_gen;
+        self.manifest_dirty = true;
+
+        Ok(true)
     }
 
     /// Reload the full chunk index from storage.
