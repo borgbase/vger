@@ -12,6 +12,7 @@ pub(crate) use self::hooks::HOOK_COMMANDS;
 pub use self::hooks::{HooksConfig, SourceHooksConfig};
 pub use self::limits::{
     CpuLimitsConfig, IoLimitsConfig, NetworkLimitsConfig, ResourceLimitsConfig,
+    DEFAULT_UPLOAD_CONCURRENCY,
 };
 
 // Re-export from submodules

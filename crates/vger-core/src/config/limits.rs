@@ -2,6 +2,9 @@ use serde::{Deserialize, Serialize};
 
 use crate::error::{Result, VgerError};
 
+/// Default maximum number of in-flight background pack uploads.
+pub const DEFAULT_UPLOAD_CONCURRENCY: usize = 2;
+
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct ResourceLimitsConfig {
     #[serde(default)]
@@ -26,7 +29,7 @@ pub struct CpuLimitsConfig {
     /// Unix process niceness target (-20..19). 0 = unchanged.
     #[serde(default)]
     pub nice: i32,
-    /// Max in-flight background pack uploads (default: 4, range: 1-16).
+    /// Max in-flight background pack uploads (default: 2, range: 1-16).
     #[serde(default)]
     pub max_upload_concurrency: Option<usize>,
     /// Batch size in MiB for transform flushes (default: 32, range: 4-256).
@@ -101,7 +104,8 @@ impl CpuLimitsConfig {
 
     /// Effective upload concurrency limit.
     pub fn upload_concurrency(&self) -> usize {
-        self.max_upload_concurrency.unwrap_or(4)
+        self.max_upload_concurrency
+            .unwrap_or(DEFAULT_UPLOAD_CONCURRENCY)
     }
 
     /// Effective pipeline depth (0 = disabled).

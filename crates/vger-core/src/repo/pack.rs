@@ -196,6 +196,11 @@ impl PackWriter {
         self.pack_type
     }
 
+    /// The target pack size in bytes.
+    pub fn target_size(&self) -> usize {
+        self.target_size
+    }
+
     /// Append the encrypted header trailer to the already-accumulated `pack_bytes`,
     /// compute the PackId, and swap the finalized buffer into `out`.
     ///
@@ -421,11 +426,16 @@ pub fn compute_tree_pack_target(min_pack_size: u32) -> usize {
 pub struct PackBufferPool {
     inner: Mutex<VecDeque<Vec<u8>>>,
     available: Condvar,
+    /// Desired buffer capacity. Buffers that grow beyond 125% of this are
+    /// shrunk on return to reclaim memory from oversized final packs.
+    target_capacity: usize,
 }
 
 impl PackBufferPool {
     /// Create a pool with `count` empty buffers.
-    pub fn new(count: usize) -> Self {
+    /// `target_capacity` is the expected buffer size; buffers that grow beyond
+    /// 125% of this value are shrunk on return to reclaim memory.
+    pub fn new(count: usize, target_capacity: usize) -> Self {
         let mut bufs = VecDeque::with_capacity(count);
         for _ in 0..count {
             bufs.push_back(Vec::new());
@@ -433,6 +443,7 @@ impl PackBufferPool {
         Self {
             inner: Mutex::new(bufs),
             available: Condvar::new(),
+            target_capacity,
         }
     }
 
@@ -452,7 +463,11 @@ impl PackBufferPool {
     }
 
     /// Return a buffer to the pool. Private — only called by `PooledBuffer::drop`.
-    fn checkin(&self, buf: Vec<u8>) {
+    fn checkin(&self, mut buf: Vec<u8>) {
+        // Reclaim memory from buffers that grew beyond target (e.g. large final blob).
+        if buf.capacity() > self.target_capacity + self.target_capacity / 4 {
+            buf.shrink_to(self.target_capacity);
+        }
         let mut guard = self.inner.lock().unwrap();
         guard.push_back(buf);
         self.available.notify_one();
@@ -556,7 +571,7 @@ mod tests {
 
     #[test]
     fn pool_checkout_and_return() {
-        let pool = Arc::new(PackBufferPool::new(2));
+        let pool = Arc::new(PackBufferPool::new(2, 128 * 1024));
 
         // Can check out up to pool size
         let buf1 = pool.checkout();
@@ -576,7 +591,7 @@ mod tests {
 
     #[test]
     fn pool_blocks_when_exhausted() {
-        let pool = Arc::new(PackBufferPool::new(1));
+        let pool = Arc::new(PackBufferPool::new(1, 128 * 1024));
         let _buf1 = pool.checkout();
 
         // Spawn a thread that tries to checkout — it should block
@@ -598,7 +613,7 @@ mod tests {
 
     #[test]
     fn pool_retains_buffer_capacity() {
-        let pool = Arc::new(PackBufferPool::new(1));
+        let pool = Arc::new(PackBufferPool::new(1, 128 * 1024));
 
         // Check out, grow the buffer, return it
         {

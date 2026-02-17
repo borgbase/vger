@@ -15,7 +15,7 @@ use serde::{Deserialize, Serialize};
 use tracing::{debug, warn};
 
 use crate::compress;
-use crate::config::{ChunkerConfig, RepositoryConfig};
+use crate::config::{ChunkerConfig, RepositoryConfig, DEFAULT_UPLOAD_CONCURRENCY};
 use crate::crypto::chunk_id::ChunkId;
 use crate::crypto::key::{EncryptedKey, MasterKey};
 use crate::crypto::pack_id::PackId;
@@ -54,9 +54,6 @@ fn default_min_pack_size() -> u32 {
 fn default_max_pack_size() -> u32 {
     128 * 1024 * 1024
 }
-
-/// Default maximum number of in-flight background pack uploads.
-const DEFAULT_IN_FLIGHT_PACK_UPLOADS: usize = 4;
 
 /// Maximum total weight (bytes) of cached blobs in the blob cache.
 const BLOB_CACHE_MAX_BYTES: usize = 32 * 1024 * 1024; // 32 MiB
@@ -286,7 +283,7 @@ impl Repository {
             index_delta: None,
             blob_cache: BlobCache::new(BLOB_CACHE_MAX_BYTES),
             pack_buffer_pool: None,
-            max_in_flight_uploads: DEFAULT_IN_FLIGHT_PACK_UPLOADS,
+            max_in_flight_uploads: DEFAULT_UPLOAD_CONCURRENCY,
             manifest_dirty: false,
             index_dirty: false,
             file_cache_dirty: false,
@@ -406,7 +403,7 @@ impl Repository {
             index_delta: None,
             blob_cache: BlobCache::new(BLOB_CACHE_MAX_BYTES),
             pack_buffer_pool: None,
-            max_in_flight_uploads: DEFAULT_IN_FLIGHT_PACK_UPLOADS,
+            max_in_flight_uploads: DEFAULT_UPLOAD_CONCURRENCY,
             manifest_dirty: false,
             index_dirty: false,
             file_cache_dirty: false,
@@ -554,7 +551,8 @@ impl Repository {
     /// the rest for in-flight uploads. Buffers start empty and grow lazily.
     pub fn activate_pack_buffer_pool(&mut self) {
         let pool_size = self.max_in_flight_uploads + 1;
-        self.pack_buffer_pool = Some(Arc::new(PackBufferPool::new(pool_size)));
+        let target = self.data_pack_writer.target_size();
+        self.pack_buffer_pool = Some(Arc::new(PackBufferPool::new(pool_size, target)));
     }
 
     #[cfg(test)]
