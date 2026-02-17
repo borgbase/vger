@@ -544,6 +544,11 @@ impl Repository {
         self.pack_buffer_pool = Some(Arc::new(PackBufferPool::new(pool_size)));
     }
 
+    #[cfg(test)]
+    pub fn has_pack_buffer_pool(&self) -> bool {
+        self.pack_buffer_pool.is_some()
+    }
+
     /// Switch to dedup-only index mode to reduce memory during backup.
     ///
     /// Builds a lightweight `DedupIndex` (chunk_id → stored_size only) from the
@@ -619,6 +624,11 @@ impl Repository {
     pub fn save_state(&mut self) -> Result<()> {
         // Flush any pending packs
         self.flush_packs()?;
+
+        // Release pack buffer pool — all uploads are complete, no more packs
+        // will be written. Frees pool_size × pack_target_size of retained
+        // buffer memory before the memory-intensive index operations below.
+        self.pack_buffer_pool = None;
 
         // Drop tiered dedup index (releases mmap) before reloading full index.
         self.tiered_dedup.take();
