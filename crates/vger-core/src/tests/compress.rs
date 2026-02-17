@@ -95,3 +95,16 @@ fn from_config_invalid() {
     let result = Compression::from_config("brotli", 3);
     assert!(result.is_err());
 }
+
+#[test]
+fn zstd_level_change_reinit() {
+    let data = b"hello world, test zstd level change reinit path";
+
+    let compressed_1 = compress(Compression::Zstd { level: 1 }, data).unwrap();
+    let decompressed_1 = decompress(&compressed_1).unwrap();
+    assert_eq!(decompressed_1, data);
+
+    let compressed_9 = compress(Compression::Zstd { level: 9 }, data).unwrap();
+    let decompressed_9 = decompress(&compressed_9).unwrap();
+    assert_eq!(decompressed_9, data);
+}

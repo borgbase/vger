@@ -62,12 +62,31 @@ pub fn compress(compression: Compression, data: &[u8]) -> Result<Vec<u8>> {
             Ok(out)
         }
         Compression::Zstd { level } => {
-            let compressed = zstd::encode_all(std::io::Cursor::new(data), level)
-                .map_err(|e| VgerError::Other(format!("zstd compress: {e}")))?;
-            let mut out = Vec::with_capacity(1 + compressed.len());
-            out.push(TAG_ZSTD);
-            out.extend_from_slice(&compressed);
-            Ok(out)
+            use std::cell::RefCell;
+            thread_local! {
+                static ZSTD_CX: RefCell<Option<(i32, zstd::bulk::Compressor<'static>)>> =
+                    const { RefCell::new(None) };
+            }
+
+            ZSTD_CX.with(|cell| {
+                let mut slot = cell.borrow_mut();
+
+                // Lazily init or reinit if the compression level changed.
+                if !matches!(slot.as_ref(), Some((l, _)) if *l == level) {
+                    let cx = zstd::bulk::Compressor::new(level)
+                        .map_err(|e| VgerError::Other(format!("zstd init: {e}")))?;
+                    *slot = Some((level, cx));
+                }
+                let (_, cx) = slot.as_mut().unwrap();
+
+                let compressed = cx
+                    .compress(data)
+                    .map_err(|e| VgerError::Other(format!("zstd compress: {e}")))?;
+                let mut out = Vec::with_capacity(1 + compressed.len());
+                out.push(TAG_ZSTD);
+                out.extend_from_slice(&compressed);
+                Ok(out)
+            })
         }
     }
 }
