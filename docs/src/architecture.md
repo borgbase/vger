@@ -43,6 +43,7 @@ Rationale:
 FastCDC (content-defined chunking) via the `fastcdc` v3 crate.
 
 Default parameters: 512 KiB min, 2 MiB average, 8 MiB max (configurable in YAML).
+`chunker.max_size` is hard-capped at 16 MiB during config validation.
 
 Rationale:
 - Newer algorithm, benchmarks faster than Rabin fingerprinting
@@ -127,7 +128,7 @@ The type tag byte is passed as AAD (authenticated additional data) to the select
 
 ### Local Optimization Caches (Client Machine)
 
-These files live in the local cache directory (`~/.cache/vger/<repo_id_hex>/...` on Linux, `~/Library/Caches/vger/<repo_id_hex>/...` on macOS). They are optimization artifacts, not repository source of truth.
+These files live under a per-repo local cache root. By default this is the platform cache directory + `vger` (for example, `~/.cache/vger/<repo_id_hex>/...` on Linux, `~/Library/Caches/vger/<repo_id_hex>/...` on macOS). If `cache_dir` is set in config, that path becomes the cache root. These are optimization artifacts, not repository source of truth.
 
 ```text
 <cache>/<repo_id_hex>/
@@ -138,6 +139,8 @@ These files live in the local cache directory (`~/.cache/vger/<repo_id_hex>/...`
 ```
 
 All three index caches are validated against `manifest.index_generation`. A generation mismatch means "stale cache" and triggers safe fallback/rebuild paths.
+
+The same per-repo cache root is also used as the preferred temp location for mmap-backed data-pack assembly files.
 
 ### Key Data Structures
 
@@ -207,7 +210,7 @@ Chunks are grouped into **pack files** (~32 MiB) instead of being stored as indi
 #### Pack File Format
 
 ```text
-[8B magic "VGERPACK\0"][1B version=1]
+[8B magic "VGERPACK"][1B version=1]
 [4B blob_0_len LE][blob_0_data]
 [4B blob_1_len LE][blob_1_data]
 ...
@@ -225,8 +228,10 @@ Chunks are grouped into **pack files** (~32 MiB) instead of being stored as indi
 #### Data Packs vs Tree Packs
 
 Two separate `PackWriter` instances:
-- **Data packs** — file content chunks. Dynamic target size.
-- **Tree packs** — item-stream metadata. Fixed at `min(min_pack_size, 4 MiB)` since metadata is small and read frequently.
+- **Data packs** — file content chunks. Dynamic target size. Assembled in mmap-backed anonymous temp files by default (OS-paged memory behavior under pressure).
+- **Tree packs** — item-stream metadata. Fixed at `min(min_pack_size, 4 MiB)` and assembled in heap `Vec<u8>` buffers.
+
+If mmap temp-file allocation fails (or preferred temp location is low on space), data-pack assembly falls back to system temp, then to heap buffers.
 
 #### Dynamic Pack Sizing
 
@@ -267,7 +272,7 @@ If you raise `max_pack_size`, target size can grow further, up to the 512 MiB ha
 open repo (full index loaded once)
   → prune stale local file-cache entries
   → enable tiered dedup mode (mmap cache + xor filter, fallback to dedup HashMap)
-  → configure bounded upload concurrency and activate pack buffer pool
+  → configure bounded upload concurrency
   → walk sources with excludes
     → pipeline path (if enabled): walk → parallel read/chunk/hash/compress/encrypt → sequential commit
       → ByteBudget enforces pipeline_buffer_mib as a real in-flight memory cap
@@ -280,7 +285,6 @@ open repo (full index loaded once)
   → mutate manifest
   → save_state()
     → flush packs and pending uploads
-    → release pack buffer pool
     → if dedup/tiered mode: apply IndexDelta (fast path = incremental full-index-cache merge; slow path = reload full index + merge)
     → write dirty manifest/index only
     → rebuild local dedup/restore/full-index caches as needed
@@ -302,7 +306,7 @@ open repository without index (`open_without_index`)
   → build coalesced pack read groups:
     → preferred: index-free lookup via restore cache
     → fallback: load full index and retain only snapshot-needed chunks
-  → parallel range reads by pack/offset, decrypt + decompress chunks, write targets
+  → parallel range reads by pack/offset, decrypt + decompress-with-size-hint chunks, write targets
   → restore file metadata (mode, mtime, optional xattrs)
 ```
 
@@ -402,7 +406,7 @@ limits:
   cpu:
     max_threads: 4                 # worker budget (0 = all cores)
     nice: 10                       # Unix nice value
-    max_upload_concurrency: 4      # max in-flight background pack uploads
+    max_upload_concurrency: 2      # default max in-flight background pack uploads
     transform_batch_mib: 32        # flush threshold for pending transforms
     transform_batch_chunks: 8192   # flush threshold by action count
     pipeline_depth: 4              # 0 disables pipeline, >0 enables bounded pipeline
@@ -418,6 +422,7 @@ limits:
 Deduplicating backup tools are often dominated by index memory and restore-planning overhead at large chunk counts. vger's implemented architecture addresses that class of bottlenecks with:
 
 - Tiered dedup lookups (session map + xor filter + mmap cache) instead of always materializing a full in-memory index during backup
+- mmap-backed data-pack assembly, so pack bytes are OS-paged instead of always heap-resident
 - Index-light restore planning (restore-cache-first, filtered-index fallback) for lower peak memory on extract
 - Explicitly bounded backup pipeline memory (`pipeline_buffer_mib`) and bounded in-flight uploads
 - Incremental index update paths that avoid rebuilding/uploading from a full in-memory index on every save
@@ -564,7 +569,7 @@ For packs with `keep_blobs: []`, the server simply deletes the pack.
 - Required files exist (`config`, `manifest`, `index`, `keys/repokey`)
 - Pack files follow `<2-char-hex>/<64-char-hex>` shard pattern
 - No zero-byte packs (minimum valid = magic 9 bytes + header length 4 bytes = 13 bytes)
-- Pack files start with `VGERPACK\0` magic bytes
+- Pack files start with `VGERPACK` magic bytes
 - Reports stale lock count, total size, and pack counts
 
 Full content verification (decrypt + recompute chunk IDs) stays client-side via `vger check --verify-data`.
@@ -617,11 +622,12 @@ repositories:
 | **Restore mmap cache** | Index-light extract planning via local restore cache; fallback to filtered full-index loading when needed |
 | **Incremental index update** | `save_state()` fast path merges `IndexDelta` into local full-index cache and serializes index from cache |
 | **Bounded parallel pipeline** | Byte-budgeted pipeline (`pipeline_buffer_mib`) with bounded worker/upload concurrency |
-| **Pack buffer pool** | Reusable seal/upload buffers activated during backup and released before index-heavy save-state work |
+| **mmap-backed pack assembly** | Data-pack assembly uses mmap-backed temp files (with fallback chain) to reduce heap residency under memory pressure |
+| **cache_dir override** | Configurable root for file cache, dedup/restore/full-index caches, and preferred mmap temp-file location |
 | **Parallel transforms** | rayon-backed compression/encryption within the bounded pipeline |
 | **break-lock command** | Forced stale-lock cleanup for backend/object lock recovery |
 | **Compact pack health accounting** | Compact analysis reports/tracks corrupt and orphan packs in addition to reclaimable dead bytes |
-| **File-level cache** | inode/mtime/ctime skip for unchanged files — avoids read, chunk, compress, encrypt. Stored locally in the platform cache dir (macOS: `~/Library/Caches/vger/<repo_id>/filecache`, Linux: `~/.cache/vger/…`) — machine-specific, not in the repo. |
+| **File-level cache** | inode/mtime/ctime skip for unchanged files — avoids read, chunk, compress, encrypt. Stored locally under the per-repo cache root (default platform cache dir + `vger`, or `cache_dir` override). |
 
 ### Planned / Not Yet Implemented
 

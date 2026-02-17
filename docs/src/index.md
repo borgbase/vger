@@ -8,7 +8,7 @@ V'Ger is a fast, encrypted, deduplicated backup tool written in Rust. It's cente
 
 ## Features
 
-- **Deduplication** via FastCDC content-defined chunking
+- **Deduplication** via FastCDC content-defined chunking with a memory-optimized engine (tiered dedup index + mmap-backed pack assembly)
 - **Compression** with LZ4 (default), Zstandard, or none
 - **Encryption** with AES-256-GCM or ChaCha20-Poly1305 (auto-selected) and Argon2id key derivation
 - **Storage backends** — local filesystem, S3-compatible storage, SFTP
