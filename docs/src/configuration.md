@@ -53,7 +53,7 @@ repositories:
     region: "us-east-1"
 ```
 
-Each entry accepts an optional `label` for CLI targeting (`vger list --repo local`) and optional pack size tuning (`min_pack_size`, `max_pack_size`). See [Storage Backends](backends.md) for all backend-specific options.
+Each entry accepts an optional `label` for CLI targeting (`vger list --repo local`) and optional pack size tuning (`min_pack_size`, `max_pack_size`). Defaults are `min_pack_size = 32 MiB` and `max_pack_size = 128 MiB`; `max_pack_size` has a hard ceiling of `512 MiB`. See [Storage Backends](backends.md) for all backend-specific options.
 
 ## Sources
 

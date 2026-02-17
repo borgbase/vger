@@ -208,7 +208,7 @@ Pack sizes grow with repository size. Config exposes floor and ceiling:
 repositories:
   - path: /backups/repo
     min_pack_size: 33554432     # 32 MiB (floor, default)
-    max_pack_size: 536870912    # 512 MiB (ceiling, default)
+    max_pack_size: 134217728    # 128 MiB (default)
 ```
 
 Data pack sizing formula:
@@ -216,12 +216,16 @@ Data pack sizing formula:
 target = clamp(min_pack_size * sqrt(num_data_packs / 100), min_pack_size, max_pack_size)
 ```
 
+`max_pack_size` has a hard ceiling of **512 MiB**. Values above that are rejected at repository init/open.
+
 | Data packs in repo | Target pack size |
 |--------------------|------------------|
 | < 100              | 32 MiB (floor)   |
 | 1,000              | ~101 MiB         |
-| 10,000             | ~320 MiB         |
-| 30,000+            | 512 MiB (cap)    |
+| 10,000             | 128 MiB (default cap) |
+| 30,000+            | 128 MiB (default cap) |
+
+If you raise `max_pack_size`, target size can grow further, up to the 512 MiB hard ceiling.
 
 `num_data_packs` is computed at `open()` by counting distinct `pack_id` values in the ChunkIndex (zero extra I/O).
 
