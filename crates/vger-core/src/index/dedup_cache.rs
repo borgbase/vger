@@ -867,7 +867,7 @@ pub fn load_chunk_index_from_full_cache_path(path: &Path, generation: u64) -> Re
         crate::error::VgerError::Other("full index cache not found or stale".into())
     })?;
 
-    let mut index = ChunkIndex::new();
+    let mut index = ChunkIndex::with_capacity(cache.entry_count() as usize);
     for entry in cache.iter() {
         index.add(
             entry.chunk_id,

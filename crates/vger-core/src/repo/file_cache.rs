@@ -8,7 +8,7 @@ use crate::crypto::CryptoEngine;
 use crate::error::Result;
 use crate::snapshot::item::ChunkRef;
 
-use super::format::{pack_object, unpack_object_expect, ObjectType};
+use super::format::{pack_object_streaming, unpack_object_expect, ObjectType};
 
 /// Cached filesystem metadata for a file, used to skip re-reading unchanged files.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -146,7 +146,7 @@ impl FileCache {
         }
     }
 
-    /// Save the file cache to local disk. Errors are logged but non-fatal.
+    /// Save the file cache to local disk.
     pub fn save(&self, repo_id: &[u8], crypto: &dyn CryptoEngine) -> Result<()> {
         let Some(path) = Self::cache_path(repo_id) else {
             return Ok(());
@@ -154,8 +154,18 @@ impl FileCache {
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent)?;
         }
-        let cache_bytes = rmp_serde::to_vec(self)?;
-        let packed = pack_object(ObjectType::FileCache, &cache_bytes, crypto)?;
+        // Stream-serialize directly into the output buffer to avoid a separate
+        // plaintext allocation (~89M savings for large caches).
+        let estimated = self.entries.len().saturating_mul(240);
+        let packed = pack_object_streaming(ObjectType::FileCache, estimated, crypto, |buf| {
+            Ok(rmp_serde::encode::write(buf, self)?)
+        })?;
+        debug!(
+            entries = self.entries.len(),
+            estimated_bytes = estimated,
+            actual_bytes = packed.len(),
+            "file cache serialized"
+        );
         std::fs::write(&path, packed)?;
         Ok(())
     }

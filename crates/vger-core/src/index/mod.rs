@@ -30,6 +30,12 @@ impl ChunkIndex {
         }
     }
 
+    pub fn with_capacity(capacity: usize) -> Self {
+        Self {
+            entries: HashMap::with_capacity(capacity),
+        }
+    }
+
     /// Returns `true` if this chunk already exists (dedup hit).
     pub fn contains(&self, id: &ChunkId) -> bool {
         self.entries.contains_key(id)

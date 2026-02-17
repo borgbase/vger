@@ -634,6 +634,12 @@ impl Repository {
         self.tiered_dedup.take();
         // If in dedup mode (either tiered or HashMap), reload the full index
         // and apply our delta. Only mark index_dirty if the delta has mutations.
+        //
+        // On the fast path (incremental update succeeded), we defer chunk_index
+        // hydration until after file_cache.save() so the ~42M index and the
+        // ~89M file_cache serialization buffer don't coexist at peak.
+        let mut deferred_index_load = false;
+
         if let Some(delta) = self.index_delta.take() {
             self.dedup_index = None;
 
@@ -649,12 +655,9 @@ impl Repository {
                 if fast_ok {
                     // Fast path succeeded — index uploaded, caches rebuilt,
                     // manifest.index_generation and manifest_dirty already set.
-                    // Hydrate chunk_index from LOCAL full_index_cache (no storage round-trip).
-                    self.chunk_index = dedup_cache::load_chunk_index_from_full_cache(
-                        &self.config.id,
-                        self.manifest.index_generation,
-                    )?;
+                    // Defer chunk_index hydration to reduce peak memory.
                     self.rebuild_dedup_cache = false;
+                    deferred_index_load = true;
                 } else {
                     // Slow path: full HashMap (first run, stale cache, error)
                     let mut full_index = self.reload_full_index()?;
@@ -684,9 +687,8 @@ impl Repository {
                         if dedup_ok && restore_ok {
                             self.rebuild_dedup_cache = false;
                             rebuilt_from_cache = true;
-                            // Hydrate chunk_index from local cache to preserve postcondition.
-                            self.chunk_index =
-                                dedup_cache::load_chunk_index_from_full_cache(id, gen)?;
+                            // Defer chunk_index hydration to reduce peak memory.
+                            deferred_index_load = true;
                         } else {
                             warn!(
                                 "cache rebuild from full_index_cache partially failed, falling back"
@@ -700,8 +702,8 @@ impl Repository {
                 }
             } else {
                 // Empty delta, no cache rebuild needed.
-                // Still must restore chunk_index for postcondition.
-                self.chunk_index = self.reload_full_index()?;
+                // Still must restore chunk_index for postcondition (deferred).
+                deferred_index_load = true;
             }
         }
 
@@ -757,11 +759,34 @@ impl Repository {
             self.rebuild_dedup_cache = false;
         }
 
-        if self.file_cache_dirty {
-            self.file_cache
-                .save(&self.config.id, self.crypto.as_ref())?;
-            self.file_cache_dirty = false;
+        // Save file cache before hydrating chunk_index to reduce peak memory.
+        // Capture error instead of early-returning so we can hydrate first.
+        let fc_result = if self.file_cache_dirty {
+            match self.file_cache.save(&self.config.id, self.crypto.as_ref()) {
+                Ok(()) => {
+                    self.file_cache_dirty = false;
+                    Ok(())
+                }
+                Err(e) => Err(e),
+            }
+        } else {
+            Ok(())
+        };
+
+        // Always hydrate chunk_index — postcondition: self.chunk_index is valid
+        // on all exit paths (success and error).
+        if deferred_index_load {
+            // Try local full_index_cache first (fast, no storage round-trip),
+            // fall back to reloading from remote storage if cache is unavailable.
+            self.chunk_index = dedup_cache::load_chunk_index_from_full_cache(
+                &self.config.id,
+                self.manifest.index_generation,
+            )
+            .or_else(|_| self.reload_full_index())?;
         }
+
+        // Now propagate any file cache save error
+        fc_result?;
 
         Ok(())
     }

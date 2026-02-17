@@ -4,6 +4,7 @@ use crate::repo::pack::PackType;
 use crate::repo::EncryptionMode;
 use crate::repo::Repository;
 use crate::testutil::{test_repo_plaintext, MemoryBackend, PutLog, RecordingBackend};
+use std::path::PathBuf;
 
 #[test]
 fn init_creates_required_keys() {
@@ -369,4 +370,65 @@ fn save_state_releases_pack_buffer_pool() {
         !repo.has_pack_buffer_pool(),
         "pack_buffer_pool should be released after save_state to free buffer memory"
     );
+}
+
+/// Compute the file cache path the same way `FileCache::cache_path` does.
+fn file_cache_path(repo_id: &[u8]) -> Option<PathBuf> {
+    dirs::cache_dir().map(|base| {
+        base.join("vger")
+            .join(hex::encode(repo_id))
+            .join("filecache")
+    })
+}
+
+#[test]
+fn deferred_hydration_survives_file_cache_save_error() {
+    let (mut repo, _log) = repo_on_recording_backend();
+
+    // Store a chunk so the index has content
+    let (id_a, _, _) = repo
+        .store_chunk(b"hydration test chunk", Compression::None, PackType::Data)
+        .unwrap();
+    repo.mark_manifest_dirty();
+    repo.mark_index_dirty();
+    repo.save_state().unwrap();
+    assert_eq!(repo.chunk_index().len(), 1);
+
+    // Enable dedup mode (drops full index, activates deferred hydration path)
+    repo.enable_dedup_mode();
+    assert!(repo.chunk_index().is_empty());
+
+    // Mark file_cache dirty so save_state() will attempt file_cache.save()
+    repo.mark_file_cache_dirty();
+
+    // Block the file cache write by placing a directory where the file should go.
+    // std::fs::write() will fail with "Is a directory".
+    let cache_path = file_cache_path(&repo.config.id).expect("cache dir available");
+    if let Some(parent) = cache_path.parent() {
+        std::fs::create_dir_all(parent).unwrap();
+    }
+    // Remove existing file if present, then create a directory in its place
+    let _ = std::fs::remove_file(&cache_path);
+    std::fs::create_dir(&cache_path).unwrap();
+
+    // save_state should fail (file cache write error)...
+    let result = repo.save_state();
+    assert!(
+        result.is_err(),
+        "save_state should fail when file cache write is blocked"
+    );
+
+    // ...but chunk_index must be hydrated despite the error
+    assert_eq!(
+        repo.chunk_index().len(),
+        1,
+        "chunk_index should be hydrated even when file_cache.save() fails"
+    );
+    assert!(
+        repo.chunk_index().get(&id_a).is_some(),
+        "chunk_index should contain the original chunk"
+    );
+
+    // Clean up: remove the blocking directory
+    let _ = std::fs::remove_dir(&cache_path);
 }
