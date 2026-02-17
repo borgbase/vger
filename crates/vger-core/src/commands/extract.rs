@@ -16,7 +16,9 @@ use crate::error::{Result, VgerError};
 use crate::platform::fs;
 use crate::repo::file_cache::FileCache;
 use crate::repo::format::{unpack_object_expect, ObjectType};
-use crate::snapshot::item::{Item, ItemType};
+#[cfg(test)]
+use crate::snapshot::item::Item;
+use crate::snapshot::item::ItemType;
 use crate::storage::StorageBackend;
 
 use super::util::open_repo_without_index;
@@ -180,23 +182,24 @@ where
         info!("Resolved '{}' to snapshot {}", snapshot_name, resolved_name);
     }
 
-    // Load snapshot items.  When the restore cache is available, read tree-pack
-    // chunks via the cache to avoid loading the full chunk index.
-    let items = if let Some(ref cache) = restore_cache {
-        match super::list::load_snapshot_items_via_lookup(&mut repo, &resolved_name, |id| {
+    // Load raw item stream bytes (not decoded Items).  When the restore cache
+    // is available, read tree-pack chunks via the cache to avoid loading the
+    // full chunk index.
+    let items_stream = if let Some(ref cache) = restore_cache {
+        match super::list::load_snapshot_item_stream_via_lookup(&mut repo, &resolved_name, |id| {
             cache.lookup(id)
         }) {
-            Ok(items) => items,
+            Ok(stream) => stream,
             Err(VgerError::ChunkNotInIndex(_)) => {
                 info!("restore cache missing tree-pack chunk, falling back to full index");
                 repo.load_chunk_index()?;
-                super::list::load_snapshot_items(&mut repo, &resolved_name)?
+                super::list::load_snapshot_item_stream(&mut repo, &resolved_name)?
             }
             Err(e) => return Err(e),
         }
     } else {
         repo.load_chunk_index()?;
-        super::list::load_snapshot_items(&mut repo, &resolved_name)?
+        super::list::load_snapshot_item_stream(&mut repo, &resolved_name)?
     };
 
     let dest_path = Path::new(dest);
@@ -205,101 +208,67 @@ where
         .canonicalize()
         .map_err(|e| VgerError::Other(format!("invalid destination '{}': {e}", dest)))?;
 
-    let mut sorted_items = items;
-    sort_items_for_extract(&mut sorted_items);
+    // Stream items: create dirs/symlinks immediately, build file plan + chunk targets.
+    let (planned_files, chunk_targets, mut stats) =
+        stream_and_plan(&items_stream, &dest_root, &mut include_path, xattrs_enabled)?;
+    drop(items_stream); // free raw bytes before read group building
 
-    let mut stats = ExtractStats::default();
+    if !planned_files.is_empty() {
+        // Build read groups from chunk targets.
+        let groups = if !chunk_targets.is_empty() {
+            if let Some(ref cache) = restore_cache {
+                info!("using mmap restore cache ({} entries)", cache.entry_count());
+                repo.clear_chunk_index();
 
-    // Phase 1: Create directories + symlinks; collect file items for parallel restore.
-    let mut file_items: Vec<(&Item, PathBuf)> = Vec::new();
+                // Pre-scan: check if all chunks exist in cache before consuming chunk_targets.
+                let all_in_cache = chunk_targets.keys().all(|id| cache.lookup(id).is_some());
 
-    for item in &sorted_items {
-        if !include_path(&item.path) {
-            continue;
-        }
-
-        let rel = sanitize_item_path(&item.path)?;
-        let target = dest_root.join(&rel);
-
-        match item.entry_type {
-            ItemType::Directory => {
-                ensure_path_within_root(&target, &dest_root)?;
-                std::fs::create_dir_all(&target)?;
-                ensure_path_within_root(&target, &dest_root)?;
-                let _ = fs::apply_mode(&target, item.mode);
-                if xattrs_enabled {
-                    apply_item_xattrs(&target, item.xattrs.as_ref());
-                }
-                stats.dirs += 1;
-            }
-            ItemType::Symlink => {
-                if let Some(ref link_target) = item.link_target {
-                    ensure_parent_exists_within_root(&target, &dest_root)?;
-                    let _ = std::fs::remove_file(&target);
-                    fs::create_symlink(Path::new(link_target), &target)?;
-                    if xattrs_enabled {
-                        apply_item_xattrs(&target, item.xattrs.as_ref());
-                    }
-                    stats.symlinks += 1;
-                }
-            }
-            ItemType::RegularFile => {
-                file_items.push((item, target));
-            }
-        }
-    }
-
-    if !file_items.is_empty() {
-        // Try the mmap restore cache first — avoids keeping the full index in memory.
-        let plan_result = if let Some(ref cache) = restore_cache {
-            info!("using mmap restore cache ({} entries)", cache.entry_count());
-            // Free the full index before planning — the mmap cache has all pack locations.
-            repo.clear_chunk_index();
-            let result = plan_reads(&file_items, |id| cache.lookup(id));
-            match &result {
-                Ok(_) => Some(result),
-                Err(VgerError::ChunkNotInIndex(_)) => {
-                    // Cache is stale — fall through to filtered index path.
+                if all_in_cache {
+                    build_read_groups(chunk_targets, |id| cache.lookup(id))?
+                } else {
                     info!("restore cache lookup failed, falling back to filtered index");
-                    None
+                    if repo.chunk_index().is_empty() {
+                        repo.load_chunk_index()?;
+                    }
+                    let needed_chunks: HashSet<ChunkId> = chunk_targets.keys().copied().collect();
+                    repo.retain_chunk_index(&needed_chunks);
+                    drop(needed_chunks);
+                    info!(
+                        "loaded filtered chunk index ({} entries)",
+                        repo.chunk_index().len()
+                    );
+                    let index = repo.chunk_index();
+                    build_read_groups(chunk_targets, |id| {
+                        index
+                            .get(id)
+                            .map(|e| (e.pack_id, e.pack_offset, e.stored_size))
+                    })?
                 }
-                Err(_) => Some(result), // Real error — propagate immediately.
+            } else {
+                info!("restore cache unavailable, using filtered index");
+                if repo.chunk_index().is_empty() {
+                    repo.load_chunk_index()?;
+                }
+                let needed_chunks: HashSet<ChunkId> = chunk_targets.keys().copied().collect();
+                repo.retain_chunk_index(&needed_chunks);
+                drop(needed_chunks);
+                info!(
+                    "loaded filtered chunk index ({} entries)",
+                    repo.chunk_index().len()
+                );
+                let index = repo.chunk_index();
+                build_read_groups(chunk_targets, |id| {
+                    index
+                        .get(id)
+                        .map(|e| (e.pack_id, e.pack_offset, e.stored_size))
+                })?
             }
         } else {
-            info!("restore cache unavailable, using filtered index");
-            None
+            Vec::new()
         };
 
-        // Phase 2: Plan reads — group chunks by pack, coalesce adjacent ranges.
-        let (planned_files, groups) = if let Some(result) = plan_result {
-            result?
-        } else {
-            // Fallback: reload/filter the index and plan from there.
-            if repo.chunk_index().is_empty() {
-                repo.load_chunk_index()?;
-            }
-            let needed_chunks: HashSet<ChunkId> = file_items
-                .iter()
-                .flat_map(|(item, _)| item.chunks.iter().map(|c| c.id))
-                .collect();
-            repo.retain_chunk_index(&needed_chunks);
-            drop(needed_chunks);
-            info!(
-                "loaded filtered chunk index ({} entries)",
-                repo.chunk_index().len()
-            );
-            let index = repo.chunk_index();
-            plan_reads(&file_items, |id| {
-                index
-                    .get(id)
-                    .map(|e| (e.pack_id, e.pack_offset, e.stored_size))
-            })?
-        };
-
-        drop(file_items); // release borrows on sorted_items
-        drop(sorted_items); // free all Item memory
-                            // Free chunk index memory — all pack locations are now in PlannedBlob structs.
-                            // After this point repo is only used for .storage and .crypto.
+        // Free chunk index memory — all pack locations are now in PlannedBlob structs.
+        // After this point repo is only used for .storage and .crypto.
         repo.clear_chunk_index();
 
         debug!(
@@ -345,6 +314,116 @@ where
 }
 
 // ---------------------------------------------------------------------------
+// Streaming item processing — two-pass over raw msgpack bytes
+// ---------------------------------------------------------------------------
+
+/// Stream items from raw bytes: create dirs/symlinks immediately, build file
+/// plan + chunk targets.  Two passes ensure directories exist before
+/// symlinks/files are processed.
+///
+/// Note: `include_path` may be called more than once per path (once per pass).
+/// Callers must not rely on single-invocation semantics for stateful filters.
+///
+/// Because directories are created during decoding (pass 1), a malformed item
+/// stream that fails to decode partway through may leave partial directories on
+/// disk.  This is acceptable — directory creation is idempotent and extraction
+/// is not transactional.
+fn stream_and_plan<F>(
+    items_stream: &[u8],
+    dest_root: &Path,
+    include_path: &mut F,
+    xattrs_enabled: bool,
+) -> Result<(
+    Vec<PlannedFile>,
+    HashMap<ChunkId, ChunkTargets>,
+    ExtractStats,
+)>
+where
+    F: FnMut(&str) -> bool,
+{
+    let mut stats = ExtractStats::default();
+
+    // Pass 1: Create all matching directories.
+    super::list::for_each_decoded_item(items_stream, |item| {
+        if item.entry_type != ItemType::Directory || !include_path(&item.path) {
+            return Ok(());
+        }
+        let rel = sanitize_item_path(&item.path)?;
+        let target = dest_root.join(&rel);
+        ensure_path_within_root(&target, dest_root)?;
+        std::fs::create_dir_all(&target)?;
+        ensure_path_within_root(&target, dest_root)?;
+        let _ = fs::apply_mode(&target, item.mode);
+        if xattrs_enabled {
+            apply_item_xattrs(&target, item.xattrs.as_ref());
+        }
+        stats.dirs += 1;
+        Ok(())
+    })?;
+
+    // Pass 2: Process symlinks (create immediately) and files (build plan).
+    let mut planned_files = Vec::new();
+    let mut chunk_targets: HashMap<ChunkId, ChunkTargets> = HashMap::new();
+
+    super::list::for_each_decoded_item(items_stream, |item| {
+        if !include_path(&item.path) {
+            return Ok(());
+        }
+        match item.entry_type {
+            ItemType::Symlink => {
+                if let Some(ref link_target) = item.link_target {
+                    let rel = sanitize_item_path(&item.path)?;
+                    let target = dest_root.join(&rel);
+                    ensure_parent_exists_within_root(&target, dest_root)?;
+                    let _ = std::fs::remove_file(&target);
+                    fs::create_symlink(Path::new(link_target), &target)?;
+                    if xattrs_enabled {
+                        apply_item_xattrs(&target, item.xattrs.as_ref());
+                    }
+                    stats.symlinks += 1;
+                }
+            }
+            ItemType::RegularFile => {
+                let rel = sanitize_item_path(&item.path)?;
+                let target = dest_root.join(&rel);
+                let file_idx = planned_files.len();
+                let mut file_offset: u64 = 0;
+                for chunk_ref in &item.chunks {
+                    let entry = chunk_targets
+                        .entry(chunk_ref.id)
+                        .or_insert_with(|| ChunkTargets {
+                            expected_size: chunk_ref.size,
+                            targets: SmallVec::new(),
+                        });
+                    if entry.expected_size != chunk_ref.size {
+                        return Err(VgerError::InvalidFormat(format!(
+                            "chunk {} has inconsistent logical sizes in snapshot metadata: {} vs {}",
+                            chunk_ref.id, entry.expected_size, chunk_ref.size
+                        )));
+                    }
+                    entry.targets.push(WriteTarget {
+                        file_idx,
+                        file_offset,
+                    });
+                    file_offset += chunk_ref.size as u64;
+                }
+                planned_files.push(PlannedFile {
+                    target_path: target,
+                    total_size: file_offset,
+                    mode: item.mode,
+                    mtime: item.mtime,
+                    xattrs: item.xattrs.clone(),
+                });
+            }
+            ItemType::Directory => {} // handled in pass 1
+        }
+        Ok(())
+    })?;
+
+    Ok((planned_files, chunk_targets, stats))
+}
+
+// ---------------------------------------------------------------------------
 // Read planning — group chunks by pack and coalesce adjacent ranges
 // ---------------------------------------------------------------------------
 
@@ -356,6 +435,7 @@ struct ChunkTargets {
 
 /// Plan reads using a lookup closure that returns `(pack_id, pack_offset, stored_size)`.
 /// The closure abstracts over ChunkIndex vs MmapRestoreCache.
+#[cfg(test)]
 fn plan_reads<L>(
     file_items: &[(&Item, PathBuf)],
     lookup: L,
@@ -398,7 +478,19 @@ where
         });
     }
 
-    // Look up each unique chunk's pack location and group by pack.
+    let groups = build_read_groups(chunk_targets, lookup)?;
+    Ok((files, groups))
+}
+
+/// Look up each unique chunk's pack location and coalesce into ReadGroups.
+/// Consumes `chunk_targets` by value.
+fn build_read_groups<L>(
+    chunk_targets: HashMap<ChunkId, ChunkTargets>,
+    lookup: L,
+) -> Result<Vec<ReadGroup>>
+where
+    L: Fn(&ChunkId) -> Option<(PackId, u64, u32)>,
+{
     let mut pack_blobs: HashMap<PackId, Vec<PlannedBlob>> = HashMap::new();
 
     for (chunk_id, ct) in chunk_targets {
@@ -452,7 +544,7 @@ where
         groups.push(cur);
     }
 
-    Ok((files, groups))
+    Ok(groups)
 }
 
 // ---------------------------------------------------------------------------
@@ -601,19 +693,6 @@ fn process_read_group(
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
-
-fn sort_items_for_extract(items: &mut [Item]) {
-    items.sort_by(|a, b| {
-        let type_ord = |t: &ItemType| match t {
-            ItemType::Directory => 0,
-            ItemType::Symlink => 1,
-            ItemType::RegularFile => 2,
-        };
-        type_ord(&a.entry_type)
-            .cmp(&type_ord(&b.entry_type))
-            .then_with(|| a.path.cmp(&b.path))
-    });
-}
 
 /// Check if a path matches the selection set.
 /// A path matches if it's exactly in the set, or any prefix (ancestor) is in the set.
@@ -1025,5 +1104,158 @@ mod tests {
         .unwrap_err()
         .to_string();
         assert!(err.contains("size mismatch after restore decode"));
+    }
+
+    // -----------------------------------------------------------------------
+    // stream_and_plan tests
+    // -----------------------------------------------------------------------
+
+    fn make_dir_item(path: &str, mode: u32) -> Item {
+        Item {
+            path: path.to_string(),
+            entry_type: ItemType::Directory,
+            mode,
+            uid: 1000,
+            gid: 1000,
+            user: None,
+            group: None,
+            mtime: 0,
+            atime: None,
+            ctime: None,
+            size: 0,
+            chunks: Vec::new(),
+            link_target: None,
+            xattrs: None,
+        }
+    }
+
+    fn make_symlink_item(path: &str, target: &str) -> Item {
+        Item {
+            path: path.to_string(),
+            entry_type: ItemType::Symlink,
+            mode: 0o777,
+            uid: 1000,
+            gid: 1000,
+            user: None,
+            group: None,
+            mtime: 0,
+            atime: None,
+            ctime: None,
+            size: 0,
+            chunks: Vec::new(),
+            link_target: Some(target.to_string()),
+            xattrs: None,
+        }
+    }
+
+    fn serialize_items(items: &[Item]) -> Vec<u8> {
+        let mut bytes = Vec::new();
+        for item in items {
+            bytes.extend_from_slice(&rmp_serde::to_vec(item).unwrap());
+        }
+        bytes
+    }
+
+    #[test]
+    fn stream_and_plan_dirs_before_files() {
+        let temp = tempdir().unwrap();
+        let dest = &temp.path().canonicalize().unwrap();
+
+        // Serialize in reverse order: file before its parent dir.
+        let items = vec![
+            make_file_item("mydir/a.txt", vec![(0xAA, 100)]),
+            make_dir_item("mydir", 0o755),
+        ];
+        let stream = serialize_items(&items);
+
+        let (planned_files, chunk_targets, stats) =
+            stream_and_plan(&stream, dest, &mut |_| true, false).unwrap();
+
+        // Directory was created (pass 1 runs before pass 2).
+        assert!(dest.join("mydir").is_dir());
+        assert_eq!(stats.dirs, 1);
+
+        // File is in planned_files.
+        assert_eq!(planned_files.len(), 1);
+        assert!(planned_files[0].target_path.ends_with("mydir/a.txt"));
+        assert_eq!(chunk_targets.len(), 1);
+    }
+
+    #[test]
+    fn stream_and_plan_respects_filter() {
+        let temp = tempdir().unwrap();
+        let dest = &temp.path().canonicalize().unwrap();
+
+        let items = vec![
+            make_dir_item("included", 0o755),
+            make_dir_item("excluded", 0o755),
+            make_file_item("included/a.txt", vec![(0xAA, 100)]),
+            make_file_item("excluded/b.txt", vec![(0xBB, 200)]),
+        ];
+        let stream = serialize_items(&items);
+
+        let (planned_files, _chunk_targets, stats) = stream_and_plan(
+            &stream,
+            dest,
+            &mut |p: &str| p.starts_with("included"),
+            false,
+        )
+        .unwrap();
+
+        // Only the included directory was created.
+        assert!(dest.join("included").is_dir());
+        assert!(!dest.join("excluded").exists());
+        assert_eq!(stats.dirs, 1);
+
+        // Only the included file is planned.
+        assert_eq!(planned_files.len(), 1);
+        assert!(planned_files[0].target_path.ends_with("included/a.txt"));
+    }
+
+    #[test]
+    fn stream_and_plan_only_retains_files() {
+        let temp = tempdir().unwrap();
+        let dest = &temp.path().canonicalize().unwrap();
+
+        let n_dirs = 5;
+        let m_files = 3;
+        let mut items: Vec<Item> = Vec::new();
+        for i in 0..n_dirs {
+            items.push(make_dir_item(&format!("dir{i}"), 0o755));
+        }
+        for i in 0..m_files {
+            items.push(make_file_item(
+                &format!("dir0/file{i}.txt"),
+                vec![((0xA0 + i) as u8, 100)],
+            ));
+        }
+        // Add a symlink too — should not be in planned_files.
+        items.push(make_symlink_item("dir0/link", "file0.txt"));
+        let stream = serialize_items(&items);
+
+        let (planned_files, _chunk_targets, stats) =
+            stream_and_plan(&stream, dest, &mut |_| true, false).unwrap();
+
+        assert_eq!(planned_files.len(), m_files as usize);
+        assert_eq!(stats.dirs, n_dirs);
+        assert_eq!(stats.symlinks, 1);
+    }
+
+    #[test]
+    fn stream_and_plan_decode_failure_leaves_partial_dirs() {
+        // Extraction is not transactional: a decode error partway through the
+        // stream may leave already-created directories on disk.  This test
+        // documents that behavior as intentional.
+        let temp = tempdir().unwrap();
+        let dest = &temp.path().canonicalize().unwrap();
+
+        let mut stream = serialize_items(&[make_dir_item("aaa", 0o755)]);
+        // Append garbage bytes to trigger a decode error after the first item.
+        stream.extend_from_slice(&[0xFF, 0xFF, 0xFF]);
+
+        let result = stream_and_plan(&stream, dest, &mut |_| true, false);
+        assert!(result.is_err());
+        // The directory from before the corrupt bytes was still created.
+        assert!(dest.join("aaa").is_dir());
     }
 }
