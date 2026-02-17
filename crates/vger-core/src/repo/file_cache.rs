@@ -35,6 +35,12 @@ impl FileCache {
         }
     }
 
+    pub fn with_capacity(capacity: usize) -> Self {
+        Self {
+            entries: HashMap::with_capacity(capacity),
+        }
+    }
+
     /// Look up a file in the cache. Returns the cached chunk refs only if all
     /// metadata fields match exactly (device, inode, mtime_ns, ctime_ns, size).
     pub fn lookup(

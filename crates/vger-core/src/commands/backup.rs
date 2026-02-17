@@ -1242,7 +1242,7 @@ pub fn run_with_progress(
         let mut item_stream = Vec::new();
         let mut item_ptrs: Vec<ChunkId> = Vec::new();
         let items_config = items_chunker_config();
-        let mut new_file_cache = FileCache::new();
+        let mut new_file_cache = FileCache::with_capacity(repo.file_cache().len());
 
         // Execute command dumps before walking filesystem
         process_command_dumps(
