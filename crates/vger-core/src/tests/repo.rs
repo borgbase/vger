@@ -432,3 +432,101 @@ fn deferred_hydration_survives_file_cache_save_error() {
     // Clean up: remove the blocking directory
     let _ = std::fs::remove_dir(&cache_path);
 }
+
+#[test]
+fn init_rejects_oversized_max_pack_size() {
+    use crate::config::{RepositoryConfig, RetryConfig};
+
+    crate::testutil::init_test_environment();
+
+    let min_pack = 32 * 1024 * 1024; // 32 MiB
+
+    // Just over the 512 MiB hard limit — should fail.
+    let oversized_config = RepositoryConfig {
+        url: String::new(),
+        region: None,
+        access_key_id: None,
+        secret_access_key: None,
+        endpoint: None,
+        sftp_key: None,
+        sftp_known_hosts: None,
+        sftp_max_connections: None,
+        rest_token: None,
+        min_pack_size: min_pack,
+        max_pack_size: 513 * 1024 * 1024,
+        retry: RetryConfig::default(),
+    };
+
+    let result = Repository::init(
+        Box::new(MemoryBackend::new()),
+        EncryptionMode::None,
+        ChunkerConfig::default(),
+        None,
+        Some(&oversized_config),
+    );
+    assert!(
+        result.is_err(),
+        "init should reject max_pack_size > 512 MiB"
+    );
+    let err = format!("{}", result.err().unwrap());
+    assert!(err.contains("512 MiB"), "error should mention limit: {err}");
+
+    // Exactly 512 MiB — should succeed.
+    let valid_config = RepositoryConfig {
+        url: String::new(),
+        region: None,
+        access_key_id: None,
+        secret_access_key: None,
+        endpoint: None,
+        sftp_key: None,
+        sftp_known_hosts: None,
+        sftp_max_connections: None,
+        rest_token: None,
+        min_pack_size: min_pack,
+        max_pack_size: 512 * 1024 * 1024,
+        retry: RetryConfig::default(),
+    };
+
+    let result = Repository::init(
+        Box::new(MemoryBackend::new()),
+        EncryptionMode::None,
+        ChunkerConfig::default(),
+        None,
+        Some(&valid_config),
+    );
+    assert!(
+        result.is_ok(),
+        "init should accept max_pack_size == 512 MiB"
+    );
+}
+
+#[test]
+fn open_rejects_oversized_max_pack_size() {
+    crate::testutil::init_test_environment();
+
+    // Init a valid repo first.
+    let storage = Box::new(MemoryBackend::new());
+    let repo = Repository::init(
+        storage,
+        EncryptionMode::None,
+        ChunkerConfig::default(),
+        None,
+        None,
+    )
+    .unwrap();
+
+    // Tamper with the stored config: set max_pack_size > 512 MiB.
+    let mut tampered_config = repo.config.clone();
+    tampered_config.max_pack_size = 513 * 1024 * 1024;
+    let tampered_data = rmp_serde::to_vec(&tampered_config).unwrap();
+    repo.storage.put("config", &tampered_data).unwrap();
+
+    // Re-open should fail.
+    let result = Repository::open(Box::new(repo.storage.clone()), None);
+    assert!(
+        result.is_err(),
+        "open should reject stored max_pack_size > 512 MiB"
+    );
+    let err = format!("{}", result.err().unwrap());
+    assert!(err.contains("512 MiB"), "error should mention limit: {err}");
+}

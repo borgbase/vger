@@ -54,9 +54,9 @@ pub const MAX_BLOBS_PER_PACK: usize = 10_000;
 pub const PACK_MAX_AGE_SECS: u64 = 300;
 
 /// Skip upfront `reserve()` for unreasonably large target sizes (e.g. `usize::MAX`
-/// in tests). Real pack targets are well below this — `max_pack_size` defaults
-/// to 128 MiB.
-const MAX_PREALLOC_SIZE: usize = 256 * 1024 * 1024;
+/// in tests). Must be >= `max_pack_size` (hard-capped at 512 MiB) so that
+/// pre-allocation fires for all realistic pack targets.
+const MAX_PREALLOC_SIZE: usize = 512 * 1024 * 1024;
 
 /// Tuple describing one chunk's location and refcount in a sealed/flushed pack.
 pub type PackedChunkEntry = (ChunkId, u32, u64, u32);
@@ -113,8 +113,10 @@ impl PackWriter {
 
         // On first blob: write pack header and pre-reserve capacity.
         if self.blob_meta.is_empty() {
-            if self.pack_bytes.capacity() == 0 && self.target_size <= MAX_PREALLOC_SIZE {
-                self.pack_bytes.reserve(self.target_size);
+            let prealloc = self.target_size.min(MAX_PREALLOC_SIZE);
+            if self.pack_bytes.capacity() < prealloc {
+                // len == 0 here (first blob), so reserve(prealloc) guarantees capacity >= prealloc.
+                self.pack_bytes.reserve(prealloc);
             }
             self.pack_bytes.extend_from_slice(PACK_MAGIC);
             self.pack_bytes.push(PACK_VERSION);
@@ -773,6 +775,79 @@ mod tests {
         // Writer should be clear now.
         assert!(!w.has_pending());
         assert_eq!(w.pack_bytes.len(), 0);
+    }
+
+    #[test]
+    fn prealloc_fires_for_fresh_buffer() {
+        let mut w = PackWriter::new(PackType::Data, 64 * 1024);
+        w.add_blob(1, dummy_chunk_id(0), vec![0u8; 10], 10);
+        assert!(
+            w.pack_bytes.capacity() >= 64 * 1024,
+            "expected capacity >= 64K, got {}",
+            w.pack_bytes.capacity()
+        );
+    }
+
+    #[test]
+    fn prealloc_fires_for_undersized_recycled_buffer() {
+        let target = 128 * 1024;
+        let mut w = PackWriter::new(PackType::Data, target);
+        let engine = crate::crypto::PlaintextEngine::new(&[0u8; 32]);
+
+        // First pack: add a small blob and seal into a small out Vec.
+        w.add_blob(1, dummy_chunk_id(0), vec![0u8; 10], 10);
+        let mut out = Vec::new();
+        let _ = w.seal_into(&engine, &mut out).unwrap();
+
+        // After seal_into, w.pack_bytes got swapped with `out` (which was small).
+        // Its capacity is much less than target_size.
+        assert!(
+            w.pack_bytes.capacity() < target,
+            "recycled buffer should be undersized"
+        );
+
+        // Second pack: add a blob — prealloc should fire for the undersized recycled buffer.
+        w.add_blob(1, dummy_chunk_id(1), vec![0u8; 10], 10);
+        assert!(
+            w.pack_bytes.capacity() >= target,
+            "expected capacity >= {target} after recycled prealloc, got {}",
+            w.pack_bytes.capacity()
+        );
+    }
+
+    #[test]
+    fn prealloc_skipped_for_oversized_target() {
+        let mut w = PackWriter::new(PackType::Data, usize::MAX);
+        // Should not panic or OOM — the MAX_PREALLOC_SIZE guard prevents reserve(usize::MAX).
+        w.add_blob(1, dummy_chunk_id(0), vec![0u8; 10], 10);
+        assert!(!w.pack_bytes.is_empty());
+    }
+
+    #[test]
+    fn small_backup_on_large_target() {
+        let target = 256 * 1024;
+        let mut w = PackWriter::new(PackType::Data, target);
+
+        // Add a single small blob (1 KiB).
+        w.add_blob(1, dummy_chunk_id(0), vec![0xAB; 1024], 1024);
+
+        // Pre-alloc should have fired: capacity >= target.
+        assert!(
+            w.pack_bytes.capacity() >= target,
+            "expected capacity >= {target}, got {}",
+            w.pack_bytes.capacity()
+        );
+
+        // Seal and verify the output is small (just header + 1 blob + trailer).
+        let engine = crate::crypto::PlaintextEngine::new(&[0u8; 32]);
+        let (_, pack_bytes, entries) = w.seal(&engine).unwrap();
+        assert_eq!(entries.len(), 1);
+        // Output should be small: header(9) + len(4) + blob(1024) + trailer < 2 KiB
+        assert!(
+            pack_bytes.len() < 2048,
+            "sealed output unexpectedly large: {}",
+            pack_bytes.len()
+        );
     }
 
     /// Validates `pack_bytes.len() == PACK_HEADER_SIZE + current_size` across

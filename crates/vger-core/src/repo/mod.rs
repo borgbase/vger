@@ -52,7 +52,7 @@ fn default_min_pack_size() -> u32 {
 }
 
 fn default_max_pack_size() -> u32 {
-    512 * 1024 * 1024
+    128 * 1024 * 1024
 }
 
 /// Default maximum number of in-flight background pack uploads.
@@ -187,6 +187,12 @@ impl Repository {
             .map(|c| c.max_pack_size)
             .unwrap_or_else(default_max_pack_size);
 
+        if max_pack_size > 512 * 1024 * 1024 {
+            return Err(VgerError::Config(format!(
+                "max_pack_size ({max_pack_size}) exceeds hard limit of 512 MiB"
+            )));
+        }
+
         let repo_config = RepoConfig {
             version: 1,
             id: repo_id,
@@ -318,6 +324,13 @@ impl Repository {
 
         if repo_config.version != 1 {
             return Err(VgerError::UnsupportedVersion(repo_config.version));
+        }
+
+        if repo_config.max_pack_size > 512 * 1024 * 1024 {
+            return Err(VgerError::Config(format!(
+                "max_pack_size ({}) exceeds hard limit of 512 MiB",
+                repo_config.max_pack_size
+            )));
         }
 
         // Build crypto engine

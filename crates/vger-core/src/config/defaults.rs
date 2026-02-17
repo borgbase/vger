@@ -31,7 +31,7 @@ pub(super) fn default_min_pack_size() -> u32 {
 }
 
 pub(super) fn default_max_pack_size() -> u32 {
-    512 * 1024 * 1024 // 512 MiB
+    128 * 1024 * 1024 // 128 MiB
 }
 
 pub(super) fn default_max_retries() -> usize {
