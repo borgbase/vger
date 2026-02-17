@@ -26,7 +26,7 @@ use crate::index::{ChunkIndex, DedupIndex, IndexDelta};
 use crate::storage::StorageBackend;
 
 use self::file_cache::FileCache;
-use self::format::{pack_object, unpack_object_expect, ObjectType};
+use self::format::{pack_object, pack_object_streaming, unpack_object_expect, ObjectType};
 use self::manifest::Manifest;
 use self::pack::{
     compute_data_pack_target, compute_tree_pack_target, read_blob_from_pack, PackBufferPool,
@@ -723,9 +723,13 @@ impl Repository {
         }
 
         if self.index_dirty {
-            let index_bytes = rmp_serde::to_vec(&self.chunk_index)?;
-            let index_packed =
-                pack_object(ObjectType::ChunkIndex, &index_bytes, self.crypto.as_ref())?;
+            let estimated = self.chunk_index.len().saturating_mul(80);
+            let index_packed = pack_object_streaming(
+                ObjectType::ChunkIndex,
+                estimated,
+                self.crypto.as_ref(),
+                |buf| Ok(rmp_serde::encode::write(buf, &self.chunk_index)?),
+            )?;
             self.storage.put("index", &index_packed)?;
             self.index_dirty = false;
         }

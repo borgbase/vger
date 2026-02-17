@@ -7417,6 +7417,7 @@ dependencies = [
  "pariter",
  "rand 0.8.5",
  "rayon",
+ "rmp",
  "rmp-serde",
  "russh",
  "russh-sftp",

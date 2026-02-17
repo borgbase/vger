@@ -5,7 +5,7 @@ use serde::{Deserialize, Serialize};
 use tracing::debug;
 
 use crate::crypto::CryptoEngine;
-use crate::error::Result;
+use crate::error::{Result, VgerError};
 use crate::snapshot::item::ChunkRef;
 
 use super::format::{pack_object_streaming, unpack_object_expect, ObjectType};
@@ -113,6 +113,82 @@ impl FileCache {
         before - self.entries.len()
     }
 
+    /// Decode from msgpack plaintext with pre-allocated HashMap capacity.
+    /// Parses the msgpack envelope to extract the map entry count, applies a
+    /// safety cap based on plaintext length, then deserializes entries into a
+    /// pre-sized HashMap. Falls back to rmp_serde::from_slice on parse error.
+    fn decode_from_plaintext(plaintext: &[u8]) -> Result<Self> {
+        match Self::try_decode_preallocated(plaintext) {
+            Ok(cache) => Ok(cache),
+            Err(_) => {
+                // Envelope parsing failed — fall back to derived Deserialize.
+                Ok(rmp_serde::from_slice(plaintext)?)
+            }
+        }
+    }
+
+    fn try_decode_preallocated(plaintext: &[u8]) -> Result<Self> {
+        let mut cursor = std::io::Cursor::new(plaintext);
+
+        // Peek at first byte to determine envelope shape.
+        let marker = rmp::decode::read_marker(&mut cursor)
+            .map_err(|e| VgerError::Other(format!("file cache: bad marker: {e:?}")))?;
+
+        let map_len = match marker {
+            // Struct-as-array: [entries_map]
+            rmp::Marker::FixArray(1) | rmp::Marker::Array16 | rmp::Marker::Array32 => {
+                cursor.set_position(0);
+                let outer = rmp::decode::read_array_len(&mut cursor)
+                    .map_err(|e| VgerError::Other(format!("file cache: {e}")))?;
+                if outer != 1 {
+                    return Err(VgerError::Other(
+                        "file cache: expected 1-field struct".into(),
+                    ));
+                }
+                rmp::decode::read_map_len(&mut cursor)
+                    .map_err(|e| VgerError::Other(format!("file cache: {e}")))?
+                    as usize
+            }
+            // Struct-as-map: {"entries": entries_map}
+            rmp::Marker::FixMap(1) | rmp::Marker::Map16 | rmp::Marker::Map32 => {
+                cursor.set_position(0);
+                let outer = rmp::decode::read_map_len(&mut cursor)
+                    .map_err(|e| VgerError::Other(format!("file cache: {e}")))?;
+                if outer != 1 {
+                    return Err(VgerError::Other(
+                        "file cache: expected 1-field struct".into(),
+                    ));
+                }
+                // Skip key string ("entries") by reading it through the decoder
+                let mut key_buf = [0u8; 16]; // "entries" is 7 bytes; 16 is plenty
+                rmp::decode::read_str(&mut cursor, &mut key_buf)
+                    .map_err(|e| VgerError::Other(format!("file cache: {e}")))?;
+                rmp::decode::read_map_len(&mut cursor)
+                    .map_err(|e| VgerError::Other(format!("file cache: {e}")))?
+                    as usize
+            }
+            _ => return Err(VgerError::Other("file cache: unexpected envelope".into())),
+        };
+
+        // Safety cap: each map entry is at least ~8 bytes in msgpack.
+        let max_entries = plaintext.len() / 8;
+        let capacity = map_len.min(max_entries);
+
+        let pos = cursor.position() as usize;
+        if pos > plaintext.len() {
+            return Err(VgerError::Other("file cache: truncated".into()));
+        }
+        let remaining = &plaintext[pos..];
+        let mut de = rmp_serde::Deserializer::new(remaining);
+        let mut entries = HashMap::with_capacity(capacity);
+        for _ in 0..map_len {
+            let key: String = Deserialize::deserialize(&mut de)?;
+            let val: FileCacheEntry = Deserialize::deserialize(&mut de)?;
+            entries.insert(key, val);
+        }
+        Ok(FileCache { entries })
+    }
+
     /// Return the local filesystem path for the cache file.
     /// Platform cache dir + `vger/<repo_id_hex>/filecache`
     /// (macOS: `~/Library/Caches/vger/…`, Linux: `~/.cache/vger/…`)
@@ -130,14 +206,22 @@ impl FileCache {
         let Some(path) = Self::cache_path(repo_id) else {
             return Self::new();
         };
-        let Ok(data) = std::fs::read(&path) else {
-            return Self::new();
+        // Scope `data` so the encrypted blob (~64M) is dropped before
+        // deserialization allocates the HashMap.
+        let plaintext = {
+            let data = match std::fs::read(&path) {
+                Ok(d) => d,
+                Err(_) => return Self::new(),
+            };
+            match unpack_object_expect(&data, ObjectType::FileCache, crypto) {
+                Ok(pt) => pt,
+                Err(_) => {
+                    debug!("file cache: failed to decrypt, starting fresh");
+                    return Self::new();
+                }
+            }
         };
-        let Ok(plaintext) = unpack_object_expect(&data, ObjectType::FileCache, crypto) else {
-            debug!("file cache: failed to decrypt, starting fresh");
-            return Self::new();
-        };
-        match rmp_serde::from_slice(&plaintext) {
+        match Self::decode_from_plaintext(&plaintext) {
             Ok(cache) => cache,
             Err(e) => {
                 debug!("file cache: failed to deserialize: {e}, starting fresh");
@@ -343,5 +427,68 @@ mod tests {
         assert!(cache.is_empty());
         assert_eq!(cache.len(), 0);
         assert!(cache.lookup("/any/path", 0, 0, 0, 0, 0).is_none());
+    }
+
+    #[test]
+    fn decode_from_plaintext_round_trip() {
+        let mut cache = FileCache::new();
+        for i in 0..100 {
+            cache.insert(
+                format!("/tmp/file_{i}.txt"),
+                1,
+                1000 + i as u64,
+                1234567890,
+                1234567890,
+                4096,
+                sample_chunk_refs(),
+            );
+        }
+
+        // Serialize with derived Serialize (struct-as-array).
+        let plaintext = rmp_serde::to_vec(&cache).unwrap();
+
+        // Decode with the pre-allocating decoder.
+        let decoded = FileCache::decode_from_plaintext(&plaintext).unwrap();
+        assert_eq!(decoded.len(), 100);
+        for i in 0..100 {
+            let path = format!("/tmp/file_{i}.txt");
+            assert!(
+                decoded
+                    .lookup(&path, 1, 1000 + i as u64, 1234567890, 1234567890, 4096)
+                    .is_some(),
+                "missing entry for {path}"
+            );
+        }
+    }
+
+    #[test]
+    fn decode_from_plaintext_empty_cache() {
+        let cache = FileCache::new();
+        let plaintext = rmp_serde::to_vec(&cache).unwrap();
+        let decoded = FileCache::decode_from_plaintext(&plaintext).unwrap();
+        assert!(decoded.is_empty());
+    }
+
+    #[test]
+    fn decode_from_plaintext_bogus_map_len_capped() {
+        // Craft a msgpack byte sequence: array(1) then a map header claiming 2^30 entries.
+        // The safety cap should limit allocation to plaintext.len() / 8.
+        let mut buf = Vec::new();
+        // FixArray(1)
+        rmp::encode::write_array_len(&mut buf, 1).unwrap();
+        // Map32 with absurd length
+        rmp::encode::write_map_len(&mut buf, 1 << 30).unwrap();
+        // No actual data follows — deserialization should fail gracefully, not OOM.
+        let result = FileCache::decode_from_plaintext(&buf);
+        // Should error (not panic/OOM), either from try_decode or fallback.
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn decode_from_plaintext_falls_back_on_garbage() {
+        // Completely invalid msgpack — should fall through to rmp_serde and error.
+        let garbage = vec![0xFF, 0xFE, 0xFD];
+        let result = FileCache::decode_from_plaintext(&garbage);
+        assert!(result.is_err());
     }
 }

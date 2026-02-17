@@ -324,12 +324,11 @@ fn flush_cross_file_batch(
 
     // Sequential phase: iterate files in walk order, commit chunks, update caches.
     for file in batch.files.drain(..) {
-        emit_progress(
-            progress,
-            BackupProgressEvent::FileStarted {
+        if let Some(cb) = progress.as_deref_mut() {
+            cb(BackupProgressEvent::FileStarted {
                 path: file.item.path.clone(),
-            },
-        );
+            });
+        }
 
         let mut item = file.item;
 
@@ -369,18 +368,6 @@ fn flush_cross_file_batch(
 
         stats.nfiles += 1;
 
-        new_file_cache.insert(
-            file.abs_path,
-            file.metadata_summary.device,
-            file.metadata_summary.inode,
-            file.metadata_summary.mtime_ns,
-            file.metadata_summary.ctime_ns,
-            file.metadata_summary.size,
-            item.chunks.clone(),
-        );
-
-        emit_stats_progress(progress, stats, Some(item.path.clone()));
-
         append_item_to_stream(
             repo,
             item_stream,
@@ -389,6 +376,18 @@ fn flush_cross_file_batch(
             items_config,
             compression,
         )?;
+
+        new_file_cache.insert(
+            file.abs_path,
+            file.metadata_summary.device,
+            file.metadata_summary.inode,
+            file.metadata_summary.mtime_ns,
+            file.metadata_summary.ctime_ns,
+            file.metadata_summary.size,
+            std::mem::take(&mut item.chunks),
+        );
+
+        emit_stats_progress(progress, stats, Some(std::mem::take(&mut item.path)));
     }
 
     batch.raw_chunks.clear();
@@ -648,12 +647,11 @@ fn process_regular_file_item(
     max_pending_transform_bytes: usize,
     max_pending_file_actions: usize,
 ) -> Result<()> {
-    emit_progress(
-        progress,
-        BackupProgressEvent::FileStarted {
+    if let Some(cb) = progress.as_deref_mut() {
+        cb(BackupProgressEvent::FileStarted {
             path: item.path.clone(),
-        },
-    );
+        });
+    }
 
     // File-level cache: skip read/chunk/compress/encrypt for unchanged files.
     let abs_path = entry_path.to_string_lossy().to_string();
@@ -994,12 +992,11 @@ fn process_source_path(
                         progress,
                     )?;
 
-                    emit_progress(
-                        progress,
-                        BackupProgressEvent::FileStarted {
+                    if let Some(cb) = progress.as_deref_mut() {
+                        cb(BackupProgressEvent::FileStarted {
                             path: item.path.clone(),
-                        },
-                    );
+                        });
+                    }
 
                     // Cache entries were pre-sanitized against the index before backup.
                     let mut file_original: u64 = 0;

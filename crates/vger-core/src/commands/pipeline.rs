@@ -671,9 +671,7 @@ fn consume_processed_entry(
     max_pending_file_actions: usize,
     budget: &ByteBudget,
 ) -> Result<()> {
-    use super::backup::{
-        append_item_to_stream, emit_progress, emit_stats_progress, flush_regular_file_batch,
-    };
+    use super::backup::{append_item_to_stream, emit_stats_progress, flush_regular_file_batch};
 
     match entry {
         ProcessedEntry::ProcessedFile {
@@ -683,12 +681,11 @@ fn consume_processed_entry(
             chunks,
             acquired_bytes,
         } => {
-            emit_progress(
-                progress,
-                BackupProgressEvent::FileStarted {
+            if let Some(cb) = progress.as_deref_mut() {
+                cb(BackupProgressEvent::FileStarted {
                     path: item.path.clone(),
-                },
-            );
+                });
+            }
 
             for prepared in chunks {
                 let size = prepared.uncompressed_size;
@@ -724,18 +721,6 @@ fn consume_processed_entry(
 
             stats.nfiles += 1;
 
-            new_file_cache.insert(
-                abs_path,
-                metadata.device,
-                metadata.inode,
-                metadata.mtime_ns,
-                metadata.ctime_ns,
-                metadata.size,
-                item.chunks.clone(),
-            );
-
-            emit_stats_progress(progress, stats, Some(item.path.clone()));
-
             append_item_to_stream(
                 repo,
                 item_stream,
@@ -744,6 +729,18 @@ fn consume_processed_entry(
                 items_config,
                 compression,
             )?;
+
+            new_file_cache.insert(
+                abs_path,
+                metadata.device,
+                metadata.inode,
+                metadata.mtime_ns,
+                metadata.ctime_ns,
+                metadata.size,
+                std::mem::take(&mut item.chunks),
+            );
+
+            emit_stats_progress(progress, stats, Some(std::mem::take(&mut item.path)));
         }
 
         ProcessedEntry::LargeFile {
@@ -751,12 +748,11 @@ fn consume_processed_entry(
             abs_path,
             metadata,
         } => {
-            emit_progress(
-                progress,
-                BackupProgressEvent::FileStarted {
+            if let Some(cb) = progress.as_deref_mut() {
+                cb(BackupProgressEvent::FileStarted {
                     path: item.path.clone(),
-                },
-            );
+                });
+            }
 
             let chunk_id_key = *repo.crypto.chunk_id_key();
             let file = File::open(Path::new(&abs_path)).map_err(VgerError::Io)?;
@@ -805,18 +801,6 @@ fn consume_processed_entry(
 
             stats.nfiles += 1;
 
-            new_file_cache.insert(
-                abs_path,
-                metadata.device,
-                metadata.inode,
-                metadata.mtime_ns,
-                metadata.ctime_ns,
-                metadata.size,
-                item.chunks.clone(),
-            );
-
-            emit_stats_progress(progress, stats, Some(item.path.clone()));
-
             append_item_to_stream(
                 repo,
                 item_stream,
@@ -825,6 +809,18 @@ fn consume_processed_entry(
                 items_config,
                 compression,
             )?;
+
+            new_file_cache.insert(
+                abs_path,
+                metadata.device,
+                metadata.inode,
+                metadata.mtime_ns,
+                metadata.ctime_ns,
+                metadata.size,
+                std::mem::take(&mut item.chunks),
+            );
+
+            emit_stats_progress(progress, stats, Some(std::mem::take(&mut item.path)));
         }
 
         ProcessedEntry::CacheHit {
@@ -833,12 +829,11 @@ fn consume_processed_entry(
             metadata,
             cached_refs,
         } => {
-            emit_progress(
-                progress,
-                BackupProgressEvent::FileStarted {
+            if let Some(cb) = progress.as_deref_mut() {
+                cb(BackupProgressEvent::FileStarted {
                     path: item.path.clone(),
-                },
-            );
+                });
+            }
 
             let mut file_original: u64 = 0;
             let mut file_compressed: u64 = 0;
@@ -852,19 +847,6 @@ fn consume_processed_entry(
             stats.compressed_size += file_compressed;
             item.chunks = cached_refs;
 
-            new_file_cache.insert(
-                abs_path,
-                metadata.device,
-                metadata.inode,
-                metadata.mtime_ns,
-                metadata.ctime_ns,
-                metadata.size,
-                item.chunks.clone(),
-            );
-
-            debug!(path = %item.path, "file cache hit (parallel)");
-            emit_stats_progress(progress, stats, Some(item.path.clone()));
-
             append_item_to_stream(
                 repo,
                 item_stream,
@@ -873,6 +855,19 @@ fn consume_processed_entry(
                 items_config,
                 compression,
             )?;
+
+            new_file_cache.insert(
+                abs_path,
+                metadata.device,
+                metadata.inode,
+                metadata.mtime_ns,
+                metadata.ctime_ns,
+                metadata.size,
+                std::mem::take(&mut item.chunks),
+            );
+
+            debug!(path = %item.path, "file cache hit (parallel)");
+            emit_stats_progress(progress, stats, Some(std::mem::take(&mut item.path)));
         }
 
         ProcessedEntry::NonFile { item } => {
