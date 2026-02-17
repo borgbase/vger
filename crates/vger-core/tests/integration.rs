@@ -36,6 +36,7 @@ fn init_local_repo(dir: &std::path::Path) -> Repository {
         ChunkerConfig::default(),
         None,
         None,
+        None,
     )
     .unwrap()
 }
@@ -43,7 +44,7 @@ fn init_local_repo(dir: &std::path::Path) -> Repository {
 fn open_local_repo(dir: &std::path::Path) -> Repository {
     init_test_environment();
     let storage = Box::new(LocalBackend::new(dir.to_str().unwrap()).unwrap());
-    Repository::open(storage, None).unwrap()
+    Repository::open(storage, None, None).unwrap()
 }
 
 fn make_test_config(repo_dir: &std::path::Path) -> VgerConfig {
@@ -77,6 +78,7 @@ fn make_test_config(repo_dir: &std::path::Path) -> VgerConfig {
         xattrs: XattrsConfig::default(),
         schedule: ScheduleConfig::default(),
         limits: ResourceLimitsConfig::default(),
+        cache_dir: None,
     }
 }
 
@@ -172,7 +174,7 @@ fn init_auto_mode_persists_concrete_encryption_mode() {
     drop(repo);
 
     let storage = Box::new(LocalBackend::new(repo_dir.to_str().unwrap()).unwrap());
-    let reopened = Repository::open(storage, Some("test-passphrase")).unwrap();
+    let reopened = Repository::open(storage, Some("test-passphrase"), None).unwrap();
     assert_eq!(reopened.config.encryption, selected);
 }
 

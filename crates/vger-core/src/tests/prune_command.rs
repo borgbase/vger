@@ -13,7 +13,7 @@ use super::helpers::{
 fn open_local_repo(repo_dir: &std::path::Path) -> Repository {
     init_test_environment();
     let storage = Box::new(LocalBackend::new(repo_dir.to_str().unwrap()).unwrap());
-    Repository::open(storage, None).unwrap()
+    Repository::open(storage, None, None).unwrap()
 }
 
 #[test]

@@ -105,6 +105,7 @@ fn init_repo_with_backend(backend: AdvisoryLockBackend) -> Repository {
         ChunkerConfig::default(),
         None,
         None,
+        None,
     )
     .unwrap()
 }

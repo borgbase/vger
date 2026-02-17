@@ -1202,7 +1202,11 @@ pub fn run_with_progress(
     let backend = storage::backend_from_config(&config.repository, throttle_bps)?;
     let backend =
         limits::wrap_backup_storage_backend(backend, &config.repository.url, &config.limits)?;
-    let mut repo = Repository::open(backend, passphrase)?;
+    let mut repo = Repository::open(
+        backend,
+        passphrase,
+        super::util::cache_dir_from_config(config),
+    )?;
 
     with_repo_lock(&mut repo, |repo| {
         // Check snapshot name is unique while holding the lock.

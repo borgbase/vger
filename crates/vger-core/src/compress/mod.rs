@@ -125,9 +125,7 @@ pub fn decompress_with_hint(data: &[u8], expected_size: Option<usize>) -> Result
         TAG_ZSTD => {
             let mut decoder = zstd::stream::Decoder::new(std::io::Cursor::new(payload))
                 .map_err(|e| VgerError::Decompression(format!("zstd init: {e}")))?;
-            let hinted_capacity = expected_size
-                .unwrap_or(0)
-                .min(MAX_DECOMPRESS_SIZE as usize);
+            let hinted_capacity = expected_size.unwrap_or(0).min(MAX_DECOMPRESS_SIZE as usize);
             let mut output = Vec::with_capacity(hinted_capacity);
             decoder
                 .by_ref()

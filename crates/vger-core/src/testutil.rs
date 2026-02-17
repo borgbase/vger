@@ -105,6 +105,7 @@ pub fn test_repo_plaintext() -> Repository {
         ChunkerConfig::default(),
         None,
         None,
+        None,
     )
     .expect("failed to init test repo")
 }

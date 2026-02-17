@@ -63,6 +63,7 @@ fn make_test_config(repo_dir: &Path) -> VgerConfig {
         xattrs: XattrsConfig::default(),
         schedule: ScheduleConfig::default(),
         limits: ResourceLimitsConfig::default(),
+        cache_dir: None,
     }
 }
 
@@ -84,7 +85,7 @@ fn source_entry(path: &Path, label: &str) -> SourceEntry {
 
 fn open_local_repo(repo_dir: &Path, passphrase: Option<&str>) -> Repository {
     let storage = Box::new(LocalBackend::new(repo_dir.to_str().unwrap()).unwrap());
-    Repository::open(storage, passphrase).unwrap()
+    Repository::open(storage, passphrase, None).unwrap()
 }
 
 fn backup_source(
@@ -326,7 +327,7 @@ fn run_encrypted_lifecycle(mode: EncryptionModeConfig, expected_mode: Encryption
     );
 
     let storage = Box::new(LocalBackend::new(repo_dir.to_str().unwrap()).unwrap());
-    let wrong_open = Repository::open(storage, Some(wrong_passphrase));
+    let wrong_open = Repository::open(storage, Some(wrong_passphrase), None);
     assert!(matches!(wrong_open, Err(VgerError::DecryptionFailed)));
 
     let wrong_extract = commands::extract::run(
@@ -470,7 +471,7 @@ fn extract_loads_items_via_restore_cache_without_index() {
 
     // Open repo WITHOUT loading the chunk index
     let storage = Box::new(LocalBackend::new(repo_dir.to_str().unwrap()).unwrap());
-    let mut repo = Repository::open_without_index(storage, None).unwrap();
+    let mut repo = Repository::open_without_index(storage, None, None).unwrap();
 
     // Restore cache should exist (built by save_state during backup)
     let cache = repo
@@ -515,7 +516,7 @@ fn extract_falls_back_to_index_on_cache_miss() {
     // open_restore_cache() will succeed, but every lookup() returns None,
     // triggering the ChunkNotInIndex fallback in extract.rs.
     let cache_path =
-        vger_core::index::dedup_cache::restore_cache_path(&repo_id).expect("cache path");
+        vger_core::index::dedup_cache::restore_cache_path(&repo_id, None).expect("cache path");
     let empty_index = vger_core::index::ChunkIndex::new();
     vger_core::index::dedup_cache::build_restore_cache_to_path(
         &empty_index,
@@ -561,7 +562,7 @@ fn extract_works_without_restore_cache() {
     let repo_id = repo.config.id.clone();
     drop(repo);
     let cache_path =
-        vger_core::index::dedup_cache::restore_cache_path(&repo_id).expect("cache path");
+        vger_core::index::dedup_cache::restore_cache_path(&repo_id, None).expect("cache path");
     let _ = std::fs::remove_file(&cache_path);
 
     // Full extract should still work via the no-cache path

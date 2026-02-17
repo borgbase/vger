@@ -1,5 +1,5 @@
 use std::collections::HashMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 use tracing::debug;
@@ -9,6 +9,18 @@ use crate::error::{Result, VgerError};
 use crate::snapshot::item::ChunkRef;
 
 use super::format::{pack_object_streaming, unpack_object_expect, ObjectType};
+
+/// Compute the per-repo cache directory.
+///
+/// With `cache_dir_override`: `<override>/<repo_id_hex>/`
+/// Without: `<platform_cache_dir>/vger/<repo_id_hex>/`
+pub(crate) fn repo_cache_dir(repo_id: &[u8], cache_dir_override: Option<&Path>) -> Option<PathBuf> {
+    let base = match cache_dir_override {
+        Some(dir) => Some(dir.to_path_buf()),
+        None => dirs::cache_dir().map(|d| d.join("vger")),
+    };
+    base.map(|b| b.join(hex::encode(repo_id)))
+}
 
 /// Cached filesystem metadata for a file, used to skip re-reading unchanged files.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -196,20 +208,18 @@ impl FileCache {
     }
 
     /// Return the local filesystem path for the cache file.
-    /// Platform cache dir + `vger/<repo_id_hex>/filecache`
-    /// (macOS: `~/Library/Caches/vger/…`, Linux: `~/.cache/vger/…`)
-    fn cache_path(repo_id: &[u8]) -> Option<PathBuf> {
-        dirs::cache_dir().map(|base| {
-            base.join("vger")
-                .join(hex::encode(repo_id))
-                .join("filecache")
-        })
+    fn cache_path(repo_id: &[u8], cache_dir_override: Option<&Path>) -> Option<PathBuf> {
+        repo_cache_dir(repo_id, cache_dir_override).map(|d| d.join("filecache"))
     }
 
     /// Load the file cache from local disk. Returns an empty cache if the
     /// file doesn't exist or can't be read (backward-compatible).
-    pub fn load(repo_id: &[u8], crypto: &dyn CryptoEngine) -> Self {
-        let Some(path) = Self::cache_path(repo_id) else {
+    pub fn load(
+        repo_id: &[u8],
+        crypto: &dyn CryptoEngine,
+        cache_dir_override: Option<&Path>,
+    ) -> Self {
+        let Some(path) = Self::cache_path(repo_id, cache_dir_override) else {
             return Self::new();
         };
         // Scope `data` so the encrypted blob (~64M) is dropped before
@@ -237,8 +247,13 @@ impl FileCache {
     }
 
     /// Save the file cache to local disk.
-    pub fn save(&self, repo_id: &[u8], crypto: &dyn CryptoEngine) -> Result<()> {
-        let Some(path) = Self::cache_path(repo_id) else {
+    pub fn save(
+        &self,
+        repo_id: &[u8],
+        crypto: &dyn CryptoEngine,
+        cache_dir_override: Option<&Path>,
+    ) -> Result<()> {
+        let Some(path) = Self::cache_path(repo_id, cache_dir_override) else {
             return Ok(());
         };
         if let Some(parent) = path.parent() {
@@ -496,5 +511,25 @@ mod tests {
         let garbage = vec![0xFF, 0xFE, 0xFD];
         let result = FileCache::decode_from_plaintext(&garbage);
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn repo_cache_dir_default() {
+        let repo_id = [0xABu8; 32];
+        let dir = super::repo_cache_dir(&repo_id, None);
+        assert!(dir.is_some());
+        let d = dir.unwrap();
+        assert!(d.to_string_lossy().contains("vger"));
+        assert!(d.to_string_lossy().contains(&hex::encode(repo_id)));
+    }
+
+    #[test]
+    fn repo_cache_dir_with_override() {
+        let repo_id = [0xCDu8; 32];
+        let temp = tempfile::tempdir().unwrap();
+        let override_root = temp.path().join("vger-cache");
+        let dir = super::repo_cache_dir(&repo_id, Some(override_root.as_path())).unwrap();
+        assert!(dir.starts_with(&override_root));
+        assert!(dir.to_string_lossy().contains(&hex::encode(repo_id)));
     }
 }

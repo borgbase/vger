@@ -236,7 +236,12 @@ pub fn compact_repo(
             .max()
             .unwrap_or(DEFAULT_MAX_BLOB_OVERHEAD);
 
-        let mut writer = PackWriter::new(pack_type, pack_target, max_blob_overhead);
+        let mut writer = PackWriter::new(
+            pack_type,
+            pack_target,
+            max_blob_overhead,
+            repo.repo_cache_dir(),
+        );
 
         for entry in &analysis.live_entries {
             let blob_data = read_blob_from_pack(

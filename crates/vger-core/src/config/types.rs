@@ -31,6 +31,10 @@ pub struct VgerConfig {
     pub schedule: ScheduleConfig,
     #[serde(default)]
     pub limits: ResourceLimitsConfig,
+    /// Root directory for all local caches and pack temp files.
+    /// Default: platform cache dir + "vger" (e.g. ~/.cache/vger/).
+    #[serde(default)]
+    pub cache_dir: Option<String>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]

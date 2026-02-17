@@ -1,5 +1,6 @@
 use std::collections::HashMap;
 use std::fs::File;
+use std::path::PathBuf;
 use std::time::Instant;
 
 use memmap2::MmapMut;
@@ -142,6 +143,8 @@ pub struct PackWriter {
     pending: HashMap<ChunkId, (u32, u32)>,
     /// When the first blob was added to the current buffer.
     first_blob_time: Option<Instant>,
+    /// Directory for mmap temp files. None = system temp.
+    temp_dir: Option<PathBuf>,
 }
 
 impl PackWriter {
@@ -152,7 +155,12 @@ impl PackWriter {
     ///
     /// For backup, use `DEFAULT_MAX_BLOB_OVERHEAD`. For compact, pre-scan
     /// existing blobs to find the maximum per-blob append size.
-    pub fn new(pack_type: PackType, target_size: usize, max_blob_overhead: usize) -> Self {
+    pub fn new(
+        pack_type: PackType,
+        target_size: usize,
+        max_blob_overhead: usize,
+        temp_dir: Option<PathBuf>,
+    ) -> Self {
         Self {
             pack_type,
             target_size,
@@ -162,12 +170,13 @@ impl PackWriter {
             current_size: 0,
             pending: HashMap::new(),
             first_blob_time: None,
+            temp_dir,
         }
     }
 
     /// Create a new pack writer using `DEFAULT_MAX_BLOB_OVERHEAD` (for backup).
-    pub fn new_default(pack_type: PackType, target_size: usize) -> Self {
-        Self::new(pack_type, target_size, DEFAULT_MAX_BLOB_OVERHEAD)
+    pub fn new_default(pack_type: PackType, target_size: usize, temp_dir: Option<PathBuf>) -> Self {
+        Self::new(pack_type, target_size, DEFAULT_MAX_BLOB_OVERHEAD, temp_dir)
     }
 
     /// Compute the mmap allocation size for data packs.
@@ -216,23 +225,48 @@ impl PackWriter {
 
     /// Try to create an mmap'd temp file of the given size.
     fn try_create_mmap(&self, alloc_size: usize) -> Result<MmapBuffer> {
-        // Best-effort pre-flight check: verify temp dir has enough free space.
-        // This is racy (other processes can consume space between check and use)
-        // and only checks per-pack (not cumulative across concurrent mmaps).
-        // Total temp space needed across all concurrent mmaps:
-        //   (max_in_flight_uploads + 1) × alloc_size
-        if let Some(free) = temp_dir_free_space() {
-            let required = (alloc_size as u64).saturating_mul(2);
-            if free < required {
-                return Err(VgerError::Other(format!(
-                    "temp dir has {free} bytes free, need at least {required}"
-                )));
-            }
-        }
+        // Best-effort pre-flight check: verify the target temp dir has enough
+        // free space. This is racy (other processes can consume space between
+        // check and use) and only checks per-pack (not cumulative across
+        // concurrent mmaps).
+        let required = (alloc_size as u64).saturating_mul(2);
 
-        let file = tempfile::tempfile().map_err(|e| {
-            VgerError::Other(format!("failed to create temp file for pack mmap: {e}"))
-        })?;
+        let file = if let Some(ref dir) = self.temp_dir {
+            let dir_ok = match temp_dir_free_space(Some(dir)) {
+                Some(free) if free < required => {
+                    warn!(
+                        "{} has {free} bytes free (need {required}), using system temp",
+                        dir.display()
+                    );
+                    false
+                }
+                _ => true, // unknown or sufficient
+            };
+            if dir_ok {
+                std::fs::create_dir_all(dir)
+                    .and_then(|()| tempfile::tempfile_in(dir))
+                    .or_else(|e| {
+                        warn!(
+                            "temp file in {} failed ({e}), using system temp",
+                            dir.display()
+                        );
+                        tempfile::tempfile()
+                    })
+            } else {
+                tempfile::tempfile()
+            }
+        } else {
+            // No configured dir — check system temp space.
+            if let Some(free) = temp_dir_free_space(None) {
+                if free < required {
+                    return Err(VgerError::Other(format!(
+                        "temp dir has {free} bytes free, need at least {required}"
+                    )));
+                }
+            }
+            tempfile::tempfile()
+        }
+        .map_err(|e| VgerError::Other(format!("failed to create temp file for pack mmap: {e}")))?;
         file.set_len(alloc_size as u64)
             .map_err(|e| VgerError::Other(format!("failed to set temp file length: {e}")))?;
 
@@ -466,13 +500,16 @@ impl PackWriter {
     }
 }
 
-/// Best-effort check: return free bytes in the temp directory, or None if
+/// Best-effort check: return free bytes in the given directory (or system temp), or None if
 /// the check is unsupported or fails.
 #[cfg(unix)]
-fn temp_dir_free_space() -> Option<u64> {
+fn temp_dir_free_space(dir: Option<&std::path::Path>) -> Option<u64> {
     use std::ffi::CString;
 
-    let tmp = std::env::temp_dir();
+    let tmp = match dir {
+        Some(d) => d.to_path_buf(),
+        None => std::env::temp_dir(),
+    };
     let c_path = CString::new(tmp.as_os_str().as_encoded_bytes()).ok()?;
     let mut stat: libc::statvfs = unsafe { std::mem::zeroed() };
     let ret = unsafe { libc::statvfs(c_path.as_ptr(), &mut stat) };
@@ -485,7 +522,7 @@ fn temp_dir_free_space() -> Option<u64> {
 }
 
 #[cfg(not(unix))]
-fn temp_dir_free_space() -> Option<u64> {
+fn temp_dir_free_space(_dir: Option<&std::path::Path>) -> Option<u64> {
     None
 }
 
@@ -622,7 +659,7 @@ mod tests {
 
     #[test]
     fn should_flush_on_size() {
-        let mut w = PackWriter::new_default(PackType::Data, 100);
+        let mut w = PackWriter::new_default(PackType::Data, 100, None);
         assert!(!w.should_flush());
         w.add_blob(1, dummy_chunk_id(0), vec![0u8; 120], 120)
             .unwrap();
@@ -632,7 +669,7 @@ mod tests {
     #[test]
     fn should_flush_on_blob_count() {
         // Use a very large target size so size-based flush never triggers
-        let mut w = PackWriter::new_default(PackType::Data, usize::MAX);
+        let mut w = PackWriter::new_default(PackType::Data, usize::MAX, None);
         for i in 0..MAX_BLOBS_PER_PACK {
             assert!(!w.should_flush(), "should not flush at {i} blobs");
             let mut id_bytes = [0u8; 32];
@@ -644,7 +681,7 @@ mod tests {
 
     #[test]
     fn seal_resets_first_blob_time() {
-        let mut w = PackWriter::new_default(PackType::Data, usize::MAX);
+        let mut w = PackWriter::new_default(PackType::Data, usize::MAX, None);
         w.add_blob(1, dummy_chunk_id(0), vec![0u8; 10], 10).unwrap();
         assert!(w.first_blob_time.is_some());
 
@@ -699,7 +736,7 @@ mod tests {
 
         let engine = crate::crypto::PlaintextEngine::new(&[0u8; 32]);
 
-        let mut w = PackWriter::new_default(PackType::Data, usize::MAX);
+        let mut w = PackWriter::new_default(PackType::Data, usize::MAX, None);
         w.add_blob(1, dummy_chunk_id(0xAA), vec![0xDE, 0xAD], 2)
             .unwrap();
         w.add_blob(1, dummy_chunk_id(0xBB), vec![0xBE, 0xEF, 0x42], 3)
@@ -728,7 +765,7 @@ mod tests {
             (1, dummy_chunk_id(3), vec![30u8; 30], 30),
         ];
 
-        let mut w = PackWriter::new_default(PackType::Data, usize::MAX);
+        let mut w = PackWriter::new_default(PackType::Data, usize::MAX, None);
         for (obj_type, chunk_id, data, uncompressed) in &blobs {
             w.add_blob(*obj_type, *chunk_id, data.clone(), *uncompressed)
                 .unwrap();
@@ -794,7 +831,7 @@ mod tests {
             }
         }
 
-        let mut w = PackWriter::new_default(PackType::Data, usize::MAX);
+        let mut w = PackWriter::new_default(PackType::Data, usize::MAX, None);
         w.add_blob(1, dummy_chunk_id(1), vec![0xAA; 100], 100)
             .unwrap();
         w.add_blob(1, dummy_chunk_id(2), vec![0xBB; 200], 200)
@@ -825,7 +862,7 @@ mod tests {
     /// Data packs use mmap, tree packs use Vec.
     #[test]
     fn data_packs_use_mmap_tree_packs_use_vec() {
-        let mut data_w = PackWriter::new_default(PackType::Data, 1024);
+        let mut data_w = PackWriter::new_default(PackType::Data, 1024, None);
         data_w
             .add_blob(1, dummy_chunk_id(0), vec![0u8; 10], 10)
             .unwrap();
@@ -834,7 +871,7 @@ mod tests {
             "data pack should use mmap buffer"
         );
 
-        let mut tree_w = PackWriter::new_default(PackType::Tree, 1024);
+        let mut tree_w = PackWriter::new_default(PackType::Tree, 1024, None);
         tree_w
             .add_blob(1, dummy_chunk_id(0), vec![0u8; 10], 10)
             .unwrap();
@@ -872,7 +909,7 @@ mod tests {
             }
         }
 
-        let mut w = PackWriter::new_default(PackType::Tree, usize::MAX);
+        let mut w = PackWriter::new_default(PackType::Tree, usize::MAX, None);
 
         // Add blobs, check invariant after each (Vec path).
         w.add_blob(1, dummy_chunk_id(1), vec![0xAA; 100], 100)
@@ -912,7 +949,7 @@ mod tests {
     #[test]
     fn mmap_overflow_returns_error() {
         // Small target + overhead so the mmap is alloc_size = 64 + 64 + 1 MiB ≈ 1 MiB.
-        let mut w = PackWriter::new(PackType::Data, 64, 64);
+        let mut w = PackWriter::new(PackType::Data, 64, 64, None);
         // First small blob succeeds.
         w.add_blob(1, dummy_chunk_id(0), vec![0u8; 10], 10).unwrap();
         // A blob larger than the remaining mmap capacity (~1 MiB) should fail.
@@ -924,7 +961,7 @@ mod tests {
     /// Backup-path writer with small data still seals correctly (mmap path).
     #[test]
     fn small_backup_on_mmap() {
-        let mut w = PackWriter::new_default(PackType::Data, 256 * 1024);
+        let mut w = PackWriter::new_default(PackType::Data, 256 * 1024, None);
 
         w.add_blob(1, dummy_chunk_id(0), vec![0xAB; 1024], 1024)
             .unwrap();
@@ -937,6 +974,22 @@ mod tests {
             sealed.data.as_slice().len() < 2048,
             "sealed output unexpectedly large: {}",
             sealed.data.as_slice().len()
+        );
+    }
+
+    #[test]
+    fn data_pack_falls_back_to_system_temp_when_configured_dir_unusable() {
+        let temp = tempfile::tempdir().unwrap();
+        let blocker = temp.path().join("blocker");
+        std::fs::write(&blocker, b"x").unwrap();
+        let unusable_dir = blocker.join("subdir");
+
+        let mut w = PackWriter::new_default(PackType::Data, 1024, Some(unusable_dir));
+        w.add_blob(1, dummy_chunk_id(1), vec![0u8; 16], 16).unwrap();
+
+        assert!(
+            matches!(w.buffer, Some(PackBuffer::Mmap(_))),
+            "expected mmap buffer after falling back to system temp"
         );
     }
 }

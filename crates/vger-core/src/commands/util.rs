@@ -1,13 +1,20 @@
+use std::path::PathBuf;
+
 use crate::config::VgerConfig;
 use crate::error::Result;
 use crate::repo::lock;
 use crate::repo::Repository;
 use crate::storage;
 
+/// Extract the cache_dir override from config as a PathBuf.
+pub(crate) fn cache_dir_from_config(config: &VgerConfig) -> Option<PathBuf> {
+    config.cache_dir.as_deref().map(PathBuf::from)
+}
+
 /// Open a repository from config using the standard backend resolver.
 pub fn open_repo(config: &VgerConfig, passphrase: Option<&str>) -> Result<Repository> {
     let backend = storage::backend_from_config(&config.repository, None)?;
-    Repository::open(backend, passphrase)
+    Repository::open(backend, passphrase, cache_dir_from_config(config))
 }
 
 /// Open a repository without loading the chunk index.
@@ -17,7 +24,7 @@ pub fn open_repo_without_index(
     passphrase: Option<&str>,
 ) -> Result<Repository> {
     let backend = storage::backend_from_config(&config.repository, None)?;
-    Repository::open_without_index(backend, passphrase)
+    Repository::open_without_index(backend, passphrase, cache_dir_from_config(config))
 }
 
 /// Open a repository and execute a mutation while holding an advisory lock.

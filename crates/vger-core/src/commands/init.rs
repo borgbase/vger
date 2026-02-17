@@ -24,6 +24,7 @@ pub fn run(config: &VgerConfig, passphrase: Option<&str>) -> Result<Repository> 
         config.chunker.clone(),
         passphrase,
         Some(&config.repository),
+        super::util::cache_dir_from_config(config),
     )?;
 
     Ok(repo)

@@ -59,6 +59,7 @@ pub fn make_test_config(repo_dir: &Path) -> VgerConfig {
         xattrs: XattrsConfig::default(),
         schedule: ScheduleConfig::default(),
         limits: ResourceLimitsConfig::default(),
+        cache_dir: None,
     }
 }
 

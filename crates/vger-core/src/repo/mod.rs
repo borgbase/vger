@@ -5,6 +5,7 @@ pub mod manifest;
 pub mod pack;
 
 use std::collections::{HashMap as StdHashMap, VecDeque};
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::thread::JoinHandle;
 
@@ -152,6 +153,8 @@ pub struct Repository {
     file_cache_dirty: bool,
     /// Whether to rebuild the local dedup cache at save time.
     rebuild_dedup_cache: bool,
+    /// Override for the cache directory root (from config `cache_dir`).
+    cache_dir_override: Option<PathBuf>,
 }
 
 impl Repository {
@@ -162,6 +165,7 @@ impl Repository {
         chunker_params: ChunkerConfig,
         passphrase: Option<&str>,
         repo_config_opts: Option<&RepositoryConfig>,
+        cache_dir: Option<PathBuf>,
     ) -> Result<Self> {
         let storage: Arc<dyn StorageBackend> = Arc::from(storage);
 
@@ -265,6 +269,7 @@ impl Repository {
         // No packs yet, so data target = min_pack_size
         let data_target = min_pack_size as usize;
         let tree_target = compute_tree_pack_target(min_pack_size);
+        let pack_temp_dir = file_cache::repo_cache_dir(&repo_config.id, cache_dir.as_deref());
 
         Ok(Repository {
             storage,
@@ -273,8 +278,12 @@ impl Repository {
             chunk_index,
             config: repo_config,
             file_cache: FileCache::new(),
-            data_pack_writer: PackWriter::new_default(PackType::Data, data_target),
-            tree_pack_writer: PackWriter::new_default(PackType::Tree, tree_target),
+            data_pack_writer: PackWriter::new_default(
+                PackType::Data,
+                data_target,
+                pack_temp_dir.clone(),
+            ),
+            tree_pack_writer: PackWriter::new_default(PackType::Tree, tree_target, pack_temp_dir),
             pending_uploads: VecDeque::new(),
             dedup_index: None,
             tiered_dedup: None,
@@ -285,12 +294,17 @@ impl Repository {
             index_dirty: false,
             file_cache_dirty: false,
             rebuild_dedup_cache: false,
+            cache_dir_override: cache_dir,
         })
     }
 
     /// Open an existing repository.
-    pub fn open(storage: Box<dyn StorageBackend>, passphrase: Option<&str>) -> Result<Self> {
-        let mut repo = Self::open_base(storage, passphrase)?;
+    pub fn open(
+        storage: Box<dyn StorageBackend>,
+        passphrase: Option<&str>,
+        cache_dir: Option<PathBuf>,
+    ) -> Result<Self> {
+        let mut repo = Self::open_base(storage, passphrase, cache_dir)?;
         repo.load_chunk_index()?;
         Ok(repo)
     }
@@ -301,13 +315,18 @@ impl Repository {
     pub fn open_without_index(
         storage: Box<dyn StorageBackend>,
         passphrase: Option<&str>,
+        cache_dir: Option<PathBuf>,
     ) -> Result<Self> {
-        Self::open_base(storage, passphrase)
+        Self::open_base(storage, passphrase, cache_dir)
     }
 
     /// Shared open logic: reads config, builds crypto, loads manifest and file cache.
     /// Does NOT load the chunk index — callers either load it themselves or skip it.
-    fn open_base(storage: Box<dyn StorageBackend>, passphrase: Option<&str>) -> Result<Self> {
+    fn open_base(
+        storage: Box<dyn StorageBackend>,
+        passphrase: Option<&str>,
+        cache_dir: Option<PathBuf>,
+    ) -> Result<Self> {
         let storage: Arc<dyn StorageBackend> = Arc::from(storage);
 
         // Read config
@@ -379,11 +398,12 @@ impl Repository {
         let manifest: Manifest = rmp_serde::from_slice(&manifest_bytes)?;
 
         // Load file cache from local disk (not from the repo).
-        let file_cache = FileCache::load(&repo_config.id, crypto.as_ref());
+        let file_cache = FileCache::load(&repo_config.id, crypto.as_ref(), cache_dir.as_deref());
 
         // Use min_pack_size as default pack target (recalculated after index load).
         let data_target = repo_config.min_pack_size as usize;
         let tree_target = compute_tree_pack_target(repo_config.min_pack_size);
+        let pack_temp_dir = file_cache::repo_cache_dir(&repo_config.id, cache_dir.as_deref());
 
         Ok(Repository {
             storage,
@@ -392,8 +412,12 @@ impl Repository {
             chunk_index: ChunkIndex::new(),
             config: repo_config,
             file_cache,
-            data_pack_writer: PackWriter::new_default(PackType::Data, data_target),
-            tree_pack_writer: PackWriter::new_default(PackType::Tree, tree_target),
+            data_pack_writer: PackWriter::new_default(
+                PackType::Data,
+                data_target,
+                pack_temp_dir.clone(),
+            ),
+            tree_pack_writer: PackWriter::new_default(PackType::Tree, tree_target, pack_temp_dir),
             pending_uploads: VecDeque::new(),
             dedup_index: None,
             tiered_dedup: None,
@@ -404,6 +428,7 @@ impl Repository {
             index_dirty: false,
             file_cache_dirty: false,
             rebuild_dedup_cache: false,
+            cache_dir_override: cache_dir,
         })
     }
 
@@ -418,7 +443,8 @@ impl Repository {
             self.config.min_pack_size,
             self.config.max_pack_size,
         );
-        self.data_pack_writer = PackWriter::new_default(PackType::Data, data_target);
+        self.data_pack_writer =
+            PackWriter::new_default(PackType::Data, data_target, self.repo_cache_dir());
         Ok(())
     }
 
@@ -437,10 +463,19 @@ impl Repository {
         self.file_cache_dirty = true;
     }
 
+    /// Return the resolved repo cache directory for this repository.
+    pub(crate) fn repo_cache_dir(&self) -> Option<PathBuf> {
+        file_cache::repo_cache_dir(&self.config.id, self.cache_dir_override.as_deref())
+    }
+
     /// Try to open the mmap'd restore cache for this repository.
     /// Returns `None` if the cache is missing, stale, or corrupt.
     pub fn open_restore_cache(&self) -> Option<dedup_cache::MmapRestoreCache> {
-        dedup_cache::MmapRestoreCache::open(&self.config.id, self.manifest.index_generation)
+        dedup_cache::MmapRestoreCache::open(
+            &self.config.id,
+            self.manifest.index_generation,
+            self.cache_dir_override.as_deref(),
+        )
     }
 
     // ----- Accessors for private fields -----
@@ -575,7 +610,11 @@ impl Repository {
 
         self.rebuild_dedup_cache = true;
         let generation = self.manifest.index_generation;
-        if let Some(mmap_cache) = dedup_cache::MmapDedupCache::open(&self.config.id, generation) {
+        if let Some(mmap_cache) = dedup_cache::MmapDedupCache::open(
+            &self.config.id,
+            generation,
+            self.cache_dir_override.as_deref(),
+        ) {
             let tiered = TieredDedupIndex::new(mmap_cache);
             debug!(?tiered, "tiered dedup mode: using mmap cache");
             // Drop the full index to reclaim memory.
@@ -656,21 +695,31 @@ impl Repository {
                 // Empty delta: index unchanged, but caches may need rebuilding.
                 // Try to rebuild caches from full_index_cache if available.
                 let mut rebuilt_from_cache = false;
-                if let Some(cache_path) = dedup_cache::full_index_cache_path(&self.config.id) {
+                let cd = self.cache_dir_override.as_deref();
+                if let Some(cache_path) = dedup_cache::full_index_cache_path(&self.config.id, cd) {
                     if dedup_cache::MmapFullIndexCache::open(
                         &self.config.id,
                         self.manifest.index_generation,
+                        cd,
                     )
                     .is_some()
                     {
                         let gen = self.manifest.index_generation;
                         let id = &self.config.id;
-                        let dedup_ok =
-                            dedup_cache::build_dedup_cache_from_full_cache(&cache_path, gen, id)
-                                .is_ok();
-                        let restore_ok =
-                            dedup_cache::build_restore_cache_from_full_cache(&cache_path, gen, id)
-                                .is_ok();
+                        let dedup_ok = dedup_cache::build_dedup_cache_from_full_cache(
+                            &cache_path,
+                            gen,
+                            id,
+                            cd,
+                        )
+                        .is_ok();
+                        let restore_ok = dedup_cache::build_restore_cache_from_full_cache(
+                            &cache_path,
+                            gen,
+                            id,
+                            cd,
+                        )
+                        .is_ok();
                         if dedup_ok && restore_ok {
                             self.rebuild_dedup_cache = false;
                             rebuilt_from_cache = true;
@@ -725,10 +774,12 @@ impl Repository {
         // activate. Written on first backup (bootstrap) and every subsequent
         // backup that used tiered/dedup mode. Non-fatal on error.
         if self.rebuild_dedup_cache {
+            let cd = self.cache_dir_override.as_deref();
             if let Err(e) = dedup_cache::build_dedup_cache(
                 &self.chunk_index,
                 self.manifest.index_generation,
                 &self.config.id,
+                cd,
             ) {
                 warn!("failed to rebuild dedup cache: {e}");
             }
@@ -736,6 +787,7 @@ impl Repository {
                 &self.chunk_index,
                 self.manifest.index_generation,
                 &self.config.id,
+                cd,
             ) {
                 warn!("failed to rebuild restore cache: {e}");
             }
@@ -744,6 +796,7 @@ impl Repository {
                 &self.chunk_index,
                 self.manifest.index_generation,
                 &self.config.id,
+                cd,
             ) {
                 warn!("failed to build full index cache: {e}");
             }
@@ -753,7 +806,11 @@ impl Repository {
         // Save file cache before hydrating chunk_index to reduce peak memory.
         // Capture error instead of early-returning so we can hydrate first.
         let fc_result = if self.file_cache_dirty {
-            match self.file_cache.save(&self.config.id, self.crypto.as_ref()) {
+            match self.file_cache.save(
+                &self.config.id,
+                self.crypto.as_ref(),
+                self.cache_dir_override.as_deref(),
+            ) {
                 Ok(()) => {
                     self.file_cache_dirty = false;
                     Ok(())
@@ -772,6 +829,7 @@ impl Repository {
             self.chunk_index = dedup_cache::load_chunk_index_from_full_cache(
                 &self.config.id,
                 self.manifest.index_generation,
+                self.cache_dir_override.as_deref(),
             )
             .or_else(|_| self.reload_full_index())?;
         }
@@ -786,7 +844,8 @@ impl Repository {
     /// Returns `Ok(true)` on success (index uploaded, caches rebuilt, manifest updated).
     /// Returns `Ok(false)` if the cache is missing or stale (caller should use slow path).
     fn try_incremental_index_update(&mut self, delta: &IndexDelta) -> Result<bool> {
-        let cache_path = match dedup_cache::full_index_cache_path(&self.config.id) {
+        let cd = self.cache_dir_override.as_deref();
+        let cache_path = match dedup_cache::full_index_cache_path(&self.config.id, cd) {
             Some(p) => p,
             None => return Ok(false),
         };
@@ -794,6 +853,7 @@ impl Repository {
         let old_cache = match dedup_cache::MmapFullIndexCache::open(
             &self.config.id,
             self.manifest.index_generation,
+            cd,
         ) {
             Some(c) => c,
             None => return Ok(false),
@@ -833,14 +893,20 @@ impl Repository {
         drop(packed);
 
         // Rebuild dedup + restore caches from full cache (streaming)
-        if let Err(e) =
-            dedup_cache::build_dedup_cache_from_full_cache(&cache_path, new_gen, &self.config.id)
-        {
+        if let Err(e) = dedup_cache::build_dedup_cache_from_full_cache(
+            &cache_path,
+            new_gen,
+            &self.config.id,
+            cd,
+        ) {
             warn!("failed to rebuild dedup cache from full cache: {e}");
         }
-        if let Err(e) =
-            dedup_cache::build_restore_cache_from_full_cache(&cache_path, new_gen, &self.config.id)
-        {
+        if let Err(e) = dedup_cache::build_restore_cache_from_full_cache(
+            &cache_path,
+            new_gen,
+            &self.config.id,
+            cd,
+        ) {
             warn!("failed to rebuild restore cache from full cache: {e}");
         }
 

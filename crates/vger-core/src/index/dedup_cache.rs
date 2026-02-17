@@ -10,6 +10,7 @@ use crate::crypto::chunk_id::ChunkId;
 use crate::crypto::pack_id::PackId;
 use crate::error::Result;
 use crate::index::{ChunkIndex, ChunkIndexEntry, IndexDelta};
+use crate::repo::file_cache::repo_cache_dir;
 
 /// Magic bytes at the start of the dedup cache file.
 const MAGIC: &[u8; 8] = b"VGDEDUP\0";
@@ -29,12 +30,8 @@ const ENTRY_SIZE: usize = 36;
 
 /// Return the local filesystem path for the dedup cache file.
 /// `~/.cache/vger/<repo_id_hex>/dedup_cache` (same directory as file cache).
-pub fn dedup_cache_path(repo_id: &[u8]) -> Option<PathBuf> {
-    dirs::cache_dir().map(|base| {
-        base.join("vger")
-            .join(hex::encode(repo_id))
-            .join("dedup_cache")
-    })
+pub fn dedup_cache_path(repo_id: &[u8], cache_dir: Option<&Path>) -> Option<PathBuf> {
+    repo_cache_dir(repo_id, cache_dir).map(|d| d.join("dedup_cache"))
 }
 
 // ---------------------------------------------------------------------------
@@ -43,8 +40,13 @@ pub fn dedup_cache_path(repo_id: &[u8]) -> Option<PathBuf> {
 
 /// Build the dedup cache binary file from the full chunk index.
 /// Writes atomically via temp-file + rename.
-pub fn build_dedup_cache(index: &ChunkIndex, generation: u64, repo_id: &[u8]) -> Result<()> {
-    let Some(path) = dedup_cache_path(repo_id) else {
+pub fn build_dedup_cache(
+    index: &ChunkIndex,
+    generation: u64,
+    repo_id: &[u8],
+    cache_dir: Option<&Path>,
+) -> Result<()> {
+    let Some(path) = dedup_cache_path(repo_id, cache_dir) else {
         return Ok(());
     };
     if let Some(parent) = path.parent() {
@@ -114,13 +116,17 @@ impl MmapDedupCache {
     /// Open and validate the dedup cache file.
     /// Returns `None` on any mismatch (missing file, wrong magic/version/generation,
     /// unexpected file size) — the caller should fall back to the HashMap path.
-    pub fn open(repo_id: &[u8], expected_generation: u64) -> Option<Self> {
+    pub fn open(
+        repo_id: &[u8],
+        expected_generation: u64,
+        cache_dir: Option<&Path>,
+    ) -> Option<Self> {
         // Generation 0 means "no cache ever written".
         if expected_generation == 0 {
             return None;
         }
 
-        let path = dedup_cache_path(repo_id)?;
+        let path = dedup_cache_path(repo_id, cache_dir)?;
         Self::open_path(&path, expected_generation)
     }
 
@@ -372,18 +378,19 @@ const RESTORE_HEADER_SIZE: usize = 28;
 const RESTORE_ENTRY_SIZE: usize = 76;
 
 /// Return the local filesystem path for the restore cache file.
-pub fn restore_cache_path(repo_id: &[u8]) -> Option<PathBuf> {
-    dirs::cache_dir().map(|base| {
-        base.join("vger")
-            .join(hex::encode(repo_id))
-            .join("restore_cache")
-    })
+pub fn restore_cache_path(repo_id: &[u8], cache_dir: Option<&Path>) -> Option<PathBuf> {
+    repo_cache_dir(repo_id, cache_dir).map(|d| d.join("restore_cache"))
 }
 
 /// Build the restore cache binary file from the full chunk index.
 /// Writes atomically via temp-file + rename.
-pub fn build_restore_cache(index: &ChunkIndex, generation: u64, repo_id: &[u8]) -> Result<()> {
-    let Some(path) = restore_cache_path(repo_id) else {
+pub fn build_restore_cache(
+    index: &ChunkIndex,
+    generation: u64,
+    repo_id: &[u8],
+    cache_dir: Option<&Path>,
+) -> Result<()> {
+    let Some(path) = restore_cache_path(repo_id, cache_dir) else {
         return Ok(());
     };
     if let Some(parent) = path.parent() {
@@ -447,11 +454,15 @@ impl MmapRestoreCache {
     /// Open and validate the restore cache file.
     /// Returns `None` on any mismatch (missing file, wrong magic/version/generation,
     /// unexpected file size).
-    pub fn open(repo_id: &[u8], expected_generation: u64) -> Option<Self> {
+    pub fn open(
+        repo_id: &[u8],
+        expected_generation: u64,
+        cache_dir: Option<&Path>,
+    ) -> Option<Self> {
         if expected_generation == 0 {
             return None;
         }
-        let path = restore_cache_path(repo_id)?;
+        let path = restore_cache_path(repo_id, cache_dir)?;
         Self::open_path(&path, expected_generation)
     }
 
@@ -574,12 +585,8 @@ const FULL_HEADER_SIZE: usize = 28;
 const FULL_ENTRY_SIZE: usize = 80;
 
 /// Return the local filesystem path for the full index cache file.
-pub fn full_index_cache_path(repo_id: &[u8]) -> Option<PathBuf> {
-    dirs::cache_dir().map(|base| {
-        base.join("vger")
-            .join(hex::encode(repo_id))
-            .join("full_index_cache")
-    })
+pub fn full_index_cache_path(repo_id: &[u8], cache_dir: Option<&Path>) -> Option<PathBuf> {
+    repo_cache_dir(repo_id, cache_dir).map(|d| d.join("full_index_cache"))
 }
 
 /// A single entry read from the full index cache.
@@ -601,11 +608,15 @@ pub struct MmapFullIndexCache {
 impl MmapFullIndexCache {
     /// Open and validate the full index cache file.
     /// Returns `None` on any mismatch.
-    pub fn open(repo_id: &[u8], expected_generation: u64) -> Option<Self> {
+    pub fn open(
+        repo_id: &[u8],
+        expected_generation: u64,
+        cache_dir: Option<&Path>,
+    ) -> Option<Self> {
         if expected_generation == 0 {
             return None;
         }
-        let path = full_index_cache_path(repo_id)?;
+        let path = full_index_cache_path(repo_id, cache_dir)?;
         Self::open_path(&path, expected_generation)
     }
 
@@ -728,8 +739,13 @@ fn write_full_header(
 
 /// Build the full index cache from a ChunkIndex HashMap.
 /// This is the slow path / bootstrap: used on first backup or after cache invalidation.
-pub fn build_full_index_cache(index: &ChunkIndex, generation: u64, repo_id: &[u8]) -> Result<()> {
-    let Some(path) = full_index_cache_path(repo_id) else {
+pub fn build_full_index_cache(
+    index: &ChunkIndex,
+    generation: u64,
+    repo_id: &[u8],
+    cache_dir: Option<&Path>,
+) -> Result<()> {
+    let Some(path) = full_index_cache_path(repo_id, cache_dir) else {
         return Ok(());
     };
     if let Some(parent) = path.parent() {
@@ -855,8 +871,12 @@ pub fn merge_full_index_cache(
 
 /// Load a ChunkIndex HashMap from the local full index cache.
 /// Used after incremental update to hydrate `self.chunk_index` without a storage round-trip.
-pub fn load_chunk_index_from_full_cache(repo_id: &[u8], generation: u64) -> Result<ChunkIndex> {
-    let path = full_index_cache_path(repo_id)
+pub fn load_chunk_index_from_full_cache(
+    repo_id: &[u8],
+    generation: u64,
+    cache_dir: Option<&Path>,
+) -> Result<ChunkIndex> {
+    let path = full_index_cache_path(repo_id, cache_dir)
         .ok_or_else(|| crate::error::VgerError::Other("no cache dir available".into()))?;
     load_chunk_index_from_full_cache_path(&path, generation)
 }
@@ -969,8 +989,9 @@ pub fn build_dedup_cache_from_full_cache(
     full_cache_path: &Path,
     generation: u64,
     repo_id: &[u8],
+    cache_dir: Option<&Path>,
 ) -> Result<()> {
-    let Some(path) = dedup_cache_path(repo_id) else {
+    let Some(path) = dedup_cache_path(repo_id, cache_dir) else {
         return Ok(());
     };
     if let Some(parent) = path.parent() {
@@ -1016,8 +1037,9 @@ pub fn build_restore_cache_from_full_cache(
     full_cache_path: &Path,
     generation: u64,
     repo_id: &[u8],
+    cache_dir: Option<&Path>,
 ) -> Result<()> {
-    let Some(path) = restore_cache_path(repo_id) else {
+    let Some(path) = restore_cache_path(repo_id, cache_dir) else {
         return Ok(());
     };
     if let Some(parent) = path.parent() {
@@ -1074,7 +1096,7 @@ mod tests {
     #[test]
     fn dedup_cache_path_returns_some() {
         let repo_id = [0xABu8; 32];
-        let path = dedup_cache_path(&repo_id);
+        let path = dedup_cache_path(&repo_id, None);
         assert!(path.is_some());
         let p = path.unwrap();
         assert!(p.to_string_lossy().contains("dedup_cache"));
@@ -1176,7 +1198,7 @@ mod tests {
     #[test]
     fn restore_cache_path_returns_some() {
         let repo_id = [0xCDu8; 32];
-        let path = restore_cache_path(&repo_id);
+        let path = restore_cache_path(&repo_id, None);
         assert!(path.is_some());
         let p = path.unwrap();
         assert!(p.to_string_lossy().contains("restore_cache"));

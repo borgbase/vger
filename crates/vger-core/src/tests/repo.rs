@@ -15,6 +15,7 @@ fn init_creates_required_keys() {
         ChunkerConfig::default(),
         None,
         None,
+        None,
     )
     .unwrap();
 
@@ -33,6 +34,7 @@ fn init_twice_fails() {
         ChunkerConfig::default(),
         None,
         None,
+        None,
     )
     .unwrap();
 
@@ -41,6 +43,7 @@ fn init_twice_fails() {
         Box::new(repo.storage.clone()),
         EncryptionMode::None,
         ChunkerConfig::default(),
+        None,
         None,
         None,
     );
@@ -163,6 +166,7 @@ fn repo_on_recording_backend() -> (Repository, PutLog) {
         Box::new(backend),
         EncryptionMode::None,
         ChunkerConfig::default(),
+        None,
         None,
         None,
     )
@@ -441,6 +445,7 @@ fn init_rejects_oversized_max_pack_size() {
         ChunkerConfig::default(),
         None,
         Some(&oversized_config),
+        None,
     );
     assert!(
         result.is_err(),
@@ -471,6 +476,7 @@ fn init_rejects_oversized_max_pack_size() {
         ChunkerConfig::default(),
         None,
         Some(&valid_config),
+        None,
     );
     assert!(
         result.is_ok(),
@@ -490,6 +496,7 @@ fn open_rejects_oversized_max_pack_size() {
         ChunkerConfig::default(),
         None,
         None,
+        None,
     )
     .unwrap();
 
@@ -500,7 +507,7 @@ fn open_rejects_oversized_max_pack_size() {
     repo.storage.put("config", &tampered_data).unwrap();
 
     // Re-open should fail.
-    let result = Repository::open(Box::new(repo.storage.clone()), None);
+    let result = Repository::open(Box::new(repo.storage.clone()), None, None);
     assert!(
         result.is_err(),
         "open should reject stored max_pack_size > 512 MiB"

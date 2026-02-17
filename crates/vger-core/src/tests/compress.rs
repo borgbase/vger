@@ -111,7 +111,11 @@ fn zstd_level_change_reinit() {
 
 #[test]
 fn decompress_with_hint_matches_decompress() {
-    let payloads: &[&[u8]] = &[b"", b"tiny", b"larger test payload for decompress hint checks"];
+    let payloads: &[&[u8]] = &[
+        b"",
+        b"tiny",
+        b"larger test payload for decompress hint checks",
+    ];
     let codecs = [
         Compression::None,
         Compression::Lz4,

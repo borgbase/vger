@@ -109,6 +109,9 @@ struct ConfigDocument {
     /// Global hooks — apply to all repositories.
     #[serde(default)]
     hooks: HooksConfig,
+    /// Root directory for all local caches and pack temp files.
+    #[serde(default)]
+    cache_dir: Option<String>,
 }
 
 // Backward-compatible alias used by internal tests.
@@ -392,6 +395,12 @@ fn resolve_document(mut raw: ConfigDocument) -> crate::error::Result<Vec<Resolve
                     xattrs: raw.xattrs.clone(),
                     schedule: raw.schedule.clone(),
                     limits: entry.limits.unwrap_or_else(|| raw.limits.clone()),
+                    cache_dir: raw
+                        .cache_dir
+                        .as_deref()
+                        .map(str::trim)
+                        .filter(|s| !s.is_empty())
+                        .map(expand_tilde),
                 },
                 global_hooks: raw.hooks.clone(),
                 repo_hooks,
@@ -778,6 +787,62 @@ repositories:
     }
 
     #[test]
+    fn test_cache_dir_empty_string_resolves_to_none() {
+        let yaml = r#"
+cache_dir: ""
+repositories:
+  - url: /tmp/repo
+sources:
+  - /home/user
+"#;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.yaml");
+        fs::write(&path, yaml).unwrap();
+
+        let repos = load_and_resolve(&path).unwrap();
+        assert_eq!(repos[0].config.cache_dir, None);
+    }
+
+    #[test]
+    fn test_cache_dir_whitespace_resolves_to_none() {
+        let yaml = r#"
+cache_dir: "   "
+repositories:
+  - url: /tmp/repo
+sources:
+  - /home/user
+"#;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.yaml");
+        fs::write(&path, yaml).unwrap();
+
+        let repos = load_and_resolve(&path).unwrap();
+        assert_eq!(repos[0].config.cache_dir, None);
+    }
+
+    #[test]
+    fn test_cache_dir_tilde_expands_when_nonempty() {
+        let yaml = r#"
+cache_dir: "~/vger-cache"
+repositories:
+  - url: /tmp/repo
+sources:
+  - /home/user
+"#;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.yaml");
+        fs::write(&path, yaml).unwrap();
+
+        let repos = load_and_resolve(&path).unwrap();
+        let home = dirs::home_dir().expect("home dir should be available in test env");
+        let expected = home.join("vger-cache").to_string_lossy().to_string();
+        assert_eq!(
+            repos[0].config.cache_dir.as_deref(),
+            Some(expected.as_str())
+        );
+    }
+
+    #[test]
     fn test_sftp_repository_options_parse() {
         let yaml = r#"
 repositories:
@@ -1115,6 +1180,7 @@ repositories:
                 xattrs: XattrsConfig::default(),
                 schedule: ScheduleConfig::default(),
                 limits: ResourceLimitsConfig::default(),
+                cache_dir: None,
             },
             global_hooks: HooksConfig::default(),
             repo_hooks: HooksConfig::default(),
