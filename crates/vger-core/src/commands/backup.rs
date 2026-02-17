@@ -57,8 +57,7 @@ pub(crate) fn append_item_to_stream(
     items_config: &ChunkerConfig,
     compression: Compression,
 ) -> Result<()> {
-    let item_bytes = rmp_serde::to_vec(item)?;
-    item_stream.extend_from_slice(&item_bytes);
+    rmp_serde::encode::write(item_stream, item)?;
     if item_stream.len() >= items_config.avg_size as usize {
         flush_item_stream_chunk(repo, item_stream, item_ptrs, compression)?;
     }
