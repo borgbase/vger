@@ -56,16 +56,29 @@ Rationale:
 - Per-chunk tags allow mixing algorithms within a single repository
 - LZ4 for speed-sensitive workloads, ZSTD for better compression ratios
 - No repository-wide format version lock-in for compression choice
+- ZSTD compression reuses a thread-local compressor context per level, reducing allocation churn in parallel backup paths
+- Decompression enforces a hard output cap (32 MiB) to bound memory usage and mitigate decompression-bomb inputs
 
 ### Deduplication
 
-Content-addressed deduplication using keyed `ChunkId` values (BLAKE2b-256 MAC). Identical data produces the same `ChunkId`, so the second copy is never stored — only its refcount is incremented.
+Content-addressed deduplication uses keyed `ChunkId` values (BLAKE2b-256 MAC). Identical plaintext produces the same `ChunkId`, so the second copy is not stored; only refcounts are incremented.
+
+vger supports three index modes for dedup lookups:
+
+1. **Full index mode** — in-memory `ChunkIndex` (`HashMap<ChunkId, ChunkIndexEntry>`)
+2. **Dedup-only mode** — lightweight `DedupIndex` (`ChunkId -> stored_size`) plus `IndexDelta` for mutations
+3. **Tiered dedup mode** — `TieredDedupIndex`:
+   - session-local HashMap for new chunks in the current backup
+   - Xor filter (`xorf::Xor8`) as probabilistic negative check
+   - mmap-backed on-disk dedup cache for exact lookup
+
+During backup, `enable_tiered_dedup_mode()` is used by default. If the mmap cache is missing/stale/corrupt, vger safely falls back to dedup-only HashMap mode.
 
 **Two-level dedup check** (in `Repository::bump_ref_if_exists`):
-1. **Committed index** — the persisted `ChunkIndex` loaded at repo open
-2. **Pending pack writers** — blobs buffered in the current data and tree `PackWriter` instances that haven't been flushed yet
+1. **Persistent dedup tier** — full index, dedup-only index, or tiered dedup index (depending on mode)
+2. **Pending pack writers** — blobs buffered in data/tree `PackWriter`s that have not yet been flushed
 
-This two-level check prevents duplicates both across backups (via the committed index) and within a single backup run (via the pending writers). Refcounts are tracked at every level so that `delete` and `compact` can determine when a blob is truly orphaned.
+This prevents duplicates both across backups and within a single backup run.
 
 ---
 
@@ -112,6 +125,20 @@ The type tag byte is passed as AAD (authenticated additional data) to the select
 `- locks/                    # Advisory lock files
 ```
 
+### Local Optimization Caches (Client Machine)
+
+These files live in the local cache directory (`~/.cache/vger/<repo_id_hex>/...` on Linux, `~/Library/Caches/vger/<repo_id_hex>/...` on macOS). They are optimization artifacts, not repository source of truth.
+
+```text
+<cache>/<repo_id_hex>/
+|- filecache                 # File metadata -> cached ChunkRefs
+|- dedup_cache               # Sorted ChunkId -> stored_size (mmap + xor filter)
+|- restore_cache             # Sorted ChunkId -> pack_id, pack_offset, stored_size (mmap)
+`- full_index_cache          # Sorted full index rows for incremental index updates
+```
+
+All three index caches are validated against `manifest.index_generation`. A generation mismatch means "stale cache" and triggers safe fallback/rebuild paths.
+
 ### Key Data Structures
 
 **ChunkIndex** — `HashMap<ChunkId, ChunkIndexEntry>`, stored encrypted at the `index` key. The central lookup table for deduplication, restore, and compaction.
@@ -130,6 +157,7 @@ The type tag byte is passed as AAD (authenticated additional data) to the select
 | version | u32 | Format version (currently 1) |
 | timestamp | DateTime | Last modification time |
 | snapshots | Vec\<SnapshotEntry\> | One entry per snapshot |
+| index_generation | u64 | Cache-validity token rotated when index changes; used to validate local mmap caches |
 
 Each `SnapshotEntry` contains: `name`, `id` (32-byte random), `time`, `source_label`, `label`, `source_paths`.
 
@@ -236,37 +264,46 @@ If you raise `max_pack_size`, target size can grow further, up to the 512 MiB ha
 ### Backup Pipeline
 
 ```text
-walk sources (walkdir + exclude filters)
-  → for each file: check file cache (device, inode, mtime, ctime, size)
-    → [cache hit + all chunks in index] reuse cached ChunkRefs, bump refcounts
-    → [cache miss] FastCDC content-defined chunking
-      → for each chunk: compute ChunkId (keyed BLAKE2b-256)
-        → dedup check (committed index + pending pack writers)
-          → [new chunk] compress (LZ4/ZSTD) → encrypt (selected AEAD mode) → buffer into PackWriter
-          → [dedup hit] increment refcount, skip storage
-        → when PackWriter reaches target size → flush pack to packs/<shard>/<id>
-  → serialize Item to msgpack → append to item stream buffer
-    → when buffer reaches ~128 KiB → chunk as tree pack
-→ flush remaining packs
-→ build SnapshotMeta (with item_ptrs referencing tree pack chunks)
-→ store SnapshotMeta at snapshots/<id>
-→ update Manifest
-→ save_state() (flush packs → persist manifest + index, save file cache locally)
+open repo (full index loaded once)
+  → prune stale local file-cache entries
+  → enable tiered dedup mode (mmap cache + xor filter, fallback to dedup HashMap)
+  → configure bounded upload concurrency and activate pack buffer pool
+  → walk sources with excludes
+    → pipeline path (if enabled): walk → parallel read/chunk/hash/compress/encrypt → sequential commit
+      → ByteBudget enforces pipeline_buffer_mib as a real in-flight memory cap
+    → sequential path (fallback when pipeline disabled)
+    → dedup check (persistent dedup tier + pending pack writers)
+      → [new chunk] commit encrypted blob to data/tree pack writer
+      → [dedup hit] bump refcount only
+  → serialize items incrementally into item-stream chunks (tree packs)
+  → write SnapshotMeta
+  → mutate manifest
+  → save_state()
+    → flush packs and pending uploads
+    → release pack buffer pool
+    → if dedup/tiered mode: apply IndexDelta (fast path = incremental full-index-cache merge; slow path = reload full index + merge)
+    → write dirty manifest/index only
+    → rebuild local dedup/restore/full-index caches as needed
+    → persist local file cache
 ```
 
 ### Restore Pipeline
 
 ```text
-open repository → load Manifest → find snapshot by name
-  → load SnapshotMeta from snapshots/<id>
-    → read item_ptrs chunks (tree packs) → deserialize Vec<Item>
-      → sort: directories first, then symlinks, then files
-        → for each directory: create dir, set permissions
-        → for each symlink: create symlink
-        → for each file:
-          → for each ChunkRef: read blob from pack → decrypt → decompress
-          → write concatenated content to disk
-          → restore permissions and mtime
+open repository without index (`open_without_index`)
+  → resolve snapshot
+  → try mmap restore cache (validated by manifest.index_generation)
+  → load item stream:
+    → preferred: lookup tree-pack chunk locations via restore cache
+    → fallback: load full index and read item stream normally
+  → stream-decode items in two passes:
+    → pass 1 create directories
+    → pass 2 create symlinks and plan file chunk writes
+  → build coalesced pack read groups:
+    → preferred: index-free lookup via restore cache
+    → fallback: load full index and retain only snapshot-needed chunks
+  → parallel range reads by pack/offset, decrypt + decompress chunks, write targets
+  → restore file metadata (mode, mtime, optional xattrs)
 ```
 
 ### Item Stream
@@ -277,7 +314,9 @@ Snapshot metadata (the list of files, directories, and symlinks) is **not** stor
 2. When the buffer reaches ~128 KiB, it is chunked and stored as a **tree pack** chunk (with a finer CDC config: 32 KiB min / 128 KiB avg / 512 KiB max)
 3. The resulting `ChunkId` values are collected into `item_ptrs` in the `SnapshotMeta`
 
-This design means the item stream benefits from deduplication — if most files are unchanged between backups, the item-stream chunks are mostly identical and deduplicated away. It also avoids a memory spike from materializing all items at once.
+This design means the item stream benefits from deduplication — if most files are unchanged between backups, the item-stream chunks are mostly identical and deduplicated away.
+
+Restore now also consumes item streams incrementally (streaming deserialization) instead of materializing full `Vec<Item>` state up front.
 
 ---
 
@@ -285,14 +324,16 @@ This design means the item stream benefits from deduplication — if most files 
 
 ### Locking
 
-Client-side advisory locks prevent concurrent mutating operations on the same repository.
+vger uses advisory locking to prevent concurrent mutating operations on the same repository.
 
-- Lock files are stored at `locks/<timestamp>-<uuid>.json`
+- Preferred path: backend-native lock APIs (`acquire_advisory_lock` / `release_advisory_lock`) when the backend supports them (for example, vger-server)
+- Fallback path: lock files at `locks/<timestamp>-<uuid>.json`
 - Each lock contains: hostname, PID, and acquisition timestamp
 - **Oldest-key-wins**: after writing its lock, a client lists all locks — if its key isn't lexicographically first, it deletes its own lock and returns an error
 - **Stale cleanup**: locks older than 6 hours are automatically removed before each acquisition attempt
 - **Commands that lock**: `backup`, `delete`, `prune`, `compact`
 - **Read-only commands** (no lock): `list`, `extract`, `check`, `info`
+- **Recovery**: `vger break-lock` forcibly removes stale backend/object locks when interrupted processes leave lock conflicts
 
 When using a vger server, server-managed locks with TTL replace client-side advisory locks (see [Server Architecture](#server-architecture)).
 
@@ -318,16 +359,17 @@ After `delete` or `prune`, chunk refcounts are decremented and entries with refc
 2. Read each pack's trailing header to get `Vec<PackHeaderEntry>`
 3. Classify each blob as live (exists in `ChunkIndex` at matching pack+offset) or dead
 4. Compute `unused_ratio = dead_bytes / total_bytes` per pack
-5. Filter packs where `unused_ratio >= threshold` (default 10%)
+5. Track pack health counters (`packs_corrupt`, `packs_orphan`) in addition to live/dead bytes
+6. Filter packs where `unused_ratio >= threshold` (default 10%)
 
 **Phase 2 — Repack:**
 For each candidate pack (most wasteful first, respecting `--max-repack-size` cap):
-1. If all blobs are dead → delete the pack file directly
-2. Otherwise: read live blobs as encrypted passthrough (no decrypt/re-encrypt cycle)
-3. Write into a new pack via a standalone `PackWriter`, flush to storage
-4. Update `ChunkIndex` entries to point to the new pack_id/offset
-5. `save_state()` — persist index before deleting old pack (crash safety)
-6. Delete old pack file
+1. If backend supports `server_repack`, send a repack plan and apply returned pack remaps
+2. Otherwise run client-side repack:
+   - If all blobs are dead → delete the pack file directly
+   - Else read live blobs as encrypted passthrough (no decrypt/re-encrypt cycle), write a new pack, update index mappings
+3. Persist index/manifest updates before old pack deletion (`save_state()`)
+4. Delete old pack(s)
 
 #### Crash Safety
 
@@ -343,25 +385,44 @@ vger compact [--threshold 10] [--max-repack-size 2G] [-n/--dry-run]
 
 ## Parallel Pipeline
 
-During backup, the compress+encrypt phase runs in parallel using `rayon`:
+Backup uses a bounded pipeline:
 
-1. For each file, all chunks are classified as existing (dedup hit) or new
-2. New chunks are collected into a batch of `TransformJob` structs
-3. The batch is processed via `rayon::par_iter` — each job compresses and encrypts independently
-4. Results are inserted sequentially into the `PackWriter` (maintaining offset ordering)
+1. Sequential walk stage emits file work
+2. Parallel workers (pariter-based) read/chunk/hash/compress/encrypt files
+3. A `ByteBudget` enforces a hard cap on in-flight pipeline bytes (`pipeline_buffer_mib`)
+4. Consumer stage commits chunks and updates dedup/index state sequentially
+5. Pack uploads run in background with bounded in-flight upload concurrency
 
-This pattern keeps the critical section (pack writer insertion + index updates) single-threaded while parallelizing the CPU-heavy work.
+The CPU-heavy transform stage uses rayon pools, while pipeline orchestration uses bounded worker queues. Large files can bypass full in-memory materialization and stream inline to keep memory predictable.
 
 **Configuration:**
 
 ```yaml
 limits:
   cpu:
-    max_threads: 4              # rayon thread pool size (0 = rayon default, all cores)
-    nice: 10                    # Unix nice value for the backup process
+    max_threads: 4                 # worker budget (0 = all cores)
+    nice: 10                       # Unix nice value
+    max_upload_concurrency: 4      # max in-flight background pack uploads
+    transform_batch_mib: 32        # flush threshold for pending transforms
+    transform_batch_chunks: 8192   # flush threshold by action count
+    pipeline_depth: 4              # 0 disables pipeline, >0 enables bounded pipeline
+    pipeline_buffer_mib: 256       # hard cap for in-flight pipeline bytes
   io:
-    read_mib_per_sec: 100       # disk read rate limit (0 = unlimited)
+    read_mib_per_sec: 100          # disk read rate limit (0 = unlimited)
 ```
+
+---
+
+## Why This Is Notable for Backup Tools
+
+Deduplicating backup tools are often dominated by index memory and restore-planning overhead at large chunk counts. vger's implemented architecture addresses that class of bottlenecks with:
+
+- Tiered dedup lookups (session map + xor filter + mmap cache) instead of always materializing a full in-memory index during backup
+- Index-light restore planning (restore-cache-first, filtered-index fallback) for lower peak memory on extract
+- Explicitly bounded backup pipeline memory (`pipeline_buffer_mib`) and bounded in-flight uploads
+- Incremental index update paths that avoid rebuilding/uploading from a full in-memory index on every save
+
+These optimizations are implementation choices in current vger, not future roadmap items.
 
 ---
 
@@ -545,14 +606,21 @@ repositories:
 |---------|-------------|
 | **Pack files** | Chunks grouped into ~32 MiB packs with dynamic sizing, separate data/tree packs |
 | **Retention policies** | `keep_daily`, `keep_weekly`, `keep_monthly`, `keep_yearly`, `keep_last`, `keep_within` |
-| **delete command** | Remove individual snapshots, decrement refcounts |
+| **snapshot delete command** | Remove individual snapshots, decrement refcounts |
 | **prune command** | Apply retention policies, remove expired snapshots |
 | **check command** | Structural integrity + optional `--verify-data` for full content verification |
 | **Type-safe PackId** | Newtype for pack file identifiers with `storage_key()` |
 | **compact command** | Rewrite packs to reclaim space from orphaned blobs after delete/prune |
 | **REST server** | axum-based backup server with auth, append-only, quotas, freshness tracking, lock TTL, server-side compaction |
 | **REST backend** | `StorageBackend` over HTTP with range-read support (behind `backend-rest` feature) |
-| **Parallel pipeline** | `rayon` for chunk compress/encrypt pipeline |
+| **Tiered dedup index** | Backup dedup via session map + xor filter + mmap dedup cache, with safe fallback to HashMap dedup mode |
+| **Restore mmap cache** | Index-light extract planning via local restore cache; fallback to filtered full-index loading when needed |
+| **Incremental index update** | `save_state()` fast path merges `IndexDelta` into local full-index cache and serializes index from cache |
+| **Bounded parallel pipeline** | Byte-budgeted pipeline (`pipeline_buffer_mib`) with bounded worker/upload concurrency |
+| **Pack buffer pool** | Reusable seal/upload buffers activated during backup and released before index-heavy save-state work |
+| **Parallel transforms** | rayon-backed compression/encryption within the bounded pipeline |
+| **break-lock command** | Forced stale-lock cleanup for backend/object lock recovery |
+| **Compact pack health accounting** | Compact analysis reports/tracks corrupt and orphan packs in addition to reclaimable dead bytes |
 | **File-level cache** | inode/mtime/ctime skip for unchanged files — avoids read, chunk, compress, encrypt. Stored locally in the platform cache dir (macOS: `~/Library/Caches/vger/<repo_id>/filecache`, Linux: `~/.cache/vger/…`) — machine-specific, not in the repo. |
 
 ### Planned / Not Yet Implemented
