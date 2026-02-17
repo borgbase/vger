@@ -20,6 +20,7 @@ DATASET_BENCHMARK="$DATASET_DIR"
 RUNS=${RUNS:-3}
 WARMUP_RUNS=${WARMUP_RUNS:-1}
 PASSPHRASE=${PASSPHRASE:-123}
+TOOL=${TOOL:-}
 SCRIPT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 
 if [[ ! -d "$DATASET_DIR" ]]; then
@@ -36,13 +37,25 @@ if [[ ! -d "$DATASET_SNAPSHOT2" ]]; then
 fi
 
 need() { command -v "$1" >/dev/null 2>&1 || { echo "missing: $1" >&2; exit 2; }; }
-need vger
-need restic
-need rustic
-need borg
 need /usr/bin/time
 command -v perf >/dev/null 2>&1 && HAVE_PERF=1 || HAVE_PERF=0
 command -v strace >/dev/null 2>&1 && HAVE_STRACE=1 || HAVE_STRACE=0
+
+case "$TOOL" in
+  "")
+    need vger
+    need restic
+    need rustic
+    need borg
+    ;;
+  vger|restic|rustic|borg)
+    need "$TOOL"
+    ;;
+  *)
+    echo "TOOL must be one of: vger, restic, rustic, borg (or empty for all); got: $TOOL" >&2
+    exit 2
+    ;;
+esac
 
 if ! [[ "$RUNS" =~ ^[0-9]+$ ]] || [[ "$RUNS" -lt 1 ]]; then
   echo "RUNS must be a positive integer; got: $RUNS" >&2
@@ -111,16 +124,46 @@ RESTORE_RUSTIC="$OUT_ROOT/restore-rustic"
 RESTORE_BORG="$OUT_ROOT/restore-borg"
 mkdir -p "$RESTORE_VGER" "$RESTORE_RESTIC" "$RESTORE_RUSTIC" "$RESTORE_BORG"
 
-OPS=(
-  vger_backup
-  vger_restore
-  restic_backup
-  restic_restore
-  rustic_backup
-  rustic_restore
-  borg_backup
-  borg_restore
-)
+if [[ -n "$TOOL" ]]; then
+  OPS=(
+    "${TOOL}_backup"
+    "${TOOL}_restore"
+  )
+else
+  OPS=(
+    vger_backup
+    vger_restore
+    restic_backup
+    restic_restore
+    rustic_backup
+    rustic_restore
+    borg_backup
+    borg_restore
+  )
+fi
+
+list_previous_run_roots() {
+  local base="$HOME/runtime/benchmarks"
+  local stamps=()
+  local d=""
+  local bn=""
+
+  [[ -d "$base" ]] || return 0
+
+  for d in "$base"/*; do
+    [[ -d "$d" ]] || continue
+    bn=$(basename "$d")
+    [[ "$bn" =~ ^[0-9]{8}T[0-9]{6}Z$ ]] || continue
+    [[ "$bn" < "$STAMP" ]] || continue
+    stamps+=("$bn")
+  done
+
+  if [[ "${#stamps[@]}" -gt 0 ]]; then
+    while IFS= read -r bn; do
+      echo "$base/$bn"
+    done < <(printf "%s\n" "${stamps[@]}" | sort -r)
+  fi
+}
 
 tool_from_op() {
   local op="$1"
@@ -431,7 +474,7 @@ cd "$OUT_ROOT"
   done
 } >"$OUT_ROOT/commands.txt"
 
-echo "[config] dataset=$DATASET_DIR runs=$RUNS warmup_runs=$WARMUP_RUNS"
+echo "[config] dataset=$DATASET_DIR runs=$RUNS warmup_runs=$WARMUP_RUNS tool=${TOOL:-all}"
 
 echo "[dataset] seed=$DATASET_SNAPSHOT1"
 echo "[dataset] benchmark=$DATASET_BENCHMARK"
@@ -481,6 +524,7 @@ Seed snapshot (untimed): $DATASET_SNAPSHOT1
 Benchmark dataset (timed): $DATASET_BENCHMARK
 Runs per benchmark: $RUNS
 Warmup runs per benchmark: $WARMUP_RUNS
+Selected tool: ${TOOL:-all}
 
 Workflow per run:
 1) drop cache + reset/init tool repo
@@ -499,6 +543,26 @@ Outputs:
 EOF2
 
 # Post-processing outputs (summary + chart)
-python3 "$SCRIPT_DIR/bench_report.py" all "$OUT_ROOT" --out-dir "$OUT_ROOT/reports"
+REPORT_ARGS=()
+if [[ -n "$TOOL" ]]; then
+  mapfile -t PREV_RUN_ROOTS < <(list_previous_run_roots || true)
+  if [[ "${#PREV_RUN_ROOTS[@]}" -gt 0 ]]; then
+    echo "[report] backfill roots (${#PREV_RUN_ROOTS[@]}):"
+    for PREV_RUN_ROOT in "${PREV_RUN_ROOTS[@]}"; do
+      echo "  - $PREV_RUN_ROOT"
+      REPORT_ARGS+=(
+        --backfill-root "$PREV_RUN_ROOT"
+      )
+    done
+    REPORT_ARGS+=(
+      --backfill-mode nonselected
+      --selected-tool "$TOOL"
+    )
+  else
+    echo "[report] no previous run found for backfill"
+  fi
+fi
+
+python3 "$SCRIPT_DIR/benchmark_report.py" all "$OUT_ROOT" --out-dir "$OUT_ROOT/reports" "${REPORT_ARGS[@]}"
 
 echo "OK: results in $OUT_ROOT"

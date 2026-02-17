@@ -40,23 +40,23 @@ Dataset layout expected by the harness:
 
 Use the bundled harness (preferred; produces comparable outputs every run).
 
-Scripts live under `scripts/benchmarks/` relative to this skill directory.
+Scripts live under the repository at `scripts/`.
 
 ```bash
-SKILL_DIR="$(dirname "$(readlink -f "$0")")"  # or set manually
+REPO_ROOT="$(git rev-parse --show-toplevel)"
 
 # Basic: repeated /usr/bin/time -v runs + averaged report metrics
-RUNS=5 WARMUP_RUNS=1 "$SKILL_DIR/scripts/benchmarks/run.sh" ~/corpus-remote
+RUNS=5 WARMUP_RUNS=1 "$REPO_ROOT/scripts/benchmark.sh" ~/corpus-remote
 
 # Add strace/perf on top of default profiling (if allowed on host)
-PROFILE_STRACE=1 PROFILE_PERF=1 RUNS=3 WARMUP_RUNS=1 "$SKILL_DIR/scripts/benchmarks/run.sh" ~/corpus-remote
+PROFILE_STRACE=1 PROFILE_PERF=1 RUNS=3 WARMUP_RUNS=1 "$REPO_ROOT/scripts/benchmark.sh" ~/corpus-remote
 ```
 
 The harness writes to `~/runtime/benchmarks/<UTC_STAMP>/`.
 
 Post-processing (summary table + chart):
 ```bash
-python3 "$SKILL_DIR/scripts/benchmarks/bench_report.py" all ~/runtime/benchmarks/<UTC_STAMP>
+python3 "$REPO_ROOT/scripts/bench_report.py" all ~/runtime/benchmarks/<UTC_STAMP>
 ```
 
 `run.sh` now calls the reporter automatically at the end of each run and writes:

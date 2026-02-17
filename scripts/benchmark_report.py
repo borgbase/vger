@@ -2,9 +2,12 @@
 from __future__ import annotations
 
 import argparse
+import datetime
 import json
 import math
+import os
 import pathlib
+import re
 import shutil
 import statistics
 import subprocess
@@ -162,8 +165,7 @@ def fmt_cpu_pct(v: float | None) -> str:
     return f"{v:.1f}%"
 
 
-def get_dataset_bytes(root: pathlib.Path) -> int | None:
-    meta = root / "profile.vger_backup" / "meta.txt"
+def _dataset_path_from_meta(meta: pathlib.Path) -> str | None:
     if not meta.exists():
         return None
     dataset: str | None = None
@@ -175,10 +177,24 @@ def get_dataset_bytes(root: pathlib.Path) -> int | None:
             break
         if line.startswith("dataset_snapshot_2="):
             benchmark_dataset = line.split("=", 1)[1].strip()
-            break
+            continue
         if line.startswith("dataset="):
             dataset = line.split("=", 1)[1].strip()
     dataset_path = benchmark_root or benchmark_dataset or dataset
+    return dataset_path
+
+
+def find_dataset_path(root: pathlib.Path) -> str | None:
+    dataset_path: str | None = None
+    for op in OPS:
+        dataset_path = _dataset_path_from_meta(root / f"profile.{op}" / "meta.txt")
+        if dataset_path:
+            break
+    return dataset_path
+
+
+def get_dataset_bytes(root: pathlib.Path) -> int | None:
+    dataset_path = find_dataset_path(root)
     if not dataset_path:
         return None
     try:
@@ -188,9 +204,44 @@ def get_dataset_bytes(root: pathlib.Path) -> int | None:
         return None
 
 
-def build_records(root: pathlib.Path) -> tuple[List[dict], int | None]:
+def get_dataset_file_count(root: pathlib.Path) -> int | None:
+    dataset_path = find_dataset_path(root)
+    if not dataset_path:
+        return None
+    try:
+        total = 0
+        for _root, _dirs, files in os.walk(dataset_path):
+            total += len(files)
+        return total
+    except Exception:
+        return None
+
+
+def infer_run_timestamp_utc(root: pathlib.Path) -> str | None:
+    m = re.match(r"^(\d{8}T\d{6}Z)$", root.name)
+    if m:
+        try:
+            dt = datetime.datetime.strptime(m.group(1), "%Y%m%dT%H%M%SZ").replace(tzinfo=datetime.timezone.utc)
+            return dt.strftime("%Y-%m-%dT%H:%M:%SZ")
+        except ValueError:
+            pass
+
+    for op in OPS:
+        meta = root / f"profile.{op}" / "meta.txt"
+        if not meta.exists():
+            continue
+        for line in meta.read_text(errors="replace").splitlines():
+            if line.startswith("timestamp_utc="):
+                ts = line.split("=", 1)[1].strip()
+                if ts:
+                    return ts
+    return None
+
+
+def build_records(root: pathlib.Path) -> tuple[List[dict], int | None, int | None]:
     repo_sizes = parse_repo_sizes(root / "repo-sizes.txt")
     dataset_bytes = get_dataset_bytes(root)
+    dataset_files = get_dataset_file_count(root)
     dataset_mib = (dataset_bytes / (1024.0 * 1024.0)) if dataset_bytes else None
 
     records: List[dict] = []
@@ -303,7 +354,74 @@ def build_records(root: pathlib.Path) -> tuple[List[dict], int | None]:
                 "exit_status": exit_status,
             }
         )
-    return records, dataset_bytes
+    return records, dataset_bytes, dataset_files
+
+
+def _record_has_data(record: dict | None) -> bool:
+    if not record:
+        return False
+    return int(record.get("run_count", 0) or 0) > 0
+
+
+def merge_records(
+    current_records: List[dict],
+    backfill_records: List[dict],
+    mode: str,
+    selected_tool: str | None = None,
+) -> List[dict]:
+    current_map = {r["op"]: r for r in current_records}
+    backfill_map = {r["op"]: r for r in backfill_records}
+    merged: List[dict] = []
+
+    for op in OPS:
+        current = current_map.get(op)
+        backfill = backfill_map.get(op)
+        chosen = current
+        tool = op.split("_", 1)[0]
+
+        if mode == "nonselected":
+            if selected_tool is None:
+                raise ValueError("selected_tool is required for nonselected backfill mode")
+            if tool != selected_tool and not _record_has_data(current) and backfill is not None:
+                chosen = backfill
+        elif mode == "missing":
+            if not _record_has_data(current) and backfill is not None:
+                chosen = backfill
+        else:
+            raise ValueError(f"unsupported backfill mode: {mode}")
+
+        if chosen is not None:
+            merged.append(chosen)
+
+    return merged
+
+
+def apply_backfill_records(
+    records: List[dict],
+    backfill_roots: List[str],
+    backfill_mode: str,
+    selected_tool_arg: str,
+) -> tuple[List[dict], List[str], str]:
+    if not backfill_roots:
+        return records, [], selected_tool_arg
+
+    selected_tool: str | None = None
+    if backfill_mode == "nonselected":
+        if selected_tool_arg not in TOOLS:
+            raise ValueError(f"--selected-tool must be one of: {', '.join(TOOLS)}")
+        selected_tool = selected_tool_arg
+
+    applied_roots: List[str] = []
+    merged = records
+    for root_str in backfill_roots:
+        backfill_root = pathlib.Path(root_str).expanduser()
+        if not backfill_root.is_dir():
+            raise ValueError(f"backfill root dir not found: {backfill_root}")
+        backfill_records, _backfill_dataset_bytes, _backfill_dataset_files = build_records(backfill_root)
+        merged = merge_records(merged, backfill_records, backfill_mode, selected_tool)
+        applied_roots.append(str(backfill_root))
+
+    return merged, applied_roots, selected_tool_arg
 
 
 def fmt_float(v: float | None, digits: int) -> str:
@@ -411,21 +529,32 @@ def records_markdown(records: List[dict]) -> str:
     return "\n".join(lines) + "\n"
 
 
-def write_summary_outputs(out_dir: pathlib.Path, records: List[dict], dataset_bytes: int | None) -> None:
+def write_summary_outputs(
+    out_dir: pathlib.Path,
+    records: List[dict],
+    dataset_bytes: int | None,
+    dataset_files: int | None,
+    summary_meta: dict | None = None,
+) -> None:
     out_dir.mkdir(parents=True, exist_ok=True)
     (out_dir / "summary.tsv").write_text(records_tsv(records))
     (out_dir / "summary.md").write_text(records_markdown(records))
     payload = {
         "dataset_bytes": dataset_bytes,
+        "dataset_files": dataset_files,
         "records": records,
     }
+    if summary_meta:
+        payload.update(summary_meta)
     (out_dir / "summary.json").write_text(json.dumps(payload, indent=2))
 
 
-def print_summary(root: pathlib.Path, records: List[dict], dataset_bytes: int | None) -> None:
+def print_summary(root: pathlib.Path, records: List[dict], dataset_bytes: int | None, dataset_files: int | None) -> None:
     print(f"root: {root}")
     if dataset_bytes is not None:
         print(f"dataset_bytes: {dataset_bytes}")
+    if dataset_files is not None:
+        print(f"dataset_files: {dataset_files}")
     print(
         (
             "op\truns\tfailed_runs\tduration_s\tduration_s_std\tthroughput_mib_s\tthroughput_mib_s_std\tcpu%"
@@ -486,6 +615,9 @@ def generate_chart_with_deps(
     out_file: pathlib.Path,
     records: List[dict],
     no_uv_bootstrap: bool = False,
+    backfill_roots: List[str] | None = None,
+    backfill_mode: str = "nonselected",
+    selected_tool: str = "",
 ) -> int:
     try:
         import matplotlib.gridspec as gridspec
@@ -516,6 +648,12 @@ def generate_chart_with_deps(
             str(out_file),
             "--no-uv-bootstrap",
         ]
+        for backfill_root in backfill_roots or []:
+            cmd.extend(["--backfill-root", backfill_root])
+        if backfill_roots:
+            cmd.extend(["--backfill-mode", backfill_mode])
+            if selected_tool:
+                cmd.extend(["--selected-tool", selected_tool])
         return subprocess.call(cmd)
 
     tools_display = ["V'Ger", "Restic", "Rustic", "Borg"]
@@ -827,8 +965,22 @@ def generate_chart_with_deps(
         ax_bot.spines["top"].set_visible(False)
 
     dataset_bytes = get_dataset_bytes(root)
+    dataset_files = get_dataset_file_count(root)
     dataset_gib = (dataset_bytes / (1024.0 ** 3)) if dataset_bytes else None
-    dataset_label = f"~{dataset_gib:.0f} GiB dataset" if dataset_gib else "dataset"
+    if dataset_files is None:
+        files_label = None
+    elif dataset_files >= 1_000_000:
+        files_label = f"{dataset_files / 1_000_000.0:.1f}M"
+    elif dataset_files >= 1_000:
+        files_label = f"{dataset_files / 1_000.0:.0f}k"
+    else:
+        files_label = str(dataset_files)
+    if dataset_gib is not None and files_label is not None:
+        dataset_label = f"{dataset_gib:.0f} GiB / {files_label} files"
+    elif dataset_gib is not None:
+        dataset_label = f"{dataset_gib:.0f} GiB dataset"
+    else:
+        dataset_label = "dataset"
 
     fig = plt.figure(figsize=(11, 8.5))
     fig.suptitle(
@@ -869,6 +1021,18 @@ def generate_chart_with_deps(
         bbox_to_anchor=(0.5, 0.005),
     )
 
+    run_timestamp_utc = infer_run_timestamp_utc(root)
+    if run_timestamp_utc:
+        fig.text(
+            0.995,
+            0.003,
+            f"run: {run_timestamp_utc}",
+            ha="right",
+            va="bottom",
+            fontsize=6.5,
+            color="#78909c",
+        )
+
     out_file.parent.mkdir(parents=True, exist_ok=True)
     fig.savefig(out_file, dpi=200, bbox_inches="tight")
     plt.close(fig)
@@ -881,11 +1045,11 @@ def cmd_summary(args: argparse.Namespace) -> int:
     if not root.is_dir():
         print(f"root dir not found: {root}", file=sys.stderr)
         return 2
-    records, dataset_bytes = build_records(root)
-    print_summary(root, records, dataset_bytes)
+    records, dataset_bytes, dataset_files = build_records(root)
+    print_summary(root, records, dataset_bytes, dataset_files)
     if args.write_files:
         out_dir = pathlib.Path(args.out_dir).expanduser()
-        write_summary_outputs(out_dir, records, dataset_bytes)
+        write_summary_outputs(out_dir, records, dataset_bytes, dataset_files)
         print(f"summary files: {out_dir}")
     return 0
 
@@ -896,8 +1060,24 @@ def cmd_chart(args: argparse.Namespace) -> int:
         print(f"root dir not found: {root}", file=sys.stderr)
         return 2
     out_file = pathlib.Path(args.chart_file).expanduser()
-    records, _dataset_bytes = build_records(root)
-    return generate_chart_with_deps(root, out_file, records, no_uv_bootstrap=args.no_uv_bootstrap)
+    records, _dataset_bytes, _dataset_files = build_records(root)
+    try:
+        records, _applied_backfill_roots, _selected_tool = apply_backfill_records(
+            records, args.backfill_root, args.backfill_mode, args.selected_tool
+        )
+    except ValueError as e:
+        print(str(e), file=sys.stderr)
+        return 2
+
+    return generate_chart_with_deps(
+        root,
+        out_file,
+        records,
+        no_uv_bootstrap=args.no_uv_bootstrap,
+        backfill_roots=args.backfill_root,
+        backfill_mode=args.backfill_mode,
+        selected_tool=args.selected_tool,
+    )
 
 
 def cmd_all(args: argparse.Namespace) -> int:
@@ -910,12 +1090,33 @@ def cmd_all(args: argparse.Namespace) -> int:
     out_dir.mkdir(parents=True, exist_ok=True)
     chart_file = pathlib.Path(args.chart_file).expanduser()
 
-    records, dataset_bytes = build_records(root)
-    print_summary(root, records, dataset_bytes)
-    write_summary_outputs(out_dir, records, dataset_bytes)
+    records, dataset_bytes, dataset_files = build_records(root)
+    summary_meta: dict = {}
+    if args.backfill_root:
+        try:
+            records, applied_backfill_roots, selected_tool_arg = apply_backfill_records(
+                records, args.backfill_root, args.backfill_mode, args.selected_tool
+            )
+        except ValueError as e:
+            print(str(e), file=sys.stderr)
+            return 2
+        summary_meta["backfill_roots"] = applied_backfill_roots
+        summary_meta["selected_tool"] = selected_tool_arg
+        summary_meta["backfill_mode"] = args.backfill_mode
+
+    print_summary(root, records, dataset_bytes, dataset_files)
+    write_summary_outputs(out_dir, records, dataset_bytes, dataset_files, summary_meta=summary_meta)
     print(f"summary files: {out_dir}")
 
-    rc = generate_chart_with_deps(root, chart_file, records, no_uv_bootstrap=False)
+    rc = generate_chart_with_deps(
+        root,
+        chart_file,
+        records,
+        no_uv_bootstrap=False,
+        backfill_roots=args.backfill_root,
+        backfill_mode=args.backfill_mode,
+        selected_tool=args.selected_tool,
+    )
     if rc != 0:
         (out_dir / "chart_error.txt").write_text("failed to generate chart\n")
         return rc
@@ -939,6 +1140,19 @@ def build_parser() -> argparse.ArgumentParser:
         default="",
         help="output chart path (default: <root>/reports/benchmark.summary.png)",
     )
+    pc.add_argument(
+        "--backfill-root",
+        action="append",
+        default=[],
+        help="previous benchmark root used for backfill (repeatable; newest first)",
+    )
+    pc.add_argument(
+        "--backfill-mode",
+        default="nonselected",
+        choices=["nonselected", "missing"],
+        help="record backfill policy",
+    )
+    pc.add_argument("--selected-tool", default="", help="tool selected in current run")
     pc.add_argument("--no-uv-bootstrap", action="store_true", help=argparse.SUPPRESS)
     pc.set_defaults(func=cmd_chart)
 
@@ -950,6 +1164,19 @@ def build_parser() -> argparse.ArgumentParser:
         default="",
         help="output chart path (default: <out-dir>/benchmark.summary.png)",
     )
+    pa.add_argument(
+        "--backfill-root",
+        action="append",
+        default=[],
+        help="previous benchmark root used for backfill (repeatable; newest first)",
+    )
+    pa.add_argument(
+        "--backfill-mode",
+        default="nonselected",
+        choices=["nonselected", "missing"],
+        help="record backfill policy",
+    )
+    pa.add_argument("--selected-tool", default="", help="tool selected in current run")
     pa.set_defaults(func=cmd_all)
 
     return p

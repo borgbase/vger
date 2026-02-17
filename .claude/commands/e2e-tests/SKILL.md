@@ -47,8 +47,8 @@ Run each sub-skill to execute a specific test area. Results go to `~/runtime/`.
 - **`e2e-tests:filesystems:zfs`** — ZFS dataset snapshot hooks via .zfs/snapshot path
 
 ### Benchmarks
-- **`e2e-tests:benchmarks`** — Compare vger performance against restic and rustic (use `benchmarks.md` + bundled scripts under `scripts/benchmarks/`)
-- **`e2e-tests:stress`** — Run long-loop backup/restore/delete stress validation against local corpus (use `stress.md` + `scripts/stress/run.sh`)
+- **`e2e-tests:benchmarks`** — Compare vger performance against restic and rustic (use `benchmarks.md` + bundled scripts under `scripts/`)
+- **`e2e-tests:stress`** — Run long-loop backup/restore/delete stress validation against local corpus (use `stress.md` + `scripts/stress.sh`)
 
 ## Recommended Execution Order
 

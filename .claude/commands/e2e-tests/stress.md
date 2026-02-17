@@ -21,7 +21,8 @@ Continuously exercise the local backend lifecycle to catch correctness, lock han
 Use the bundled harness:
 
 ```bash
-bash .claude/commands/e2e-tests/scripts/stress/run.sh --help
+REPO_ROOT="$(git rev-parse --show-toplevel)"
+bash "$REPO_ROOT/scripts/stress.sh" --help
 ```
 
 ## Defaults
@@ -35,7 +36,8 @@ bash .claude/commands/e2e-tests/scripts/stress/run.sh --help
 Smoke test:
 
 ```bash
-bash .claude/commands/e2e-tests/scripts/stress/run.sh \
+REPO_ROOT="$(git rev-parse --show-toplevel)"
+bash "$REPO_ROOT/scripts/stress.sh" \
   --iterations 1 \
   --check-every 1 \
   --verify-data-every 0
@@ -44,7 +46,8 @@ bash .claude/commands/e2e-tests/scripts/stress/run.sh \
 Longer stress pass:
 
 ```bash
-bash .claude/commands/e2e-tests/scripts/stress/run.sh \
+REPO_ROOT="$(git rev-parse --show-toplevel)"
+bash "$REPO_ROOT/scripts/stress.sh" \
   --iterations 1000 \
   --check-every 50 \
   --verify-data-every 0
