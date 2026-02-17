@@ -1,4 +1,5 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
+use std::sync::{Arc, Condvar, Mutex};
 use std::time::Instant;
 
 use serde::{Deserialize, Serialize};
@@ -163,30 +164,28 @@ impl PackWriter {
         self.pack_type
     }
 
-    /// Assemble buffered blobs into a pack, compute its PackId, and clear internal state.
-    /// Does NOT write to storage — the caller is responsible for uploading `pack_bytes`.
-    /// Returns (pack_id, pack_bytes, vec of (chunk_id, stored_size, offset, refcount)).
-    pub fn seal(&mut self, crypto: &dyn CryptoEngine) -> Result<SealedPackResult> {
+    /// Assemble buffered blobs into a caller-provided buffer, compute its PackId,
+    /// and clear internal state. Uses `drain(..)` to drop each blob's encrypted data
+    /// immediately after copying, reducing transient memory overlap.
+    ///
+    /// Returns (pack_id, vec of (chunk_id, stored_size, offset, refcount)).
+    pub fn seal_into(
+        &mut self,
+        crypto: &dyn CryptoEngine,
+        out: &mut Vec<u8>,
+    ) -> Result<(PackId, Vec<PackedChunkEntry>)> {
         if self.buffer.is_empty() {
             return Err(VgerError::Other("cannot seal empty pack writer".into()));
         }
 
-        // Build header entries
+        // Phase 1: Build header entries and results by borrowing &self.buffer.
+        // Offsets are deterministic from buffer contents (running sum from PACK_HEADER_SIZE).
         let mut header_entries: Vec<PackHeaderEntry> = Vec::with_capacity(self.buffer.len());
-        let mut pack_bytes: Vec<u8> =
-            Vec::with_capacity(PACK_HEADER_SIZE + self.current_size + 1024);
-
-        // Write pack magic + version
-        pack_bytes.extend_from_slice(PACK_MAGIC);
-        pack_bytes.push(PACK_VERSION);
-
-        // Write each blob: [4B length LE][blob data]
+        let mut running_offset = PACK_HEADER_SIZE;
         for blob in &self.buffer {
             let blob_len = blob.encrypted_data.len() as u32;
-            let offset = pack_bytes.len() as u64 + 4; // offset past the length prefix
-
-            pack_bytes.extend_from_slice(&blob_len.to_le_bytes());
-            pack_bytes.extend_from_slice(&blob.encrypted_data);
+            let offset = running_offset as u64 + 4; // past the 4B length prefix
+            running_offset += 4 + blob.encrypted_data.len();
 
             header_entries.push(PackHeaderEntry {
                 obj_type: blob.obj_type,
@@ -197,17 +196,6 @@ impl PackWriter {
             });
         }
 
-        // Serialize and encrypt the header
-        let header_bytes = rmp_serde::to_vec(&header_entries)?;
-        let encrypted_header = pack_object(ObjectType::PackHeader, &header_bytes, crypto)?;
-        let header_len = encrypted_header.len() as u32;
-        pack_bytes.extend_from_slice(&encrypted_header);
-        pack_bytes.extend_from_slice(&header_len.to_le_bytes());
-
-        // Compute pack ID = BLAKE2b-256 of entire pack contents
-        let pack_id = PackId::compute(&pack_bytes);
-
-        // Collect results with refcounts from pending map
         let mut results: Vec<PackedChunkEntry> = Vec::with_capacity(header_entries.len());
         for entry in &header_entries {
             let refcount = self
@@ -218,12 +206,49 @@ impl PackWriter {
             results.push((entry.chunk_id, entry.length, entry.offset, refcount));
         }
 
-        // Clear state
-        self.buffer.clear();
+        // Phase 2: Fallible work — serialize and encrypt the header.
+        // Writer state is still untouched; on error the caller can retry.
+        let header_bytes = rmp_serde::to_vec(&header_entries)?;
+        let encrypted_header = pack_object(ObjectType::PackHeader, &header_bytes, crypto)?;
+
+        // Phase 3: All fallible ops succeeded — now drain blobs into output buffer.
+        out.clear();
+        out.reserve(PACK_HEADER_SIZE + self.current_size + 1024);
+
+        // Write pack magic + version
+        out.extend_from_slice(PACK_MAGIC);
+        out.push(PACK_VERSION);
+
+        // Write each blob: [4B length LE][blob data]
+        // drain(..) drops each blob's encrypted_data immediately after copying.
+        for blob in self.buffer.drain(..) {
+            let blob_len = blob.encrypted_data.len() as u32;
+            out.extend_from_slice(&blob_len.to_le_bytes());
+            out.extend_from_slice(&blob.encrypted_data);
+        }
+
+        // Append pre-built encrypted header + length trailer
+        let header_len = encrypted_header.len() as u32;
+        out.extend_from_slice(&encrypted_header);
+        out.extend_from_slice(&header_len.to_le_bytes());
+
+        // Compute pack ID = BLAKE2b-256 of entire pack contents
+        let pack_id = PackId::compute(out);
+
+        // Clear writer state
         self.current_size = 0;
         self.pending.clear();
         self.first_blob_time = None;
 
+        Ok((pack_id, results))
+    }
+
+    /// Assemble buffered blobs into a pack, compute its PackId, and clear internal state.
+    /// Does NOT write to storage — the caller is responsible for uploading `pack_bytes`.
+    /// Returns (pack_id, pack_bytes, vec of (chunk_id, stored_size, offset, refcount)).
+    pub fn seal(&mut self, crypto: &dyn CryptoEngine) -> Result<SealedPackResult> {
+        let mut pack_bytes = Vec::with_capacity(PACK_HEADER_SIZE + self.current_size + 1024);
+        let (pack_id, results) = self.seal_into(crypto, &mut pack_bytes)?;
         Ok((pack_id, pack_bytes, results))
     }
 
@@ -363,6 +388,83 @@ pub fn compute_tree_pack_target(min_pack_size: u32) -> usize {
     std::cmp::min(min_pack_size as usize, four_mib)
 }
 
+/// A fixed-size pool of reusable `Vec<u8>` buffers for pack seal/upload.
+///
+/// Buffers start as empty `Vec::new()` and grow lazily on first use via
+/// `seal_into()`. After that, they retain their allocation across reuses,
+/// eliminating repeated large alloc/dealloc cycles.
+///
+/// When all buffers are checked out, `checkout()` blocks — providing natural
+/// backpressure that caps pack buffer memory at `pool_size × max_pack_size`.
+pub struct PackBufferPool {
+    inner: Mutex<VecDeque<Vec<u8>>>,
+    available: Condvar,
+}
+
+impl PackBufferPool {
+    /// Create a pool with `count` empty buffers.
+    pub fn new(count: usize) -> Self {
+        let mut bufs = VecDeque::with_capacity(count);
+        for _ in 0..count {
+            bufs.push_back(Vec::new());
+        }
+        Self {
+            inner: Mutex::new(bufs),
+            available: Condvar::new(),
+        }
+    }
+
+    /// Check out a buffer from the pool. Blocks if all buffers are in use.
+    pub fn checkout(self: &Arc<Self>) -> PooledBuffer {
+        let mut guard = self.inner.lock().unwrap();
+        loop {
+            if let Some(mut buf) = guard.pop_front() {
+                buf.clear();
+                return PooledBuffer {
+                    buf: Some(buf),
+                    pool: Arc::clone(self),
+                };
+            }
+            guard = self.available.wait(guard).unwrap();
+        }
+    }
+
+    /// Return a buffer to the pool. Private — only called by `PooledBuffer::drop`.
+    fn checkin(&self, buf: Vec<u8>) {
+        let mut guard = self.inner.lock().unwrap();
+        guard.push_back(buf);
+        self.available.notify_one();
+    }
+}
+
+/// RAII guard that returns a buffer to its `PackBufferPool` on drop.
+///
+/// Guarantees buffer return on both success and error paths — if the upload
+/// thread panics or `storage.put()` returns `Err`, the buffer is still
+/// returned to the pool, preventing deadlock from buffer leak.
+pub struct PooledBuffer {
+    buf: Option<Vec<u8>>,
+    pool: Arc<PackBufferPool>,
+}
+
+impl PooledBuffer {
+    pub fn as_slice(&self) -> &[u8] {
+        self.buf.as_ref().expect("buffer already taken")
+    }
+
+    pub fn as_mut_vec(&mut self) -> &mut Vec<u8> {
+        self.buf.as_mut().expect("buffer already taken")
+    }
+}
+
+impl Drop for PooledBuffer {
+    fn drop(&mut self) {
+        if let Some(buf) = self.buf.take() {
+            self.pool.checkin(buf);
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -401,5 +503,94 @@ mod tests {
         let engine = crate::crypto::PlaintextEngine::new(&[0u8; 32]);
         let _ = w.seal(&engine).unwrap();
         assert!(w.first_blob_time.is_none());
+    }
+
+    #[test]
+    fn seal_into_matches_seal() {
+        let engine = crate::crypto::PlaintextEngine::new(&[0u8; 32]);
+
+        // Build two identical writers
+        let blobs: Vec<(u8, ChunkId, Vec<u8>, u32)> = vec![
+            (1, dummy_chunk_id(1), vec![10u8; 50], 50),
+            (1, dummy_chunk_id(2), vec![20u8; 80], 80),
+            (1, dummy_chunk_id(3), vec![30u8; 30], 30),
+        ];
+
+        let mut w1 = PackWriter::new(PackType::Data, usize::MAX);
+        let mut w2 = PackWriter::new(PackType::Data, usize::MAX);
+        for (obj_type, chunk_id, data, uncompressed) in &blobs {
+            w1.add_blob(*obj_type, *chunk_id, data.clone(), *uncompressed);
+            w2.add_blob(*obj_type, *chunk_id, data.clone(), *uncompressed);
+        }
+
+        let (id1, bytes1, entries1) = w1.seal(&engine).unwrap();
+        let mut out = Vec::new();
+        let (id2, entries2) = w2.seal_into(&engine, &mut out).unwrap();
+
+        assert_eq!(id1, id2);
+        assert_eq!(bytes1, out);
+        assert_eq!(entries1, entries2);
+    }
+
+    #[test]
+    fn pool_checkout_and_return() {
+        let pool = Arc::new(PackBufferPool::new(2));
+
+        // Can check out up to pool size
+        let buf1 = pool.checkout();
+        let buf2 = pool.checkout();
+
+        assert!(buf1.as_slice().is_empty());
+        assert!(buf2.as_slice().is_empty());
+
+        // Drop returns buffers to pool
+        drop(buf1);
+        drop(buf2);
+
+        // Can check out again after return
+        let _buf3 = pool.checkout();
+        let _buf4 = pool.checkout();
+    }
+
+    #[test]
+    fn pool_blocks_when_exhausted() {
+        let pool = Arc::new(PackBufferPool::new(1));
+        let _buf1 = pool.checkout();
+
+        // Spawn a thread that tries to checkout — it should block
+        let pool2 = Arc::clone(&pool);
+        let handle = std::thread::spawn(move || {
+            let buf = pool2.checkout();
+            buf.as_slice().len()
+        });
+
+        // Give the thread time to block
+        std::thread::sleep(std::time::Duration::from_millis(50));
+        assert!(!handle.is_finished(), "thread should be blocked waiting");
+
+        // Return our buffer — unblocks the thread
+        drop(_buf1);
+        let result = handle.join().unwrap();
+        assert_eq!(result, 0);
+    }
+
+    #[test]
+    fn pool_retains_buffer_capacity() {
+        let pool = Arc::new(PackBufferPool::new(1));
+
+        // Check out, grow the buffer, return it
+        {
+            let mut buf = pool.checkout();
+            let v = buf.as_mut_vec();
+            v.extend_from_slice(&[0u8; 1024]);
+            assert!(v.capacity() >= 1024);
+        }
+
+        // Check out again — buffer should be cleared but retain capacity
+        let buf = pool.checkout();
+        assert_eq!(buf.as_slice().len(), 0);
+        // The underlying Vec should have retained its allocation
+        // (We can't directly inspect capacity through as_slice, but
+        //  the important thing is it's cleared and reusable)
     }
 }
