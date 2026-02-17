@@ -15,6 +15,11 @@ on:
         type: boolean
         required: false
         default: true
+      debug_build:
+        description: "Build with debug info (for profiling)"
+        type: boolean
+        required: false
+        default: false
       publish_release:
         description: "Publish a GitHub Release (true/false)"
         required: false
@@ -32,7 +37,7 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
         with:
-          shared-key: release-linux
+          shared-key: release-linux${{ github.event.inputs.debug_build == 'true' && '-profiling' || '' }}
           cache-on-failure: true
       - name: Install Linux GUI deps
         run: |
@@ -41,7 +46,12 @@ jobs:
             libxkbcommon-dev libayatana-appindicator3-dev || \
           sudo apt-get install -y libappindicator3-dev
       - name: Build
-        run: cargo build --release -p vger-cli -p vger-server -p vger-gui
+        run: |
+          if [ "${{ github.event.inputs.debug_build }}" = "true" ]; then
+            cargo build --profile profiling -p vger-cli -p vger-server -p vger-gui
+          else
+            cargo build --release -p vger-cli -p vger-server -p vger-gui
+          fi
       - name: Package
         run: |
           if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
@@ -49,8 +59,15 @@ jobs:
           else
             VERSION="${GITHUB_REF_NAME}"
           fi
-          ARCHIVE="vger-${VERSION}-x86_64-unknown-linux-gnu.tar.gz"
-          tar -czf "${ARCHIVE}" -C target/release vger vger-server vger-gui
+          if [ "${{ github.event.inputs.debug_build }}" = "true" ]; then
+            PROFILE_DIR="profiling"
+            SUFFIX="-debug"
+          else
+            PROFILE_DIR="release"
+            SUFFIX=""
+          fi
+          ARCHIVE="vger-${VERSION}-x86_64-unknown-linux-gnu${SUFFIX}.tar.gz"
+          tar -czf "${ARCHIVE}" -C "target/${PROFILE_DIR}" vger vger-server vger-gui
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:

@@ -49,3 +49,8 @@ lto = "fat"
 codegen-units = 1
 panic = "abort"
 strip = "symbols"
+
+[profile.profiling]
+inherits = "release"
+debug = 2
+strip = "none"
