@@ -1,4 +1,4 @@
-use crate::compress::{compress, decompress, Compression};
+use crate::compress::{compress, decompress, decompress_with_hint, Compression};
 use crate::error::VgerError;
 
 #[test]
@@ -107,4 +107,31 @@ fn zstd_level_change_reinit() {
     let compressed_9 = compress(Compression::Zstd { level: 9 }, data).unwrap();
     let decompressed_9 = decompress(&compressed_9).unwrap();
     assert_eq!(decompressed_9, data);
+}
+
+#[test]
+fn decompress_with_hint_matches_decompress() {
+    let payloads: &[&[u8]] = &[b"", b"tiny", b"larger test payload for decompress hint checks"];
+    let codecs = [
+        Compression::None,
+        Compression::Lz4,
+        Compression::Zstd { level: 3 },
+    ];
+
+    for codec in codecs {
+        for payload in payloads {
+            let encoded = compress(codec, payload).unwrap();
+            let plain_a = decompress(&encoded).unwrap();
+            let plain_b = decompress_with_hint(&encoded, Some(payload.len())).unwrap();
+            assert_eq!(plain_a, plain_b);
+        }
+    }
+}
+
+#[test]
+fn decompress_with_hint_accepts_huge_hint() {
+    let payload = vec![0x7F; 4096];
+    let encoded = compress(Compression::Zstd { level: 3 }, &payload).unwrap();
+    let decoded = decompress_with_hint(&encoded, Some(usize::MAX)).unwrap();
+    assert_eq!(decoded, payload);
 }

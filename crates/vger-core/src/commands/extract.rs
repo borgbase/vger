@@ -35,7 +35,8 @@ const MAX_COALESCE_GAP: u64 = 256 * 1024; // 256 KiB
 const MAX_READ_SIZE: u64 = 16 * 1024 * 1024; // 16 MiB
 
 /// Number of parallel reader threads for downloading pack data.
-const MAX_READER_THREADS: usize = 8;
+/// Kept high for throughput while reducing peak memory versus 8 workers.
+const MAX_READER_THREADS: usize = 6;
 
 /// Maximum number of simultaneously open output files per restore worker.
 /// Caps fd usage while still avoiding per-chunk open/close churn.
@@ -647,7 +648,8 @@ fn process_read_group(
 
         let raw = &data[local_offset..local_end];
         let compressed = unpack_object_expect(raw, ObjectType::ChunkData, crypto)?;
-        let plaintext = compress::decompress(&compressed)?;
+        let plaintext =
+            compress::decompress_with_hint(&compressed, Some(blob.expected_size as usize))?;
         drop(compressed); // free decrypted buffer before file writes
 
         if plaintext.len() != blob.expected_size as usize {

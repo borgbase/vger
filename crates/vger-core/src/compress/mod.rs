@@ -93,6 +93,15 @@ pub fn compress(compression: Compression, data: &[u8]) -> Result<Vec<u8>> {
 
 /// Decompress data by reading the 1-byte tag prefix and dispatching.
 pub fn decompress(data: &[u8]) -> Result<Vec<u8>> {
+    decompress_with_hint(data, None)
+}
+
+/// Decompress data by reading the 1-byte tag prefix and dispatching.
+///
+/// `expected_size` is a best-effort capacity hint used to reduce `Vec` growth
+/// during streaming decode. It is always capped by `MAX_DECOMPRESS_SIZE` and
+/// never bypasses size-limit checks.
+pub fn decompress_with_hint(data: &[u8], expected_size: Option<usize>) -> Result<Vec<u8>> {
     if data.is_empty() {
         return Err(VgerError::Decompression("empty data".into()));
     }
@@ -116,7 +125,10 @@ pub fn decompress(data: &[u8]) -> Result<Vec<u8>> {
         TAG_ZSTD => {
             let mut decoder = zstd::stream::Decoder::new(std::io::Cursor::new(payload))
                 .map_err(|e| VgerError::Decompression(format!("zstd init: {e}")))?;
-            let mut output = Vec::new();
+            let hinted_capacity = expected_size
+                .unwrap_or(0)
+                .min(MAX_DECOMPRESS_SIZE as usize);
+            let mut output = Vec::with_capacity(hinted_capacity);
             decoder
                 .by_ref()
                 .take(MAX_DECOMPRESS_SIZE + 1)
@@ -162,5 +174,32 @@ mod tests {
         let compressed = compress(Compression::Lz4, original).unwrap();
         let decompressed = decompress(&compressed).unwrap();
         assert_eq!(decompressed, original);
+    }
+
+    #[test]
+    fn decompress_with_hint_matches_decompress() {
+        let payloads: &[&[u8]] = &[b"", b"short", b"this payload is long enough to compress"];
+        let codecs = [
+            Compression::None,
+            Compression::Lz4,
+            Compression::Zstd { level: 3 },
+        ];
+
+        for codec in codecs {
+            for payload in payloads {
+                let encoded = compress(codec, payload).unwrap();
+                let plain_a = decompress(&encoded).unwrap();
+                let plain_b = decompress_with_hint(&encoded, Some(payload.len())).unwrap();
+                assert_eq!(plain_a, plain_b);
+            }
+        }
+    }
+
+    #[test]
+    fn decompress_with_hint_caps_large_hint() {
+        let payload = vec![0xAB; 1024];
+        let encoded = compress(Compression::Zstd { level: 3 }, &payload).unwrap();
+        let decoded = decompress_with_hint(&encoded, Some(usize::MAX)).unwrap();
+        assert_eq!(decoded, payload);
     }
 }
