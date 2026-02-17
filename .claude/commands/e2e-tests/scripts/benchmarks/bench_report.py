@@ -31,6 +31,8 @@ TIMEV_FIELDS = {
     "user_s": "User time (seconds)",
     "sys_s": "System time (seconds)",
     "max_rss_kb": "Maximum resident set size (kbytes)",
+    "voluntary_ctx_switches": "Voluntary context switches",
+    "involuntary_ctx_switches": "Involuntary context switches",
     "fs_in": "File system inputs",
     "fs_out": "File system outputs",
     "exit_status": "Exit status",
@@ -201,6 +203,8 @@ def build_records(root: pathlib.Path) -> tuple[List[dict], int | None]:
             t = parse_timev(run_file)
             duration_s = parse_elapsed_seconds(t.get("elapsed", "NA"))
             throughput_mib_s: float | None = None
+            user_s = parse_float(t.get("user_s", "NA"))
+            sys_s = parse_float(t.get("sys_s", "NA"))
             if dataset_mib is not None and duration_s and duration_s > 0:
                 throughput_mib_s = dataset_mib / duration_s
             exit_status = parse_int(t.get("exit_status", "NA"))
@@ -211,9 +215,12 @@ def build_records(root: pathlib.Path) -> tuple[List[dict], int | None]:
                     "duration_s": duration_s,
                     "throughput_mib_s": throughput_mib_s,
                     "cpu_pct_value": parse_cpu_pct_value(t.get("cpu_pct", "NA")),
-                    "user_s": parse_float(t.get("user_s", "NA")),
-                    "sys_s": parse_float(t.get("sys_s", "NA")),
+                    "user_s": user_s,
+                    "sys_s": sys_s,
+                    "cpu_s": user_s + sys_s if user_s is not None and sys_s is not None else None,
                     "maxrss_kb": parse_int(t.get("max_rss_kb", "NA")),
+                    "voluntary_ctx_switches": parse_int(t.get("voluntary_ctx_switches", "NA")),
+                    "involuntary_ctx_switches": parse_int(t.get("involuntary_ctx_switches", "NA")),
                     "fs_in": parse_int(t.get("fs_in", "NA")),
                     "fs_out": parse_int(t.get("fs_out", "NA")),
                     "exit_status": exit_status,
@@ -225,8 +232,21 @@ def build_records(root: pathlib.Path) -> tuple[List[dict], int | None]:
         cpu_pct_value, cpu_pct_std = mean_std([r["cpu_pct_value"] for r in run_metrics])
         user_s, user_s_std = mean_std([r["user_s"] for r in run_metrics])
         sys_s, sys_s_std = mean_std([r["sys_s"] for r in run_metrics])
+        cpu_s, cpu_s_std = mean_std([r["cpu_s"] for r in run_metrics])
         maxrss_kb, maxrss_kb_std = mean_std(
             [float(r["maxrss_kb"]) if r["maxrss_kb"] is not None else None for r in run_metrics]
+        )
+        voluntary_ctx_switches, voluntary_ctx_switches_std = mean_std(
+            [
+                float(r["voluntary_ctx_switches"]) if r["voluntary_ctx_switches"] is not None else None
+                for r in run_metrics
+            ]
+        )
+        involuntary_ctx_switches, involuntary_ctx_switches_std = mean_std(
+            [
+                float(r["involuntary_ctx_switches"]) if r["involuntary_ctx_switches"] is not None else None
+                for r in run_metrics
+            ]
         )
         fs_in, fs_in_std = mean_std([float(r["fs_in"]) if r["fs_in"] is not None else None for r in run_metrics])
         fs_out, fs_out_std = mean_std(
@@ -265,8 +285,14 @@ def build_records(root: pathlib.Path) -> tuple[List[dict], int | None]:
                 "user_s_std": user_s_std,
                 "sys_s": sys_s,
                 "sys_s_std": sys_s_std,
+                "cpu_s": cpu_s,
+                "cpu_s_std": cpu_s_std,
                 "maxrss_kb": maxrss_kb,
                 "maxrss_kb_std": maxrss_kb_std,
+                "voluntary_ctx_switches": voluntary_ctx_switches,
+                "voluntary_ctx_switches_std": voluntary_ctx_switches_std,
+                "involuntary_ctx_switches": involuntary_ctx_switches,
+                "involuntary_ctx_switches_std": involuntary_ctx_switches_std,
                 "fs_in": fs_in,
                 "fs_in_std": fs_in_std,
                 "fs_out": fs_out,
@@ -297,7 +323,7 @@ def records_tsv(records: List[dict]) -> str:
         (
             "op\truns\tfailed_runs\tduration_s\tduration_s_std\tthroughput_mib_s\tthroughput_mib_s_std\tcpu%"
             "\tcpu_pct_std\tuser_s\tuser_s_std\tsys_s\tsys_s_std\tmaxrss_kb\tmaxrss_kb_std\tfs_in\tfs_in_std"
-            "\tfs_out\tfs_out_std\trepo_size\texit"
+            "\tfs_out\tfs_out_std\tvol_ctx_sw\tvol_ctx_sw_std\tinvol_ctx_sw\tinvol_ctx_sw_std\trepo_size\texit"
         )
     ]
     for r in records:
@@ -323,6 +349,10 @@ def records_tsv(records: List[dict]) -> str:
                     fmt_float(r["fs_in_std"], 0),
                     fmt_float(r["fs_out"], 0),
                     fmt_float(r["fs_out_std"], 0),
+                    fmt_float(r["voluntary_ctx_switches"], 0),
+                    fmt_float(r["voluntary_ctx_switches_std"], 0),
+                    fmt_float(r["involuntary_ctx_switches"], 0),
+                    fmt_float(r["involuntary_ctx_switches_std"], 0),
                     r["repo_size"],
                     fmt_int(r["exit_status"]),
                 ]
@@ -336,9 +366,13 @@ def records_markdown(records: List[dict]) -> str:
         (
             "| op | runs | failed_runs | duration_s | duration_s_std | throughput_mib_s | throughput_mib_s_std | "
             "cpu% | cpu_pct_std | user_s | user_s_std | sys_s | sys_s_std | maxrss_kb | maxrss_kb_std | fs_in | "
-            "fs_in_std | fs_out | fs_out_std | repo_size | exit |"
+            "fs_in_std | fs_out | fs_out_std | vol_ctx_sw | vol_ctx_sw_std | invol_ctx_sw | invol_ctx_sw_std | "
+            "repo_size | exit |"
         ),
-        "|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|",
+        (
+            "|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|"
+            "---:|---:|---:|"
+        ),
     ]
     for r in records:
         lines.append(
@@ -364,6 +398,10 @@ def records_markdown(records: List[dict]) -> str:
                     fmt_float(r["fs_in_std"], 0),
                     fmt_float(r["fs_out"], 0),
                     fmt_float(r["fs_out_std"], 0),
+                    fmt_float(r["voluntary_ctx_switches"], 0),
+                    fmt_float(r["voluntary_ctx_switches_std"], 0),
+                    fmt_float(r["involuntary_ctx_switches"], 0),
+                    fmt_float(r["involuntary_ctx_switches_std"], 0),
                     r["repo_size"],
                     fmt_int(r["exit_status"]),
                 ]
@@ -392,7 +430,7 @@ def print_summary(root: pathlib.Path, records: List[dict], dataset_bytes: int | 
         (
             "op\truns\tfailed_runs\tduration_s\tduration_s_std\tthroughput_mib_s\tthroughput_mib_s_std\tcpu%"
             "\tcpu_pct_std\tuser_s\tuser_s_std\tsys_s\tsys_s_std\tmaxrss_kb\tmaxrss_kb_std\tfs_in\tfs_in_std"
-            "\tfs_out\tfs_out_std\trepo_size\texit"
+            "\tfs_out\tfs_out_std\tvol_ctx_sw\tvol_ctx_sw_std\tinvol_ctx_sw\tinvol_ctx_sw_std\trepo_size\texit"
         )
     )
     for r in records:
@@ -418,6 +456,10 @@ def print_summary(root: pathlib.Path, records: List[dict], dataset_bytes: int | 
                     fmt_float(r["fs_in_std"], 0),
                     fmt_float(r["fs_out"], 0),
                     fmt_float(r["fs_out_std"], 0),
+                    fmt_float(r["voluntary_ctx_switches"], 0),
+                    fmt_float(r["voluntary_ctx_switches_std"], 0),
+                    fmt_float(r["involuntary_ctx_switches"], 0),
+                    fmt_float(r["involuntary_ctx_switches_std"], 0),
                     r["repo_size"],
                     fmt_int(r["exit_status"]),
                 ]
@@ -450,6 +492,7 @@ def generate_chart_with_deps(
         import matplotlib.pyplot as plt
         import numpy as np
         from matplotlib.patches import Patch
+        from matplotlib.ticker import FuncFormatter
     except ModuleNotFoundError as e:
         if no_uv_bootstrap:
             print(f"chart dependencies missing: {e}", file=sys.stderr)
@@ -476,10 +519,12 @@ def generate_chart_with_deps(
         return subprocess.call(cmd)
 
     tools_display = ["V'Ger", "Restic", "Rustic", "Borg"]
-    throughput = _chart_values(records, "throughput_mib_s")
     duration = _chart_values(records, "duration_s")
-    cpu = _chart_values(records, "cpu_pct_value")
+    cpu_seconds = _chart_values(records, "cpu_s")
+    user_seconds = _chart_values(records, "user_s")
+    sys_seconds = _chart_values(records, "sys_s")
     memory = _chart_values(records, "maxrss_kb")
+    voluntary_ctx_switches = _chart_values(records, "voluntary_ctx_switches")
     memory["backup"] = [v / 1024.0 if not math.isnan(v) else v for v in memory["backup"]]
     memory["restore"] = [v / 1024.0 if not math.isnan(v) else v for v in memory["restore"]]
 
@@ -507,6 +552,8 @@ def generate_chart_with_deps(
 
     backup_colors = [VGER if t == "V'Ger" else OTHER for t in tools_display]
     restore_colors = [VGER_LIGHT if t == "V'Ger" else OTHER_LIGHT for t in tools_display]
+    backup_top_colors = ["#f57c00" if t == "V'Ger" else "#455a64" for t in tools_display]
+    restore_top_colors = ["#ffa726" if t == "V'Ger" else "#607d8b" for t in tools_display]
 
     def style_axis(ax, title: str, higher_is_better: bool) -> None:
         ax.set_xticks(x)
@@ -525,7 +572,13 @@ def generate_chart_with_deps(
         ax.spines["left"].set_color("#2a2a40")
         ax.spines["bottom"].set_color("#2a2a40")
 
-    def draw_standard_panel(ax, title: str, vals: dict, higher_is_better: bool) -> None:
+    def draw_standard_panel(
+        ax,
+        title: str,
+        vals: dict,
+        higher_is_better: bool,
+        use_k_labels: bool = False,
+    ) -> None:
         backup_vals = np.array(vals["backup"], dtype=float)
         restore_vals = np.array(vals["restore"], dtype=float)
         bars1 = ax.bar(x - w / 2, backup_vals, w, color=backup_colors, zorder=3)
@@ -540,7 +593,10 @@ def generate_chart_with_deps(
                 h = float(bar.get_height())
                 if not np.isfinite(h):
                     continue
-                label = f"{h:.0f}" if h >= 10 else f"{h:.1f}"
+                if use_k_labels:
+                    label = f"{h / 1000.0:.1f}k"
+                else:
+                    label = f"{h:.0f}" if h >= 10 else f"{h:.1f}"
                 ax.text(
                     bar.get_x() + bar.get_width() / 2,
                     h + ymax * 0.01,
@@ -552,7 +608,56 @@ def generate_chart_with_deps(
                     fontweight="bold",
                 )
 
+        if use_k_labels:
+            ax.yaxis.set_major_formatter(FuncFormatter(lambda y, _pos: f"{y / 1000.0:.0f}k"))
+
         style_axis(ax, title, higher_is_better)
+
+    def draw_cpu_seconds_stacked_panel(ax) -> None:
+        user_backup = np.array(user_seconds["backup"], dtype=float)
+        user_restore = np.array(user_seconds["restore"], dtype=float)
+        sys_backup = np.array(sys_seconds["backup"], dtype=float)
+        sys_restore = np.array(sys_seconds["restore"], dtype=float)
+        total_backup = np.array(cpu_seconds["backup"], dtype=float)
+        total_restore = np.array(cpu_seconds["restore"], dtype=float)
+
+        bars_user_backup = ax.bar(x - w / 2, user_backup, w, color=backup_colors, zorder=3)
+        bars_user_restore = ax.bar(x + w / 2, user_restore, w, color=restore_colors, zorder=3)
+        ax.bar(x - w / 2, sys_backup, w, bottom=user_backup, color=backup_top_colors, zorder=3)
+        ax.bar(x + w / 2, sys_restore, w, bottom=user_restore, color=restore_top_colors, zorder=3)
+
+        finite = np.concatenate([total_backup[np.isfinite(total_backup)], total_restore[np.isfinite(total_restore)]])
+        ymax = float(finite.max()) if finite.size else 1.0
+        ax.set_ylim(0, ymax * 1.20)
+
+        for bars, totals in ((bars_user_backup, total_backup), (bars_user_restore, total_restore)):
+            for i, bar in enumerate(bars):
+                h = float(totals[i])
+                if not np.isfinite(h):
+                    continue
+                label = f"{h:.0f}" if h >= 10 else f"{h:.1f}"
+                ax.text(
+                    bar.get_x() + bar.get_width() / 2,
+                    h + ymax * 0.012,
+                    label,
+                    ha="center",
+                    va="bottom",
+                    fontsize=7.5,
+                    color="#b0bec5",
+                    fontweight="bold",
+                )
+
+        ax.text(
+            0.01,
+            0.98,
+            "bottom: user_s\ntop: sys_s",
+            transform=ax.transAxes,
+            ha="left",
+            va="top",
+            fontsize=8.0,
+            color="#90a4ae",
+        )
+        style_axis(ax, "CPU Seconds (s)", False)
 
     def draw_memory_broken_panel(ax_top, ax_bot, vals: dict) -> None:
         backup_vals = np.array(vals["backup"], dtype=float)
@@ -632,6 +737,95 @@ def generate_chart_with_deps(
         ax_top.spines["bottom"].set_visible(False)
         ax_bot.spines["top"].set_visible(False)
 
+    def draw_ctx_switches_broken_panel(ax_top, ax_bot, vals: dict) -> None:
+        backup_vals = np.array(vals["backup"], dtype=float)
+        restore_vals = np.array(vals["restore"], dtype=float)
+
+        for ax in (ax_top, ax_bot):
+            ax.bar(x - w / 2, backup_vals, w, color=backup_colors, zorder=3)
+            ax.bar(x + w / 2, restore_vals, w, color=restore_colors, zorder=3)
+
+        finite = np.concatenate([backup_vals[np.isfinite(backup_vals)], restore_vals[np.isfinite(restore_vals)]])
+        if not finite.size:
+            max_val = 1.0
+            lower_cap = 1.0
+            upper_min = 1.0
+            upper_max = 2.0
+        else:
+            sorted_vals = np.sort(finite)
+            max_val = float(sorted_vals[-1])
+            second_max = float(sorted_vals[-2]) if sorted_vals.size > 1 else max_val
+            lower_cap = max(second_max * 1.15, max_val * 0.18)
+            lower_cap = min(lower_cap, max_val * 0.75)
+            upper_min = max(lower_cap * 1.10, max_val * 0.88)
+            upper_max = max(upper_min + max_val * 0.06, max_val * 1.06)
+
+        ax_bot.set_ylim(0, lower_cap)
+        ax_top.set_ylim(upper_min, upper_max)
+
+        ax_top.spines["bottom"].set_visible(False)
+        ax_bot.spines["top"].set_visible(False)
+        ax_top.tick_params(bottom=False, labelbottom=False)
+
+        zigzag_n = 12
+        zx = np.linspace(-0.6, len(tools_display) - 0.4, zigzag_n * 2 + 1)
+        zy_amp_b = (ax_bot.get_ylim()[1] - ax_bot.get_ylim()[0]) * 0.018
+        zy_bot = [ax_bot.get_ylim()[1] + (zy_amp_b if i % 2 == 0 else -zy_amp_b) for i in range(len(zx))]
+        ax_bot.plot(zx, zy_bot, color="#78909c", linewidth=0.7, clip_on=False, zorder=10)
+
+        zy_amp_t = (ax_top.get_ylim()[1] - ax_top.get_ylim()[0]) * 0.018
+        zy_top = [ax_top.get_ylim()[0] + (zy_amp_t if i % 2 == 0 else -zy_amp_t) for i in range(len(zx))]
+        ax_top.plot(zx, zy_top, color="#78909c", linewidth=0.7, clip_on=False, zorder=10)
+
+        for i in range(len(tools_display)):
+            for values, x_off in ((backup_vals, -w / 2), (restore_vals, w / 2)):
+                v = float(values[i])
+                if not np.isfinite(v):
+                    continue
+                label = f"{v / 1000.0:.1f}k"
+                if v > lower_cap:
+                    ax_top.text(
+                        x[i] + x_off,
+                        v + (upper_max - upper_min) * 0.03,
+                        label,
+                        ha="center",
+                        va="bottom",
+                        fontsize=7.5,
+                        color="#ff6666",
+                        fontweight="bold",
+                    )
+                else:
+                    ax_bot.text(
+                        x[i] + x_off,
+                        v + lower_cap * 0.012,
+                        label,
+                        ha="center",
+                        va="bottom",
+                        fontsize=7.5,
+                        color="#b0bec5",
+                        fontweight="bold",
+                    )
+
+        ax_bot.set_xticks(x)
+        ax_bot.set_xticklabels(tools_display, fontsize=10)
+        for label in ax_bot.get_xticklabels():
+            if "V'Ger" in label.get_text():
+                label.set_color(VGER)
+                label.set_fontweight("bold")
+        ax_top.set_xticks([])
+        ax_top.set_title("I/O Wait Events  (↓ lower is better)", fontsize=10, color="#cfd8dc", pad=10)
+
+        for ax in (ax_top, ax_bot):
+            ax.yaxis.set_major_formatter(FuncFormatter(lambda y, _pos: f"{y / 1000.0:.0f}k"))
+            ax.set_axisbelow(True)
+            ax.grid(axis="y", color="#2e3d44", linewidth=0.5)
+            ax.spines["top"].set_visible(False)
+            ax.spines["right"].set_visible(False)
+            ax.spines["left"].set_color("#2a2a40")
+            ax.spines["bottom"].set_color("#2a2a40")
+        ax_top.spines["bottom"].set_visible(False)
+        ax_bot.spines["top"].set_visible(False)
+
     dataset_bytes = get_dataset_bytes(root)
     dataset_gib = (dataset_bytes / (1024.0 ** 3)) if dataset_bytes else None
     dataset_label = f"~{dataset_gib:.0f} GiB dataset" if dataset_gib else "dataset"
@@ -648,9 +842,10 @@ def generate_chart_with_deps(
     outer = gridspec.GridSpec(
         2, 2, figure=fig, hspace=0.38, wspace=0.28, left=0.06, right=0.97, top=0.90, bottom=0.09
     )
-    draw_standard_panel(fig.add_subplot(outer[0, 0]), "Throughput (MiB/s)", throughput, True)
-    draw_standard_panel(fig.add_subplot(outer[0, 1]), "Duration (s)", duration, False)
-    draw_standard_panel(fig.add_subplot(outer[1, 0]), "CPU Usage (%)", cpu, False)
+    draw_standard_panel(fig.add_subplot(outer[0, 0]), "Duration (s)", duration, False)
+    draw_cpu_seconds_stacked_panel(fig.add_subplot(outer[0, 1]))
+    ctx_inner = gridspec.GridSpecFromSubplotSpec(2, 1, subplot_spec=outer[1, 0], height_ratios=[1, 3], hspace=0.08)
+    draw_ctx_switches_broken_panel(fig.add_subplot(ctx_inner[0]), fig.add_subplot(ctx_inner[1]), voluntary_ctx_switches)
 
     inner = gridspec.GridSpecFromSubplotSpec(2, 1, subplot_spec=outer[1, 1], height_ratios=[1, 3], hspace=0.08)
     draw_memory_broken_panel(fig.add_subplot(inner[0]), fig.add_subplot(inner[1]), memory)

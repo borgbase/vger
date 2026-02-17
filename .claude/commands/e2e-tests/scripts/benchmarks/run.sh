@@ -213,6 +213,69 @@ measured_cmd_for_op() {
   esac
 }
 
+prepare_cmds_for_op() {
+  local op="$1"
+  local tool=""
+  local phase=""
+
+  tool=$(tool_from_op "$op")
+  phase=$(phase_from_op "$op")
+
+  case "$tool" in
+    vger)
+      if [[ "$phase" == "backup" ]]; then
+        echo "drop caches"
+        echo "reset repo: rm -rf '$VGER_REPO' && mkdir -p '$VGER_REPO'"
+        echo "init repo: vger init -R bench"
+        echo "seed backup: vger backup -R bench -l bench '$DATASET_SNAPSHOT1'"
+      else
+        echo "none (uses repo state from preceding timed vger_backup)"
+      fi
+      ;;
+    restic)
+      if [[ "$phase" == "backup" ]]; then
+        echo "drop caches"
+        echo "reset repo: rm -rf '$RESTIC_REPO' && mkdir -p '$RESTIC_REPO'"
+        echo "init repo: restic init"
+        echo "seed backup: restic backup '$DATASET_SNAPSHOT1'"
+      else
+        echo "none (uses repo state from preceding timed restic_backup)"
+      fi
+      ;;
+    rustic)
+      if [[ "$phase" == "backup" ]]; then
+        echo "drop caches"
+        echo "reset repo: rm -rf '$RUSTIC_REPO' && mkdir -p '$RUSTIC_REPO'"
+        echo "init repo: rustic init"
+        echo "seed backup: rustic backup '$DATASET_SNAPSHOT1'"
+      else
+        echo "none (uses repo state from preceding timed rustic_backup)"
+      fi
+      ;;
+    borg)
+      if [[ "$phase" == "backup" ]]; then
+        echo "drop caches"
+        echo "reset repo: rm -rf '$BORG_REPO' && mkdir -p '$BORG_REPO'"
+        echo "init repo: borg init --encryption=repokey-blake2"
+        echo "seed backup: borg create --compression zstd,3 --stats '::bench-<utc>-<rand>' '$DATASET_SNAPSHOT1'"
+      else
+        echo "none (uses repo state from preceding timed borg_backup)"
+      fi
+      ;;
+    *)
+      echo "unknown operation: $op" >&2
+      return 2
+      ;;
+  esac
+}
+
+should_prepare_op_run() {
+  local op="$1"
+  local phase=""
+  phase=$(phase_from_op "$op")
+  [[ "$phase" == "backup" ]]
+}
+
 prepare_op_run() {
   local op="$1"
   local prep_log="$2"
@@ -237,16 +300,16 @@ prepare_op_run() {
   echo "[prepare] seed backup snapshot-1 (untimed)" >>"$prep_log"
   backup_adhoc_for_tool "$tool" "$DATASET_SNAPSHOT1" >>"$prep_log" 2>&1
 
-  if [[ "$phase" == "restore" ]]; then
-    echo "[prepare] benchmark backup top-level dataset (untimed, for restore source)" >>"$prep_log"
-    backup_adhoc_for_tool "$tool" "$DATASET_BENCHMARK" >>"$prep_log" 2>&1
-  fi
 }
 
 run_one() {
   local op="$1"
   local cmd=""
+  local prep_cmds=""
+  local phase=""
   cmd=$(measured_cmd_for_op "$op")
+  prep_cmds=$(prepare_cmds_for_op "$op")
+  phase=$(phase_from_op "$op")
 
   local out="$OUT_ROOT/profile.$op"
   local runs_dir="$out/runs"
@@ -259,7 +322,10 @@ run_one() {
     echo "dataset_snapshot_1=$DATASET_SNAPSHOT1"
     echo "dataset_snapshot_2=$DATASET_SNAPSHOT2"
     echo "dataset_benchmark=$DATASET_BENCHMARK"
-    echo "cmd=$cmd"
+    echo "timed_cmd=$cmd"
+    echo "prepare_steps<<EOF"
+    echo "$prep_cmds"
+    echo "EOF"
     echo "runs=$RUNS"
     echo "warmup_runs=$WARMUP_RUNS"
     echo "timestamp_utc=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
@@ -277,10 +343,16 @@ run_one() {
   if [[ "$WARMUP_RUNS" -gt 0 ]]; then
     for ((i = 1; i <= WARMUP_RUNS; i++)); do
       run_label=$(printf "%03d" "$i")
-      echo "[warmup] $op $i/$WARMUP_RUNS"
-      if ! prepare_op_run "$op" "$out/warmup-$run_label.prep.log"; then
-        failed_warmups=$((failed_warmups + 1))
-        continue
+      if [[ "$phase" == "restore" ]]; then
+        echo "[warmup] $op $i/$WARMUP_RUNS (no prep; uses preceding timed backup state)"
+      else
+        echo "[warmup] $op $i/$WARMUP_RUNS"
+      fi
+      if should_prepare_op_run "$op"; then
+        if ! prepare_op_run "$op" "$out/warmup-$run_label.prep.log"; then
+          failed_warmups=$((failed_warmups + 1))
+          continue
+        fi
       fi
       if ! bash -lc "$cmd" >"$out/warmup-$run_label.stdout.txt" 2>"$out/warmup-$run_label.stderr.txt"; then
         failed_warmups=$((failed_warmups + 1))
@@ -294,14 +366,20 @@ run_one() {
     run_timev="$runs_dir/run-$run_label.timev.txt"
     run_rc_file="$runs_dir/run-$run_label.rc"
 
-    echo "[run] $op $i/$RUNS"
+    if [[ "$phase" == "restore" ]]; then
+      echo "[run] $op $i/$RUNS (no prep; uses preceding timed backup state)"
+    else
+      echo "[run] $op $i/$RUNS"
+    fi
 
-    if ! prepare_op_run "$op" "$runs_dir/run-$run_label.prep.log"; then
-      rc=1
-      failed_runs=$((failed_runs + 1))
-      : >"$run_timev"
-      echo "$rc" >"$run_rc_file"
-      continue
+    if should_prepare_op_run "$op"; then
+      if ! prepare_op_run "$op" "$runs_dir/run-$run_label.prep.log"; then
+        rc=1
+        failed_runs=$((failed_runs + 1))
+        : >"$run_timev"
+        echo "$rc" >"$run_rc_file"
+        continue
+      fi
     fi
 
     if /usr/bin/time -v bash -lc "$cmd" >"$run_stdout" 2>"$run_timev"; then
@@ -320,13 +398,21 @@ run_one() {
   fi
 
   if [[ "${PROFILE_PERF:-0}" == "1" && "$HAVE_PERF" == "1" ]]; then
-    if prepare_op_run "$op" "$out/perf.prep.log"; then
+    if should_prepare_op_run "$op"; then
+      if prepare_op_run "$op" "$out/perf.prep.log"; then
+        perf stat -d -r 1 -- bash -lc "$cmd" >"$out/perf.stdout.txt" 2>"$out/perf.stat.txt" || true
+      fi
+    else
       perf stat -d -r 1 -- bash -lc "$cmd" >"$out/perf.stdout.txt" 2>"$out/perf.stat.txt" || true
     fi
   fi
 
   if [[ "${PROFILE_STRACE:-0}" == "1" && "$HAVE_STRACE" == "1" ]]; then
-    if prepare_op_run "$op" "$out/strace.prep.log"; then
+    if should_prepare_op_run "$op"; then
+      if prepare_op_run "$op" "$out/strace.prep.log"; then
+        strace -c -f -qq -o "$out/strace.summary.txt" bash -lc "$cmd" >/dev/null 2>&1 || true
+      fi
+    else
       strace -c -f -qq -o "$out/strace.summary.txt" bash -lc "$cmd" >/dev/null 2>&1 || true
     fi
   fi
@@ -335,9 +421,13 @@ run_one() {
 cd "$OUT_ROOT"
 {
   echo "workflow: per warmup/run => drop caches + reset repo + init + untimed backup snapshot-1"
-  echo "restore workflow: adds untimed backup of top-level dataset before timed restore"
+  echo "restore workflow: no repo prep; restore uses state from preceding timed <tool>_backup op"
   for op in "${OPS[@]}"; do
-    echo "$op: $(measured_cmd_for_op "$op")"
+    echo "$op:"
+    echo "  timed: $(measured_cmd_for_op "$op")"
+    while IFS= read -r prep_cmd; do
+      echo "  prep: $prep_cmd"
+    done < <(prepare_cmds_for_op "$op")
   done
 } >"$OUT_ROOT/commands.txt"
 
@@ -397,7 +487,7 @@ Workflow per run:
 2) untimed backup of snapshot-1
 3) timed benchmark step:
    - backup ops: backup top-level dataset (snapshot-1 + snapshot-2)
-   - restore ops: untimed backup top-level dataset, then timed restore of latest
+   - restore ops: timed restore of latest from preceding timed backup op state
 
 Outputs:
 - commands.txt
