@@ -272,19 +272,27 @@ If you raise `max_pack_size`, target size can grow further, up to the 512 MiB ha
 open repo (full index loaded once)
   → prune stale local file-cache entries
   → enable tiered dedup mode (mmap cache + xor filter, fallback to dedup HashMap)
-  → configure bounded upload concurrency
-  → walk sources with excludes
-    → pipeline path (if enabled): walk → parallel read/chunk/hash/compress/encrypt → sequential commit
-      → ByteBudget enforces pipeline_buffer_mib as a real in-flight memory cap
-    → sequential path (fallback when pipeline disabled)
-    → dedup check (persistent dedup tier + pending pack writers)
-      → [new chunk] commit encrypted blob to data/tree pack writer
-      → [dedup hit] bump refcount only
+  → configure bounded upload concurrency + pipeline limits
+  → walk sources with excludes + one_file_system + exclude_if_present
+    → cache-hit path: reuse cached ChunkRefs and bump refs
+    → cache-miss path:
+      → pipeline path (if pipeline_depth > 0):
+        → walk emits regular files and segmented large files
+          (segmentation applies when file_size > segment_size;
+           effective segment size is clamped to min(segment_size_mib, pipeline_buffer_mib))
+        → worker threads read/chunk/hash and classify each chunk:
+          - xor prefilter says "maybe present" → hash-only chunk
+          - xor prefilter miss (or no filter) → compress + encrypt prepacked chunk
+        → sequential consumer validates segment order, performs dedup checks
+          (persistent dedup tier + pending pack writers), commits new chunks,
+          and handles xor false positives via inline transform
+        → ByteBudget enforces pipeline_buffer_mib as a hard in-flight memory cap
+      → sequential fallback path (pipeline_depth == 0)
   → serialize items incrementally into item-stream chunks (tree packs)
   → write SnapshotMeta
   → mutate manifest
   → save_state()
-    → flush packs and pending uploads
+    → flush packs/pending uploads (pack flush triggers: target size, 10,000 blobs, or 300s age)
     → if dedup/tiered mode: apply IndexDelta (fast path = incremental full-index-cache merge; slow path = reload full index + merge)
     → write dirty manifest/index only
     → rebuild local dedup/restore/full-index caches as needed
@@ -306,7 +314,10 @@ open repository without index (`open_without_index`)
   → build coalesced pack read groups:
     → preferred: index-free lookup via restore cache
     → fallback: load full index and retain only snapshot-needed chunks
-  → parallel range reads by pack/offset, decrypt + decompress-with-size-hint chunks, write targets
+  → parallel coalesced range reads by pack/offset
+    (merge when gap <= 256 KiB and merged range <= 16 MiB)
+    → 6 reader workers fetch groups, decrypt + decompress-with-size-hint chunks
+    → validate plaintext size and write to all targets (max 16 open files per worker)
   → restore file metadata (mode, mtime, optional xattrs)
 ```
 
@@ -321,6 +332,7 @@ Snapshot metadata (the list of files, directories, and symlinks) is **not** stor
 This design means the item stream benefits from deduplication — if most files are unchanged between backups, the item-stream chunks are mostly identical and deduplicated away.
 
 Restore now also consumes item streams incrementally (streaming deserialization) instead of materializing full `Vec<Item>` state up front.
+When the mmap restore cache is valid, item-stream chunk lookups can avoid loading the full chunk index.
 
 ---
 
@@ -392,12 +404,12 @@ vger compact [--threshold 10] [--max-repack-size 2G] [-n/--dry-run]
 Backup uses a bounded pipeline:
 
 1. Sequential walk stage emits file work
-2. Parallel workers (pariter-based) read/chunk/hash/compress/encrypt files
+2. Parallel workers (pariter-based) read/chunk/hash files and classify chunks (hash-only vs prepacked)
 3. A `ByteBudget` enforces a hard cap on in-flight pipeline bytes (`pipeline_buffer_mib`)
-4. Consumer stage commits chunks and updates dedup/index state sequentially
+4. Consumer stage commits chunks and updates dedup/index state sequentially (including segment-order validation for large files)
 5. Pack uploads run in background with bounded in-flight upload concurrency
 
-The CPU-heavy transform stage uses rayon pools, while pipeline orchestration uses bounded worker queues. Large files can bypass full in-memory materialization and stream inline to keep memory predictable.
+Large files are split into fixed-size segments and processed through the same worker pool. Segmentation applies only when `file_size > segment_size`, and the effective segment size is clamped to `pipeline_buffer_mib`.
 
 **Configuration:**
 
@@ -411,6 +423,7 @@ limits:
     transform_batch_chunks: 8192   # flush threshold by action count
     pipeline_depth: 4              # 0 disables pipeline, >0 enables bounded pipeline
     pipeline_buffer_mib: 256       # hard cap for in-flight pipeline bytes
+    segment_size_mib: 64           # large-file split threshold (16..=256), clamped by pipeline_buffer_mib
   io:
     read_mib_per_sec: 100          # disk read rate limit (0 = unlimited)
 ```
