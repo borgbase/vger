@@ -25,6 +25,8 @@ Options:
   --cost-type TYPE       flamegraph cost type: allocations|temporary|leaked|peak (default: peak)
   --perf-events LIST     perf events list for perf stat -e (optional)
   --perf-repeat N        perf stat repeat count -r (default: 1)
+  --perf-record          also run perf record (sampled call graph) after perf stat
+  --perf-record-freq N   perf record sample frequency -F (default: 99)
   --skip-build           skip cargo build and use existing target/profiling/vger
   --no-drop-caches       do not call drop_caches before timed profiling run
 
@@ -87,6 +89,8 @@ COST_TYPE="peak"
 PROFILER="heaptrack"
 PERF_EVENTS=""
 PERF_REPEAT="1"
+PERF_RECORD=0
+PERF_RECORD_FREQ="99"
 SKIP_BUILD=0
 NO_DROP_CACHES=0
 RESTORE_SNAPSHOT="latest"
@@ -157,6 +161,14 @@ while [[ $# -gt 0 ]]; do
       ;;
     --perf-repeat)
       PERF_REPEAT="${2:-}"
+      shift 2
+      ;;
+    --perf-record)
+      PERF_RECORD=1
+      shift
+      ;;
+    --perf-record-freq)
+      PERF_RECORD_FREQ="${2:-}"
       shift 2
       ;;
     --skip-build)
@@ -253,6 +265,10 @@ if ! [[ "$PERF_REPEAT" =~ ^[1-9][0-9]*$ ]]; then
   echo "invalid --perf-repeat: $PERF_REPEAT (expected positive integer)" >&2
   exit 2
 fi
+if ! [[ "$PERF_RECORD_FREQ" =~ ^[1-9][0-9]*$ ]]; then
+  echo "invalid --perf-record-freq: $PERF_RECORD_FREQ (expected positive integer)" >&2
+  exit 2
+fi
 
 case "$RESTORE_SETUP" in
   full|benchmark) ;;
@@ -345,6 +361,9 @@ FLAMEGRAPH_SVG="$RUN_DIR/heaptrack.flamegraph.svg"
 PERF_STAT_TXT="$RUN_DIR/perf.stat.txt"
 PERF_STDOUT_TXT="$RUN_DIR/perf.stdout.txt"
 PERF_LOG="$RUN_DIR/perf.log"
+PERF_DATA="$RUN_DIR/perf.data"
+PERF_RECORD_TXT="$RUN_DIR/perf.record.txt"
+PERF_REPORT_TXT="$RUN_DIR/perf.report.txt"
 PROFILE_LOG="$RUN_DIR/profile.log"
 SETUP_LOG="$RUN_DIR/setup.log"
 DROP_CACHES_LOG="$RUN_DIR/drop-caches.log"
@@ -440,6 +459,8 @@ write_meta() {
     echo "profiler=$PROFILER"
     echo "perf_repeat=$PERF_REPEAT"
     echo "perf_events=$PERF_EVENTS"
+    echo "perf_record=$PERF_RECORD"
+    echo "perf_record_freq=$PERF_RECORD_FREQ"
     if [[ "$PROFILER" == "heaptrack" || "$PROFILER" == "both" ]]; then
       echo "heaptrack_enabled=1"
     else
@@ -500,6 +521,11 @@ write_meta() {
       echo "perf_stat_txt=$PERF_STAT_TXT"
       echo "perf_stdout_txt=$PERF_STDOUT_TXT"
       echo "perf_log=$PERF_LOG"
+      if (( PERF_RECORD == 1 )); then
+        echo "perf_data=$PERF_DATA"
+        echo "perf_record_txt=$PERF_RECORD_TXT"
+        echo "perf_report_txt=$PERF_REPORT_TXT"
+      fi
     fi
     echo "setup_log=$SETUP_LOG"
     echo "drop_caches_log=$DROP_CACHES_LOG"
@@ -523,6 +549,13 @@ run_perf_profile() {
       perf stat -d -r "$PERF_REPEAT" -- "${PROFILE_CMD[@]}" >"$PERF_STDOUT_TXT" 2>"$PERF_STAT_TXT"
     fi
     echo "perf rc=$?"
+    if (( PERF_RECORD == 1 )); then
+      echo "perf record command: perf record -F $PERF_RECORD_FREQ -g --output $PERF_DATA -- ${PROFILE_CMD[*]}"
+      perf record -F "$PERF_RECORD_FREQ" -g --output "$PERF_DATA" -- "${PROFILE_CMD[@]}" >"$PERF_RECORD_TXT" 2>&1
+      echo "perf record rc=$?"
+      perf report --stdio --input "$PERF_DATA" >"$PERF_REPORT_TXT" 2>&1
+      echo "perf report rc=$?"
+    fi
   } | tee "$PERF_LOG"
 }
 
@@ -678,6 +711,11 @@ if [[ "$PROFILER" == "perf" || "$PROFILER" == "both" ]]; then
   echo "  perf_stat_txt:  $PERF_STAT_TXT"
   echo "  perf_stdout:    $PERF_STDOUT_TXT"
   echo "  perf_log:       $PERF_LOG"
+  if (( PERF_RECORD == 1 )); then
+    echo "  perf_data:      $PERF_DATA"
+    echo "  perf_record:    $PERF_RECORD_TXT"
+    echo "  perf_report:    $PERF_REPORT_TXT"
+  fi
 fi
 echo "  setup_log:      $SETUP_LOG"
 echo "  drop_caches_log:$DROP_CACHES_LOG"
