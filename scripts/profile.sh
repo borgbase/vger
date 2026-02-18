@@ -10,8 +10,8 @@ usage() {
 Usage: $SCRIPT_NAME [options]
 
 Build vger-cli with the profiling profile, prepare repo state for a selected
-mode, profile the selected command via heaptrack, and generate analysis +
-flamegraph reports.
+mode, profile the selected command via heaptrack and/or perf, and generate
+reports.
 
 Options:
   --mode MODE            profiling mode:
@@ -21,7 +21,10 @@ Options:
   --repo LABEL           repository label/path for -R (default: local)
   --source PATH          source path to back up (default: \$HOME/corpus-local)
   --out-root DIR         output root directory (default: \$HOME/runtime/heaptrack/reports)
+  --profiler NAME        profiler to run: heaptrack|perf|both (default: heaptrack)
   --cost-type TYPE       flamegraph cost type: allocations|temporary|leaked|peak (default: peak)
+  --perf-events LIST     perf events list for perf stat -e (optional)
+  --perf-repeat N        perf stat repeat count -r (default: 1)
   --skip-build           skip cargo build and use existing target/profiling/vger
   --no-drop-caches       do not call drop_caches before timed profiling run
 
@@ -81,6 +84,9 @@ SEED_SOURCE_PATH=""
 SOURCE_PATH="$HOME/corpus-local"
 OUT_ROOT="$HOME/runtime/heaptrack/reports"
 COST_TYPE="peak"
+PROFILER="heaptrack"
+PERF_EVENTS=""
+PERF_REPEAT="1"
 SKIP_BUILD=0
 NO_DROP_CACHES=0
 RESTORE_SNAPSHOT="latest"
@@ -139,6 +145,18 @@ while [[ $# -gt 0 ]]; do
       ;;
     --cost-type)
       COST_TYPE="${2:-}"
+      shift 2
+      ;;
+    --profiler)
+      PROFILER="${2:-}"
+      shift 2
+      ;;
+    --perf-events)
+      PERF_EVENTS="${2:-}"
+      shift 2
+      ;;
+    --perf-repeat)
+      PERF_REPEAT="${2:-}"
       shift 2
       ;;
     --skip-build)
@@ -223,6 +241,19 @@ case "$COST_TYPE" in
     ;;
 esac
 
+case "$PROFILER" in
+  heaptrack|perf|both) ;;
+  *)
+    echo "invalid --profiler: $PROFILER (expected: heaptrack|perf|both)" >&2
+    exit 2
+    ;;
+esac
+
+if ! [[ "$PERF_REPEAT" =~ ^[1-9][0-9]*$ ]]; then
+  echo "invalid --perf-repeat: $PERF_REPEAT (expected positive integer)" >&2
+  exit 2
+fi
+
 case "$RESTORE_SETUP" in
   full|benchmark) ;;
   *)
@@ -289,10 +320,15 @@ case "$MODE" in
 esac
 
 need cargo
-need heaptrack
-need heaptrack_print
 need perl
 need git
+if [[ "$PROFILER" == "heaptrack" || "$PROFILER" == "both" ]]; then
+  need heaptrack
+  need heaptrack_print
+fi
+if [[ "$PROFILER" == "perf" || "$PROFILER" == "both" ]]; then
+  need perf
+fi
 if (( NO_DROP_CACHES == 0 )); then
   need sudo
 fi
@@ -306,11 +342,14 @@ HEAPTRACK_DATA="$RUN_DIR/heaptrack.vger.$STAMP.%p.gz"
 ANALYSIS_TXT="$RUN_DIR/heaptrack.analysis.txt"
 STACKS_TXT="$RUN_DIR/heaptrack.stacks.txt"
 FLAMEGRAPH_SVG="$RUN_DIR/heaptrack.flamegraph.svg"
+PERF_STAT_TXT="$RUN_DIR/perf.stat.txt"
+PERF_STDOUT_TXT="$RUN_DIR/perf.stdout.txt"
+PERF_LOG="$RUN_DIR/perf.log"
 PROFILE_LOG="$RUN_DIR/profile.log"
 SETUP_LOG="$RUN_DIR/setup.log"
 DROP_CACHES_LOG="$RUN_DIR/drop-caches.log"
 META_TXT="$RUN_DIR/meta.txt"
-DATA_FILE=""
+HEAPTRACK_FILE=""
 AUTO_RESTORE_DEST=0
 CLEANUP_DIRS=()
 
@@ -379,9 +418,9 @@ run_full_backup() {
   "$VGER_BIN" --config "$CONFIG_PATH" backup -R "$REPO_LABEL" -l "$label" "$src" 2>&1 | tee -a "$SETUP_LOG"
 }
 
-resolve_data_file() {
-  DATA_FILE="$(ls -1t "$RUN_DIR"/heaptrack.vger."$STAMP".*.gz.zst "$RUN_DIR"/heaptrack.vger."$STAMP".*.gz 2>/dev/null | head -n 1 || true)"
-  [[ -n "$DATA_FILE" ]] || {
+resolve_heaptrack_data_file() {
+  HEAPTRACK_FILE="$(ls -1t "$RUN_DIR"/heaptrack.vger."$STAMP".*.gz.zst "$RUN_DIR"/heaptrack.vger."$STAMP".*.gz 2>/dev/null | head -n 1 || true)"
+  [[ -n "$HEAPTRACK_FILE" ]] || {
     echo "could not find heaptrack output in: $RUN_DIR" >&2
     exit 2
   }
@@ -398,6 +437,19 @@ write_meta() {
     echo "source=$SOURCE_PATH"
     echo "out_dir=$RUN_DIR"
     echo "cost_type=$COST_TYPE"
+    echo "profiler=$PROFILER"
+    echo "perf_repeat=$PERF_REPEAT"
+    echo "perf_events=$PERF_EVENTS"
+    if [[ "$PROFILER" == "heaptrack" || "$PROFILER" == "both" ]]; then
+      echo "heaptrack_enabled=1"
+    else
+      echo "heaptrack_enabled=0"
+    fi
+    if [[ "$PROFILER" == "perf" || "$PROFILER" == "both" ]]; then
+      echo "perf_enabled=1"
+    else
+      echo "perf_enabled=0"
+    fi
     echo "skip_build=$SKIP_BUILD"
     echo "drop_caches=$((1 - NO_DROP_CACHES))"
     if [[ "$MODE" == "backup" || "$MODE" == "compact" ]]; then
@@ -438,26 +490,46 @@ write_meta() {
       printf '%s\n' "${SETUP_STEPS[@]}"
     fi
     echo "EOF"
-    echo "heaptrack_data=$DATA_FILE"
-    echo "analysis_txt=$ANALYSIS_TXT"
-    echo "flamegraph_svg=$FLAMEGRAPH_SVG"
+    if [[ -n "$HEAPTRACK_FILE" ]]; then
+      echo "heaptrack_data=$HEAPTRACK_FILE"
+      echo "analysis_txt=$ANALYSIS_TXT"
+      echo "flamegraph_svg=$FLAMEGRAPH_SVG"
+      echo "profile_log=$PROFILE_LOG"
+    fi
+    if [[ "$PROFILER" == "perf" || "$PROFILER" == "both" ]]; then
+      echo "perf_stat_txt=$PERF_STAT_TXT"
+      echo "perf_stdout_txt=$PERF_STDOUT_TXT"
+      echo "perf_log=$PERF_LOG"
+    fi
     echo "setup_log=$SETUP_LOG"
     echo "drop_caches_log=$DROP_CACHES_LOG"
-    echo "profile_log=$PROFILE_LOG"
   } >"$META_TXT"
 }
 
-run_profile() {
+run_heaptrack_profile() {
   echo "[4/6] Running heaptrack for mode: $MODE"
   set -o pipefail
   heaptrack -o "$HEAPTRACK_DATA" "${PROFILE_CMD[@]}" 2>&1 | tee "$PROFILE_LOG"
   set +o pipefail
 }
 
-render_reports() {
+run_perf_profile() {
+  echo "[4/6] Running perf stat for mode: $MODE"
+  {
+    echo "perf command: perf stat -d -r $PERF_REPEAT ${PERF_EVENTS:+-e $PERF_EVENTS} -- ${PROFILE_CMD[*]}"
+    if [[ -n "$PERF_EVENTS" ]]; then
+      perf stat -d -r "$PERF_REPEAT" -e "$PERF_EVENTS" -- "${PROFILE_CMD[@]}" >"$PERF_STDOUT_TXT" 2>"$PERF_STAT_TXT"
+    else
+      perf stat -d -r "$PERF_REPEAT" -- "${PROFILE_CMD[@]}" >"$PERF_STDOUT_TXT" 2>"$PERF_STAT_TXT"
+    fi
+    echo "perf rc=$?"
+  } | tee "$PERF_LOG"
+}
+
+render_heaptrack_reports() {
   echo "[5/6] Generating text analysis and stacks..."
-  heaptrack_print -f "$DATA_FILE" > "$ANALYSIS_TXT"
-  heaptrack_print -f "$DATA_FILE" --flamegraph-cost-type "$COST_TYPE" -F "$STACKS_TXT" > /dev/null
+  heaptrack_print -f "$HEAPTRACK_FILE" > "$ANALYSIS_TXT"
+  heaptrack_print -f "$HEAPTRACK_FILE" --flamegraph-cost-type "$COST_TYPE" -F "$STACKS_TXT" > /dev/null
 
   FLAMEGRAPH_PL="$(command -v flamegraph.pl || true)"
   if [[ -z "$FLAMEGRAPH_PL" ]]; then
@@ -571,19 +643,42 @@ echo "[3/6] Dropping caches before measured command..."
 add_setup_step "drop_caches before profile"
 maybe_drop_caches
 
-run_profile
-resolve_data_file
-render_reports
+if [[ "$PROFILER" == "heaptrack" ]]; then
+  run_heaptrack_profile
+  resolve_heaptrack_data_file
+  render_heaptrack_reports
+elif [[ "$PROFILER" == "perf" ]]; then
+  run_perf_profile
+else
+  run_heaptrack_profile
+  resolve_heaptrack_data_file
+  render_heaptrack_reports
+  if (( NO_DROP_CACHES == 0 )); then
+    echo "[7/7] Dropping caches before perf run..."
+    add_setup_step "drop_caches before perf profile"
+    maybe_drop_caches
+  fi
+  run_perf_profile
+fi
+
 write_meta
 
 echo
 echo "Run complete. Outputs:"
 echo "  mode:          $MODE"
+echo "  profiler:      $PROFILER"
 echo "  run_dir:       $RUN_DIR"
-echo "  heaptrack_data: $DATA_FILE"
-echo "  analysis_txt:   $ANALYSIS_TXT"
-echo "  flamegraph_svg: $FLAMEGRAPH_SVG"
-echo "  profile_log:    $PROFILE_LOG"
+if [[ -n "$HEAPTRACK_FILE" ]]; then
+  echo "  heaptrack_data: $HEAPTRACK_FILE"
+  echo "  analysis_txt:   $ANALYSIS_TXT"
+  echo "  flamegraph_svg: $FLAMEGRAPH_SVG"
+  echo "  profile_log:    $PROFILE_LOG"
+fi
+if [[ "$PROFILER" == "perf" || "$PROFILER" == "both" ]]; then
+  echo "  perf_stat_txt:  $PERF_STAT_TXT"
+  echo "  perf_stdout:    $PERF_STDOUT_TXT"
+  echo "  perf_log:       $PERF_LOG"
+fi
 echo "  setup_log:      $SETUP_LOG"
 echo "  drop_caches_log:$DROP_CACHES_LOG"
 echo "  meta_txt:       $META_TXT"
