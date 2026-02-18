@@ -6,8 +6,9 @@ use std::path::Path;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
 
+use std::collections::BTreeMap;
+
 use ignore::WalkBuilder;
-use pariter::IteratorExt;
 use tracing::{debug, warn};
 
 use crate::chunker;
@@ -157,9 +158,7 @@ impl Drop for BudgetGuard<'_> {
 
 /// Acquire budget for a walk entry before dispatching to a worker.
 ///
-/// Called by the dedicated walk thread to reserve memory in walk order,
-/// preventing deadlock between pariter's ordered output and worker-side
-/// budget acquisition.
+/// Called by the dedicated walk thread to reserve memory in walk order.
 fn reserve_budget(entry: &WalkEntry, budget: &ByteBudget) -> Result<usize> {
     match entry {
         WalkEntry::File { file_size, .. } => {
@@ -228,7 +227,7 @@ fn read_item_xattrs(_path: &Path) -> Option<HashMap<String, Vec<u8>>> {
 }
 
 // ---------------------------------------------------------------------------
-// Parallel file processing pipeline (pariter-based)
+// Parallel file processing pipeline (crossbeam-channel)
 // ---------------------------------------------------------------------------
 
 /// Walk entry produced by the sequential walk phase.
@@ -1198,9 +1197,29 @@ fn consume_processed_entry(
     Ok(())
 }
 
-/// Run the parallel file processing pipeline using pariter.
+/// Result from the pipeline's internal channels.
 ///
-/// Walk → parallel_map (read+chunk+hash+compress+encrypt) → readahead → sequential consumer.
+/// Workers send `Ok` or `WorkerErr` (both carrying a sequence index for
+/// reordering). The walk thread sends `WalkErr` for fail-fast errors that
+/// need no reordering.
+enum PipelineResult {
+    /// Successful processing — `(seq_idx, entry)`.
+    Ok(usize, Box<ProcessedEntry>),
+    /// Worker error — `(seq_idx, error)`. Delivered in order via the
+    /// reorder buffer so earlier successes are committed first.
+    WorkerErr(usize, VgerError),
+    /// Walk-thread error — no index, triggers immediate fail-fast.
+    WalkErr(VgerError),
+}
+
+/// Run the parallel file processing pipeline using crossbeam-channel.
+///
+/// Walk → bounded work channel → N worker threads → bounded result channel
+/// → reorder buffer → sequential consumer.
+///
+/// Unlike the previous pariter-based design, no single thread both feeds
+/// work and delivers results, eliminating the deadlock where budget
+/// acquisition in the walk thread could block result delivery.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn run_parallel_pipeline(
     repo: &mut Repository,
@@ -1228,23 +1247,30 @@ pub(crate) fn run_parallel_pipeline(
     dedup_filter: Option<&xorf::Xor8>,
 ) -> Result<()> {
     debug_assert!(segment_size > 0, "segment_size must be non-zero");
+    debug_assert!(num_workers > 0, "num_workers must be non-zero");
     let chunk_id_key = *crypto.chunk_id_key();
     let chunker_config = repo.config.chunker_params.clone();
     let budget = ByteBudget::new(pipeline_buffer_bytes);
 
-    std::thread::scope(|s| {
-        // Bounded channel: walk thread sends pre-budgeted (entry, bytes) pairs.
-        // Capacity provides scheduling slack only — ByteBudget enforces the
-        // byte-level memory cap. Sizing by worker count keeps the channel small
-        // regardless of segment_size or mixed file sizes.
-        let chan_cap = num_workers * 2;
-        let (walk_tx, walk_rx) =
-            std::sync::mpsc::sync_channel::<Result<(WalkEntry, usize)>>(chan_cap);
+    // Channel capacities.
+    // work_cap: scheduling slack between walk and workers.
+    // result_cap: reorder buffer headroom between workers and consumer.
+    // ByteBudget enforces the byte-level memory cap on top of these.
+    let work_cap = num_workers * 2;
+    let result_cap = num_workers + readahead_depth;
 
-        // Reference so `move` closures capture `&ByteBudget`.
+    std::thread::scope(|s| {
+        // Stage A → B: walk thread sends pre-budgeted entries to workers.
+        let (work_tx, work_rx) = crossbeam_channel::bounded::<(usize, WalkEntry, usize)>(work_cap);
+
+        // Stage B → C: workers send ordered results to consumer.
+        let (result_tx, result_rx) = crossbeam_channel::bounded::<PipelineResult>(result_cap);
+
+        // Reference so `move` closures capture `&ByteBudget`, not move it.
         let budget_ref = &budget;
 
-        // --- Walk thread: iterate + acquire budget in walk order -------------
+        // --- Stage A: Walk thread — iterate + acquire budget in walk order ---
+        let walk_result_tx = result_tx.clone();
         s.spawn(move || {
             let walk_iter = build_walk_iter(
                 source_paths,
@@ -1258,93 +1284,130 @@ pub(crate) fn run_parallel_pipeline(
                 segment_size,
             );
 
+            let mut seq_idx: usize = 0;
             for entry_result in walk_iter {
                 match entry_result {
                     Ok(entry) => {
                         let acquired = match reserve_budget(&entry, budget_ref) {
                             Ok(n) => n,
-                            Err(e) => {
-                                // Budget poisoned — propagate and stop.
-                                let _ = walk_tx.send(Err(e));
+                            Err(_) => {
+                                // Budget poisoned — stop walking. Consumer
+                                // already knows about the error.
                                 return;
                             }
                         };
-                        if walk_tx.send(Ok((entry, acquired))).is_err() {
-                            // Consumer dropped the receiver (error path) —
-                            // release the bytes we just acquired and stop.
+                        if work_tx.send((seq_idx, entry, acquired)).is_err() {
+                            // Workers/consumer gone — release budget and stop.
                             budget_ref.release(acquired);
                             return;
                         }
+                        seq_idx += 1;
                     }
                     Err(e) => {
-                        // Consumer aborts on first error — stop walking.
-                        let _ = walk_tx.send(Err(e));
+                        // Walk error: fail-fast, no index needed.
+                        let _ = walk_result_tx.send(PipelineResult::WalkErr(e));
                         return;
                     }
                 }
             }
-            // walk_tx drops here → channel closes → walk_rx iterator ends.
+            // work_tx drops here → workers drain remaining items and exit.
         });
 
-        // --- Parallel workers: receive pre-budgeted entries from channel -----
-        let mut parallel_iter = walk_rx
-            .into_iter()
-            .parallel_map_scoped_custom(
-                s,
-                |o| o.threads(num_workers).buffer_size(num_workers),
-                move |item: Result<(WalkEntry, usize)>| -> Result<ProcessedEntry> {
-                    let (entry, pre_acquired) = item?;
-                    process_file_worker(
+        // --- Stage B: N worker threads ---
+        // Drop originals after spawning so channels close when workers exit.
+        for _ in 0..num_workers {
+            let rx = work_rx.clone();
+            let tx = result_tx.clone();
+            let chunker_cfg = chunker_config.clone();
+            s.spawn(move || {
+                for (idx, entry, pre_acquired) in rx {
+                    let result = process_file_worker(
                         entry,
                         &chunk_id_key,
                         &**crypto,
                         compression,
-                        &chunker_config,
+                        &chunker_cfg,
                         read_limiter,
                         budget_ref,
                         pre_acquired,
                         dedup_filter,
-                    )
-                },
-            )
-            .readahead_scoped_custom(s, |o| o.buffer_size(readahead_depth));
+                    );
+                    let msg = match result {
+                        Ok(processed) => PipelineResult::Ok(idx, Box::new(processed)),
+                        Err(e) => PipelineResult::WorkerErr(idx, e),
+                    };
+                    if tx.send(msg).is_err() {
+                        return; // Consumer gone.
+                    }
+                }
+            });
+        }
+        // Drop originals — channels now close only when all clones drop.
+        drop(work_rx);
+        drop(result_tx);
 
-        // --- Consumer: sequential commit of ordered results -------------------
-        // Explicit `while let` keeps `parallel_iter` owned so we can drop it
-        // on the error path.  Shutdown sequence on error:
-        //   1. budget.poison()  — wakes walk thread blocked in acquire()
-        //   2. break            — stops consuming
-        //   3. drop(parallel_iter) — drops walk_rx, joins workers; walk thread
-        //      exits from either acquire() wakeup or send() disconnect
+        // --- Stage C: Consumer with reorder buffer ---
+        let mut next_expected: usize = 0;
+        let mut pending: BTreeMap<usize, std::result::Result<ProcessedEntry, VgerError>> =
+            BTreeMap::new();
         let mut consume_err: Option<VgerError> = None;
         let mut large_file_accum: Option<LargeFileAccum> = None;
-        #[allow(clippy::while_let_on_iterator)]
-        while let Some(result) = parallel_iter.next() {
-            match result.and_then(|entry| {
-                consume_processed_entry(
-                    entry,
-                    repo,
-                    stats,
-                    new_file_cache,
-                    items_config,
-                    item_stream,
-                    item_ptrs,
-                    compression,
-                    progress,
-                    &budget,
-                    dedup_filter,
-                    &mut large_file_accum,
-                )
-            }) {
-                Ok(()) => {}
-                Err(e) => {
+
+        for msg in &result_rx {
+            match msg {
+                PipelineResult::Ok(idx, entry) => {
+                    pending.insert(idx, Ok(*entry));
+                }
+                PipelineResult::WorkerErr(idx, e) => {
+                    pending.insert(idx, Err(e));
+                }
+                PipelineResult::WalkErr(e) => {
+                    // Walk errors bypass the reorder buffer — some earlier
+                    // entries already dispatched to workers may not be
+                    // consumed. This is fine: the backup will fail, no
+                    // snapshot is saved, and in-memory pack buffers are
+                    // dropped on return.
                     budget.poison();
                     consume_err = Some(e);
                     break;
                 }
             }
+
+            // Drain consecutive entries starting from next_expected.
+            while let Some(result) = pending.remove(&next_expected) {
+                next_expected += 1;
+                match result.and_then(|entry| {
+                    consume_processed_entry(
+                        entry,
+                        repo,
+                        stats,
+                        new_file_cache,
+                        items_config,
+                        item_stream,
+                        item_ptrs,
+                        compression,
+                        progress,
+                        &budget,
+                        dedup_filter,
+                        &mut large_file_accum,
+                    )
+                }) {
+                    Ok(()) => {}
+                    Err(e) => {
+                        budget.poison();
+                        consume_err = Some(e);
+                        break;
+                    }
+                }
+            }
+
+            if consume_err.is_some() {
+                break;
+            }
         }
-        drop(parallel_iter);
+
+        // Drop receiver to unblock any workers stuck on result_tx.send().
+        drop(result_rx);
 
         // Verify no in-progress segmented file was left incomplete.
         if consume_err.is_none() {
@@ -1854,5 +1917,284 @@ mod tests {
 
         assert_eq!(it.size_hint(), (0, Some(0)));
         assert!(it.next().is_none());
+    }
+
+    // -----------------------------------------------------------------------
+    // Crossbeam-channel pipeline tests
+    // -----------------------------------------------------------------------
+
+    /// Regression test: pipeline must not deadlock when large items exhaust
+    /// the budget and workers complete out of order.
+    ///
+    /// Simulates the scenario that caused the original pariter deadlock:
+    /// small budget + large items + workers finishing in reverse order.
+    #[test]
+    fn pipeline_no_deadlock_with_small_budget_and_large_items() {
+        use std::sync::atomic::AtomicBool;
+        use std::time::Duration;
+
+        let completed = Arc::new(AtomicBool::new(false));
+        let completed2 = Arc::clone(&completed);
+
+        // Run the pipeline logic in a scoped thread so we can timeout.
+        let handle = std::thread::spawn(move || {
+            let budget = ByteBudget::new(200); // Small budget
+            let num_workers = 4;
+            let work_cap = num_workers * 2;
+            let result_cap = num_workers + 4;
+
+            let (work_tx, work_rx) = crossbeam_channel::bounded::<(usize, usize, usize)>(work_cap);
+            let (result_tx, result_rx) = crossbeam_channel::bounded::<(usize, usize)>(result_cap);
+
+            std::thread::scope(|s| {
+                let budget_ref = &budget;
+
+                // Walk thread: send 10 items, each requiring 100 bytes of budget.
+                s.spawn(move || {
+                    for i in 0..10 {
+                        let acquired = budget_ref.acquire(100).unwrap();
+                        work_tx.send((i, acquired, i)).unwrap();
+                    }
+                });
+
+                // Workers: process items with forced out-of-order completion.
+                for _ in 0..num_workers {
+                    let rx = work_rx.clone();
+                    let tx = result_tx.clone();
+                    s.spawn(move || {
+                        for (idx, acquired, delay_key) in &rx {
+                            // Reverse-order sleep: item 0 sleeps longest.
+                            if delay_key < 3 {
+                                std::thread::sleep(Duration::from_millis(
+                                    (3 - delay_key) as u64 * 5,
+                                ));
+                            }
+                            let _ = tx.send((idx, acquired));
+                        }
+                    });
+                }
+                drop(work_rx);
+                drop(result_tx);
+
+                // Consumer: reorder and release budget.
+                let mut next_expected = 0usize;
+                let mut pending: BTreeMap<usize, usize> = BTreeMap::new();
+
+                for (idx, acquired) in &result_rx {
+                    pending.insert(idx, acquired);
+                    while let Some(acq) = pending.remove(&next_expected) {
+                        budget_ref.release(acq);
+                        next_expected += 1;
+                    }
+                }
+
+                assert_eq!(next_expected, 10, "all items should be consumed");
+            });
+
+            completed2.store(true, Ordering::SeqCst);
+        });
+
+        // If this times out, we have a deadlock.
+        let timeout = Duration::from_secs(10);
+        let start = std::time::Instant::now();
+        while start.elapsed() < timeout {
+            if completed.load(Ordering::SeqCst) {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(50));
+        }
+
+        assert!(
+            completed.load(Ordering::SeqCst),
+            "pipeline deadlocked — did not complete within {timeout:?}"
+        );
+        handle.join().unwrap();
+    }
+
+    /// Walk errors must propagate cleanly even when workers are active.
+    #[test]
+    fn pipeline_walk_error_propagates_cleanly() {
+        let budget = ByteBudget::new(1000);
+        let num_workers = 2;
+        let work_cap = num_workers * 2;
+        let result_cap = num_workers + 4;
+
+        std::thread::scope(|s| {
+            let (work_tx, work_rx) = crossbeam_channel::bounded::<(usize, u8)>(work_cap);
+            let (result_tx, result_rx) = crossbeam_channel::bounded::<PipelineResult>(result_cap);
+
+            let walk_result_tx = result_tx.clone();
+            let budget_ref = &budget;
+
+            // Walk thread: send 3 successes, then a walk error.
+            s.spawn(move || {
+                for i in 0..3 {
+                    let _ = work_tx.send((i, 0));
+                }
+                let _ = walk_result_tx.send(PipelineResult::WalkErr(VgerError::Other(
+                    "walk failed".into(),
+                )));
+                // Drop work_tx to let workers drain.
+            });
+
+            // Workers: passthrough.
+            for _ in 0..num_workers {
+                let rx = work_rx.clone();
+                let tx = result_tx.clone();
+                s.spawn(move || {
+                    for (idx, _) in rx {
+                        let entry = ProcessedEntry::NonFile {
+                            item: test_item(&format!("item_{idx}")),
+                        };
+                        let _ = tx.send(PipelineResult::Ok(idx, Box::new(entry)));
+                    }
+                });
+            }
+            drop(work_rx);
+            drop(result_tx);
+
+            // Consumer: collect results.
+            let mut consumed = Vec::new();
+            let mut walk_err = None;
+            let mut next_expected = 0usize;
+            let mut pending: BTreeMap<usize, ProcessedEntry> = BTreeMap::new();
+
+            for msg in &result_rx {
+                match msg {
+                    PipelineResult::Ok(idx, entry) => {
+                        pending.insert(idx, *entry);
+                    }
+                    PipelineResult::WorkerErr(_, _) => unreachable!(),
+                    PipelineResult::WalkErr(e) => {
+                        budget_ref.poison();
+                        walk_err = Some(e);
+                        break;
+                    }
+                }
+
+                while let Some(entry) = pending.remove(&next_expected) {
+                    if let ProcessedEntry::NonFile { item } = &entry {
+                        consumed.push(item.path.clone());
+                    }
+                    next_expected += 1;
+                }
+            }
+
+            // Items before the walk error should have been consumed.
+            // (Some or all of items 0-2, depending on channel timing.)
+            assert!(walk_err.is_some(), "walk error should have been received");
+            assert!(
+                walk_err.unwrap().to_string().contains("walk failed"),
+                "should contain the walk error message"
+            );
+        });
+    }
+
+    /// Budget bytes must not leak when the consumer hits an error mid-stream.
+    #[test]
+    fn pipeline_consumer_error_releases_budget() {
+        let cap = 1000usize;
+        let budget = Arc::new(ByteBudget::new(cap));
+
+        std::thread::scope(|s| {
+            let budget_ref = &*budget;
+            let num_workers = 2;
+            let (work_tx, work_rx) = crossbeam_channel::bounded::<(usize, usize)>(num_workers * 2);
+            let (result_tx, result_rx) =
+                crossbeam_channel::bounded::<(usize, usize)>(num_workers + 4);
+
+            // Walk thread: send 5 items, each 100 bytes.
+            s.spawn(move || {
+                for i in 0..5 {
+                    let acquired = budget_ref.acquire(100).unwrap();
+                    if work_tx.send((i, acquired)).is_err() {
+                        budget_ref.release(acquired);
+                        return;
+                    }
+                }
+            });
+
+            // Workers: passthrough.
+            for _ in 0..num_workers {
+                let rx = work_rx.clone();
+                let tx = result_tx.clone();
+                s.spawn(move || {
+                    for (idx, acquired) in rx {
+                        if tx.send((idx, acquired)).is_err() {
+                            budget_ref.release(acquired);
+                            return;
+                        }
+                    }
+                });
+            }
+            drop(work_rx);
+            drop(result_tx);
+
+            // Consumer: fail on item 2, release budget for consumed items.
+            let mut next_expected = 0usize;
+            let mut pending: BTreeMap<usize, usize> = BTreeMap::new();
+
+            for (idx, acquired) in &result_rx {
+                pending.insert(idx, acquired);
+                while let Some(acq) = pending.remove(&next_expected) {
+                    if next_expected == 2 {
+                        // Simulate consumer error: poison + release this item.
+                        budget_ref.poison();
+                        budget_ref.release(acq);
+                        next_expected += 1;
+                        break;
+                    }
+                    budget_ref.release(acq);
+                    next_expected += 1;
+                }
+                if budget_ref.state.lock().unwrap().poisoned {
+                    // Release any remaining pending items.
+                    for acq in pending.values() {
+                        budget_ref.release(*acq);
+                    }
+                    pending.clear();
+                    break;
+                }
+            }
+
+            // Drain remaining results and release their budget.
+            for (_, acquired) in &result_rx {
+                budget_ref.release(acquired);
+            }
+        });
+
+        // After all threads exit, budget should be fully available.
+        let st = budget.state.lock().unwrap();
+        assert_eq!(
+            st.available, st.capacity,
+            "budget leaked: available={}, capacity={}",
+            st.available, st.capacity
+        );
+    }
+
+    /// BudgetGuard must release bytes when a worker panics.
+    #[test]
+    fn pipeline_budget_guard_releases_on_worker_panic() {
+        let budget = ByteBudget::new(200);
+
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            std::thread::scope(|s| {
+                let budget_ref = &budget;
+                s.spawn(move || {
+                    let _guard = BudgetGuard::from_pre_acquired(budget_ref, 100);
+                    panic!("simulated worker panic");
+                });
+            });
+        }));
+
+        assert!(result.is_err(), "scope should propagate panic");
+
+        // Guard should have released 100 bytes on drop during unwind.
+        let acquired = budget.acquire(200).unwrap();
+        assert_eq!(
+            acquired, 200,
+            "full budget should be available after panic cleanup"
+        );
+        budget.release(200);
     }
 }

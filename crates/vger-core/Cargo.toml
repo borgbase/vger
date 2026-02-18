@@ -62,7 +62,7 @@ thiserror = "2"
 # Logging
 tracing.workspace = true
 rayon = "1"
-pariter = "0.6"
+crossbeam-channel.workspace = true
 
 # Async runtime
 tokio = { workspace = true, features = ["rt-multi-thread"] }
