@@ -627,6 +627,18 @@ impl Repository {
         }
     }
 
+    /// Return the pre-built xor filter from whichever dedup mode is active.
+    /// Returns `None` for truly empty repos (first backup) or when no dedup mode is active.
+    pub fn dedup_filter(&self) -> Option<std::sync::Arc<xorf::Xor8>> {
+        if let Some(ref tiered) = self.tiered_dedup {
+            return tiered.xor_filter();
+        }
+        if let Some(ref dedup) = self.dedup_index {
+            return dedup.xor_filter();
+        }
+        None
+    }
+
     /// Check if a chunk exists in the index (works in normal, dedup, and tiered modes).
     pub fn chunk_exists(&self, id: &ChunkId) -> bool {
         if let Some(ref tiered) = self.tiered_dedup {

@@ -1,9 +1,11 @@
 pub mod dedup_cache;
 
 use std::collections::{HashMap, HashSet};
+use std::sync::Arc;
 
 use serde::{Deserialize, Serialize};
 use tracing::debug;
+use xorf::Xor8;
 
 use crate::crypto::chunk_id::ChunkId;
 use crate::crypto::pack_id::PackId;
@@ -138,6 +140,7 @@ impl ChunkIndex {
 #[derive(Debug)]
 pub struct DedupIndex {
     entries: HashMap<ChunkId, u32>,
+    xor_filter: Option<Arc<Xor8>>,
 }
 
 impl DedupIndex {
@@ -148,11 +151,21 @@ impl DedupIndex {
             .iter()
             .map(|(id, entry)| (*id, entry.stored_size))
             .collect();
+        let keys: Vec<u64> = entries.keys().map(dedup_cache::chunk_id_to_u64).collect();
+        let xor_filter = dedup_cache::build_xor_filter_from_keys(&keys).map(Arc::new);
         debug!(
             "built dedup index with {} entries from full index",
             entries.len()
         );
-        Self { entries }
+        Self {
+            entries,
+            xor_filter,
+        }
+    }
+
+    /// Return a shared reference to the pre-built xor filter (if any).
+    pub(crate) fn xor_filter(&self) -> Option<Arc<Xor8>> {
+        self.xor_filter.clone()
     }
 
     /// Check if a chunk exists (dedup hit).

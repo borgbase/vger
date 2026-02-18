@@ -1,6 +1,7 @@
 use std::collections::HashMap;
 use std::io::{BufWriter, Write};
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use memmap2::Mmap;
 use tracing::{debug, warn};
@@ -255,36 +256,33 @@ impl MmapDedupCache {
 
 /// Extract the first 8 bytes of a ChunkId as a little-endian u64.
 /// BLAKE2b output has excellent entropy, so this is a high-quality hash key.
-fn chunk_id_to_u64(id: &ChunkId) -> u64 {
+pub(crate) fn chunk_id_to_u64(id: &ChunkId) -> u64 {
     u64::from_le_bytes(id.0[..8].try_into().unwrap())
+}
+
+/// Build an Xor8 filter from pre-computed u64 keys.
+/// Returns `None` if the slice is empty or construction fails.
+pub(crate) fn build_xor_filter_from_keys(keys: &[u64]) -> Option<Xor8> {
+    if keys.is_empty() {
+        return None;
+    }
+    match std::panic::catch_unwind(|| Xor8::from(keys)) {
+        Ok(filter) => {
+            debug!(entries = keys.len(), "built xor filter");
+            Some(filter)
+        }
+        Err(_) => {
+            warn!("xor filter construction panicked");
+            None
+        }
+    }
 }
 
 /// Build an Xor8 filter from the mmap'd cache entries.
 /// Returns `None` if the cache is empty or construction fails.
 fn build_xor_filter(cache: &MmapDedupCache) -> Option<Xor8> {
-    if cache.entry_count() == 0 {
-        return None;
-    }
-
     let keys: Vec<u64> = cache.iter_u64_keys().collect();
-
-    // Xor8::from may loop internally on seed collisions. For BLAKE2b-derived
-    // keys the entropy is excellent, so this should succeed quickly.
-    // Wrap in catch_unwind as a safety net.
-    match std::panic::catch_unwind(|| Xor8::from(keys.as_slice())) {
-        Ok(filter) => {
-            debug!(
-                entries = cache.entry_count(),
-                fingerprint_bytes = filter.fingerprints.len(),
-                "built xor filter"
-            );
-            Some(filter)
-        }
-        Err(_) => {
-            warn!("xor filter construction panicked; falling back to mmap-only lookups");
-            None
-        }
-    }
+    build_xor_filter_from_keys(&keys)
 }
 
 // ---------------------------------------------------------------------------
@@ -298,7 +296,7 @@ fn build_xor_filter(cache: &MmapDedupCache) -> Option<Xor8> {
 /// 2. Xor filter — probabilistic negative filter (~0.4% FPR, ~1.2 bytes/entry)
 /// 3. mmap binary search — confirms filter hit, returns stored_size (OS-paged, near-zero RSS)
 pub struct TieredDedupIndex {
-    xor_filter: Option<Xor8>,
+    xor_filter: Option<Arc<Xor8>>,
     mmap_cache: MmapDedupCache,
     session_new: HashMap<ChunkId, u32>,
 }
@@ -306,12 +304,17 @@ pub struct TieredDedupIndex {
 impl TieredDedupIndex {
     /// Create a new tiered index from an opened mmap cache.
     pub fn new(mmap_cache: MmapDedupCache) -> Self {
-        let xor_filter = build_xor_filter(&mmap_cache);
+        let xor_filter = build_xor_filter(&mmap_cache).map(Arc::new);
         Self {
             xor_filter,
             mmap_cache,
             session_new: HashMap::new(),
         }
+    }
+
+    /// Return a shared reference to the pre-built xor filter (if any).
+    pub(crate) fn xor_filter(&self) -> Option<Arc<Xor8>> {
+        self.xor_filter.clone()
     }
 
     /// Check if a chunk exists in any tier.

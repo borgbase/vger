@@ -234,12 +234,12 @@ enum WalkEntry {
 
 /// Result from a parallel worker.
 pub(crate) enum ProcessedEntry {
-    /// Small/medium file: fully materialized, all chunks pre-processed in the worker.
+    /// Small/medium file: chunks classified by xor filter (hash-only or fully transformed).
     ProcessedFile {
         item: Item,
         abs_path: String,
         metadata: fs::MetadataSummary,
-        chunks: Vec<super::backup::PreparedChunk>,
+        chunks: Vec<super::backup::WorkerChunk>,
         /// Bytes acquired from ByteBudget; consumer must release after committing.
         acquired_bytes: usize,
     },
@@ -268,9 +268,37 @@ pub(crate) enum ProcessedEntry {
     },
 }
 
+/// Classify a single chunk: hash → xor filter check → transform or hash-only.
+fn classify_chunk(
+    chunk_id: ChunkId,
+    data: Vec<u8>,
+    dedup_filter: Option<&xorf::Xor8>,
+    compression: Compression,
+    crypto: &dyn CryptoEngine,
+) -> Result<super::backup::WorkerChunk> {
+    if let Some(filter) = dedup_filter {
+        use xorf::Filter;
+        let key = crate::index::dedup_cache::chunk_id_to_u64(&chunk_id);
+        if filter.contains(&key) {
+            return Ok(super::backup::WorkerChunk::Hashed(
+                super::backup::HashedChunk { chunk_id, data },
+            ));
+        }
+    }
+    let compressed = crate::compress::compress(compression, &data)?;
+    let packed = pack_object(ObjectType::ChunkData, &compressed, crypto)?;
+    Ok(super::backup::WorkerChunk::Prepared(
+        super::backup::PreparedChunk {
+            chunk_id,
+            uncompressed_size: data.len() as u32,
+            packed,
+        },
+    ))
+}
+
 /// Process a single walk entry in a parallel worker thread.
 ///
-/// For small/medium files: read, chunk, hash, compress, encrypt — all in the worker.
+/// For small/medium files: read, chunk, hash → classify via xor filter.
 /// For large files (>= threshold): return immediately so consumer streams them inline.
 #[allow(clippy::too_many_arguments)]
 fn process_file_worker(
@@ -282,6 +310,7 @@ fn process_file_worker(
     read_limiter: Option<&ByteRateLimiter>,
     large_file_threshold: u64,
     budget: &ByteBudget,
+    dedup_filter: Option<&xorf::Xor8>,
 ) -> Result<ProcessedEntry> {
     match entry {
         WalkEntry::File {
@@ -316,47 +345,40 @@ fn process_file_worker(
                 }
 
                 let chunk_id = ChunkId::compute(chunk_id_key, &data);
-                let compressed = crate::compress::compress(compression, &data)?;
-                let packed = pack_object(ObjectType::ChunkData, &compressed, crypto)?;
-
-                let prepared = super::backup::PreparedChunk {
-                    chunk_id,
-                    uncompressed_size: data.len() as u32,
-                    packed,
-                };
+                let worker_chunk =
+                    classify_chunk(chunk_id, data, dedup_filter, compression, crypto)?;
 
                 let acquired_bytes = guard.defuse();
                 return Ok(ProcessedEntry::ProcessedFile {
                     item,
                     abs_path,
                     metadata,
-                    chunks: vec![prepared],
+                    chunks: vec![worker_chunk],
                     acquired_bytes,
                 });
             }
 
-            // Medium file: read, chunk via FastCDC, then hash+compress+encrypt each chunk.
+            // Medium file: read, chunk via FastCDC, then hash → classify each chunk.
             let file = File::open(Path::new(&abs_path)).map_err(VgerError::Io)?;
             let chunk_stream = chunker::chunk_stream(
                 limits::LimitedReader::new(file, read_limiter),
                 chunker_config,
             );
 
-            let mut prepared_chunks = Vec::new();
+            let mut worker_chunks = Vec::new();
             for chunk_result in chunk_stream {
                 let chunk = chunk_result.map_err(|e| {
                     VgerError::Other(format!("chunking failed for {abs_path}: {e}"))
                 })?;
 
                 let chunk_id = ChunkId::compute(chunk_id_key, &chunk.data);
-                let compressed = crate::compress::compress(compression, &chunk.data)?;
-                let packed = pack_object(ObjectType::ChunkData, &compressed, crypto)?;
-
-                prepared_chunks.push(super::backup::PreparedChunk {
+                worker_chunks.push(classify_chunk(
                     chunk_id,
-                    uncompressed_size: chunk.data.len() as u32,
-                    packed,
-                });
+                    chunk.data,
+                    dedup_filter,
+                    compression,
+                    crypto,
+                )?);
             }
 
             let acquired_bytes = guard.defuse();
@@ -364,7 +386,7 @@ fn process_file_worker(
                 item,
                 abs_path,
                 metadata,
-                chunks: prepared_chunks,
+                chunks: worker_chunks,
                 acquired_bytes,
             })
         }
@@ -670,6 +692,7 @@ fn consume_processed_entry(
     max_pending_transform_bytes: usize,
     max_pending_file_actions: usize,
     budget: &ByteBudget,
+    dedup_filter: Option<&xorf::Xor8>,
 ) -> Result<()> {
     use super::backup::{append_item_to_stream, emit_stats_progress, flush_regular_file_batch};
 
@@ -687,32 +710,60 @@ fn consume_processed_entry(
                 });
             }
 
-            for prepared in chunks {
-                let size = prepared.uncompressed_size;
-
-                if let Some(csize) = repo.bump_ref_if_exists(&prepared.chunk_id) {
-                    stats.original_size += size as u64;
-                    stats.compressed_size += csize as u64;
-                    item.chunks.push(ChunkRef {
-                        id: prepared.chunk_id,
-                        size,
-                        csize,
-                    });
-                } else {
-                    let csize = repo.commit_prepacked_chunk(
-                        prepared.chunk_id,
-                        prepared.packed,
-                        prepared.uncompressed_size,
-                        PackType::Data,
-                    )?;
-                    stats.original_size += size as u64;
-                    stats.compressed_size += csize as u64;
-                    stats.deduplicated_size += csize as u64;
-                    item.chunks.push(ChunkRef {
-                        id: prepared.chunk_id,
-                        size,
-                        csize,
-                    });
+            for worker_chunk in chunks {
+                match worker_chunk {
+                    super::backup::WorkerChunk::Prepared(prepared) => {
+                        let size = prepared.uncompressed_size;
+                        if let Some(csize) = repo.bump_ref_if_exists(&prepared.chunk_id) {
+                            stats.original_size += size as u64;
+                            stats.compressed_size += csize as u64;
+                            item.chunks.push(ChunkRef {
+                                id: prepared.chunk_id,
+                                size,
+                                csize,
+                            });
+                        } else {
+                            let csize = repo.commit_prepacked_chunk(
+                                prepared.chunk_id,
+                                prepared.packed,
+                                prepared.uncompressed_size,
+                                PackType::Data,
+                            )?;
+                            stats.original_size += size as u64;
+                            stats.compressed_size += csize as u64;
+                            stats.deduplicated_size += csize as u64;
+                            item.chunks.push(ChunkRef {
+                                id: prepared.chunk_id,
+                                size,
+                                csize,
+                            });
+                        }
+                    }
+                    super::backup::WorkerChunk::Hashed(hashed) => {
+                        let size = hashed.data.len() as u32;
+                        if let Some(csize) = repo.bump_ref_if_exists(&hashed.chunk_id) {
+                            // True dedup hit — skip transform.
+                            stats.original_size += size as u64;
+                            stats.compressed_size += csize as u64;
+                            item.chunks.push(ChunkRef {
+                                id: hashed.chunk_id,
+                                size,
+                                csize,
+                            });
+                        } else {
+                            // False positive — compress+encrypt sequentially.
+                            let (stored_id, csize, _is_new) =
+                                repo.store_chunk(&hashed.data, compression, PackType::Data)?;
+                            stats.original_size += size as u64;
+                            stats.compressed_size += csize as u64;
+                            stats.deduplicated_size += csize as u64;
+                            item.chunks.push(ChunkRef {
+                                id: stored_id,
+                                size,
+                                csize,
+                            });
+                        }
+                    }
                 }
             }
 
@@ -784,6 +835,7 @@ fn consume_processed_entry(
                         &mut raw_chunks,
                         &mut item,
                         stats,
+                        dedup_filter,
                     )?;
                     pending_bytes = 0;
                 }
@@ -797,6 +849,7 @@ fn consume_processed_entry(
                 &mut raw_chunks,
                 &mut item,
                 stats,
+                dedup_filter,
             )?;
 
             stats.nfiles += 1;
@@ -929,6 +982,7 @@ pub(crate) fn run_parallel_pipeline(
     max_pending_transform_bytes: usize,
     max_pending_file_actions: usize,
     pipeline_buffer_bytes: usize,
+    dedup_filter: Option<&xorf::Xor8>,
 ) -> Result<()> {
     let chunk_id_key = *crypto.chunk_id_key();
     let chunker_config = repo.config.chunker_params.clone();
@@ -966,6 +1020,7 @@ pub(crate) fn run_parallel_pipeline(
                         read_limiter,
                         large_file_threshold,
                         budget_ref,
+                        dedup_filter,
                     )
                 },
             )
@@ -996,6 +1051,7 @@ pub(crate) fn run_parallel_pipeline(
                     max_pending_transform_bytes,
                     max_pending_file_actions,
                     &budget,
+                    dedup_filter,
                 )
             }) {
                 Ok(()) => {}

@@ -146,6 +146,27 @@ pub(crate) struct PreparedChunk {
     pub(crate) packed: Vec<u8>,
 }
 
+/// A chunk that was only hashed (xor filter said "probably exists").
+pub(crate) struct HashedChunk {
+    pub(crate) chunk_id: ChunkId,
+    pub(crate) data: Vec<u8>,
+}
+
+/// Result of worker-side classify: either fully transformed or hash-only.
+pub(crate) enum WorkerChunk {
+    /// Filter miss or no filter: already compressed+encrypted.
+    Prepared(PreparedChunk),
+    /// Filter hit: only hashed, raw data retained for false-positive fallback.
+    Hashed(HashedChunk),
+}
+
+/// Batch result from the parallel phase: either fully transformed or hash-only.
+enum BatchResult {
+    Transformed(PreparedChunk),
+    HashOnly { chunk_id: ChunkId, size: u32 },
+}
+
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn flush_regular_file_batch(
     repo: &mut Repository,
     compression: Compression,
@@ -154,23 +175,37 @@ pub(crate) fn flush_regular_file_batch(
     raw_chunks: &mut Vec<Vec<u8>>,
     item: &mut Item,
     stats: &mut SnapshotStats,
+    dedup_filter: Option<&xorf::Xor8>,
 ) -> Result<()> {
     if raw_chunks.is_empty() {
         return Ok(());
     }
 
-    // Parallel phase: compute ChunkId + compress + encrypt for every chunk.
-    let prepared_results: Vec<Result<PreparedChunk>> = {
+    // Parallel phase: hash → filter check → transform or hash-only.
+    let batch_results: Vec<Result<BatchResult>> = {
         let crypto = repo.crypto.as_ref();
-        let do_work = |data: &Vec<u8>| -> Result<PreparedChunk> {
+        let do_work = |data: &Vec<u8>| -> Result<BatchResult> {
             let chunk_id = ChunkId::compute(chunk_id_key, data);
+
+            // If the xor filter says "probably exists", skip compress+encrypt.
+            if let Some(filter) = dedup_filter {
+                use xorf::Filter;
+                let key = crate::index::dedup_cache::chunk_id_to_u64(&chunk_id);
+                if filter.contains(&key) {
+                    return Ok(BatchResult::HashOnly {
+                        chunk_id,
+                        size: data.len() as u32,
+                    });
+                }
+            }
+
             let compressed = crate::compress::compress(compression, data)?;
             let packed = pack_object(ObjectType::ChunkData, &compressed, crypto)?;
-            Ok(PreparedChunk {
+            Ok(BatchResult::Transformed(PreparedChunk {
                 chunk_id,
                 uncompressed_size: data.len() as u32,
                 packed,
-            })
+            }))
         };
         if let Some(pool) = transform_pool {
             pool.install(|| raw_chunks.par_iter().map(do_work).collect())
@@ -179,40 +214,66 @@ pub(crate) fn flush_regular_file_batch(
         }
     };
 
-    raw_chunks.clear();
-
     // Sequential phase: dedup check and commit.
-    for result in prepared_results {
-        let prepared = result?;
-        let size = prepared.uncompressed_size;
-
-        if let Some(csize) = repo.bump_ref_if_exists(&prepared.chunk_id) {
-            // Duplicate — already in index (or committed earlier in this batch).
-            stats.original_size += size as u64;
-            stats.compressed_size += csize as u64;
-            item.chunks.push(ChunkRef {
-                id: prepared.chunk_id,
-                size,
-                csize,
-            });
-        } else {
-            // New chunk — commit packed data into pack writer.
-            let csize = repo.commit_prepacked_chunk(
-                prepared.chunk_id,
-                prepared.packed,
-                prepared.uncompressed_size,
-                PackType::Data,
-            )?;
-            stats.original_size += size as u64;
-            stats.compressed_size += csize as u64;
-            stats.deduplicated_size += csize as u64;
-            item.chunks.push(ChunkRef {
-                id: prepared.chunk_id,
-                size,
-                csize,
-            });
+    // Don't clear raw_chunks yet — we may need raw data for false positives.
+    for (i, result) in batch_results.into_iter().enumerate() {
+        match result? {
+            BatchResult::Transformed(prepared) => {
+                let size = prepared.uncompressed_size;
+                if let Some(csize) = repo.bump_ref_if_exists(&prepared.chunk_id) {
+                    stats.original_size += size as u64;
+                    stats.compressed_size += csize as u64;
+                    item.chunks.push(ChunkRef {
+                        id: prepared.chunk_id,
+                        size,
+                        csize,
+                    });
+                } else {
+                    let csize = repo.commit_prepacked_chunk(
+                        prepared.chunk_id,
+                        prepared.packed,
+                        prepared.uncompressed_size,
+                        PackType::Data,
+                    )?;
+                    stats.original_size += size as u64;
+                    stats.compressed_size += csize as u64;
+                    stats.deduplicated_size += csize as u64;
+                    item.chunks.push(ChunkRef {
+                        id: prepared.chunk_id,
+                        size,
+                        csize,
+                    });
+                }
+            }
+            BatchResult::HashOnly { chunk_id, size } => {
+                if let Some(csize) = repo.bump_ref_if_exists(&chunk_id) {
+                    // True dedup hit — skip transform.
+                    stats.original_size += size as u64;
+                    stats.compressed_size += csize as u64;
+                    item.chunks.push(ChunkRef {
+                        id: chunk_id,
+                        size,
+                        csize,
+                    });
+                } else {
+                    // False positive — compress+encrypt sequentially.
+                    let data = &raw_chunks[i];
+                    let (stored_id, csize, _is_new) =
+                        repo.store_chunk(data, compression, PackType::Data)?;
+                    stats.original_size += size as u64;
+                    stats.compressed_size += csize as u64;
+                    stats.deduplicated_size += csize as u64;
+                    item.chunks.push(ChunkRef {
+                        id: stored_id,
+                        size,
+                        csize,
+                    });
+                }
+            }
         }
     }
+
+    raw_chunks.clear();
 
     Ok(())
 }
@@ -276,7 +337,7 @@ impl CrossFileBatch {
 }
 
 /// Flush all accumulated small-file chunks in a single rayon dispatch, then
-/// distribute PreparedChunks back to their owning files in walk order.
+/// distribute results back to their owning files in walk order.
 #[allow(clippy::too_many_arguments)]
 fn flush_cross_file_batch(
     batch: &mut CrossFileBatch,
@@ -290,23 +351,36 @@ fn flush_cross_file_batch(
     stats: &mut SnapshotStats,
     new_file_cache: &mut FileCache,
     progress: &mut Option<&mut dyn FnMut(BackupProgressEvent)>,
+    dedup_filter: Option<&xorf::Xor8>,
 ) -> Result<()> {
     if batch.is_empty() {
         return Ok(());
     }
 
-    // Parallel phase: compute ChunkId + compress + encrypt for ALL accumulated chunks at once.
-    let prepared_results: Vec<Result<PreparedChunk>> = {
+    // Parallel phase: hash → filter check → transform or hash-only.
+    let batch_results: Vec<Result<BatchResult>> = {
         let crypto = repo.crypto.as_ref();
-        let do_work = |data: &Vec<u8>| -> Result<PreparedChunk> {
+        let do_work = |data: &Vec<u8>| -> Result<BatchResult> {
             let chunk_id = ChunkId::compute(chunk_id_key, data);
+
+            if let Some(filter) = dedup_filter {
+                use xorf::Filter;
+                let key = crate::index::dedup_cache::chunk_id_to_u64(&chunk_id);
+                if filter.contains(&key) {
+                    return Ok(BatchResult::HashOnly {
+                        chunk_id,
+                        size: data.len() as u32,
+                    });
+                }
+            }
+
             let compressed = crate::compress::compress(compression, data)?;
             let packed = pack_object(ObjectType::ChunkData, &compressed, crypto)?;
-            Ok(PreparedChunk {
+            Ok(BatchResult::Transformed(PreparedChunk {
                 chunk_id,
                 uncompressed_size: data.len() as u32,
                 packed,
-            })
+            }))
         };
         if let Some(pool) = transform_pool {
             pool.install(|| batch.raw_chunks.par_iter().map(do_work).collect())
@@ -315,8 +389,8 @@ fn flush_cross_file_batch(
         }
     };
 
-    // Convert to Option<PreparedChunk> so we can .take() without cloning packed data.
-    let mut prepared: Vec<Option<PreparedChunk>> = prepared_results
+    // Convert to Option so we can .take() without cloning packed data.
+    let mut results: Vec<Option<BatchResult>> = batch_results
         .into_iter()
         .map(|r| r.map(Some))
         .collect::<Result<Vec<_>>>()?;
@@ -331,37 +405,63 @@ fn flush_cross_file_batch(
 
         let mut item = file.item;
 
-        for slot in prepared
+        let chunk_slice = file.chunk_start..(file.chunk_start + file.chunk_count);
+        for (slot, raw) in results[chunk_slice.clone()]
             .iter_mut()
-            .skip(file.chunk_start)
-            .take(file.chunk_count)
+            .zip(&batch.raw_chunks[chunk_slice])
         {
-            let p = slot.take().expect("chunk already consumed");
-            let size = p.uncompressed_size;
-
-            if let Some(csize) = repo.bump_ref_if_exists(&p.chunk_id) {
-                stats.original_size += size as u64;
-                stats.compressed_size += csize as u64;
-                item.chunks.push(ChunkRef {
-                    id: p.chunk_id,
-                    size,
-                    csize,
-                });
-            } else {
-                let csize = repo.commit_prepacked_chunk(
-                    p.chunk_id,
-                    p.packed,
-                    p.uncompressed_size,
-                    PackType::Data,
-                )?;
-                stats.original_size += size as u64;
-                stats.compressed_size += csize as u64;
-                stats.deduplicated_size += csize as u64;
-                item.chunks.push(ChunkRef {
-                    id: p.chunk_id,
-                    size,
-                    csize,
-                });
+            let br = slot.take().expect("chunk already consumed");
+            match br {
+                BatchResult::Transformed(p) => {
+                    let size = p.uncompressed_size;
+                    if let Some(csize) = repo.bump_ref_if_exists(&p.chunk_id) {
+                        stats.original_size += size as u64;
+                        stats.compressed_size += csize as u64;
+                        item.chunks.push(ChunkRef {
+                            id: p.chunk_id,
+                            size,
+                            csize,
+                        });
+                    } else {
+                        let csize = repo.commit_prepacked_chunk(
+                            p.chunk_id,
+                            p.packed,
+                            p.uncompressed_size,
+                            PackType::Data,
+                        )?;
+                        stats.original_size += size as u64;
+                        stats.compressed_size += csize as u64;
+                        stats.deduplicated_size += csize as u64;
+                        item.chunks.push(ChunkRef {
+                            id: p.chunk_id,
+                            size,
+                            csize,
+                        });
+                    }
+                }
+                BatchResult::HashOnly { chunk_id, size } => {
+                    if let Some(csize) = repo.bump_ref_if_exists(&chunk_id) {
+                        stats.original_size += size as u64;
+                        stats.compressed_size += csize as u64;
+                        item.chunks.push(ChunkRef {
+                            id: chunk_id,
+                            size,
+                            csize,
+                        });
+                    } else {
+                        // False positive — compress+encrypt sequentially.
+                        let (stored_id, csize, _is_new) =
+                            repo.store_chunk(raw, compression, PackType::Data)?;
+                        stats.original_size += size as u64;
+                        stats.compressed_size += csize as u64;
+                        stats.deduplicated_size += csize as u64;
+                        item.chunks.push(ChunkRef {
+                            id: stored_id,
+                            size,
+                            csize,
+                        });
+                    }
+                }
             }
         }
 
@@ -645,6 +745,7 @@ fn process_regular_file_item(
     progress: &mut Option<&mut dyn FnMut(BackupProgressEvent)>,
     max_pending_transform_bytes: usize,
     max_pending_file_actions: usize,
+    dedup_filter: Option<&xorf::Xor8>,
 ) -> Result<()> {
     if let Some(cb) = progress.as_deref_mut() {
         cb(BackupProgressEvent::FileStarted {
@@ -729,6 +830,7 @@ fn process_regular_file_item(
                 &mut raw_chunks,
                 item,
                 stats,
+                dedup_filter,
             )?;
             pending_bytes = 0;
         }
@@ -742,6 +844,7 @@ fn process_regular_file_item(
         &mut raw_chunks,
         item,
         stats,
+        dedup_filter,
     )?;
 
     stats.nfiles += 1;
@@ -782,6 +885,7 @@ fn process_source_path(
     read_limiter: Option<&ByteRateLimiter>,
     transform_pool: Option<&rayon::ThreadPool>,
     progress: &mut Option<&mut dyn FnMut(BackupProgressEvent)>,
+    dedup_filter: Option<&xorf::Xor8>,
 ) -> Result<()> {
     emit_progress(
         progress,
@@ -989,6 +1093,7 @@ fn process_source_path(
                         stats,
                         new_file_cache,
                         progress,
+                        dedup_filter,
                     )?;
 
                     if let Some(cb) = progress.as_deref_mut() {
@@ -1040,6 +1145,7 @@ fn process_source_path(
                             stats,
                             new_file_cache,
                             progress,
+                            dedup_filter,
                         )?;
                     }
                     continue; // item will be appended by flush
@@ -1058,6 +1164,7 @@ fn process_source_path(
                     stats,
                     new_file_cache,
                     progress,
+                    dedup_filter,
                 )?;
 
                 process_regular_file_item(
@@ -1073,6 +1180,7 @@ fn process_source_path(
                     progress,
                     max_pending_transform_bytes,
                     max_pending_file_actions,
+                    dedup_filter,
                 )?;
             }
         } else {
@@ -1089,6 +1197,7 @@ fn process_source_path(
                 stats,
                 new_file_cache,
                 progress,
+                dedup_filter,
             )?;
         }
 
@@ -1116,6 +1225,7 @@ fn process_source_path(
         stats,
         new_file_cache,
         progress,
+        dedup_filter,
     )?;
 
     emit_progress(
@@ -1239,6 +1349,7 @@ pub fn run_with_progress(
         // DedupIndex HashMap on first backup or after index changes.
         // The full index is reloaded and updated at save_state time.
         repo.enable_tiered_dedup_mode();
+        let dedup_filter = repo.dedup_filter();
 
         let time_start = Utc::now();
         let mut stats = SnapshotStats::default();
@@ -1299,6 +1410,7 @@ pub fn run_with_progress(
                 max_pending_transform_bytes,
                 max_pending_file_actions,
                 pipeline_buffer_bytes,
+                dedup_filter.as_deref(),
             )?;
         } else {
             // Sequential fallback (pipeline_depth == 0 or no source paths).
@@ -1323,6 +1435,7 @@ pub fn run_with_progress(
                     read_limiter.as_deref(),
                     transform_pool.as_ref(),
                     &mut progress,
+                    dedup_filter.as_deref(),
                 )?;
             }
         }
