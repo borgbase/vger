@@ -8,23 +8,23 @@ V'Ger is a fast, encrypted, deduplicated backup tool written in Rust. It's cente
 
 ## Features
 
-- **Deduplication** via FastCDC content-defined chunking with a memory-optimized engine (tiered dedup index + mmap-backed pack assembly)
-- **Compression** with LZ4 (default), Zstandard, or none
-- **Encryption** with AES-256-GCM or ChaCha20-Poly1305 (auto-selected) and Argon2id key derivation
 - **Storage backends** — local filesystem, S3-compatible storage, SFTP
-- **YAML-based configuration** with multiple repositories, hooks, and command dumps
-- **REST server** with append-only enforcement, quotas, and server-side compaction
+- **Encryption** with AES-256-GCM or ChaCha20-Poly1305 (auto-selected) and Argon2id key derivation
+- **YAML-based configuration** with multiple repositories, hooks, and command dumps for monitoring and database backups
+- **Deduplication** via FastCDC content-defined chunking with a memory-optimized engine (tiered dedup index + mmap-backed pack assembly)
+- **Compression** with LZ4 or Zstandard
 - **Built-in WebDAV and desktop GUI** to browse and restore snapshots
+- **REST server** with append-only enforcement, quotas, and server-side compaction
 - **Rate limiting** for CPU, disk I/O, and network bandwidth
 
 
 ## Benchmarks
 
-V'Ger achieves the best speed and throughput of any comparable backup tool, while using fewer CPU cycles.
+V'Ger leads in both speed and CPU efficiency, while maintaining competitive memory usage.
 
 ![Backup Tool Benchmark](images/benchmark.summary.png)
 
-<small>See our [e2e testing skill](https://github.com/borgbase/vger/blob/main/.claude/commands/e2e-tests/benchmarks.md) for full benchmark details. All benchmarks were run on the same Intel i7-6700 CPU @ 3.40GHz machine with 2x Samsung PM981 NVMe. Compression and resulting repository sizes comparable. Sample corpus is a mix of files including the Linux kernel, a Wikipedia dump and an Ubuntu ISO.</small>
+<small>All benchmarks were run on the same idle Intel i7-6700 CPU @ 3.40GHz machine with 2x Samsung PM981 NVMe drives. Compression settings were chosen to keep resulting repository sizes comparable. The sample corpus is a mix of small and large files with varying compressibility. See our [benchmark script](https://github.com/borgbase/vger/tree/main/scripts) for full details.</small>
 
 
 ## Comparison
