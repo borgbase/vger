@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Reproducible benchmark harness for vger vs restic vs rustic vs borg on a local repo.
+# Reproducible benchmark harness for vger vs restic vs rustic vs borg vs kopia on a local repo.
 #
 # Per measured run:
 # - drop caches and reset repo for the tool
@@ -47,12 +47,13 @@ case "$TOOL" in
     need restic
     need rustic
     need borg
+    need kopia
     ;;
-  vger|restic|rustic|borg)
+  vger|restic|rustic|borg|kopia)
     need "$TOOL"
     ;;
   *)
-    echo "TOOL must be one of: vger, restic, rustic, borg (or empty for all); got: $TOOL" >&2
+    echo "TOOL must be one of: vger, restic, rustic, borg, kopia (or empty for all); got: $TOOL" >&2
     exit 2
     ;;
 esac
@@ -72,13 +73,14 @@ LOGS="$OUT_ROOT/logs"
 mkdir -p "$LOGS"
 
 cleanup_restore_dirs() {
-  # Always remove restore artifacts from runtime after run completion/failure.
+  # Always remove restore artifacts and transient cache from runtime after run completion/failure.
   # Keep benchmark metrics/logs/reports intact.
-  local dirs=("${RESTORE_VGER:-}" "${RESTORE_RESTIC:-}" "${RESTORE_RUSTIC:-}" "${RESTORE_BORG:-}")
+  local dirs=("${RESTORE_VGER:-}" "${RESTORE_RESTIC:-}" "${RESTORE_RUSTIC:-}" "${RESTORE_BORG:-}" "${RESTORE_KOPIA:-}")
   local d=""
   for d in "${dirs[@]}"; do
     [[ -n "$d" ]] && rm -rf "$d"
   done
+  [[ -n "${KOPIA_CACHE:-}" ]] && rm -rf "$KOPIA_CACHE"
 }
 trap cleanup_restore_dirs EXIT
 
@@ -89,9 +91,12 @@ VGER_REPO="$REPO_ROOT/bench-vger"
 RESTIC_REPO="$REPO_ROOT/bench-restic"
 RUSTIC_REPO="$REPO_ROOT/bench-rustic"
 BORG_REPO="$REPO_ROOT/bench-borg"
+KOPIA_REPO="$REPO_ROOT/bench-kopia"
+KOPIA_CONFIG="$OUT_ROOT/kopia.repository.config"
+KOPIA_CACHE="$OUT_ROOT/kopia-cache"
 
-sudo -n mkdir -p "$VGER_REPO" "$RESTIC_REPO" "$RUSTIC_REPO" "$BORG_REPO"
-sudo -n chown -R "$USER:$USER" "$VGER_REPO" "$RESTIC_REPO" "$RUSTIC_REPO" "$BORG_REPO"
+sudo -n mkdir -p "$VGER_REPO" "$RESTIC_REPO" "$RUSTIC_REPO" "$BORG_REPO" "$KOPIA_REPO"
+sudo -n chown -R "$USER:$USER" "$VGER_REPO" "$RESTIC_REPO" "$RUSTIC_REPO" "$BORG_REPO" "$KOPIA_REPO"
 
 # vger config (local path repo)
 VGER_CFG="$OUT_ROOT/vger.bench.yaml"
@@ -115,6 +120,7 @@ export RUSTIC_PASSWORD="$PASSPHRASE"
 
 export BORG_REPO="$BORG_REPO"
 export BORG_PASSPHRASE="$PASSPHRASE"
+export KOPIA_PASSWORD="$PASSPHRASE"
 
 DROP_CACHES_CMD="sync; if sudo -n true 2>/dev/null; then echo 3 | sudo -n tee /proc/sys/vm/drop_caches >/dev/null 2>&1 || true; fi"
 
@@ -122,7 +128,8 @@ RESTORE_VGER="$OUT_ROOT/restore-vger"
 RESTORE_RESTIC="$OUT_ROOT/restore-restic"
 RESTORE_RUSTIC="$OUT_ROOT/restore-rustic"
 RESTORE_BORG="$OUT_ROOT/restore-borg"
-mkdir -p "$RESTORE_VGER" "$RESTORE_RESTIC" "$RESTORE_RUSTIC" "$RESTORE_BORG"
+RESTORE_KOPIA="$OUT_ROOT/restore-kopia"
+mkdir -p "$RESTORE_VGER" "$RESTORE_RESTIC" "$RESTORE_RUSTIC" "$RESTORE_BORG" "$RESTORE_KOPIA"
 
 if [[ -n "$TOOL" ]]; then
   OPS=(
@@ -139,6 +146,8 @@ else
     rustic_restore
     borg_backup
     borg_restore
+    kopia_backup
+    kopia_restore
   )
 fi
 
@@ -187,12 +196,18 @@ reset_repo_for_tool() {
     restic) repo="$RESTIC_REPO" ;;
     rustic) repo="$RUSTIC_REPO" ;;
     borg) repo="$BORG_REPO" ;;
+    kopia) repo="$KOPIA_REPO" ;;
     *) echo "unknown tool: $tool" >&2; return 2 ;;
   esac
 
   sudo -n rm -rf "$repo"
   sudo -n mkdir -p "$repo"
   sudo -n chown -R "$USER:$USER" "$repo"
+  if [[ "$tool" == "kopia" ]]; then
+    rm -f "$KOPIA_CONFIG"
+    rm -rf "$KOPIA_CACHE"
+    mkdir -p "$KOPIA_CACHE"
+  fi
 }
 
 init_repo_for_tool() {
@@ -202,6 +217,10 @@ init_repo_for_tool() {
     restic) restic init ;;
     rustic) rustic init ;;
     borg) borg init --encryption=repokey-blake2 ;;
+    kopia)
+      kopia --config-file "$KOPIA_CONFIG" repository create filesystem --path="$KOPIA_REPO" --cache-directory="$KOPIA_CACHE"
+      kopia --config-file "$KOPIA_CONFIG" policy set --global --compression=zstd
+      ;;
     *) echo "unknown tool: $tool" >&2; return 2 ;;
   esac
 }
@@ -218,6 +237,7 @@ backup_adhoc_for_tool() {
       arch="bench-$(date -u +%Y%m%dT%H%M%S)-$RANDOM"
       borg create --compression zstd,3 --stats "::$arch" "$src"
       ;;
+    kopia) kopia --config-file "$KOPIA_CONFIG" snapshot create "$src" ;;
     *) echo "unknown tool: $tool" >&2; return 2 ;;
   esac
 }
@@ -248,6 +268,12 @@ measured_cmd_for_op() {
       ;;
     borg_restore)
       echo "$DROP_CACHES_CMD; rm -rf '$RESTORE_BORG'/*; ARCH=\$(borg list --short | tail -n1); (cd '$RESTORE_BORG' && borg extract \"::\$ARCH\")"
+      ;;
+    kopia_backup)
+      echo "$DROP_CACHES_CMD; kopia --config-file '$KOPIA_CONFIG' snapshot create '$DATASET_BENCHMARK'"
+      ;;
+    kopia_restore)
+      echo "$DROP_CACHES_CMD; rm -rf '$RESTORE_KOPIA'/*; kopia --config-file '$KOPIA_CONFIG' snapshot restore '$DATASET_BENCHMARK' '$RESTORE_KOPIA' --snapshot-time latest"
       ;;
     *)
       echo "unknown operation: $op" >&2
@@ -303,6 +329,16 @@ prepare_cmds_for_op() {
         echo "seed backup: borg create --compression zstd,3 --stats '::bench-<utc>-<rand>' '$DATASET_SNAPSHOT1'"
       else
         echo "none (uses repo state from preceding timed borg_backup)"
+      fi
+      ;;
+    kopia)
+      if [[ "$phase" == "backup" ]]; then
+        echo "drop caches"
+        echo "reset repo: rm -rf '$KOPIA_REPO' && mkdir -p '$KOPIA_REPO'; rm -f '$KOPIA_CONFIG'; rm -rf '$KOPIA_CACHE' && mkdir -p '$KOPIA_CACHE'"
+        echo "init repo: kopia --config-file '$KOPIA_CONFIG' repository create filesystem --path='$KOPIA_REPO' --cache-directory='$KOPIA_CACHE' && kopia --config-file '$KOPIA_CONFIG' policy set --global --compression=zstd"
+        echo "seed backup: kopia --config-file '$KOPIA_CONFIG' snapshot create '$DATASET_SNAPSHOT1'"
+      else
+        echo "none (uses repo state from preceding timed kopia_backup)"
       fi
       ;;
     *)
@@ -485,7 +521,7 @@ done
 
 # Repo size stats
 # Repos reflect the final state from the last run per tool.
-du -sh "$VGER_REPO" "$RESTIC_REPO" "$RUSTIC_REPO" "$BORG_REPO" >"$OUT_ROOT/repo-sizes.txt"
+du -sh "$VGER_REPO" "$RESTIC_REPO" "$RUSTIC_REPO" "$BORG_REPO" "$KOPIA_REPO" >"$OUT_ROOT/repo-sizes.txt"
 
 # Tool-specific repo stats (helps explain performance/space deltas).
 {
@@ -517,6 +553,17 @@ du -sh "$VGER_REPO" "$RESTIC_REPO" "$RUSTIC_REPO" "$BORG_REPO" >"$OUT_ROOT/repo-
   borg list || true
 } >"$OUT_ROOT/borg.stats.txt" 2>&1
 
+{
+  echo "== kopia repository status =="
+  kopia --config-file "$KOPIA_CONFIG" repository status || true
+  echo
+  echo "== kopia snapshots =="
+  kopia --config-file "$KOPIA_CONFIG" snapshot list || true
+  echo
+  echo "== kopia content stats =="
+  kopia --config-file "$KOPIA_CONFIG" content stats || true
+} >"$OUT_ROOT/kopia.stats.txt" 2>&1
+
 cat >"$OUT_ROOT/README.txt" <<EOF2
 Benchmark run: $STAMP
 Dataset root: $DATASET_DIR
@@ -536,7 +583,7 @@ Workflow per run:
 Outputs:
 - commands.txt
 - repo-sizes.txt
-- vger.info.txt / restic.stats.txt / rustic.stats.txt / borg.stats.txt
+- vger.info.txt / restic.stats.txt / rustic.stats.txt / borg.stats.txt / kopia.stats.txt
 - profile.<op>/runs/run-*.timev.txt (+ stdout/rc/prep logs)
 - reports/summary.tsv / reports/summary.md / reports/summary.json
 - reports/benchmark.summary.png

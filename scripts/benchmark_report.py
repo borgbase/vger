@@ -24,9 +24,11 @@ OPS: List[str] = [
     "rustic_restore",
     "borg_backup",
     "borg_restore",
+    "kopia_backup",
+    "kopia_restore",
 ]
 
-TOOLS: List[str] = ["vger", "restic", "rustic", "borg"]
+TOOLS: List[str] = ["vger", "restic", "rustic", "borg", "kopia"]
 
 TIMEV_FIELDS = {
     "elapsed": "Elapsed (wall clock) time (h:mm:ss or m:ss)",
@@ -71,6 +73,7 @@ def parse_repo_sizes(path: pathlib.Path) -> Dict[str, str]:
         "bench-restic": "restic",
         "bench-rustic": "rustic",
         "bench-borg": "borg",
+        "bench-kopia": "kopia",
     }
     for line in path.read_text(errors="replace").splitlines():
         parts = line.split()
@@ -656,7 +659,7 @@ def generate_chart_with_deps(
                 cmd.extend(["--selected-tool", selected_tool])
         return subprocess.call(cmd)
 
-    tools_display = ["V'Ger", "Restic", "Rustic", "Borg"]
+    tools_display = ["V'Ger", "Restic", "Rustic", "Borg", "Kopia"]
     duration = _chart_values(records, "duration_s")
     cpu_seconds = _chart_values(records, "cpu_s")
     user_seconds = _chart_values(records, "user_s")
@@ -834,15 +837,17 @@ def generate_chart_with_deps(
                 if not np.isfinite(v):
                     continue
                 if v > lower_cap:
+                    label_y = max(v, upper_min) + (upper_max - upper_min) * 0.03
                     ax_top.text(
                         x[i] + x_off,
-                        v + (upper_max - upper_min) * 0.03,
+                        label_y,
                         f"{v:.0f}",
                         ha="center",
                         va="bottom",
                         fontsize=7.5,
                         color="#ff6666",
                         fontweight="bold",
+                        clip_on=False,
                     )
                 else:
                     ax_bot.text(
@@ -920,7 +925,7 @@ def generate_chart_with_deps(
                 v = float(values[i])
                 if not np.isfinite(v):
                     continue
-                label = f"{v / 1000.0:.1f}k"
+                label = f"{int(round(v / 1000.0))}k"
                 if v > lower_cap:
                     ax_top.text(
                         x[i] + x_off,
@@ -954,7 +959,7 @@ def generate_chart_with_deps(
         ax_top.set_title("I/O Wait Events  (↓ lower is better)", fontsize=10, color="#cfd8dc", pad=10)
 
         for ax in (ax_top, ax_bot):
-            ax.yaxis.set_major_formatter(FuncFormatter(lambda y, _pos: f"{y / 1000.0:.0f}k"))
+            ax.yaxis.set_major_formatter(FuncFormatter(lambda y, _pos: f"{int(round(y / 1000.0))}k"))
             ax.set_axisbelow(True)
             ax.grid(axis="y", color="#2e3d44", linewidth=0.5)
             ax.spines["top"].set_visible(False)
@@ -982,7 +987,7 @@ def generate_chart_with_deps(
     else:
         dataset_label = "dataset"
 
-    fig = plt.figure(figsize=(11, 8.5))
+    fig = plt.figure(figsize=(12.5, 8.5))
     fig.suptitle(
         f"Backup Tool Benchmark  ·  {dataset_label}",
         fontsize=16,
