@@ -10,7 +10,6 @@ pub mod init;
 pub mod list;
 #[cfg(feature = "mount")]
 pub mod mount;
-pub(crate) mod pipeline;
 pub mod prune;
 pub(crate) mod snapshot_ops;
 pub mod util;

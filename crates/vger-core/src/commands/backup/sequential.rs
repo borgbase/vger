@@ -1,164 +1,27 @@
-use std::collections::HashMap;
 use std::fs::File;
 use std::path::Path;
 
 use chrono::Utc;
-use ignore::{gitignore::Gitignore, WalkBuilder};
-use rand::RngCore;
 use rayon::prelude::*;
 use tracing::{debug, info, warn};
 
-use super::util::with_repo_lock;
 use crate::chunker;
 use crate::compress::Compression;
-use crate::config::{ChunkerConfig, CommandDump, VgerConfig};
+use crate::config::{ChunkerConfig, CommandDump};
 use crate::crypto::chunk_id::ChunkId;
 use crate::error::{Result, VgerError};
 use crate::limits::{self, ByteRateLimiter};
 use crate::platform::{fs, shell};
 use crate::repo::file_cache::FileCache;
 use crate::repo::format::{pack_object, ObjectType};
-use crate::repo::manifest::SnapshotEntry;
 use crate::repo::pack::PackType;
 use crate::repo::Repository;
 use crate::snapshot::item::{ChunkRef, Item, ItemType};
-use crate::snapshot::{SnapshotMeta, SnapshotStats};
-use crate::storage;
+use crate::snapshot::SnapshotStats;
 
-/// Items chunker config — finer granularity for the item metadata stream.
-fn items_chunker_config() -> ChunkerConfig {
-    ChunkerConfig {
-        min_size: 32 * 1024,  // 32 KiB
-        avg_size: 128 * 1024, // 128 KiB
-        max_size: 512 * 1024, // 512 KiB
-    }
-}
-
-pub(crate) fn flush_item_stream_chunk(
-    repo: &mut Repository,
-    item_stream: &mut Vec<u8>,
-    item_ptrs: &mut Vec<ChunkId>,
-    compression: Compression,
-) -> Result<()> {
-    if item_stream.is_empty() {
-        return Ok(());
-    }
-    let chunk_data = std::mem::take(item_stream);
-    let (chunk_id, _csize, _is_new) = repo.store_chunk(&chunk_data, compression, PackType::Tree)?;
-    item_ptrs.push(chunk_id);
-    Ok(())
-}
-
-pub(crate) fn append_item_to_stream(
-    repo: &mut Repository,
-    item_stream: &mut Vec<u8>,
-    item_ptrs: &mut Vec<ChunkId>,
-    item: &Item,
-    items_config: &ChunkerConfig,
-    compression: Compression,
-) -> Result<()> {
-    rmp_serde::encode::write(item_stream, item)?;
-    if item_stream.len() >= items_config.avg_size as usize {
-        flush_item_stream_chunk(repo, item_stream, item_ptrs, compression)?;
-    }
-    Ok(())
-}
-
-pub(crate) fn build_explicit_excludes(source: &Path, patterns: &[String]) -> Result<Gitignore> {
-    let mut builder = ignore::gitignore::GitignoreBuilder::new(source);
-    for pat in patterns {
-        builder
-            .add_line(None, pat)
-            .map_err(|e| VgerError::Config(format!("invalid exclude pattern '{pat}': {e}")))?;
-    }
-    builder
-        .build()
-        .map_err(|e| VgerError::Config(format!("exclude matcher build failed: {e}")))
-}
-
-pub(crate) fn should_skip_for_device(
-    one_file_system: bool,
-    source_dev: u64,
-    entry_dev: u64,
-) -> bool {
-    one_file_system && source_dev != entry_dev
-}
-
-#[cfg(unix)]
-fn read_item_xattrs(path: &Path) -> Option<HashMap<String, Vec<u8>>> {
-    let names = match xattr::list(path) {
-        Ok(names) => names,
-        Err(e) => {
-            warn!(
-                path = %path.display(),
-                error = %e,
-                "failed to list extended attributes"
-            );
-            return None;
-        }
-    };
-
-    let mut attrs = HashMap::new();
-    for name in names {
-        let key = match name.to_str() {
-            Some(name) => name.to_string(),
-            None => {
-                warn!(
-                    path = %path.display(),
-                    attr = ?name,
-                    "skipping extended attribute with non-UTF8 name"
-                );
-                continue;
-            }
-        };
-
-        match xattr::get(path, &name) {
-            Ok(Some(value)) => {
-                attrs.insert(key, value);
-            }
-            Ok(None) => {}
-            Err(e) => {
-                warn!(
-                    path = %path.display(),
-                    attr = %key,
-                    error = %e,
-                    "failed to read extended attribute"
-                );
-            }
-        }
-    }
-
-    if attrs.is_empty() {
-        None
-    } else {
-        Some(attrs)
-    }
-}
-
-#[cfg(not(unix))]
-fn read_item_xattrs(_path: &Path) -> Option<HashMap<String, Vec<u8>>> {
-    None
-}
-
-pub(crate) struct PreparedChunk {
-    pub(crate) chunk_id: ChunkId,
-    pub(crate) uncompressed_size: u32,
-    pub(crate) packed: Vec<u8>,
-}
-
-/// A chunk that was only hashed (xor filter said "probably exists").
-pub(crate) struct HashedChunk {
-    pub(crate) chunk_id: ChunkId,
-    pub(crate) data: Vec<u8>,
-}
-
-/// Result of worker-side classify: either fully transformed or hash-only.
-pub(crate) enum WorkerChunk {
-    /// Filter miss or no filter: already compressed+encrypted.
-    Prepared(PreparedChunk),
-    /// Filter hit: only hashed, raw data retained for false-positive fallback.
-    Hashed(HashedChunk),
-}
+use super::walk::{build_configured_walker, read_item_xattrs};
+use super::{append_item_to_stream, emit_progress, emit_stats_progress};
+use super::{BackupProgressEvent, PreparedChunk};
 
 /// Batch result from the parallel phase: either fully transformed or hash-only.
 enum BatchResult {
@@ -167,7 +30,7 @@ enum BatchResult {
 }
 
 #[allow(clippy::too_many_arguments)]
-pub(crate) fn flush_regular_file_batch(
+pub(super) fn flush_regular_file_batch(
     repo: &mut Repository,
     compression: Compression,
     chunk_id_key: &[u8; 32],
@@ -303,8 +166,8 @@ struct CrossFileBatch {
 }
 
 /// Flush threshold: 32 MiB or 8192 chunks.
-const CROSS_BATCH_MAX_BYTES: usize = 32 * 1024 * 1024;
-const CROSS_BATCH_MAX_CHUNKS: usize = 8192;
+pub(super) const CROSS_BATCH_MAX_BYTES: usize = 32 * 1024 * 1024;
+pub(super) const CROSS_BATCH_MAX_CHUNKS: usize = 8192;
 
 impl CrossFileBatch {
     fn new() -> Self {
@@ -508,72 +371,7 @@ fn flush_cross_file_batch(
     Ok(())
 }
 
-#[derive(Debug, Clone)]
-pub enum BackupProgressEvent {
-    SourceStarted {
-        source_path: String,
-    },
-    SourceFinished {
-        source_path: String,
-    },
-    FileStarted {
-        path: String,
-    },
-    StatsUpdated {
-        nfiles: u64,
-        original_size: u64,
-        compressed_size: u64,
-        deduplicated_size: u64,
-        current_file: Option<String>,
-    },
-}
-
-pub(crate) fn emit_progress(
-    progress: &mut Option<&mut dyn FnMut(BackupProgressEvent)>,
-    event: BackupProgressEvent,
-) {
-    if let Some(callback) = progress.as_deref_mut() {
-        callback(event);
-    }
-}
-
-pub(crate) fn emit_stats_progress(
-    progress: &mut Option<&mut dyn FnMut(BackupProgressEvent)>,
-    stats: &SnapshotStats,
-    current_file: Option<String>,
-) {
-    emit_progress(
-        progress,
-        BackupProgressEvent::StatsUpdated {
-            nfiles: stats.nfiles,
-            original_size: stats.original_size,
-            compressed_size: stats.compressed_size,
-            deduplicated_size: stats.deduplicated_size,
-            current_file,
-        },
-    );
-}
-
-/// Run `vger backup` for one or more source directories.
-pub struct BackupRequest<'a> {
-    pub snapshot_name: &'a str,
-    pub passphrase: Option<&'a str>,
-    pub source_paths: &'a [String],
-    pub source_label: &'a str,
-    pub exclude_patterns: &'a [String],
-    pub exclude_if_present: &'a [String],
-    pub one_file_system: bool,
-    pub git_ignore: bool,
-    pub xattrs_enabled: bool,
-    pub compression: Compression,
-    pub command_dumps: &'a [CommandDump],
-}
-
-pub fn run(config: &VgerConfig, req: BackupRequest<'_>) -> Result<SnapshotStats> {
-    run_with_progress(config, req, None)
-}
-
-fn build_transform_pool(max_threads: usize) -> Result<Option<rayon::ThreadPool>> {
+pub(super) fn build_transform_pool(max_threads: usize) -> Result<Option<rayon::ThreadPool>> {
     // max_threads == 1 means explicitly sequential (no pool).
     if max_threads == 1 {
         return Ok(None);
@@ -592,10 +390,10 @@ fn build_transform_pool(max_threads: usize) -> Result<Option<rayon::ThreadPool>>
 }
 
 /// Default timeout for command_dump execution (1 hour).
-const COMMAND_DUMP_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(3600);
+pub(super) const COMMAND_DUMP_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(3600);
 
 /// Execute a shell command and capture its stdout.
-fn execute_dump_command(dump: &CommandDump) -> Result<Vec<u8>> {
+pub(super) fn execute_dump_command(dump: &CommandDump) -> Result<Vec<u8>> {
     let output =
         shell::run_script_with_timeout(&dump.command, COMMAND_DUMP_TIMEOUT).map_err(|e| {
             VgerError::Other(format!(
@@ -625,7 +423,7 @@ fn execute_dump_command(dump: &CommandDump) -> Result<Vec<u8>> {
 }
 
 #[allow(clippy::too_many_arguments)]
-fn process_command_dumps(
+pub(super) fn process_command_dumps(
     repo: &mut Repository,
     command_dumps: &[CommandDump],
     compression: Compression,
@@ -739,7 +537,7 @@ fn process_command_dumps(
 }
 
 #[allow(clippy::too_many_arguments)]
-fn process_regular_file_item(
+pub(super) fn process_regular_file_item(
     repo: &mut Repository,
     entry_path: &Path,
     metadata_summary: fs::MetadataSummary,
@@ -776,21 +574,7 @@ fn process_regular_file_item(
     if let Some(cached_refs) = cache_hit {
         // Clone to release the borrow on file_cache so we can mutate repo below.
         let cached_refs = cached_refs.to_vec();
-        // Cache entries were pre-sanitized against the index before backup.
-        let mut file_original: u64 = 0;
-        let mut file_compressed: u64 = 0;
-        for cr in &cached_refs {
-            repo.increment_chunk_ref(&cr.id);
-            file_original += cr.size as u64;
-            file_compressed += cr.csize as u64;
-        }
-
-        stats.nfiles += 1;
-        stats.original_size += file_original;
-        stats.compressed_size += file_compressed;
-        // No deduplicated_size contribution — all chunks already existed.
-
-        item.chunks = cached_refs;
+        super::commit::commit_cache_hit(repo, item, cached_refs, stats);
 
         new_file_cache.insert(
             abs_path,
@@ -872,7 +656,7 @@ fn process_regular_file_item(
 }
 
 #[allow(clippy::too_many_arguments)]
-fn process_source_path(
+pub(super) fn process_source_path(
     repo: &mut Repository,
     source_path: &str,
     multi_path: bool,
@@ -902,15 +686,13 @@ fn process_source_path(
     );
 
     let source = Path::new(source_path);
-    if !source.exists() {
-        return Err(VgerError::Other(format!(
-            "source directory does not exist: {source_path}"
-        )));
-    }
-    let source_dev = std::fs::symlink_metadata(source)
-        .map(|m| fs::summarize_metadata(&m, &m.file_type()).device)
-        .map_err(|e| VgerError::Other(format!("stat error for {}: {e}", source.display())))?;
-    let explicit_excludes = build_explicit_excludes(source, exclude_patterns)?;
+    let walk_builder = build_configured_walker(
+        source,
+        exclude_patterns,
+        exclude_if_present,
+        one_file_system,
+        git_ignore,
+    )?;
 
     // For multi-path mode, derive basename prefix.
     let prefix = if multi_path {
@@ -947,58 +729,6 @@ fn process_source_path(
     } else {
         None
     };
-
-    let mut walk_builder = WalkBuilder::new(source);
-    walk_builder.follow_links(false);
-    walk_builder.hidden(false);
-    walk_builder.ignore(false); // Only honor .gitignore (optional), not .ignore.
-    walk_builder.git_global(false); // Ignore user-global excludes.
-    walk_builder.git_exclude(false); // Ignore .git/info/exclude.
-    walk_builder.parents(git_ignore); // Read parent .gitignore only when enabled.
-    walk_builder.git_ignore(git_ignore);
-    walk_builder.require_git(false);
-    walk_builder.sort_by_file_name(std::ffi::OsStr::cmp);
-
-    let markers = exclude_if_present.to_vec();
-    let source_path_buf = source.to_path_buf();
-    walk_builder.filter_entry(move |entry| {
-        let path = entry.path();
-        if path == source_path_buf {
-            return true;
-        }
-
-        let rel = path.strip_prefix(&source_path_buf).unwrap_or(path);
-        let is_dir = entry.file_type().is_some_and(|ft| ft.is_dir());
-
-        // Apply explicit exclude patterns from config (gitignore syntax).
-        if explicit_excludes
-            .matched_path_or_any_parents(rel, is_dir)
-            .is_ignore()
-        {
-            return false;
-        }
-
-        // Stay on the source filesystem when enabled.
-        if one_file_system {
-            if let Ok(metadata) = std::fs::symlink_metadata(path) {
-                let entry_dev = fs::summarize_metadata(&metadata, &metadata.file_type()).device;
-                if should_skip_for_device(one_file_system, source_dev, entry_dev) {
-                    return false;
-                }
-            }
-        }
-
-        // Skip directories containing any configured marker file.
-        if is_dir && !markers.is_empty() {
-            for marker in &markers {
-                if path.join(marker).exists() {
-                    return false;
-                }
-            }
-        }
-
-        true
-    });
 
     let chunk_id_key = *repo.crypto.chunk_id_key();
     let min_chunk_size = repo.config.chunker_params.min_size as u64;
@@ -1109,18 +839,7 @@ fn process_source_path(
                         });
                     }
 
-                    // Cache entries were pre-sanitized against the index before backup.
-                    let mut file_original: u64 = 0;
-                    let mut file_compressed: u64 = 0;
-                    for cr in &cached_refs {
-                        repo.increment_chunk_ref(&cr.id);
-                        file_original += cr.size as u64;
-                        file_compressed += cr.csize as u64;
-                    }
-                    stats.nfiles += 1;
-                    stats.original_size += file_original;
-                    stats.compressed_size += file_compressed;
-                    item.chunks = cached_refs;
+                    super::commit::commit_cache_hit(repo, &mut item, cached_refs, stats);
 
                     new_file_cache.insert(
                         abs_path,
@@ -1245,273 +964,10 @@ fn process_source_path(
     Ok(())
 }
 
-pub fn run_with_progress(
-    config: &VgerConfig,
-    req: BackupRequest<'_>,
-    mut progress: Option<&mut dyn FnMut(BackupProgressEvent)>,
-) -> Result<SnapshotStats> {
-    let snapshot_name = req.snapshot_name;
-    let passphrase = req.passphrase;
-    let source_paths = req.source_paths;
-    let source_label = req.source_label;
-    let exclude_patterns = req.exclude_patterns;
-    let exclude_if_present = req.exclude_if_present;
-    let one_file_system = req.one_file_system;
-    let git_ignore = req.git_ignore;
-    let xattrs_enabled = if req.xattrs_enabled && !fs::xattrs_supported() {
-        warn!("xattrs requested but not supported on this platform; continuing without xattrs");
-        false
-    } else {
-        req.xattrs_enabled
-    };
-    let compression = req.compression;
-    let command_dumps = req.command_dumps;
-
-    if source_paths.is_empty() && command_dumps.is_empty() {
-        return Err(VgerError::Other(
-            "no source paths or command dumps specified".into(),
-        ));
-    }
-    if one_file_system && !cfg!(unix) {
-        warn!("one_file_system filtering has limited support on this platform");
-    }
-
-    let multi_path = source_paths.len() > 1;
-
-    let _nice_guard = match limits::NiceGuard::apply(config.limits.cpu.nice) {
-        Ok(guard) => guard,
-        Err(e) => {
-            warn!(
-                "could not apply limits.cpu.nice={}: {e}",
-                config.limits.cpu.nice
-            );
-            None
-        }
-    };
-    let read_limiter = ByteRateLimiter::from_mib_per_sec(config.limits.io.read_mib_per_sec);
-    let max_pending_transform_bytes = config.limits.cpu.transform_batch_bytes();
-    let max_pending_file_actions = config.limits.cpu.max_pending_actions();
-    let upload_concurrency = config.limits.cpu.upload_concurrency();
-    let pipeline_depth = config.limits.cpu.effective_pipeline_depth();
-
-    // Resolve effective worker count before building the rayon pool so we
-    // can right-size it in pipeline mode (avoids 2× thread oversubscription).
-    let num_workers = if config.limits.cpu.max_threads == 0 {
-        std::thread::available_parallelism()
-            .map(|n| n.get())
-            .unwrap_or(2)
-    } else {
-        config.limits.cpu.max_threads
-    };
-
-    let transform_pool = if pipeline_depth > 0 {
-        // Pipeline mode doesn't need a rayon pool (no inline large-file processing).
-        None
-    } else {
-        build_transform_pool(config.limits.cpu.max_threads)?
-    };
-
-    let throttle_bps = limits::network_write_throttle_bps(&config.limits);
-    let backend = storage::backend_from_config(&config.repository, throttle_bps)?;
-    let backend =
-        limits::wrap_backup_storage_backend(backend, &config.repository.url, &config.limits)?;
-    let mut repo = Repository::open(
-        backend,
-        passphrase,
-        super::util::cache_dir_from_config(config),
-    )?;
-
-    with_repo_lock(&mut repo, |repo| {
-        // Check snapshot name is unique while holding the lock.
-        if repo.manifest().find_snapshot(snapshot_name).is_some() {
-            return Err(VgerError::SnapshotAlreadyExists(snapshot_name.into()));
-        }
-
-        // Pre-sanitize stale file-cache entries whose chunks were pruned by
-        // delete+compact. Must happen before enable_dedup_mode() which drops
-        // the full chunk index. We temporarily take the cache to avoid
-        // simultaneous mutable + immutable borrows of `repo`.
-        //
-        // INVARIANT: After this step, all remaining cache entries reference only
-        // chunks present in the index. Cache-hit paths rely on this and skip
-        // per-file existence checks for throughput.
-        {
-            let mut cache = repo.take_file_cache();
-            let pruned = cache.prune_stale_entries(&|id| repo.chunk_exists(id));
-            if pruned > 0 {
-                info!(
-                    pruned_entries = pruned,
-                    "removed stale file cache entries referencing pruned chunks"
-                );
-            }
-            repo.restore_file_cache(cache);
-        }
-
-        // Switch to tiered dedup mode to minimize memory during backup.
-        // Uses mmap'd cache + xor filter when available, falls back to
-        // DedupIndex HashMap on first backup or after index changes.
-        // The full index is reloaded and updated at save_state time.
-        repo.enable_tiered_dedup_mode();
-        let dedup_filter = repo.dedup_filter();
-
-        let time_start = Utc::now();
-        let mut stats = SnapshotStats::default();
-        let mut item_stream = Vec::new();
-        let mut item_ptrs: Vec<ChunkId> = Vec::new();
-        let items_config = items_chunker_config();
-        let mut new_file_cache = FileCache::with_capacity(repo.file_cache().len());
-
-        // Execute command dumps before walking filesystem
-        process_command_dumps(
-            repo,
-            command_dumps,
-            compression,
-            &items_config,
-            &mut item_stream,
-            &mut item_ptrs,
-            &mut stats,
-            &mut progress,
-            time_start,
-        )?;
-
-        // Apply configurable upload concurrency.
-        repo.set_max_in_flight_uploads(upload_concurrency);
-
-        let pipeline_buffer_bytes = config.limits.cpu.pipeline_buffer_bytes();
-
-        if pipeline_depth > 0 && !source_paths.is_empty() {
-            // Parallel pipeline: walk → parallel_map (read+chunk+hash+compress+encrypt)
-            // → readahead → sequential consumer (dedup + pack commit).
-            let file_cache_snapshot = repo.take_file_cache();
-            let crypto = std::sync::Arc::clone(&repo.crypto);
-            let configured_segment = config.limits.cpu.segment_size_bytes();
-            let segment_size = configured_segment.min(pipeline_buffer_bytes) as u64;
-            if configured_segment > segment_size as usize {
-                warn!(
-                    configured = configured_segment,
-                    clamped_to = %segment_size,
-                    "segment_size clamped to pipeline_buffer_bytes"
-                );
-            }
-
-            super::pipeline::run_parallel_pipeline(
-                repo,
-                source_paths,
-                multi_path,
-                exclude_patterns,
-                exclude_if_present,
-                one_file_system,
-                git_ignore,
-                xattrs_enabled,
-                &file_cache_snapshot,
-                &crypto,
-                compression,
-                read_limiter.as_deref(),
-                num_workers,
-                pipeline_depth,
-                segment_size,
-                &items_config,
-                &mut item_stream,
-                &mut item_ptrs,
-                &mut stats,
-                &mut new_file_cache,
-                &mut progress,
-                pipeline_buffer_bytes,
-                dedup_filter.as_deref(),
-            )?;
-        } else {
-            // Sequential fallback (pipeline_depth == 0 or no source paths).
-            for source_path in source_paths {
-                process_source_path(
-                    repo,
-                    source_path,
-                    multi_path,
-                    exclude_patterns,
-                    exclude_if_present,
-                    one_file_system,
-                    git_ignore,
-                    xattrs_enabled,
-                    compression,
-                    &items_config,
-                    &mut item_stream,
-                    &mut item_ptrs,
-                    &mut stats,
-                    &mut new_file_cache,
-                    max_pending_transform_bytes,
-                    max_pending_file_actions,
-                    read_limiter.as_deref(),
-                    transform_pool.as_ref(),
-                    &mut progress,
-                    dedup_filter.as_deref(),
-                )?;
-            }
-        }
-        flush_item_stream_chunk(repo, &mut item_stream, &mut item_ptrs, compression)?;
-
-        let time_end = Utc::now();
-
-        // Build snapshot metadata
-        let hostname = crate::platform::hostname();
-        let username = std::env::var("USER").unwrap_or_else(|_| "unknown".into());
-
-        let snapshot_meta = SnapshotMeta {
-            name: snapshot_name.to_string(),
-            hostname,
-            username,
-            time: time_start,
-            time_end,
-            chunker_params: repo.config.chunker_params.clone(),
-            comment: String::new(),
-            item_ptrs,
-            stats: stats.clone(),
-            source_label: source_label.to_string(),
-            source_paths: source_paths.to_vec(),
-            label: String::new(),
-        };
-
-        // Generate snapshot ID and store
-        let mut snapshot_id = vec![0u8; 32];
-        rand::thread_rng().fill_bytes(&mut snapshot_id);
-
-        let meta_bytes = rmp_serde::to_vec(&snapshot_meta)?;
-        let meta_packed = pack_object(ObjectType::SnapshotMeta, &meta_bytes, repo.crypto.as_ref())?;
-        let snapshot_id_hex = hex::encode(&snapshot_id);
-        repo.storage
-            .put(&format!("snapshots/{snapshot_id_hex}"), &meta_packed)?;
-
-        // Update manifest
-        repo.manifest_mut().timestamp = Utc::now();
-        repo.manifest_mut().snapshots.push(SnapshotEntry {
-            name: snapshot_name.to_string(),
-            id: snapshot_id,
-            time: time_start,
-            source_label: source_label.to_string(),
-            label: String::new(),
-            source_paths: source_paths.to_vec(),
-        });
-
-        // Replace file cache with the freshly-built one (drops stale entries).
-        repo.set_file_cache(new_file_cache);
-
-        // Save manifest, index, and file cache
-        repo.save_state()?;
-
-        info!(
-            "Snapshot '{}' created: {} files, {} original, {} compressed, {} deduplicated",
-            snapshot_name,
-            stats.nfiles,
-            stats.original_size,
-            stats.compressed_size,
-            stats.deduplicated_size
-        );
-
-        Ok(stats)
-    })
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::config::CommandDump;
 
     #[cfg(windows)]
     fn shell_echo_hello() -> &'static str {
@@ -1541,13 +997,6 @@ mod tests {
     #[cfg(not(windows))]
     fn shell_success_no_output() -> &'static str {
         "true"
-    }
-
-    #[test]
-    fn one_file_system_device_filter_logic() {
-        assert!(should_skip_for_device(true, 42, 43));
-        assert!(!should_skip_for_device(true, 42, 42));
-        assert!(!should_skip_for_device(false, 42, 43));
     }
 
     #[test]
