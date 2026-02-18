@@ -121,12 +121,21 @@ struct BudgetGuard<'a> {
 impl<'a> BudgetGuard<'a> {
     /// Acquire `n` bytes from the budget, returning a guard that will release
     /// them on drop if not defused.
+    #[allow(dead_code)] // Used in tests; production code uses from_pre_acquired.
     fn new(budget: &'a ByteBudget, n: usize) -> Result<Self> {
         let acquired = budget.acquire(n)?;
         Ok(Self {
             budget,
             bytes: acquired,
         })
+    }
+
+    /// Wrap already-acquired bytes in an RAII guard (no acquire call).
+    ///
+    /// Used when budget was acquired by the walk thread before dispatch to
+    /// workers. The guard ensures bytes are released if the worker `?`-bails.
+    fn from_pre_acquired(budget: &'a ByteBudget, bytes: usize) -> Self {
+        Self { budget, bytes }
     }
 
     /// Consume the guard without releasing the bytes. Returns the byte count
@@ -143,6 +152,21 @@ impl Drop for BudgetGuard<'_> {
         if self.bytes > 0 {
             self.budget.release(self.bytes);
         }
+    }
+}
+
+/// Acquire budget for a walk entry before dispatching to a worker.
+///
+/// Called by the dedicated walk thread to reserve memory in walk order,
+/// preventing deadlock between pariter's ordered output and worker-side
+/// budget acquisition.
+fn reserve_budget(entry: &WalkEntry, budget: &ByteBudget) -> Result<usize> {
+    match entry {
+        WalkEntry::File { file_size, .. } => {
+            budget.acquire(usize::try_from(*file_size).unwrap_or(usize::MAX))
+        }
+        WalkEntry::FileSegment { len, .. } => budget.acquire(*len as usize),
+        _ => Ok(0),
     }
 }
 
@@ -313,8 +337,8 @@ fn classify_chunk(
 
 /// Process a single walk entry in a parallel worker thread.
 ///
-/// For small/medium files: read, chunk, hash → classify via xor filter.
-/// For file segments: seek to offset, read segment, chunk, hash → classify.
+/// Budget bytes are pre-acquired by the walk thread; `pre_acquired_bytes`
+/// is wrapped in a [`BudgetGuard`] for error safety (auto-release on `?` bail).
 #[allow(clippy::too_many_arguments)]
 fn process_file_worker(
     entry: WalkEntry,
@@ -324,6 +348,7 @@ fn process_file_worker(
     chunker_config: &ChunkerConfig,
     read_limiter: Option<&ByteRateLimiter>,
     budget: &ByteBudget,
+    pre_acquired_bytes: usize,
     dedup_filter: Option<&xorf::Xor8>,
 ) -> Result<ProcessedEntry> {
     match entry {
@@ -333,9 +358,9 @@ fn process_file_worker(
             metadata,
             file_size,
         } => {
-            // Acquire budget before any I/O. The guard auto-releases on `?` bail.
-            let requested_bytes = usize::try_from(file_size).unwrap_or(usize::MAX);
-            let guard = BudgetGuard::new(budget, requested_bytes)?;
+            // Budget was pre-acquired by the walk thread. Wrap in a guard for
+            // error safety — if we `?`-bail, the guard drops and releases bytes.
+            let guard = BudgetGuard::from_pre_acquired(budget, pre_acquired_bytes);
 
             // Small file (< min_chunk_size): read whole, single chunk.
             if file_size < chunker_config.min_size as u64 {
@@ -405,8 +430,7 @@ fn process_file_worker(
             offset,
             len,
         } => {
-            let requested_bytes = len as usize;
-            let guard = BudgetGuard::new(budget, requested_bytes)?;
+            let guard = BudgetGuard::from_pre_acquired(budget, pre_acquired_bytes);
 
             let mut file = File::open(Path::new(&*abs_path)).map_err(VgerError::Io)?;
             file.seek(std::io::SeekFrom::Start(offset))
@@ -1209,29 +1233,67 @@ pub(crate) fn run_parallel_pipeline(
     let budget = ByteBudget::new(pipeline_buffer_bytes);
 
     std::thread::scope(|s| {
-        let walk_iter = build_walk_iter(
-            source_paths,
-            multi_path,
-            exclude_patterns,
-            exclude_if_present,
-            one_file_system,
-            git_ignore,
-            xattrs_enabled,
-            file_cache,
-            segment_size,
-        );
+        // Bounded channel: walk thread sends pre-budgeted (entry, bytes) pairs.
+        // Capacity provides scheduling slack only — ByteBudget enforces the
+        // byte-level memory cap. Sizing by worker count keeps the channel small
+        // regardless of segment_size or mixed file sizes.
+        let chan_cap = num_workers * 2;
+        let (walk_tx, walk_rx) =
+            std::sync::mpsc::sync_channel::<Result<(WalkEntry, usize)>>(chan_cap);
 
-        // Take a reference so the `move` closure captures `&ByteBudget` (which
-        // is Copy+Clone) rather than trying to move `ByteBudget` itself.
+        // Reference so `move` closures capture `&ByteBudget`.
         let budget_ref = &budget;
 
-        // Flatten Result<WalkEntry> — errors become ProcessedEntry errors through the pipeline.
-        let mut parallel_iter = walk_iter
+        // --- Walk thread: iterate + acquire budget in walk order -------------
+        s.spawn(move || {
+            let walk_iter = build_walk_iter(
+                source_paths,
+                multi_path,
+                exclude_patterns,
+                exclude_if_present,
+                one_file_system,
+                git_ignore,
+                xattrs_enabled,
+                file_cache,
+                segment_size,
+            );
+
+            for entry_result in walk_iter {
+                match entry_result {
+                    Ok(entry) => {
+                        let acquired = match reserve_budget(&entry, budget_ref) {
+                            Ok(n) => n,
+                            Err(e) => {
+                                // Budget poisoned — propagate and stop.
+                                let _ = walk_tx.send(Err(e));
+                                return;
+                            }
+                        };
+                        if walk_tx.send(Ok((entry, acquired))).is_err() {
+                            // Consumer dropped the receiver (error path) —
+                            // release the bytes we just acquired and stop.
+                            budget_ref.release(acquired);
+                            return;
+                        }
+                    }
+                    Err(e) => {
+                        // Consumer aborts on first error — stop walking.
+                        let _ = walk_tx.send(Err(e));
+                        return;
+                    }
+                }
+            }
+            // walk_tx drops here → channel closes → walk_rx iterator ends.
+        });
+
+        // --- Parallel workers: receive pre-budgeted entries from channel -----
+        let mut parallel_iter = walk_rx
+            .into_iter()
             .parallel_map_scoped_custom(
                 s,
-                |o| o.threads(num_workers),
-                move |entry_result: Result<WalkEntry>| -> Result<ProcessedEntry> {
-                    let entry = entry_result?;
+                |o| o.threads(num_workers).buffer_size(num_workers),
+                move |item: Result<(WalkEntry, usize)>| -> Result<ProcessedEntry> {
+                    let (entry, pre_acquired) = item?;
                     process_file_worker(
                         entry,
                         &chunk_id_key,
@@ -1240,18 +1302,20 @@ pub(crate) fn run_parallel_pipeline(
                         &chunker_config,
                         read_limiter,
                         budget_ref,
+                        pre_acquired,
                         dedup_filter,
                     )
                 },
             )
             .readahead_scoped_custom(s, |o| o.buffer_size(readahead_depth));
 
-        // Use explicit `while let` so `parallel_iter` is only borrowed via
-        // `next()` — keeping it owned in this scope. On error we poison the
-        // budget first (unblocking workers stuck in `acquire`), then drop the
-        // iterator (which joins workers). This prevents deadlock.
-        // A `for` loop would move the iterator, making the explicit
-        // `drop(parallel_iter)` below impossible.
+        // --- Consumer: sequential commit of ordered results -------------------
+        // Explicit `while let` keeps `parallel_iter` owned so we can drop it
+        // on the error path.  Shutdown sequence on error:
+        //   1. budget.poison()  — wakes walk thread blocked in acquire()
+        //   2. break            — stops consuming
+        //   3. drop(parallel_iter) — drops walk_rx, joins workers; walk thread
+        //      exits from either acquire() wakeup or send() disconnect
         let mut consume_err: Option<VgerError> = None;
         let mut large_file_accum: Option<LargeFileAccum> = None;
         #[allow(clippy::while_let_on_iterator)]
