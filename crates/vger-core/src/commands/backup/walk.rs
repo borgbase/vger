@@ -93,7 +93,7 @@ pub(super) fn build_configured_walker(
             return false;
         }
 
-        if one_file_system {
+        if one_file_system && is_dir {
             if let Ok(metadata) = std::fs::symlink_metadata(path) {
                 let entry_dev = fs::summarize_metadata(&metadata, &metadata.file_type()).device;
                 if should_skip_for_device(one_file_system, source_dev, entry_dev) {
