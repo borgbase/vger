@@ -714,7 +714,12 @@ fn consume_processed_entry(
                 match worker_chunk {
                     super::backup::WorkerChunk::Prepared(prepared) => {
                         let size = prepared.uncompressed_size;
-                        if let Some(csize) = repo.bump_ref_if_exists(&prepared.chunk_id) {
+                        let existing = if dedup_filter.is_some() {
+                            repo.bump_ref_prefilter_miss(&prepared.chunk_id)
+                        } else {
+                            repo.bump_ref_if_exists(&prepared.chunk_id)
+                        };
+                        if let Some(csize) = existing {
                             stats.original_size += size as u64;
                             stats.compressed_size += csize as u64;
                             item.chunks.push(ChunkRef {
@@ -741,7 +746,7 @@ fn consume_processed_entry(
                     }
                     super::backup::WorkerChunk::Hashed(hashed) => {
                         let size = hashed.data.len() as u32;
-                        if let Some(csize) = repo.bump_ref_if_exists(&hashed.chunk_id) {
+                        if let Some(csize) = repo.bump_ref_prefilter_hit(&hashed.chunk_id) {
                             // True dedup hit — skip transform.
                             stats.original_size += size as u64;
                             stats.compressed_size += csize as u64;
@@ -751,14 +756,18 @@ fn consume_processed_entry(
                                 csize,
                             });
                         } else {
-                            // False positive — compress+encrypt sequentially.
-                            let (stored_id, csize, _is_new) =
-                                repo.store_chunk(&hashed.data, compression, PackType::Data)?;
+                            // False positive — inline compress+encrypt.
+                            let csize = repo.commit_chunk_inline(
+                                hashed.chunk_id,
+                                &hashed.data,
+                                compression,
+                                PackType::Data,
+                            )?;
                             stats.original_size += size as u64;
                             stats.compressed_size += csize as u64;
                             stats.deduplicated_size += csize as u64;
                             item.chunks.push(ChunkRef {
-                                id: stored_id,
+                                id: hashed.chunk_id,
                                 size,
                                 csize,
                             });

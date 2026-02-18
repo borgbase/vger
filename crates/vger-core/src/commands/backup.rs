@@ -220,7 +220,12 @@ pub(crate) fn flush_regular_file_batch(
         match result? {
             BatchResult::Transformed(prepared) => {
                 let size = prepared.uncompressed_size;
-                if let Some(csize) = repo.bump_ref_if_exists(&prepared.chunk_id) {
+                let existing = if dedup_filter.is_some() {
+                    repo.bump_ref_prefilter_miss(&prepared.chunk_id)
+                } else {
+                    repo.bump_ref_if_exists(&prepared.chunk_id)
+                };
+                if let Some(csize) = existing {
                     stats.original_size += size as u64;
                     stats.compressed_size += csize as u64;
                     item.chunks.push(ChunkRef {
@@ -246,7 +251,7 @@ pub(crate) fn flush_regular_file_batch(
                 }
             }
             BatchResult::HashOnly { chunk_id, size } => {
-                if let Some(csize) = repo.bump_ref_if_exists(&chunk_id) {
+                if let Some(csize) = repo.bump_ref_prefilter_hit(&chunk_id) {
                     // True dedup hit — skip transform.
                     stats.original_size += size as u64;
                     stats.compressed_size += csize as u64;
@@ -256,15 +261,18 @@ pub(crate) fn flush_regular_file_batch(
                         csize,
                     });
                 } else {
-                    // False positive — compress+encrypt sequentially.
-                    let data = &raw_chunks[i];
-                    let (stored_id, csize, _is_new) =
-                        repo.store_chunk(data, compression, PackType::Data)?;
+                    // False positive — inline compress+encrypt.
+                    let csize = repo.commit_chunk_inline(
+                        chunk_id,
+                        &raw_chunks[i],
+                        compression,
+                        PackType::Data,
+                    )?;
                     stats.original_size += size as u64;
                     stats.compressed_size += csize as u64;
                     stats.deduplicated_size += csize as u64;
                     item.chunks.push(ChunkRef {
-                        id: stored_id,
+                        id: chunk_id,
                         size,
                         csize,
                     });
@@ -414,7 +422,12 @@ fn flush_cross_file_batch(
             match br {
                 BatchResult::Transformed(p) => {
                     let size = p.uncompressed_size;
-                    if let Some(csize) = repo.bump_ref_if_exists(&p.chunk_id) {
+                    let existing = if dedup_filter.is_some() {
+                        repo.bump_ref_prefilter_miss(&p.chunk_id)
+                    } else {
+                        repo.bump_ref_if_exists(&p.chunk_id)
+                    };
+                    if let Some(csize) = existing {
                         stats.original_size += size as u64;
                         stats.compressed_size += csize as u64;
                         item.chunks.push(ChunkRef {
@@ -440,7 +453,7 @@ fn flush_cross_file_batch(
                     }
                 }
                 BatchResult::HashOnly { chunk_id, size } => {
-                    if let Some(csize) = repo.bump_ref_if_exists(&chunk_id) {
+                    if let Some(csize) = repo.bump_ref_prefilter_hit(&chunk_id) {
                         stats.original_size += size as u64;
                         stats.compressed_size += csize as u64;
                         item.chunks.push(ChunkRef {
@@ -449,14 +462,14 @@ fn flush_cross_file_batch(
                             csize,
                         });
                     } else {
-                        // False positive — compress+encrypt sequentially.
-                        let (stored_id, csize, _is_new) =
-                            repo.store_chunk(raw, compression, PackType::Data)?;
+                        // False positive — inline compress+encrypt.
+                        let csize =
+                            repo.commit_chunk_inline(chunk_id, raw, compression, PackType::Data)?;
                         stats.original_size += size as u64;
                         stats.compressed_size += csize as u64;
                         stats.deduplicated_size += csize as u64;
                         item.chunks.push(ChunkRef {
-                            id: stored_id,
+                            id: chunk_id,
                             size,
                             csize,
                         });

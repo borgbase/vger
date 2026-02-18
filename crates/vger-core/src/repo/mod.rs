@@ -967,17 +967,69 @@ impl Repository {
             return Some(stored_size);
         }
 
-        // Dedup check against pending blobs in both pack writers
-        if let Some(stored_size) = self.data_pack_writer.get_pending_stored_size(chunk_id) {
-            self.data_pack_writer.increment_pending(chunk_id);
-            return Some(stored_size);
-        }
-        if let Some(stored_size) = self.tree_pack_writer.get_pending_stored_size(chunk_id) {
-            self.tree_pack_writer.increment_pending(chunk_id);
-            return Some(stored_size);
-        }
+        self.bump_ref_pending(chunk_id)
+    }
 
+    /// Prefilter said "probably exists" — tiered: skip xor, check session_new → mmap → pending.
+    /// Non-tiered: falls through to bump_ref_if_exists.
+    pub fn bump_ref_prefilter_hit(&mut self, chunk_id: &ChunkId) -> Option<u32> {
+        if let Some(ref tiered) = self.tiered_dedup {
+            if let Some(stored_size) = tiered.get_stored_size_skip_filter(chunk_id) {
+                if let Some(ref mut delta) = self.index_delta {
+                    delta.bump_refcount(chunk_id);
+                }
+                return Some(stored_size);
+            }
+            return self.bump_ref_pending(chunk_id);
+        }
+        self.bump_ref_if_exists(chunk_id)
+    }
+
+    /// Prefilter said "definitely doesn't exist" — tiered: session_new → pending only.
+    /// Non-tiered: falls through to bump_ref_if_exists.
+    pub fn bump_ref_prefilter_miss(&mut self, chunk_id: &ChunkId) -> Option<u32> {
+        if let Some(ref tiered) = self.tiered_dedup {
+            if let Some(stored_size) = tiered.session_new_stored_size(chunk_id) {
+                if let Some(ref mut delta) = self.index_delta {
+                    delta.bump_refcount(chunk_id);
+                }
+                return Some(stored_size);
+            }
+            return self.bump_ref_pending(chunk_id);
+        }
+        self.bump_ref_if_exists(chunk_id)
+    }
+
+    /// Check only pending pack writers (shared helper).
+    fn bump_ref_pending(&mut self, chunk_id: &ChunkId) -> Option<u32> {
+        if let Some(s) = self.data_pack_writer.get_pending_stored_size(chunk_id) {
+            self.data_pack_writer.increment_pending(chunk_id);
+            return Some(s);
+        }
+        if let Some(s) = self.tree_pack_writer.get_pending_stored_size(chunk_id) {
+            self.tree_pack_writer.increment_pending(chunk_id);
+            return Some(s);
+        }
         None
+    }
+
+    /// Inline false-positive path: compress + encrypt + commit a chunk whose ChunkId
+    /// was already computed by the worker. Avoids re-hashing via `store_chunk`.
+    pub fn commit_chunk_inline(
+        &mut self,
+        chunk_id: ChunkId,
+        data: &[u8],
+        compression: compress::Compression,
+        pack_type: PackType,
+    ) -> Result<u32> {
+        debug_assert_eq!(
+            ChunkId::compute(self.crypto.chunk_id_key(), data),
+            chunk_id,
+            "inline commit: chunk_id mismatch"
+        );
+        let compressed = compress::compress(compression, data)?;
+        let packed = pack_object(ObjectType::ChunkData, &compressed, self.crypto.as_ref())?;
+        self.commit_prepacked_chunk(chunk_id, packed, data.len() as u32, pack_type)
     }
 
     /// Commit a pre-compressed and pre-encrypted chunk to the selected pack writer.

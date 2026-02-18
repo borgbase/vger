@@ -342,6 +342,21 @@ impl TieredDedupIndex {
         self.mmap_cache.get_stored_size(id)
     }
 
+    /// Look up stored size, skipping the xor filter tier.
+    /// Caller already checked the xor filter (hit) — go straight to session_new → mmap.
+    pub fn get_stored_size_skip_filter(&self, id: &ChunkId) -> Option<u32> {
+        if let Some(&size) = self.session_new.get(id) {
+            return Some(size);
+        }
+        self.mmap_cache.get_stored_size(id)
+    }
+
+    /// Look up stored size in session_new only.
+    /// Caller's xor filter miss guarantees the chunk is not in the mmap cache.
+    pub fn session_new_stored_size(&self, id: &ChunkId) -> Option<u32> {
+        self.session_new.get(id).copied()
+    }
+
     /// Insert a new chunk discovered during this backup session.
     pub fn insert(&mut self, id: ChunkId, stored_size: u32) {
         self.session_new.insert(id, stored_size);
