@@ -1119,8 +1119,8 @@ fn backup_many_small_files_plus_large_file_roundtrip() {
     // Second backup (sequential path — pipeline_depth=0).
     let mut seq_config = make_test_config(&repo_dir);
     seq_config.limits.cpu.max_threads = 1;
+    seq_config.limits.cpu.pipeline_depth = Some(0);
 
-    // Force sequential by setting pipeline_depth to 0 via the limits.
     let stats2 = commands::backup::run(
         &seq_config,
         commands::backup::BackupRequest {

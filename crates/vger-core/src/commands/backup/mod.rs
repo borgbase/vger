@@ -1,11 +1,12 @@
 mod chunk_process;
+mod command_dump;
 mod commit;
 mod concurrency;
 pub(crate) mod pipeline;
 mod sequential;
 mod walk;
 
-pub(crate) use chunk_process::{PreparedChunk, WorkerChunk};
+pub(crate) use chunk_process::WorkerChunk;
 
 use chrono::Utc;
 use rand::RngCore;
@@ -241,7 +242,7 @@ pub fn run_with_progress(
         let mut new_file_cache = FileCache::with_capacity(repo.file_cache().len());
 
         // Execute command dumps before walking filesystem
-        sequential::process_command_dumps(
+        command_dump::process_command_dumps(
             repo,
             command_dumps,
             compression,

@@ -1,33 +1,26 @@
 use std::fs::File;
 use std::path::Path;
 
-use chrono::Utc;
 use rayon::prelude::*;
-use tracing::{debug, info, warn};
+use tracing::debug;
 
 use crate::chunker;
 use crate::compress::Compression;
-use crate::config::{ChunkerConfig, CommandDump};
+use crate::config::ChunkerConfig;
 use crate::crypto::chunk_id::ChunkId;
 use crate::error::{Result, VgerError};
 use crate::limits::{self, ByteRateLimiter};
-use crate::platform::{fs, shell};
+use crate::platform::fs;
 use crate::repo::file_cache::FileCache;
-use crate::repo::format::{pack_object, ObjectType};
-use crate::repo::pack::PackType;
 use crate::repo::Repository;
-use crate::snapshot::item::{ChunkRef, Item, ItemType};
+use crate::snapshot::item::{Item, ItemType};
 use crate::snapshot::SnapshotStats;
 
+use super::chunk_process::{classify_chunk, WorkerChunk};
+use super::commit::process_worker_chunks;
 use super::walk::{build_configured_walker, read_item_xattrs};
+use super::BackupProgressEvent;
 use super::{append_item_to_stream, emit_progress, emit_stats_progress};
-use super::{BackupProgressEvent, PreparedChunk};
-
-/// Batch result from the parallel phase: either fully transformed or hash-only.
-enum BatchResult {
-    Transformed(PreparedChunk),
-    HashOnly { chunk_id: ChunkId, size: u32 },
-}
 
 #[allow(clippy::too_many_arguments)]
 pub(super) fn flush_regular_file_batch(
@@ -44,109 +37,24 @@ pub(super) fn flush_regular_file_batch(
         return Ok(());
     }
 
-    // Parallel phase: hash → filter check → transform or hash-only.
-    let batch_results: Vec<Result<BatchResult>> = {
-        let crypto = repo.crypto.as_ref();
-        let do_work = |data: &Vec<u8>| -> Result<BatchResult> {
-            let chunk_id = ChunkId::compute(chunk_id_key, data);
+    let taken = std::mem::take(raw_chunks);
+    let crypto = repo.crypto.as_ref();
 
-            // If the xor filter says "probably exists", skip compress+encrypt.
-            if let Some(filter) = dedup_filter {
-                use xorf::Filter;
-                let key = crate::index::dedup_cache::chunk_id_to_u64(&chunk_id);
-                if filter.contains(&key) {
-                    return Ok(BatchResult::HashOnly {
-                        chunk_id,
-                        size: data.len() as u32,
-                    });
-                }
-            }
-
-            let compressed = crate::compress::compress(compression, data)?;
-            let packed = pack_object(ObjectType::ChunkData, &compressed, crypto)?;
-            Ok(BatchResult::Transformed(PreparedChunk {
-                chunk_id,
-                uncompressed_size: data.len() as u32,
-                packed,
-            }))
-        };
-        if let Some(pool) = transform_pool {
-            pool.install(|| raw_chunks.par_iter().map(do_work).collect())
-        } else {
-            raw_chunks.iter().map(do_work).collect()
-        }
+    let classify = |data: Vec<u8>| -> Result<WorkerChunk> {
+        let chunk_id = ChunkId::compute(chunk_id_key, &data);
+        classify_chunk(chunk_id, data, dedup_filter, compression, crypto)
     };
 
-    // Sequential phase: dedup check and commit.
-    // Don't clear raw_chunks yet — we may need raw data for false positives.
-    for (i, result) in batch_results.into_iter().enumerate() {
-        match result? {
-            BatchResult::Transformed(prepared) => {
-                let size = prepared.uncompressed_size;
-                let existing = if dedup_filter.is_some() {
-                    repo.bump_ref_prefilter_miss(&prepared.chunk_id)
-                } else {
-                    repo.bump_ref_if_exists(&prepared.chunk_id)
-                };
-                if let Some(csize) = existing {
-                    stats.original_size += size as u64;
-                    stats.compressed_size += csize as u64;
-                    item.chunks.push(ChunkRef {
-                        id: prepared.chunk_id,
-                        size,
-                        csize,
-                    });
-                } else {
-                    let csize = repo.commit_prepacked_chunk(
-                        prepared.chunk_id,
-                        prepared.packed,
-                        prepared.uncompressed_size,
-                        PackType::Data,
-                    )?;
-                    stats.original_size += size as u64;
-                    stats.compressed_size += csize as u64;
-                    stats.deduplicated_size += csize as u64;
-                    item.chunks.push(ChunkRef {
-                        id: prepared.chunk_id,
-                        size,
-                        csize,
-                    });
-                }
-            }
-            BatchResult::HashOnly { chunk_id, size } => {
-                if let Some(csize) = repo.bump_ref_prefilter_hit(&chunk_id) {
-                    // True dedup hit — skip transform.
-                    stats.original_size += size as u64;
-                    stats.compressed_size += csize as u64;
-                    item.chunks.push(ChunkRef {
-                        id: chunk_id,
-                        size,
-                        csize,
-                    });
-                } else {
-                    // False positive — inline compress+encrypt.
-                    let csize = repo.commit_chunk_inline(
-                        chunk_id,
-                        &raw_chunks[i],
-                        compression,
-                        PackType::Data,
-                    )?;
-                    stats.original_size += size as u64;
-                    stats.compressed_size += csize as u64;
-                    stats.deduplicated_size += csize as u64;
-                    item.chunks.push(ChunkRef {
-                        id: chunk_id,
-                        size,
-                        csize,
-                    });
-                }
-            }
-        }
-    }
+    let results: Vec<Result<WorkerChunk>> = if let Some(pool) = transform_pool {
+        pool.install(|| taken.into_par_iter().map(classify).collect())
+    } else {
+        taken.into_iter().map(classify).collect()
+    };
 
-    raw_chunks.clear();
-
-    Ok(())
+    // All-or-nothing: if any classification fails, no chunks are committed
+    // for this batch (matches pipeline path semantics, avoids orphaned chunks).
+    let worker_chunks: Vec<WorkerChunk> = results.into_iter().collect::<Result<Vec<_>>>()?;
+    process_worker_chunks(repo, item, worker_chunks, stats, compression, dedup_filter)
 }
 
 /// Tracks a small file pending in the cross-file batch.
@@ -154,7 +62,6 @@ struct PendingBatchFile {
     item: Item,
     metadata_summary: fs::MetadataSummary,
     abs_path: String,
-    chunk_start: usize,
     chunk_count: usize,
 }
 
@@ -194,14 +101,12 @@ impl CrossFileBatch {
         metadata_summary: fs::MetadataSummary,
         abs_path: String,
     ) {
-        let chunk_start = self.raw_chunks.len();
         self.pending_bytes += data.len();
         self.raw_chunks.push(data);
         self.files.push(PendingBatchFile {
             item,
             metadata_summary,
             abs_path,
-            chunk_start,
             chunk_count: 1,
         });
     }
@@ -228,45 +133,22 @@ fn flush_cross_file_batch(
         return Ok(());
     }
 
-    // Parallel phase: hash → filter check → transform or hash-only.
-    let batch_results: Vec<Result<BatchResult>> = {
-        let crypto = repo.crypto.as_ref();
-        let do_work = |data: &Vec<u8>| -> Result<BatchResult> {
-            let chunk_id = ChunkId::compute(chunk_id_key, data);
+    let taken = std::mem::take(&mut batch.raw_chunks);
+    let crypto = repo.crypto.as_ref();
 
-            if let Some(filter) = dedup_filter {
-                use xorf::Filter;
-                let key = crate::index::dedup_cache::chunk_id_to_u64(&chunk_id);
-                if filter.contains(&key) {
-                    return Ok(BatchResult::HashOnly {
-                        chunk_id,
-                        size: data.len() as u32,
-                    });
-                }
-            }
-
-            let compressed = crate::compress::compress(compression, data)?;
-            let packed = pack_object(ObjectType::ChunkData, &compressed, crypto)?;
-            Ok(BatchResult::Transformed(PreparedChunk {
-                chunk_id,
-                uncompressed_size: data.len() as u32,
-                packed,
-            }))
-        };
-        if let Some(pool) = transform_pool {
-            pool.install(|| batch.raw_chunks.par_iter().map(do_work).collect())
-        } else {
-            batch.raw_chunks.iter().map(do_work).collect()
-        }
+    let classify = |data: Vec<u8>| -> Result<WorkerChunk> {
+        let chunk_id = ChunkId::compute(chunk_id_key, &data);
+        classify_chunk(chunk_id, data, dedup_filter, compression, crypto)
     };
 
-    // Convert to Option so we can .take() without cloning packed data.
-    let mut results: Vec<Option<BatchResult>> = batch_results
-        .into_iter()
-        .map(|r| r.map(Some))
-        .collect::<Result<Vec<_>>>()?;
+    let results: Vec<Result<WorkerChunk>> = if let Some(pool) = transform_pool {
+        pool.install(|| taken.into_par_iter().map(classify).collect())
+    } else {
+        taken.into_iter().map(classify).collect()
+    };
 
-    // Sequential phase: iterate files in walk order, commit chunks, update caches.
+    let mut worker_chunks: Vec<WorkerChunk> = results.into_iter().collect::<Result<Vec<_>>>()?;
+
     for file in batch.files.drain(..) {
         if let Some(cb) = progress.as_deref_mut() {
             cb(BackupProgressEvent::FileStarted {
@@ -276,70 +158,14 @@ fn flush_cross_file_batch(
 
         let mut item = file.item;
 
-        let chunk_slice = file.chunk_start..(file.chunk_start + file.chunk_count);
-        for (slot, raw) in results[chunk_slice.clone()]
-            .iter_mut()
-            .zip(&batch.raw_chunks[chunk_slice])
-        {
-            let br = slot.take().expect("chunk already consumed");
-            match br {
-                BatchResult::Transformed(p) => {
-                    let size = p.uncompressed_size;
-                    let existing = if dedup_filter.is_some() {
-                        repo.bump_ref_prefilter_miss(&p.chunk_id)
-                    } else {
-                        repo.bump_ref_if_exists(&p.chunk_id)
-                    };
-                    if let Some(csize) = existing {
-                        stats.original_size += size as u64;
-                        stats.compressed_size += csize as u64;
-                        item.chunks.push(ChunkRef {
-                            id: p.chunk_id,
-                            size,
-                            csize,
-                        });
-                    } else {
-                        let csize = repo.commit_prepacked_chunk(
-                            p.chunk_id,
-                            p.packed,
-                            p.uncompressed_size,
-                            PackType::Data,
-                        )?;
-                        stats.original_size += size as u64;
-                        stats.compressed_size += csize as u64;
-                        stats.deduplicated_size += csize as u64;
-                        item.chunks.push(ChunkRef {
-                            id: p.chunk_id,
-                            size,
-                            csize,
-                        });
-                    }
-                }
-                BatchResult::HashOnly { chunk_id, size } => {
-                    if let Some(csize) = repo.bump_ref_prefilter_hit(&chunk_id) {
-                        stats.original_size += size as u64;
-                        stats.compressed_size += csize as u64;
-                        item.chunks.push(ChunkRef {
-                            id: chunk_id,
-                            size,
-                            csize,
-                        });
-                    } else {
-                        // False positive — inline compress+encrypt.
-                        let csize =
-                            repo.commit_chunk_inline(chunk_id, raw, compression, PackType::Data)?;
-                        stats.original_size += size as u64;
-                        stats.compressed_size += csize as u64;
-                        stats.deduplicated_size += csize as u64;
-                        item.chunks.push(ChunkRef {
-                            id: chunk_id,
-                            size,
-                            csize,
-                        });
-                    }
-                }
-            }
-        }
+        process_worker_chunks(
+            repo,
+            &mut item,
+            worker_chunks.drain(..file.chunk_count),
+            stats,
+            compression,
+            dedup_filter,
+        )?;
 
         stats.nfiles += 1;
 
@@ -365,7 +191,6 @@ fn flush_cross_file_batch(
         emit_stats_progress(progress, stats, Some(std::mem::take(&mut item.path)));
     }
 
-    batch.raw_chunks.clear();
     batch.pending_bytes = 0;
 
     Ok(())
@@ -387,153 +212,6 @@ pub(super) fn build_transform_pool(max_threads: usize) -> Result<Option<rayon::T
         .build()
         .map(Some)
         .map_err(|e| VgerError::Other(format!("failed to create rayon thread pool: {e}")))
-}
-
-/// Default timeout for command_dump execution (1 hour).
-pub(super) const COMMAND_DUMP_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(3600);
-
-/// Execute a shell command and capture its stdout.
-pub(super) fn execute_dump_command(dump: &CommandDump) -> Result<Vec<u8>> {
-    let output =
-        shell::run_script_with_timeout(&dump.command, COMMAND_DUMP_TIMEOUT).map_err(|e| {
-            VgerError::Other(format!(
-                "failed to execute command_dump '{}': {}",
-                dump.name, e
-            ))
-        })?;
-
-    if !output.status.success() {
-        let code = output
-            .status
-            .code()
-            .map(|c| c.to_string())
-            .unwrap_or_else(|| "unknown".to_string());
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        return Err(VgerError::Other(format!(
-            "command_dump '{}' failed (exit code {code}): {stderr}",
-            dump.name
-        )));
-    }
-
-    if output.stdout.is_empty() {
-        warn!(name = %dump.name, "command_dump produced empty output");
-    }
-
-    Ok(output.stdout)
-}
-
-#[allow(clippy::too_many_arguments)]
-pub(super) fn process_command_dumps(
-    repo: &mut Repository,
-    command_dumps: &[CommandDump],
-    compression: Compression,
-    items_config: &ChunkerConfig,
-    item_stream: &mut Vec<u8>,
-    item_ptrs: &mut Vec<ChunkId>,
-    stats: &mut SnapshotStats,
-    progress: &mut Option<&mut dyn FnMut(BackupProgressEvent)>,
-    time_start: chrono::DateTime<Utc>,
-) -> Result<()> {
-    if command_dumps.is_empty() {
-        return Ok(());
-    }
-
-    let dumps_dir_item = Item {
-        path: ".vger-dumps".to_string(),
-        entry_type: ItemType::Directory,
-        mode: 0o755,
-        uid: 0,
-        gid: 0,
-        user: None,
-        group: None,
-        mtime: 0,
-        atime: None,
-        ctime: None,
-        size: 0,
-        chunks: Vec::new(),
-        link_target: None,
-        xattrs: None,
-    };
-    append_item_to_stream(
-        repo,
-        item_stream,
-        item_ptrs,
-        &dumps_dir_item,
-        items_config,
-        compression,
-    )?;
-
-    for dump in command_dumps {
-        info!(
-            name = %dump.name,
-            command = %dump.command,
-            "executing command dump"
-        );
-        let data = execute_dump_command(dump)?;
-        let data_len = data.len() as u64;
-
-        let chunk_ranges = chunker::chunk_data(&data, &repo.config.chunker_params);
-        let chunk_id_key = *repo.crypto.chunk_id_key();
-
-        let mut chunk_refs = Vec::new();
-        for (offset, length) in chunk_ranges {
-            let chunk_data = &data[offset..offset + length];
-            let chunk_id = ChunkId::compute(&chunk_id_key, chunk_data);
-            let size = length as u32;
-
-            if let Some(csize) = repo.bump_ref_if_exists(&chunk_id) {
-                stats.original_size += size as u64;
-                stats.compressed_size += csize as u64;
-                chunk_refs.push(ChunkRef {
-                    id: chunk_id,
-                    size,
-                    csize,
-                });
-            } else {
-                let (chunk_id, csize, _is_new) =
-                    repo.store_chunk(chunk_data, compression, PackType::Data)?;
-                stats.original_size += size as u64;
-                stats.compressed_size += csize as u64;
-                stats.deduplicated_size += csize as u64;
-                chunk_refs.push(ChunkRef {
-                    id: chunk_id,
-                    size,
-                    csize,
-                });
-            }
-        }
-
-        stats.nfiles += 1;
-
-        let dump_item = Item {
-            path: format!(".vger-dumps/{}", dump.name),
-            entry_type: ItemType::RegularFile,
-            mode: 0o644,
-            uid: 0,
-            gid: 0,
-            user: None,
-            group: None,
-            mtime: time_start.timestamp_nanos_opt().unwrap_or(0),
-            atime: None,
-            ctime: None,
-            size: data_len,
-            chunks: chunk_refs,
-            link_target: None,
-            xattrs: None,
-        };
-        append_item_to_stream(
-            repo,
-            item_stream,
-            item_ptrs,
-            &dump_item,
-            items_config,
-            compression,
-        )?;
-
-        emit_stats_progress(progress, stats, Some(format!(".vger-dumps/{}", dump.name)));
-    }
-
-    Ok(())
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -962,73 +640,4 @@ pub(super) fn process_source_path(
     );
 
     Ok(())
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::config::CommandDump;
-
-    #[cfg(windows)]
-    fn shell_echo_hello() -> &'static str {
-        "Write-Output hello"
-    }
-
-    #[cfg(not(windows))]
-    fn shell_echo_hello() -> &'static str {
-        "echo hello"
-    }
-
-    #[cfg(windows)]
-    fn shell_fail() -> &'static str {
-        "exit 1"
-    }
-
-    #[cfg(not(windows))]
-    fn shell_fail() -> &'static str {
-        "false"
-    }
-
-    #[cfg(windows)]
-    fn shell_success_no_output() -> &'static str {
-        "$null = 1"
-    }
-
-    #[cfg(not(windows))]
-    fn shell_success_no_output() -> &'static str {
-        "true"
-    }
-
-    #[test]
-    fn execute_dump_command_captures_stdout() {
-        let dump = CommandDump {
-            name: "test.txt".to_string(),
-            command: shell_echo_hello().to_string(),
-        };
-        let result = execute_dump_command(&dump).unwrap();
-        let text = String::from_utf8(result).unwrap();
-        assert_eq!(text.trim_end(), "hello");
-    }
-
-    #[test]
-    fn execute_dump_command_fails_on_nonzero_exit() {
-        let dump = CommandDump {
-            name: "fail.txt".to_string(),
-            command: shell_fail().to_string(),
-        };
-        let result = execute_dump_command(&dump);
-        assert!(result.is_err());
-        let err = result.unwrap_err().to_string();
-        assert!(err.contains("command_dump 'fail.txt' failed"));
-    }
-
-    #[test]
-    fn execute_dump_command_empty_stdout_succeeds() {
-        let dump = CommandDump {
-            name: "empty.txt".to_string(),
-            command: shell_success_no_output().to_string(),
-        };
-        let result = execute_dump_command(&dump).unwrap();
-        assert!(result.is_empty());
-    }
 }

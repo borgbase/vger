@@ -13,7 +13,7 @@ use super::chunk_process::WorkerChunk;
 pub(super) fn process_worker_chunks(
     repo: &mut Repository,
     item: &mut Item,
-    chunks: Vec<WorkerChunk>,
+    chunks: impl IntoIterator<Item = WorkerChunk>,
     stats: &mut SnapshotStats,
     compression: Compression,
     dedup_filter: Option<&xorf::Xor8>,
