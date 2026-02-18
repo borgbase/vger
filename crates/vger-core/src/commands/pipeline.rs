@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 use std::fs::File;
-use std::io::Read;
+use std::io::{Read, Seek};
 use std::mem;
 use std::path::Path;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -215,6 +215,16 @@ enum WalkEntry {
         metadata: fs::MetadataSummary,
         file_size: u64,
     },
+    FileSegment {
+        /// Only present for segment 0; `None` for continuations.
+        item: Option<Item>,
+        abs_path: Arc<str>,
+        metadata: fs::MetadataSummary,
+        segment_index: usize,
+        num_segments: usize,
+        offset: u64,
+        len: u64,
+    },
     CacheHit {
         item: Item,
         abs_path: String,
@@ -243,11 +253,16 @@ pub(crate) enum ProcessedEntry {
         /// Bytes acquired from ByteBudget; consumer must release after committing.
         acquired_bytes: usize,
     },
-    /// Large file (>= threshold): worker did NO I/O, consumer streams it inline.
-    LargeFile {
-        item: Item,
-        abs_path: String,
+    /// Segment of a large file: worker processed one fixed-size slice.
+    FileSegment {
+        /// Only present for segment 0; `None` for continuations.
+        item: Option<Item>,
+        abs_path: Arc<str>,
         metadata: fs::MetadataSummary,
+        chunks: Vec<super::backup::WorkerChunk>,
+        acquired_bytes: usize,
+        segment_index: usize,
+        num_segments: usize,
     },
     /// File cache hit — consumer just bumps refcounts.
     CacheHit {
@@ -299,7 +314,7 @@ fn classify_chunk(
 /// Process a single walk entry in a parallel worker thread.
 ///
 /// For small/medium files: read, chunk, hash → classify via xor filter.
-/// For large files (>= threshold): return immediately so consumer streams them inline.
+/// For file segments: seek to offset, read segment, chunk, hash → classify.
 #[allow(clippy::too_many_arguments)]
 fn process_file_worker(
     entry: WalkEntry,
@@ -308,7 +323,6 @@ fn process_file_worker(
     compression: Compression,
     chunker_config: &ChunkerConfig,
     read_limiter: Option<&ByteRateLimiter>,
-    large_file_threshold: u64,
     budget: &ByteBudget,
     dedup_filter: Option<&xorf::Xor8>,
 ) -> Result<ProcessedEntry> {
@@ -319,15 +333,6 @@ fn process_file_worker(
             metadata,
             file_size,
         } => {
-            // Large files bypass parallel processing — consumer streams them.
-            if file_size >= large_file_threshold {
-                return Ok(ProcessedEntry::LargeFile {
-                    item,
-                    abs_path,
-                    metadata,
-                });
-            }
-
             // Acquire budget before any I/O. The guard auto-releases on `?` bail.
             let requested_bytes = usize::try_from(file_size).unwrap_or(usize::MAX);
             let guard = BudgetGuard::new(budget, requested_bytes)?;
@@ -391,6 +396,56 @@ fn process_file_worker(
             })
         }
 
+        WalkEntry::FileSegment {
+            item,
+            abs_path,
+            metadata,
+            segment_index,
+            num_segments,
+            offset,
+            len,
+        } => {
+            let requested_bytes = len as usize;
+            let guard = BudgetGuard::new(budget, requested_bytes)?;
+
+            let mut file = File::open(Path::new(&*abs_path)).map_err(VgerError::Io)?;
+            file.seek(std::io::SeekFrom::Start(offset))
+                .map_err(VgerError::Io)?;
+            let reader = file.take(len);
+
+            let chunk_stream = chunker::chunk_stream(
+                limits::LimitedReader::new(reader, read_limiter),
+                chunker_config,
+            );
+
+            let mut worker_chunks = Vec::new();
+            for chunk_result in chunk_stream {
+                let chunk = chunk_result.map_err(|e| {
+                    VgerError::Other(format!("chunking failed for {abs_path}: {e}"))
+                })?;
+
+                let chunk_id = ChunkId::compute(chunk_id_key, &chunk.data);
+                worker_chunks.push(classify_chunk(
+                    chunk_id,
+                    chunk.data,
+                    dedup_filter,
+                    compression,
+                    crypto,
+                )?);
+            }
+
+            let acquired_bytes = guard.defuse();
+            Ok(ProcessedEntry::FileSegment {
+                item,
+                abs_path,
+                metadata,
+                chunks: worker_chunks,
+                acquired_bytes,
+                segment_index,
+                num_segments,
+            })
+        }
+
         WalkEntry::CacheHit {
             item,
             abs_path,
@@ -422,6 +477,7 @@ fn build_walk_iter<'a>(
     git_ignore: bool,
     xattrs_enabled: bool,
     file_cache: &'a FileCache,
+    segment_size: u64,
 ) -> Box<dyn Iterator<Item = Result<WalkEntry>> + Send + 'a> {
     let iter = source_paths.iter().flat_map(move |source_path| {
         let source_started = std::iter::once(Ok(WalkEntry::SourceStarted {
@@ -437,6 +493,7 @@ fn build_walk_iter<'a>(
             git_ignore,
             xattrs_enabled,
             file_cache,
+            segment_size,
         );
 
         let source_finished = std::iter::once(Ok(WalkEntry::SourceFinished {
@@ -447,6 +504,83 @@ fn build_walk_iter<'a>(
     });
 
     Box::new(iter)
+}
+
+/// Lazy iterator over walk entries for a single filesystem entry.
+///
+/// Avoids heap allocation for the common zero/single-entry cases.
+/// The `Segments` variant lazily yields `FileSegment` entries for large files.
+enum WalkItems {
+    /// No entries (e.g. root entry, special files).
+    Empty,
+    /// Exactly one entry (regular file, directory, symlink, error, cache hit).
+    One(Option<Result<WalkEntry>>),
+    /// Large file split into N segments, yielded lazily.
+    Segments {
+        /// Moved into segment 0; `None` for continuations.
+        item: Option<Item>,
+        abs_path: Arc<str>,
+        metadata: fs::MetadataSummary,
+        segment_size: u64,
+        file_size: u64,
+        num_segments: usize,
+        next: usize,
+    },
+}
+
+impl Iterator for WalkItems {
+    type Item = Result<WalkEntry>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        match self {
+            WalkItems::Empty => None,
+            WalkItems::One(val) => val.take(),
+            WalkItems::Segments {
+                item,
+                abs_path,
+                metadata,
+                segment_size,
+                file_size,
+                num_segments,
+                next,
+            } => {
+                let i = *next;
+                if i >= *num_segments {
+                    return None;
+                }
+                *next = i + 1;
+                let offset = i as u64 * *segment_size;
+                let len = (*segment_size).min(*file_size - offset);
+                // Segment 0 moves the item; continuations pass None.
+                let seg_item = if i == 0 { item.take() } else { None };
+                Some(Ok(WalkEntry::FileSegment {
+                    item: seg_item,
+                    abs_path: abs_path.clone(),
+                    metadata: *metadata,
+                    segment_index: i,
+                    num_segments: *num_segments,
+                    offset,
+                    len,
+                }))
+            }
+        }
+    }
+
+    fn size_hint(&self) -> (usize, Option<usize>) {
+        match self {
+            WalkItems::Empty => (0, Some(0)),
+            WalkItems::One(val) => {
+                let n = usize::from(val.is_some());
+                (n, Some(n))
+            }
+            WalkItems::Segments {
+                num_segments, next, ..
+            } => {
+                let remaining = num_segments.saturating_sub(*next);
+                (remaining, Some(remaining))
+            }
+        }
+    }
 }
 
 /// Walk a single source path and yield WalkEntry items.
@@ -460,6 +594,7 @@ fn walk_source<'a>(
     git_ignore: bool,
     xattrs_enabled: bool,
     file_cache: &'a FileCache,
+    segment_size: u64,
 ) -> Box<dyn Iterator<Item = Result<WalkEntry>> + Send + 'a> {
     // Validate source exists and get device id.
     let source = Path::new(source_path);
@@ -562,116 +697,273 @@ fn walk_source<'a>(
 
     let source_owned = source.to_path_buf();
     let prefix_clone = prefix.clone();
-    let walk_entries = walk_builder.build().filter_map(move |entry_result| {
-        let entry = match entry_result {
-            Ok(e) => e,
-            Err(e) => {
-                return Some(Err(VgerError::Other(format!("walk error: {e}"))));
-            }
-        };
-
-        let rel_path = entry
-            .path()
-            .strip_prefix(&source_owned)
-            .unwrap_or(entry.path())
-            .to_string_lossy()
-            .to_string();
-
-        if rel_path.is_empty() {
-            return None;
-        }
-
-        let metadata = match std::fs::symlink_metadata(entry.path()) {
-            Ok(m) => m,
-            Err(e) => {
-                return Some(Err(VgerError::Other(format!(
-                    "stat error for {}: {e}",
-                    entry.path().display()
-                ))));
-            }
-        };
-
-        let file_type = metadata.file_type();
-        let metadata_summary = fs::summarize_metadata(&metadata, &file_type);
-
-        let (entry_type, link_target) = if file_type.is_dir() {
-            (ItemType::Directory, None)
-        } else if file_type.is_symlink() {
-            match std::fs::read_link(entry.path()) {
-                Ok(target) => (
-                    ItemType::Symlink,
-                    Some(target.to_string_lossy().to_string()),
-                ),
+    let walk_entries = walk_builder
+        .build()
+        .flat_map(move |entry_result| -> WalkItems {
+            let entry = match entry_result {
+                Ok(e) => e,
                 Err(e) => {
-                    return Some(Err(VgerError::Other(format!("readlink: {e}"))));
+                    return WalkItems::One(Some(Err(VgerError::Other(format!("walk error: {e}")))));
                 }
-            }
-        } else if file_type.is_file() {
-            (ItemType::RegularFile, None)
-        } else {
-            return None; // skip special files
-        };
+            };
 
-        let item_path = match &prefix_clone {
-            Some(pfx) => format!("{pfx}/{rel_path}"),
-            None => rel_path,
-        };
+            let rel_path = entry
+                .path()
+                .strip_prefix(&source_owned)
+                .unwrap_or(entry.path())
+                .to_string_lossy()
+                .to_string();
 
-        let mut item = Item {
-            path: item_path,
-            entry_type,
-            mode: metadata_summary.mode,
-            uid: metadata_summary.uid,
-            gid: metadata_summary.gid,
-            user: None,
-            group: None,
-            mtime: metadata_summary.mtime_ns,
-            atime: None,
-            ctime: None,
-            size: metadata_summary.size,
-            chunks: Vec::new(),
-            link_target,
-            xattrs: None,
-        };
-
-        if xattrs_enabled {
-            item.xattrs = read_item_xattrs(entry.path());
-        }
-
-        if entry_type == ItemType::RegularFile && metadata_summary.size > 0 {
-            let abs_path = entry.path().to_string_lossy().to_string();
-
-            // Check file cache (read-only).
-            let cache_hit = file_cache.lookup(
-                &abs_path,
-                metadata_summary.device,
-                metadata_summary.inode,
-                metadata_summary.mtime_ns,
-                metadata_summary.ctime_ns,
-                metadata_summary.size,
-            );
-
-            if let Some(cached_refs) = cache_hit {
-                return Some(Ok(WalkEntry::CacheHit {
-                    item,
-                    abs_path,
-                    metadata: metadata_summary,
-                    cached_refs: cached_refs.to_vec(),
-                }));
+            if rel_path.is_empty() {
+                return WalkItems::Empty;
             }
 
-            Some(Ok(WalkEntry::File {
-                file_size: metadata_summary.size,
-                item,
-                abs_path,
-                metadata: metadata_summary,
-            }))
-        } else {
-            Some(Ok(WalkEntry::NonFile { item }))
-        }
-    });
+            let metadata = match std::fs::symlink_metadata(entry.path()) {
+                Ok(m) => m,
+                Err(e) => {
+                    return WalkItems::One(Some(Err(VgerError::Other(format!(
+                        "stat error for {}: {e}",
+                        entry.path().display()
+                    )))));
+                }
+            };
+
+            let file_type = metadata.file_type();
+            let metadata_summary = fs::summarize_metadata(&metadata, &file_type);
+
+            let (entry_type, link_target) = if file_type.is_dir() {
+                (ItemType::Directory, None)
+            } else if file_type.is_symlink() {
+                match std::fs::read_link(entry.path()) {
+                    Ok(target) => (
+                        ItemType::Symlink,
+                        Some(target.to_string_lossy().to_string()),
+                    ),
+                    Err(e) => {
+                        return WalkItems::One(Some(Err(VgerError::Other(format!(
+                            "readlink: {e}"
+                        )))));
+                    }
+                }
+            } else if file_type.is_file() {
+                (ItemType::RegularFile, None)
+            } else {
+                return WalkItems::Empty; // skip special files
+            };
+
+            let item_path = match &prefix_clone {
+                Some(pfx) => format!("{pfx}/{rel_path}"),
+                None => rel_path,
+            };
+
+            let mut item = Item {
+                path: item_path,
+                entry_type,
+                mode: metadata_summary.mode,
+                uid: metadata_summary.uid,
+                gid: metadata_summary.gid,
+                user: None,
+                group: None,
+                mtime: metadata_summary.mtime_ns,
+                atime: None,
+                ctime: None,
+                size: metadata_summary.size,
+                chunks: Vec::new(),
+                link_target,
+                xattrs: None,
+            };
+
+            if xattrs_enabled {
+                item.xattrs = read_item_xattrs(entry.path());
+            }
+
+            if entry_type == ItemType::RegularFile && metadata_summary.size > 0 {
+                let abs_path = entry.path().to_string_lossy().to_string();
+
+                // Check file cache (read-only).
+                let cache_hit = file_cache.lookup(
+                    &abs_path,
+                    metadata_summary.device,
+                    metadata_summary.inode,
+                    metadata_summary.mtime_ns,
+                    metadata_summary.ctime_ns,
+                    metadata_summary.size,
+                );
+
+                if let Some(cached_refs) = cache_hit {
+                    return WalkItems::One(Some(Ok(WalkEntry::CacheHit {
+                        item,
+                        abs_path,
+                        metadata: metadata_summary,
+                        cached_refs: cached_refs.to_vec(),
+                    })));
+                }
+
+                let file_size = metadata_summary.size;
+                if file_size > segment_size {
+                    // Split large file into segments for lazy parallel processing.
+                    let num_segments = file_size.div_ceil(segment_size) as usize;
+                    let abs_path: Arc<str> = abs_path.into();
+                    WalkItems::Segments {
+                        item: Some(item),
+                        abs_path,
+                        metadata: metadata_summary,
+                        segment_size,
+                        file_size,
+                        num_segments,
+                        next: 0,
+                    }
+                } else {
+                    WalkItems::One(Some(Ok(WalkEntry::File {
+                        file_size,
+                        item,
+                        abs_path,
+                        metadata: metadata_summary,
+                    })))
+                }
+            } else {
+                WalkItems::One(Some(Ok(WalkEntry::NonFile { item })))
+            }
+        });
 
     Box::new(prefix_item.chain(walk_entries))
+}
+
+/// Tracks in-progress accumulation of a segmented large file.
+struct LargeFileAccum {
+    item: Item,
+    abs_path: Arc<str>,
+    metadata: fs::MetadataSummary,
+    next_expected_index: usize,
+    num_segments: usize,
+}
+
+/// Validate and update the segment accumulator state machine.
+///
+/// For segment 0: initializes the accumulator (errors if one already exists).
+/// For continuations: validates ordering, file identity, and segment count.
+/// Returns `Ok(())` on success.
+fn validate_segment_accum(
+    large_file_accum: &mut Option<LargeFileAccum>,
+    item: Option<Item>,
+    abs_path: Arc<str>,
+    metadata: fs::MetadataSummary,
+    segment_index: usize,
+    num_segments: usize,
+) -> Result<()> {
+    if segment_index == 0 {
+        if large_file_accum.is_some() {
+            return Err(VgerError::Other("nested large file segmentation".into()));
+        }
+        let item = item.ok_or_else(|| VgerError::Other("BUG: segment 0 must carry item".into()))?;
+        *large_file_accum = Some(LargeFileAccum {
+            item,
+            abs_path,
+            metadata,
+            next_expected_index: 1,
+            num_segments,
+        });
+    } else {
+        let accum = large_file_accum
+            .as_mut()
+            .ok_or_else(|| VgerError::Other("FileSegment without preceding segment 0".into()))?;
+        if segment_index != accum.next_expected_index {
+            return Err(VgerError::Other(format!(
+                "segment index mismatch: expected {}, got {segment_index}",
+                accum.next_expected_index
+            )));
+        }
+        if abs_path != accum.abs_path {
+            return Err(VgerError::Other("segment file identity mismatch".into()));
+        }
+        if num_segments != accum.num_segments {
+            return Err(VgerError::Other(format!(
+                "segment count mismatch: expected {}, got {num_segments}",
+                accum.num_segments
+            )));
+        }
+        accum.next_expected_index += 1;
+    }
+    Ok(())
+}
+
+/// Commit worker chunks into a repository, updating item and stats.
+///
+/// Shared by `ProcessedFile` and `FileSegment` consumer arms.
+fn process_worker_chunks(
+    repo: &mut Repository,
+    item: &mut Item,
+    chunks: Vec<super::backup::WorkerChunk>,
+    stats: &mut SnapshotStats,
+    compression: Compression,
+    dedup_filter: Option<&xorf::Xor8>,
+) -> Result<()> {
+    for worker_chunk in chunks {
+        match worker_chunk {
+            super::backup::WorkerChunk::Prepared(prepared) => {
+                let size = prepared.uncompressed_size;
+                let existing = if dedup_filter.is_some() {
+                    repo.bump_ref_prefilter_miss(&prepared.chunk_id)
+                } else {
+                    repo.bump_ref_if_exists(&prepared.chunk_id)
+                };
+                if let Some(csize) = existing {
+                    stats.original_size += size as u64;
+                    stats.compressed_size += csize as u64;
+                    item.chunks.push(ChunkRef {
+                        id: prepared.chunk_id,
+                        size,
+                        csize,
+                    });
+                } else {
+                    let csize = repo.commit_prepacked_chunk(
+                        prepared.chunk_id,
+                        prepared.packed,
+                        prepared.uncompressed_size,
+                        PackType::Data,
+                    )?;
+                    stats.original_size += size as u64;
+                    stats.compressed_size += csize as u64;
+                    stats.deduplicated_size += csize as u64;
+                    item.chunks.push(ChunkRef {
+                        id: prepared.chunk_id,
+                        size,
+                        csize,
+                    });
+                }
+            }
+            super::backup::WorkerChunk::Hashed(hashed) => {
+                let size = hashed.data.len() as u32;
+                if let Some(csize) = repo.bump_ref_prefilter_hit(&hashed.chunk_id) {
+                    // True dedup hit — skip transform.
+                    stats.original_size += size as u64;
+                    stats.compressed_size += csize as u64;
+                    item.chunks.push(ChunkRef {
+                        id: hashed.chunk_id,
+                        size,
+                        csize,
+                    });
+                } else {
+                    // False positive — inline compress+encrypt.
+                    let csize = repo.commit_chunk_inline(
+                        hashed.chunk_id,
+                        &hashed.data,
+                        compression,
+                        PackType::Data,
+                    )?;
+                    stats.original_size += size as u64;
+                    stats.compressed_size += csize as u64;
+                    stats.deduplicated_size += csize as u64;
+                    item.chunks.push(ChunkRef {
+                        id: hashed.chunk_id,
+                        size,
+                        csize,
+                    });
+                }
+            }
+        }
+    }
+    Ok(())
 }
 
 /// Consume a single processed entry: dedup check, pack commit, item stream, file cache.
@@ -686,15 +978,11 @@ fn consume_processed_entry(
     item_ptrs: &mut Vec<ChunkId>,
     compression: Compression,
     progress: &mut Option<&mut dyn FnMut(BackupProgressEvent)>,
-    // For LargeFile inline processing:
-    transform_pool: Option<&rayon::ThreadPool>,
-    read_limiter: Option<&ByteRateLimiter>,
-    max_pending_transform_bytes: usize,
-    max_pending_file_actions: usize,
     budget: &ByteBudget,
     dedup_filter: Option<&xorf::Xor8>,
+    large_file_accum: &mut Option<LargeFileAccum>,
 ) -> Result<()> {
-    use super::backup::{append_item_to_stream, emit_stats_progress, flush_regular_file_batch};
+    use super::backup::{append_item_to_stream, emit_stats_progress};
 
     match entry {
         ProcessedEntry::ProcessedFile {
@@ -710,71 +998,7 @@ fn consume_processed_entry(
                 });
             }
 
-            for worker_chunk in chunks {
-                match worker_chunk {
-                    super::backup::WorkerChunk::Prepared(prepared) => {
-                        let size = prepared.uncompressed_size;
-                        let existing = if dedup_filter.is_some() {
-                            repo.bump_ref_prefilter_miss(&prepared.chunk_id)
-                        } else {
-                            repo.bump_ref_if_exists(&prepared.chunk_id)
-                        };
-                        if let Some(csize) = existing {
-                            stats.original_size += size as u64;
-                            stats.compressed_size += csize as u64;
-                            item.chunks.push(ChunkRef {
-                                id: prepared.chunk_id,
-                                size,
-                                csize,
-                            });
-                        } else {
-                            let csize = repo.commit_prepacked_chunk(
-                                prepared.chunk_id,
-                                prepared.packed,
-                                prepared.uncompressed_size,
-                                PackType::Data,
-                            )?;
-                            stats.original_size += size as u64;
-                            stats.compressed_size += csize as u64;
-                            stats.deduplicated_size += csize as u64;
-                            item.chunks.push(ChunkRef {
-                                id: prepared.chunk_id,
-                                size,
-                                csize,
-                            });
-                        }
-                    }
-                    super::backup::WorkerChunk::Hashed(hashed) => {
-                        let size = hashed.data.len() as u32;
-                        if let Some(csize) = repo.bump_ref_prefilter_hit(&hashed.chunk_id) {
-                            // True dedup hit — skip transform.
-                            stats.original_size += size as u64;
-                            stats.compressed_size += csize as u64;
-                            item.chunks.push(ChunkRef {
-                                id: hashed.chunk_id,
-                                size,
-                                csize,
-                            });
-                        } else {
-                            // False positive — inline compress+encrypt.
-                            let csize = repo.commit_chunk_inline(
-                                hashed.chunk_id,
-                                &hashed.data,
-                                compression,
-                                PackType::Data,
-                            )?;
-                            stats.original_size += size as u64;
-                            stats.compressed_size += csize as u64;
-                            stats.deduplicated_size += csize as u64;
-                            item.chunks.push(ChunkRef {
-                                id: hashed.chunk_id,
-                                size,
-                                csize,
-                            });
-                        }
-                    }
-                }
-            }
+            process_worker_chunks(repo, &mut item, chunks, stats, compression, dedup_filter)?;
 
             // Release budget bytes now that chunks are committed.
             budget.release(acquired_bytes);
@@ -803,86 +1027,75 @@ fn consume_processed_entry(
             emit_stats_progress(progress, stats, Some(std::mem::take(&mut item.path)));
         }
 
-        ProcessedEntry::LargeFile {
-            mut item,
+        ProcessedEntry::FileSegment {
+            item,
             abs_path,
             metadata,
+            chunks,
+            acquired_bytes,
+            segment_index,
+            num_segments,
         } => {
-            if let Some(cb) = progress.as_deref_mut() {
-                cb(BackupProgressEvent::FileStarted {
-                    path: item.path.clone(),
-                });
-            }
-
-            let chunk_id_key = *repo.crypto.chunk_id_key();
-            let file = File::open(Path::new(&abs_path)).map_err(VgerError::Io)?;
-            let chunk_stream = chunker::chunk_stream(
-                limits::LimitedReader::new(file, read_limiter),
-                &repo.config.chunker_params,
-            );
-
-            let mut raw_chunks: Vec<Vec<u8>> = Vec::new();
-            let mut pending_bytes: usize = 0;
-
-            for chunk_result in chunk_stream {
-                let chunk = chunk_result.map_err(|e| {
-                    VgerError::Other(format!("chunking failed for {abs_path}: {e}"))
-                })?;
-
-                let data_len = chunk.data.len();
-                pending_bytes = pending_bytes.saturating_add(data_len);
-                raw_chunks.push(chunk.data);
-
-                if pending_bytes >= max_pending_transform_bytes
-                    || raw_chunks.len() >= max_pending_file_actions
-                {
-                    flush_regular_file_batch(
-                        repo,
-                        compression,
-                        &chunk_id_key,
-                        transform_pool,
-                        &mut raw_chunks,
-                        &mut item,
-                        stats,
-                        dedup_filter,
-                    )?;
-                    pending_bytes = 0;
+            // For segment 0, fire progress event before validation consumes `item`.
+            if segment_index == 0 {
+                if let (Some(cb), Some(it)) = (progress.as_deref_mut(), item.as_ref()) {
+                    cb(BackupProgressEvent::FileStarted {
+                        path: it.path.clone(),
+                    });
                 }
             }
 
-            flush_regular_file_batch(
+            validate_segment_accum(
+                large_file_accum,
+                item,
+                abs_path,
+                metadata,
+                segment_index,
+                num_segments,
+            )?;
+
+            // Process chunks via shared helper.
+            let accum = large_file_accum.as_mut().ok_or_else(|| {
+                VgerError::Other("BUG: large_file_accum missing after segment validation".into())
+            })?;
+            process_worker_chunks(
                 repo,
-                compression,
-                &chunk_id_key,
-                transform_pool,
-                &mut raw_chunks,
-                &mut item,
+                &mut accum.item,
+                chunks,
                 stats,
+                compression,
                 dedup_filter,
             )?;
+            budget.release(acquired_bytes);
 
-            stats.nfiles += 1;
+            if segment_index == num_segments - 1 {
+                // Last segment: finalize.
+                let mut accum = large_file_accum.take().ok_or_else(|| {
+                    VgerError::Other("BUG: large_file_accum missing at segment finalization".into())
+                })?;
+                stats.nfiles += 1;
 
-            append_item_to_stream(
-                repo,
-                item_stream,
-                item_ptrs,
-                &item,
-                items_config,
-                compression,
-            )?;
+                append_item_to_stream(
+                    repo,
+                    item_stream,
+                    item_ptrs,
+                    &accum.item,
+                    items_config,
+                    compression,
+                )?;
 
-            new_file_cache.insert(
-                abs_path,
-                metadata.device,
-                metadata.inode,
-                metadata.mtime_ns,
-                metadata.ctime_ns,
-                metadata.size,
-                std::mem::take(&mut item.chunks),
-            );
+                new_file_cache.insert(
+                    accum.abs_path.to_string(),
+                    accum.metadata.device,
+                    accum.metadata.inode,
+                    accum.metadata.mtime_ns,
+                    accum.metadata.ctime_ns,
+                    accum.metadata.size,
+                    std::mem::take(&mut accum.item.chunks),
+                );
 
-            emit_stats_progress(progress, stats, Some(std::mem::take(&mut item.path)));
+                emit_stats_progress(progress, stats, Some(std::mem::take(&mut accum.item.path)));
+            }
         }
 
         ProcessedEntry::CacheHit {
@@ -980,19 +1193,17 @@ pub(crate) fn run_parallel_pipeline(
     read_limiter: Option<&ByteRateLimiter>,
     num_workers: usize,
     readahead_depth: usize,
-    large_file_threshold: u64,
+    segment_size: u64,
     items_config: &ChunkerConfig,
     item_stream: &mut Vec<u8>,
     item_ptrs: &mut Vec<ChunkId>,
     stats: &mut SnapshotStats,
     new_file_cache: &mut FileCache,
     progress: &mut Option<&mut dyn FnMut(BackupProgressEvent)>,
-    transform_pool: Option<&rayon::ThreadPool>,
-    max_pending_transform_bytes: usize,
-    max_pending_file_actions: usize,
     pipeline_buffer_bytes: usize,
     dedup_filter: Option<&xorf::Xor8>,
 ) -> Result<()> {
+    debug_assert!(segment_size > 0, "segment_size must be non-zero");
     let chunk_id_key = *crypto.chunk_id_key();
     let chunker_config = repo.config.chunker_params.clone();
     let budget = ByteBudget::new(pipeline_buffer_bytes);
@@ -1007,6 +1218,7 @@ pub(crate) fn run_parallel_pipeline(
             git_ignore,
             xattrs_enabled,
             file_cache,
+            segment_size,
         );
 
         // Take a reference so the `move` closure captures `&ByteBudget` (which
@@ -1027,7 +1239,6 @@ pub(crate) fn run_parallel_pipeline(
                         compression,
                         &chunker_config,
                         read_limiter,
-                        large_file_threshold,
                         budget_ref,
                         dedup_filter,
                     )
@@ -1042,6 +1253,7 @@ pub(crate) fn run_parallel_pipeline(
         // A `for` loop would move the iterator, making the explicit
         // `drop(parallel_iter)` below impossible.
         let mut consume_err: Option<VgerError> = None;
+        let mut large_file_accum: Option<LargeFileAccum> = None;
         #[allow(clippy::while_let_on_iterator)]
         while let Some(result) = parallel_iter.next() {
             match result.and_then(|entry| {
@@ -1055,12 +1267,9 @@ pub(crate) fn run_parallel_pipeline(
                     item_ptrs,
                     compression,
                     progress,
-                    transform_pool,
-                    read_limiter,
-                    max_pending_transform_bytes,
-                    max_pending_file_actions,
                     &budget,
                     dedup_filter,
+                    &mut large_file_accum,
                 )
             }) {
                 Ok(()) => {}
@@ -1072,6 +1281,16 @@ pub(crate) fn run_parallel_pipeline(
             }
         }
         drop(parallel_iter);
+
+        // Verify no in-progress segmented file was left incomplete.
+        if consume_err.is_none() {
+            if let Some(accum) = &large_file_accum {
+                consume_err = Some(VgerError::Other(format!(
+                    "incomplete segmented file '{}': received {}/{} segments",
+                    accum.abs_path, accum.next_expected_index, accum.num_segments,
+                )));
+            }
+        }
 
         debug_assert!(
             budget.peak_acquired() <= pipeline_buffer_bytes,
@@ -1264,5 +1483,312 @@ mod tests {
         budget.release(bytes);
         budget.acquire(64).unwrap();
         budget.release(64);
+    }
+
+    // -----------------------------------------------------------------------
+    // Segment accumulator validation tests
+    // -----------------------------------------------------------------------
+
+    fn test_item(path: &str) -> Item {
+        Item {
+            path: path.to_string(),
+            entry_type: ItemType::RegularFile,
+            mode: 0o644,
+            uid: 0,
+            gid: 0,
+            user: None,
+            group: None,
+            mtime: 0,
+            atime: None,
+            ctime: None,
+            size: 1024,
+            chunks: Vec::new(),
+            link_target: None,
+            xattrs: None,
+        }
+    }
+
+    fn test_metadata() -> fs::MetadataSummary {
+        fs::MetadataSummary {
+            mode: 0o644,
+            uid: 0,
+            gid: 0,
+            mtime_ns: 0,
+            ctime_ns: 0,
+            device: 0,
+            inode: 0,
+            size: 1024,
+        }
+    }
+
+    #[test]
+    fn segment_out_of_order() {
+        let mut accum: Option<LargeFileAccum> = None;
+        let meta = test_metadata();
+
+        // Feed segment 0.
+        validate_segment_accum(
+            &mut accum,
+            Some(test_item("file_a")),
+            "/tmp/file_a".into(),
+            meta,
+            0,
+            3,
+        )
+        .unwrap();
+
+        // Skip segment 1, feed segment 2 → error.
+        let err =
+            validate_segment_accum(&mut accum, None, "/tmp/file_a".into(), meta, 2, 3).unwrap_err();
+        assert!(
+            err.to_string().contains("segment index mismatch"),
+            "expected 'segment index mismatch', got: {err}"
+        );
+    }
+
+    #[test]
+    fn segment_file_identity_mismatch() {
+        let mut accum: Option<LargeFileAccum> = None;
+        let meta = test_metadata();
+
+        // Feed segment 0 for file A.
+        validate_segment_accum(
+            &mut accum,
+            Some(test_item("file_a")),
+            "/tmp/file_a".into(),
+            meta,
+            0,
+            3,
+        )
+        .unwrap();
+
+        // Feed segment 1 with different abs_path → error.
+        let err =
+            validate_segment_accum(&mut accum, None, "/tmp/file_b".into(), meta, 1, 3).unwrap_err();
+        assert!(
+            err.to_string().contains("segment file identity mismatch"),
+            "expected 'segment file identity mismatch', got: {err}"
+        );
+    }
+
+    #[test]
+    fn segment_nested_start() {
+        let mut accum: Option<LargeFileAccum> = None;
+        let meta = test_metadata();
+
+        // Feed segment 0 for file A (3 segments).
+        validate_segment_accum(
+            &mut accum,
+            Some(test_item("file_a")),
+            "/tmp/file_a".into(),
+            meta,
+            0,
+            3,
+        )
+        .unwrap();
+
+        // Feed segment 0 for file B before file A completes → error.
+        let err = validate_segment_accum(
+            &mut accum,
+            Some(test_item("file_b")),
+            "/tmp/file_b".into(),
+            meta,
+            0,
+            2,
+        )
+        .unwrap_err();
+        assert!(
+            err.to_string().contains("nested large file segmentation"),
+            "expected 'nested large file segmentation', got: {err}"
+        );
+    }
+
+    #[test]
+    fn segment_without_start() {
+        let mut accum: Option<LargeFileAccum> = None;
+        let meta = test_metadata();
+
+        // Feed segment 1 with no prior segment 0 → error.
+        let err =
+            validate_segment_accum(&mut accum, None, "/tmp/file_a".into(), meta, 1, 3).unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("FileSegment without preceding segment 0"),
+            "expected 'FileSegment without preceding segment 0', got: {err}"
+        );
+    }
+
+    #[test]
+    fn incomplete_accumulator_check() {
+        let mut accum: Option<LargeFileAccum> = None;
+        let meta = test_metadata();
+
+        // Feed segment 0 and 1 of a 3-segment file, but not segment 2.
+        validate_segment_accum(
+            &mut accum,
+            Some(test_item("file_a")),
+            "/tmp/file_a".into(),
+            meta,
+            0,
+            3,
+        )
+        .unwrap();
+        validate_segment_accum(&mut accum, None, "/tmp/file_a".into(), meta, 1, 3).unwrap();
+
+        // Simulate the post-loop check from run_parallel_pipeline.
+        assert!(accum.is_some(), "accum should still be active");
+        let a = accum.as_ref().unwrap();
+        assert_eq!(a.next_expected_index, 2);
+        assert_eq!(a.num_segments, 3);
+        // The real pipeline generates this error:
+        let err_msg = format!(
+            "incomplete segmented file '{}': received {}/{} segments",
+            a.abs_path, a.next_expected_index, a.num_segments,
+        );
+        assert!(
+            err_msg.contains("incomplete segmented file"),
+            "expected incomplete message, got: {err_msg}"
+        );
+    }
+
+    #[test]
+    fn segment_count_mismatch() {
+        let mut accum: Option<LargeFileAccum> = None;
+        let meta = test_metadata();
+
+        // Feed segment 0 with num_segments=3.
+        validate_segment_accum(
+            &mut accum,
+            Some(test_item("file_a")),
+            "/tmp/file_a".into(),
+            meta,
+            0,
+            3,
+        )
+        .unwrap();
+
+        // Feed segment 1 with different num_segments → error.
+        let err =
+            validate_segment_accum(&mut accum, None, "/tmp/file_a".into(), meta, 1, 5).unwrap_err();
+        assert!(
+            err.to_string().contains("segment count mismatch"),
+            "expected 'segment count mismatch', got: {err}"
+        );
+    }
+
+    #[test]
+    fn segment_happy_path() {
+        let mut accum: Option<LargeFileAccum> = None;
+        let meta = test_metadata();
+
+        // Feed all 3 segments in order.
+        for i in 0..3 {
+            let item = if i == 0 {
+                Some(test_item("file_a"))
+            } else {
+                None
+            };
+            validate_segment_accum(&mut accum, item, "/tmp/file_a".into(), meta, i, 3).unwrap();
+        }
+
+        // Accumulator should be present with next_expected_index == 3.
+        let a = accum.as_ref().unwrap();
+        assert_eq!(a.next_expected_index, 3);
+        assert_eq!(a.num_segments, 3);
+        assert_eq!(a.item.path, "file_a");
+        assert_eq!(&*a.abs_path, "/tmp/file_a");
+    }
+
+    // -----------------------------------------------------------------------
+    // WalkItems iterator tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn walk_items_empty() {
+        let mut it = WalkItems::Empty;
+        assert_eq!(it.size_hint(), (0, Some(0)));
+        assert!(it.next().is_none());
+    }
+
+    #[test]
+    fn walk_items_one() {
+        let entry = Ok(WalkEntry::NonFile {
+            item: test_item("x"),
+        });
+        let mut it = WalkItems::One(Some(entry));
+        assert_eq!(it.size_hint(), (1, Some(1)));
+        assert!(it.next().is_some());
+        assert_eq!(it.size_hint(), (0, Some(0)));
+        assert!(it.next().is_none());
+    }
+
+    #[test]
+    fn walk_items_segments_lazy() {
+        let meta = test_metadata();
+        let mut it = WalkItems::Segments {
+            item: Some(test_item("big")),
+            abs_path: "/tmp/big".into(),
+            metadata: meta,
+            segment_size: 100,
+            file_size: 250,
+            num_segments: 3,
+            next: 0,
+        };
+        assert_eq!(it.size_hint(), (3, Some(3)));
+
+        // Segment 0 should carry Some(item).
+        let seg0 = it.next().unwrap().unwrap();
+        if let WalkEntry::FileSegment {
+            item,
+            segment_index,
+            offset,
+            len,
+            ..
+        } = seg0
+        {
+            assert!(item.is_some(), "segment 0 must carry item");
+            assert_eq!(segment_index, 0);
+            assert_eq!(offset, 0);
+            assert_eq!(len, 100);
+        } else {
+            panic!("expected FileSegment");
+        }
+
+        // Segment 1 should carry None item.
+        let seg1 = it.next().unwrap().unwrap();
+        if let WalkEntry::FileSegment {
+            item,
+            segment_index,
+            offset,
+            len,
+            ..
+        } = seg1
+        {
+            assert!(item.is_none(), "continuation must carry None item");
+            assert_eq!(segment_index, 1);
+            assert_eq!(offset, 100);
+            assert_eq!(len, 100);
+        } else {
+            panic!("expected FileSegment");
+        }
+
+        // Segment 2 (last): len should be remainder.
+        let seg2 = it.next().unwrap().unwrap();
+        if let WalkEntry::FileSegment {
+            segment_index,
+            offset,
+            len,
+            ..
+        } = seg2
+        {
+            assert_eq!(segment_index, 2);
+            assert_eq!(offset, 200);
+            assert_eq!(len, 50);
+        } else {
+            panic!("expected FileSegment");
+        }
+
+        assert_eq!(it.size_hint(), (0, Some(0)));
+        assert!(it.next().is_none());
     }
 }

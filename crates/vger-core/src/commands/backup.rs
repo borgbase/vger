@@ -591,12 +591,6 @@ fn build_transform_pool(max_threads: usize) -> Result<Option<rayon::ThreadPool>>
         .map_err(|e| VgerError::Other(format!("failed to create rayon thread pool: {e}")))
 }
 
-fn compute_large_file_threshold(pipeline_buffer_bytes: usize, num_workers: usize) -> u64 {
-    // Avoid potential overflow in `num_workers * 2` for pathological configs.
-    let denom = num_workers.max(1).saturating_mul(2);
-    (pipeline_buffer_bytes / denom.max(1)) as u64
-}
-
 /// Default timeout for command_dump execution (1 hour).
 const COMMAND_DUMP_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(3600);
 
@@ -1311,12 +1305,8 @@ pub fn run_with_progress(
     };
 
     let transform_pool = if pipeline_depth > 0 {
-        // Pipeline workers handle most parallelism. Size rayon for
-        // large-file inline flushes: half the budget.
-        // build_transform_pool returns None when threads==1,
-        // preserving max_threads=1 → sequential semantics.
-        let rayon_threads = num_workers.div_ceil(2);
-        build_transform_pool(rayon_threads)?
+        // Pipeline mode doesn't need a rayon pool (no inline large-file processing).
+        None
     } else {
         build_transform_pool(config.limits.cpu.max_threads)?
     };
@@ -1394,8 +1384,15 @@ pub fn run_with_progress(
             // → readahead → sequential consumer (dedup + pack commit).
             let file_cache_snapshot = repo.take_file_cache();
             let crypto = std::sync::Arc::clone(&repo.crypto);
-            let large_file_threshold =
-                compute_large_file_threshold(pipeline_buffer_bytes, num_workers);
+            let configured_segment = config.limits.cpu.segment_size_bytes();
+            let segment_size = configured_segment.min(pipeline_buffer_bytes) as u64;
+            if configured_segment > segment_size as usize {
+                warn!(
+                    configured = configured_segment,
+                    clamped_to = %segment_size,
+                    "segment_size clamped to pipeline_buffer_bytes"
+                );
+            }
 
             super::pipeline::run_parallel_pipeline(
                 repo,
@@ -1412,16 +1409,13 @@ pub fn run_with_progress(
                 read_limiter.as_deref(),
                 num_workers,
                 pipeline_depth,
-                large_file_threshold,
+                segment_size,
                 &items_config,
                 &mut item_stream,
                 &mut item_ptrs,
                 &mut stats,
                 &mut new_file_cache,
                 &mut progress,
-                transform_pool.as_ref(),
-                max_pending_transform_bytes,
-                max_pending_file_actions,
                 pipeline_buffer_bytes,
                 dedup_filter.as_deref(),
             )?;
@@ -1587,29 +1581,5 @@ mod tests {
         };
         let result = execute_dump_command(&dump).unwrap();
         assert!(result.is_empty());
-    }
-
-    #[test]
-    fn compute_large_file_threshold_scales_with_workers() {
-        let pipeline_buffer_bytes = 32 * 1024 * 1024;
-        assert_eq!(
-            compute_large_file_threshold(pipeline_buffer_bytes, 1),
-            16 * 1024 * 1024
-        );
-        assert_eq!(
-            compute_large_file_threshold(pipeline_buffer_bytes, 2),
-            8 * 1024 * 1024
-        );
-        // 0 workers is treated as "at least one" defensively.
-        assert_eq!(
-            compute_large_file_threshold(pipeline_buffer_bytes, 0),
-            16 * 1024 * 1024
-        );
-    }
-
-    #[test]
-    fn compute_large_file_threshold_handles_overflowing_worker_math() {
-        // Pathological config should not overflow/panic.
-        assert_eq!(compute_large_file_threshold(1024, usize::MAX), 0);
     }
 }

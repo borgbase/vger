@@ -44,6 +44,11 @@ pub struct CpuLimitsConfig {
     /// Max in-flight chunk bytes in the pipeline channel (default: 256 MiB, range: 32-1024).
     #[serde(default)]
     pub pipeline_buffer_mib: Option<usize>,
+    /// Segment size in MiB for large-file pipeline splitting (default: 64, range: 16-256).
+    /// Files larger than this are split into segments for parallel worker processing.
+    /// Changing this value may reduce dedup effectiveness against prior snapshots.
+    #[serde(default)]
+    pub segment_size_mib: Option<usize>,
 }
 
 impl CpuLimitsConfig {
@@ -89,6 +94,13 @@ impl CpuLimitsConfig {
                 )));
             }
         }
+        if let Some(n) = self.segment_size_mib {
+            if !(16..=256).contains(&n) {
+                return Err(VgerError::Config(format!(
+                    "limits.cpu.segment_size_mib must be in [16, 256], got {n}"
+                )));
+            }
+        }
         Ok(())
     }
 
@@ -116,6 +128,11 @@ impl CpuLimitsConfig {
     /// Effective pipeline buffer size in bytes.
     pub fn pipeline_buffer_bytes(&self) -> usize {
         self.pipeline_buffer_mib.unwrap_or(256) * 1024 * 1024
+    }
+
+    /// Effective segment size in bytes for large-file pipeline splitting.
+    pub fn segment_size_bytes(&self) -> usize {
+        self.segment_size_mib.unwrap_or(64) * 1024 * 1024
     }
 }
 
