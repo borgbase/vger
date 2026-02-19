@@ -4,7 +4,7 @@ use crate::config::VgerConfig;
 use crate::crypto::chunk_id::ChunkId;
 use crate::crypto::pack_id::PackId;
 use crate::error::{Result, VgerError};
-use crate::repo::format::{unpack_object_expect, ObjectType};
+use crate::repo::format::{unpack_object_expect_with_context, ObjectType};
 use crate::repo::manifest::SnapshotEntry;
 use crate::repo::Repository;
 use crate::snapshot::item::Item;
@@ -51,8 +51,12 @@ pub fn load_snapshot_meta(repo: &Repository, snapshot_name: &str) -> Result<Snap
         .get(&format!("snapshots/{snapshot_id_hex}"))?
         .ok_or_else(|| VgerError::SnapshotNotFound(snapshot_name.into()))?;
 
-    let meta_bytes =
-        unpack_object_expect(&meta_data, ObjectType::SnapshotMeta, repo.crypto.as_ref())?;
+    let meta_bytes = unpack_object_expect_with_context(
+        &meta_data,
+        ObjectType::SnapshotMeta,
+        &entry.id,
+        repo.crypto.as_ref(),
+    )?;
     Ok(rmp_serde::from_slice(&meta_bytes)?)
 }
 

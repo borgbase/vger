@@ -2,7 +2,9 @@ use crate::crypto::aes_gcm::Aes256GcmEngine;
 use crate::crypto::PlaintextEngine;
 use crate::error::VgerError;
 use crate::repo::format::{
-    pack_object, pack_object_streaming, unpack_object, unpack_object_expect, ObjectType,
+    pack_object, pack_object_streaming, pack_object_with_context, unpack_object,
+    unpack_object_expect, unpack_object_expect_with_context, unpack_object_with_context,
+    ObjectType,
 };
 
 #[test]
@@ -134,4 +136,36 @@ fn pack_object_streaming_matches_pack_object() {
         })
         .unwrap();
     assert_eq!(packed_normal, packed_streaming);
+}
+
+#[test]
+fn context_bound_roundtrip_encrypted() {
+    let engine = Aes256GcmEngine::new(&[0x11; 32], &[0x22; 32]);
+    let data = b"context-bound payload";
+    let context = b"chunk-identity";
+    let packed = pack_object_with_context(ObjectType::ChunkData, context, data, &engine).unwrap();
+    let unpacked =
+        unpack_object_expect_with_context(&packed, ObjectType::ChunkData, context, &engine)
+            .unwrap();
+    assert_eq!(unpacked, data);
+}
+
+#[test]
+fn context_bound_wrong_context_fails() {
+    let engine = Aes256GcmEngine::new(&[0x11; 32], &[0x22; 32]);
+    let packed =
+        pack_object_with_context(ObjectType::ChunkData, b"chunk-a", b"ciphertext", &engine)
+            .unwrap();
+    let err = unpack_object_with_context(&packed, b"chunk-b", &engine).unwrap_err();
+    assert!(matches!(err, VgerError::DecryptionFailed));
+}
+
+#[test]
+fn context_bound_unpack_rejects_legacy_object() {
+    let engine = Aes256GcmEngine::new(&[0x11; 32], &[0x22; 32]);
+    let packed = pack_object(ObjectType::Manifest, b"legacy-manifest", &engine).unwrap();
+    let err =
+        unpack_object_expect_with_context(&packed, ObjectType::Manifest, b"manifest", &engine)
+            .unwrap_err();
+    assert!(matches!(err, VgerError::DecryptionFailed));
 }

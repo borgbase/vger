@@ -1,6 +1,9 @@
 use crate::crypto::CryptoEngine;
 use crate::error::{Result, VgerError};
 
+/// Domain-separation marker for object identity binding in AEAD AAD.
+const OBJECT_CONTEXT_AAD_PREFIX: &[u8] = b"vger:object-context:v1\0";
+
 /// Object type tags for the repo envelope format.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(u8)]
@@ -29,6 +32,27 @@ impl ObjectType {
     }
 }
 
+fn legacy_aad(tag: u8) -> [u8; 1] {
+    [tag]
+}
+
+fn contextual_aad(tag: u8, context: &[u8]) -> Vec<u8> {
+    let mut aad = Vec::with_capacity(1 + OBJECT_CONTEXT_AAD_PREFIX.len() + context.len());
+    aad.push(tag);
+    aad.extend_from_slice(OBJECT_CONTEXT_AAD_PREFIX);
+    aad.extend_from_slice(context);
+    aad
+}
+
+fn parse_object_envelope(data: &[u8]) -> Result<(u8, ObjectType, &[u8])> {
+    if data.is_empty() {
+        return Err(VgerError::InvalidFormat("empty object".into()));
+    }
+    let tag = data[0];
+    let obj_type = ObjectType::from_u8(tag)?;
+    Ok((tag, obj_type, &data[1..]))
+}
+
 /// Serialize a typed payload into an encrypted repo object.
 ///
 /// Wire format (encrypted): `[1-byte type_tag][encrypted_blob]`
@@ -41,7 +65,28 @@ pub fn pack_object(
     crypto: &dyn CryptoEngine,
 ) -> Result<Vec<u8>> {
     let tag = obj_type as u8;
-    let aad = [tag]; // authenticate the type tag
+    let aad = legacy_aad(tag); // authenticate the type tag
+    let encrypted = crypto.encrypt(plaintext, &aad)?;
+
+    let mut out = Vec::with_capacity(1 + encrypted.len());
+    out.push(tag);
+    out.extend_from_slice(&encrypted);
+    Ok(out)
+}
+
+/// Serialize a typed payload into an encrypted repo object and bind it to an
+/// object identity context.
+///
+/// Decryption should use `unpack_object_with_context` /
+/// `unpack_object_expect_with_context`.
+pub fn pack_object_with_context(
+    obj_type: ObjectType,
+    context: &[u8],
+    plaintext: &[u8],
+    crypto: &dyn CryptoEngine,
+) -> Result<Vec<u8>> {
+    let tag = obj_type as u8;
+    let aad = contextual_aad(tag, context);
     let encrypted = crypto.encrypt(plaintext, &aad)?;
 
     let mut out = Vec::with_capacity(1 + encrypted.len());
@@ -69,7 +114,47 @@ where
     F: FnOnce(&mut Vec<u8>) -> Result<()>,
 {
     let tag = obj_type as u8;
-    let aad = [tag];
+    let aad = legacy_aad(tag);
+
+    if crypto.is_encrypting() {
+        // Layout: [tag][nonce 12][plaintext → ciphertext][tag 16]
+        let mut buf = Vec::with_capacity(1 + 12 + estimated_plaintext_size + 16);
+        buf.push(tag);
+        // Reserve 12 bytes for the nonce (filled after encryption)
+        buf.extend_from_slice(&[0u8; 12]);
+        // Let the caller write plaintext starting at offset 13
+        write_plaintext(&mut buf)?;
+        // Encrypt the plaintext region in-place
+        let plaintext_start = 1 + 12; // after tag + nonce placeholder
+        let (nonce, gcm_tag) =
+            crypto.encrypt_in_place_detached(&mut buf[plaintext_start..], &aad)?;
+        // Fill in the nonce
+        buf[1..13].copy_from_slice(&nonce);
+        // Append the authentication tag
+        buf.extend_from_slice(&gcm_tag);
+        Ok(buf)
+    } else {
+        // Plaintext engine: [tag][plaintext]
+        let mut buf = Vec::with_capacity(1 + estimated_plaintext_size);
+        buf.push(tag);
+        write_plaintext(&mut buf)?;
+        Ok(buf)
+    }
+}
+
+/// Streaming variant of `pack_object_with_context`.
+pub fn pack_object_streaming_with_context<F>(
+    obj_type: ObjectType,
+    context: &[u8],
+    estimated_plaintext_size: usize,
+    crypto: &dyn CryptoEngine,
+    write_plaintext: F,
+) -> Result<Vec<u8>>
+where
+    F: FnOnce(&mut Vec<u8>) -> Result<()>,
+{
+    let tag = obj_type as u8;
+    let aad = contextual_aad(tag, context);
 
     if crypto.is_encrypting() {
         // Layout: [tag][nonce 12][plaintext → ciphertext][tag 16]
@@ -100,13 +185,21 @@ where
 /// Deserialize and decrypt a repo object.
 /// Returns `(object_type, plaintext)`.
 pub fn unpack_object(data: &[u8], crypto: &dyn CryptoEngine) -> Result<(ObjectType, Vec<u8>)> {
-    if data.is_empty() {
-        return Err(VgerError::InvalidFormat("empty object".into()));
-    }
-    let tag = data[0];
-    let obj_type = ObjectType::from_u8(tag)?;
-    let aad = [tag];
-    let plaintext = crypto.decrypt(&data[1..], &aad)?;
+    let (tag, obj_type, encrypted) = parse_object_envelope(data)?;
+    let aad = legacy_aad(tag);
+    let plaintext = crypto.decrypt(encrypted, &aad)?;
+    Ok((obj_type, plaintext))
+}
+
+/// Deserialize and decrypt a repo object bound to `context`.
+pub fn unpack_object_with_context(
+    data: &[u8],
+    context: &[u8],
+    crypto: &dyn CryptoEngine,
+) -> Result<(ObjectType, Vec<u8>)> {
+    let (tag, obj_type, encrypted) = parse_object_envelope(data)?;
+    let aad = contextual_aad(tag, context);
+    let plaintext = crypto.decrypt(encrypted, &aad)?;
     Ok((obj_type, plaintext))
 }
 
@@ -117,6 +210,23 @@ pub fn unpack_object_expect(
     crypto: &dyn CryptoEngine,
 ) -> Result<Vec<u8>> {
     let (obj_type, plaintext) = unpack_object(data, crypto)?;
+    if obj_type != expected_type {
+        return Err(VgerError::InvalidFormat(format!(
+            "unexpected object type: expected {:?}, got {:?}",
+            expected_type, obj_type
+        )));
+    }
+    Ok(plaintext)
+}
+
+/// Context-bound variant of `unpack_object_expect`.
+pub fn unpack_object_expect_with_context(
+    data: &[u8],
+    expected_type: ObjectType,
+    context: &[u8],
+    crypto: &dyn CryptoEngine,
+) -> Result<Vec<u8>> {
+    let (obj_type, plaintext) = unpack_object_with_context(data, context, crypto)?;
     if obj_type != expected_type {
         return Err(VgerError::InvalidFormat(format!(
             "unexpected object type: expected {:?}, got {:?}",

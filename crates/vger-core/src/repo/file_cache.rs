@@ -8,7 +8,9 @@ use crate::crypto::CryptoEngine;
 use crate::error::{Result, VgerError};
 use crate::snapshot::item::ChunkRef;
 
-use super::format::{pack_object_streaming, unpack_object_expect, ObjectType};
+use super::format::{
+    pack_object_streaming_with_context, unpack_object_expect_with_context, ObjectType,
+};
 
 /// Compute the per-repo cache directory.
 ///
@@ -229,7 +231,12 @@ impl FileCache {
                 Ok(d) => d,
                 Err(_) => return Self::new(),
             };
-            match unpack_object_expect(&data, ObjectType::FileCache, crypto) {
+            match unpack_object_expect_with_context(
+                &data,
+                ObjectType::FileCache,
+                b"filecache",
+                crypto,
+            ) {
                 Ok(pt) => pt,
                 Err(_) => {
                     debug!("file cache: failed to decrypt, starting fresh");
@@ -262,9 +269,13 @@ impl FileCache {
         // Stream-serialize directly into the output buffer to avoid a separate
         // plaintext allocation (~89M savings for large caches).
         let estimated = self.entries.len().saturating_mul(240);
-        let packed = pack_object_streaming(ObjectType::FileCache, estimated, crypto, |buf| {
-            Ok(rmp_serde::encode::write(buf, self)?)
-        })?;
+        let packed = pack_object_streaming_with_context(
+            ObjectType::FileCache,
+            b"filecache",
+            estimated,
+            crypto,
+            |buf| Ok(rmp_serde::encode::write(buf, self)?),
+        )?;
         debug!(
             entries = self.entries.len(),
             estimated_bytes = estimated,

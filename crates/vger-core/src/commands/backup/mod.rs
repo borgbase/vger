@@ -20,7 +20,7 @@ use crate::error::{Result, VgerError};
 use crate::limits::{self, ByteRateLimiter};
 use crate::platform::fs;
 use crate::repo::file_cache::FileCache;
-use crate::repo::format::{pack_object, ObjectType};
+use crate::repo::format::{pack_object_with_context, ObjectType};
 use crate::repo::manifest::SnapshotEntry;
 use crate::repo::pack::PackType;
 use crate::repo::Repository;
@@ -353,9 +353,14 @@ pub fn run_with_progress(
         let mut snapshot_id = vec![0u8; 32];
         rand::thread_rng().fill_bytes(&mut snapshot_id);
 
-        let meta_bytes = rmp_serde::to_vec(&snapshot_meta)?;
-        let meta_packed = pack_object(ObjectType::SnapshotMeta, &meta_bytes, repo.crypto.as_ref())?;
         let snapshot_id_hex = hex::encode(&snapshot_id);
+        let meta_bytes = rmp_serde::to_vec(&snapshot_meta)?;
+        let meta_packed = pack_object_with_context(
+            ObjectType::SnapshotMeta,
+            &snapshot_id,
+            &meta_bytes,
+            repo.crypto.as_ref(),
+        )?;
         repo.storage
             .put(&format!("snapshots/{snapshot_id_hex}"), &meta_packed)?;
 

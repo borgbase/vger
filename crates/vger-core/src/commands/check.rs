@@ -5,7 +5,7 @@ use crate::config::VgerConfig;
 use crate::crypto::chunk_id::ChunkId;
 use crate::crypto::pack_id::PackId;
 use crate::error::Result;
-use crate::repo::format::{unpack_object_expect, ObjectType};
+use crate::repo::format::{unpack_object_expect_with_context, ObjectType};
 use crate::repo::pack::read_blob_from_pack;
 use crate::snapshot::item::ItemType;
 
@@ -218,17 +218,21 @@ pub fn run_with_progress(
             };
 
             // Decrypt
-            let compressed =
-                match unpack_object_expect(&raw, ObjectType::ChunkData, repo.crypto.as_ref()) {
-                    Ok(bytes) => bytes,
-                    Err(e) => {
-                        errors.push(CheckError {
-                            context: "verify-data".into(),
-                            message: format!("chunk {chunk_id}: decrypt failed: {e}"),
-                        });
-                        continue;
-                    }
-                };
+            let compressed = match unpack_object_expect_with_context(
+                &raw,
+                ObjectType::ChunkData,
+                &chunk_id.0,
+                repo.crypto.as_ref(),
+            ) {
+                Ok(bytes) => bytes,
+                Err(e) => {
+                    errors.push(CheckError {
+                        context: "verify-data".into(),
+                        message: format!("chunk {chunk_id}: decrypt failed: {e}"),
+                    });
+                    continue;
+                }
+            };
 
             // Decompress
             let plaintext = match compress::decompress(&compressed) {

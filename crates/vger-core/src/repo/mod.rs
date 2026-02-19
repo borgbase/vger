@@ -27,7 +27,10 @@ use crate::index::{ChunkIndex, DedupIndex, IndexDelta};
 use crate::storage::StorageBackend;
 
 use self::file_cache::FileCache;
-use self::format::{pack_object, pack_object_streaming, unpack_object_expect, ObjectType};
+use self::format::{
+    pack_object_streaming_with_context, pack_object_with_context,
+    unpack_object_expect_with_context, ObjectType,
+};
 use self::manifest::Manifest;
 use self::pack::{
     compute_data_pack_target, compute_tree_pack_target, read_blob_from_pack, PackType, PackWriter,
@@ -58,6 +61,9 @@ fn default_max_pack_size() -> u32 {
 
 /// Maximum total weight (bytes) of cached blobs in the blob cache.
 const BLOB_CACHE_MAX_BYTES: usize = 32 * 1024 * 1024; // 32 MiB
+
+const MANIFEST_OBJECT_CONTEXT: &[u8] = b"manifest";
+const INDEX_OBJECT_CONTEXT: &[u8] = b"index";
 
 /// FIFO blob cache bounded by total weight in bytes.
 /// Caches decrypted+decompressed chunks to avoid redundant storage reads.
@@ -250,13 +256,23 @@ impl Repository {
         // Store empty manifest
         let manifest = Manifest::new();
         let manifest_bytes = rmp_serde::to_vec(&manifest)?;
-        let manifest_packed = pack_object(ObjectType::Manifest, &manifest_bytes, crypto.as_ref())?;
+        let manifest_packed = pack_object_with_context(
+            ObjectType::Manifest,
+            MANIFEST_OBJECT_CONTEXT,
+            &manifest_bytes,
+            crypto.as_ref(),
+        )?;
         storage.put("manifest", &manifest_packed)?;
 
         // Store empty chunk index
         let chunk_index = ChunkIndex::new();
         let index_bytes = rmp_serde::to_vec(&chunk_index)?;
-        let index_packed = pack_object(ObjectType::ChunkIndex, &index_bytes, crypto.as_ref())?;
+        let index_packed = pack_object_with_context(
+            ObjectType::ChunkIndex,
+            INDEX_OBJECT_CONTEXT,
+            &index_bytes,
+            crypto.as_ref(),
+        )?;
         storage.put("index", &index_packed)?;
 
         // Create directory structure
@@ -393,8 +409,12 @@ impl Repository {
         let manifest_data = storage
             .get("manifest")?
             .ok_or_else(|| VgerError::InvalidFormat("missing manifest".into()))?;
-        let manifest_bytes =
-            unpack_object_expect(&manifest_data, ObjectType::Manifest, crypto.as_ref())?;
+        let manifest_bytes = unpack_object_expect_with_context(
+            &manifest_data,
+            ObjectType::Manifest,
+            MANIFEST_OBJECT_CONTEXT,
+            crypto.as_ref(),
+        )?;
         let manifest: Manifest = rmp_serde::from_slice(&manifest_bytes)?;
 
         // Load file cache from local disk (not from the repo).
@@ -764,16 +784,21 @@ impl Repository {
 
         if self.manifest_dirty {
             let manifest_bytes = rmp_serde::to_vec(&self.manifest)?;
-            let manifest_packed =
-                pack_object(ObjectType::Manifest, &manifest_bytes, self.crypto.as_ref())?;
+            let manifest_packed = pack_object_with_context(
+                ObjectType::Manifest,
+                MANIFEST_OBJECT_CONTEXT,
+                &manifest_bytes,
+                self.crypto.as_ref(),
+            )?;
             self.storage.put("manifest", &manifest_packed)?;
             self.manifest_dirty = false;
         }
 
         if self.index_dirty {
             let estimated = self.chunk_index.len().saturating_mul(80);
-            let index_packed = pack_object_streaming(
+            let index_packed = pack_object_streaming_with_context(
                 ObjectType::ChunkIndex,
+                INDEX_OBJECT_CONTEXT,
                 estimated,
                 self.crypto.as_ref(),
                 |buf| Ok(rmp_serde::encode::write(buf, &self.chunk_index)?),
@@ -933,8 +958,12 @@ impl Repository {
     /// Reload the full chunk index from storage.
     fn reload_full_index(&self) -> Result<ChunkIndex> {
         if let Some(index_data) = self.storage.get("index")? {
-            let index_bytes =
-                unpack_object_expect(&index_data, ObjectType::ChunkIndex, self.crypto.as_ref())?;
+            let index_bytes = unpack_object_expect_with_context(
+                &index_data,
+                ObjectType::ChunkIndex,
+                INDEX_OBJECT_CONTEXT,
+                self.crypto.as_ref(),
+            )?;
             Ok(rmp_serde::from_slice(&index_bytes)?)
         } else {
             Ok(ChunkIndex::new())
@@ -1028,7 +1057,12 @@ impl Repository {
             "inline commit: chunk_id mismatch"
         );
         let compressed = compress::compress(compression, data)?;
-        let packed = pack_object(ObjectType::ChunkData, &compressed, self.crypto.as_ref())?;
+        let packed = pack_object_with_context(
+            ObjectType::ChunkData,
+            &chunk_id.0,
+            &compressed,
+            self.crypto.as_ref(),
+        )?;
         self.commit_prepacked_chunk(chunk_id, packed, data.len() as u32, pack_type)
     }
 
@@ -1148,7 +1182,12 @@ impl Repository {
         let uncompressed_size = data.len() as u32;
 
         // Encrypt and wrap in repo object envelope
-        let packed = pack_object(ObjectType::ChunkData, &compressed, self.crypto.as_ref())?;
+        let packed = pack_object_with_context(
+            ObjectType::ChunkData,
+            &chunk_id.0,
+            &compressed,
+            self.crypto.as_ref(),
+        )?;
         let stored_size =
             self.commit_prepacked_chunk(chunk_id, packed, uncompressed_size, pack_type)?;
 
@@ -1187,8 +1226,12 @@ impl Repository {
 
         let blob_data =
             read_blob_from_pack(self.storage.as_ref(), pack_id, pack_offset, stored_size)?;
-        let compressed =
-            unpack_object_expect(&blob_data, ObjectType::ChunkData, self.crypto.as_ref())?;
+        let compressed = unpack_object_expect_with_context(
+            &blob_data,
+            ObjectType::ChunkData,
+            &chunk_id.0,
+            self.crypto.as_ref(),
+        )?;
         let plaintext = compress::decompress(&compressed)?;
 
         self.blob_cache.insert(*chunk_id, plaintext.clone());

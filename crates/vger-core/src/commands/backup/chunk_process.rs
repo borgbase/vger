@@ -2,7 +2,7 @@ use crate::compress::Compression;
 use crate::crypto::chunk_id::ChunkId;
 use crate::crypto::CryptoEngine;
 use crate::error::Result;
-use crate::repo::format::{pack_object, ObjectType};
+use crate::repo::format::{pack_object_with_context, ObjectType};
 
 pub(crate) struct PreparedChunk {
     pub(crate) chunk_id: ChunkId,
@@ -40,7 +40,7 @@ pub(super) fn classify_chunk(
         }
     }
     let compressed = crate::compress::compress(compression, &data)?;
-    let packed = pack_object(ObjectType::ChunkData, &compressed, crypto)?;
+    let packed = pack_object_with_context(ObjectType::ChunkData, &chunk_id.0, &compressed, crypto)?;
     Ok(WorkerChunk::Prepared(PreparedChunk {
         chunk_id,
         uncompressed_size: data.len() as u32,

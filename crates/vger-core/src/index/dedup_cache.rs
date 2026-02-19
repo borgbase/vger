@@ -986,8 +986,9 @@ pub fn serialize_full_cache_to_packed_object(
     let estimated = cache.entry_count() as usize * 86;
     let serializable = FullCacheSerializable { cache };
 
-    crate::repo::format::pack_object_streaming(
+    crate::repo::format::pack_object_streaming_with_context(
         crate::repo::format::ObjectType::ChunkIndex,
+        b"index",
         estimated,
         crypto,
         |buf| {
@@ -1436,9 +1437,10 @@ mod tests {
         let packed = serialize_full_cache_to_packed_object(&cache, &engine).unwrap();
 
         // Decrypt (plaintext) and deserialize
-        let plaintext = crate::repo::format::unpack_object_expect(
+        let plaintext = crate::repo::format::unpack_object_expect_with_context(
             &packed,
             crate::repo::format::ObjectType::ChunkIndex,
+            b"index",
             &engine,
         )
         .unwrap();

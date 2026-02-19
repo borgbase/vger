@@ -15,7 +15,7 @@ use crate::crypto::CryptoEngine;
 use crate::error::{Result, VgerError};
 use crate::platform::fs;
 use crate::repo::file_cache::FileCache;
-use crate::repo::format::{unpack_object_expect, ObjectType};
+use crate::repo::format::{unpack_object_expect_with_context, ObjectType};
 #[cfg(test)]
 use crate::snapshot::item::Item;
 use crate::snapshot::item::ItemType;
@@ -647,7 +647,12 @@ fn process_read_group(
         }
 
         let raw = &data[local_offset..local_end];
-        let compressed = unpack_object_expect(raw, ObjectType::ChunkData, crypto)?;
+        let compressed = unpack_object_expect_with_context(
+            raw,
+            ObjectType::ChunkData,
+            &blob.chunk_id.0,
+            crypto,
+        )?;
         let plaintext =
             compress::decompress_with_hint(&compressed, Some(blob.expected_size as usize))?;
         drop(compressed); // free decrypted buffer before file writes
@@ -830,7 +835,7 @@ mod tests {
     use crate::crypto::pack_id::PackId;
     use crate::crypto::PlaintextEngine;
     use crate::index::ChunkIndex;
-    use crate::repo::format::pack_object;
+    use crate::repo::format::pack_object_with_context;
     use crate::snapshot::item::{ChunkRef, Item, ItemType};
     use crate::storage::StorageBackend;
     use crate::testutil::{test_chunk_id_key, MemoryBackend};
@@ -1070,7 +1075,9 @@ mod tests {
         let payload = b"abc";
         let compressed = crate::compress::compress(Compression::None, payload).unwrap();
         let crypto = PlaintextEngine::new(&test_chunk_id_key());
-        let packed = pack_object(ObjectType::ChunkData, &compressed, &crypto).unwrap();
+        let packed =
+            pack_object_with_context(ObjectType::ChunkData, &dummy_chunk_id(0xAA).0, &compressed, &crypto)
+                .unwrap();
 
         let pack_id = dummy_pack_id(9);
         let backend = Arc::new(MemoryBackend::new());
