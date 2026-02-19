@@ -25,7 +25,7 @@ Options:
   --cost-type TYPE       flamegraph cost type: allocations|temporary|leaked|peak (default: peak)
   --perf-events LIST     perf events list for perf stat -e (optional)
   --perf-repeat N        perf stat repeat count -r (default: 1)
-  --perf-record          also run perf record (sampled call graph) after perf stat
+  --perf-record          run perf record (sampled call graph) after perf stat (default: enabled)
   --perf-record-freq N   perf record sample frequency -F (default: 99)
   --skip-build           skip cargo build and use existing target/profiling/vger
   --no-drop-caches       do not call drop_caches before timed profiling run
@@ -89,7 +89,7 @@ COST_TYPE="peak"
 PROFILER="heaptrack"
 PERF_EVENTS=""
 PERF_REPEAT="1"
-PERF_RECORD=0
+PERF_RECORD=1
 PERF_RECORD_FREQ="99"
 SKIP_BUILD=0
 NO_DROP_CACHES=0
