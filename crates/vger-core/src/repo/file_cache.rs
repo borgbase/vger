@@ -1,6 +1,8 @@
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
+use blake2::digest::{Update, VariableOutput};
+use blake2::Blake2bVar;
 use serde::{Deserialize, Serialize};
 use tracing::debug;
 
@@ -25,6 +27,27 @@ pub(crate) fn repo_cache_dir(repo_id: &[u8], cache_dir_override: Option<&Path>) 
     base.map(|b| b.join(hex::encode(repo_id)))
 }
 
+/// 16-byte BLAKE2b hash of a file path, used as a compact HashMap key.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+struct PathHash([u8; 16]);
+
+impl serde::Serialize for PathHash {
+    fn serialize<S: serde::Serializer>(
+        &self,
+        serializer: S,
+    ) -> std::result::Result<S::Ok, S::Error> {
+        serializer.serialize_bytes(&self.0)
+    }
+}
+
+fn hash_path(path: &str) -> PathHash {
+    let mut hasher = Blake2bVar::new(16).expect("valid output size");
+    hasher.update(path.as_bytes());
+    let mut out = [0u8; 16];
+    hasher.finalize_variable(&mut out).expect("correct length");
+    PathHash(out)
+}
+
 /// Cached filesystem metadata for a file, used to skip re-reading unchanged files.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct FileCacheEntry {
@@ -36,11 +59,11 @@ pub struct FileCacheEntry {
     pub chunk_refs: Vec<ChunkRef>,
 }
 
-/// Maps absolute file paths to their cached metadata and chunk references.
+/// Maps path hashes to their cached metadata and chunk references.
 /// Used to skip re-reading, re-chunking, and re-compressing unchanged files.
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize)]
 pub struct FileCache {
-    entries: HashMap<String, FileCacheEntry>,
+    entries: HashMap<PathHash, FileCacheEntry>,
 }
 
 impl FileCache {
@@ -67,7 +90,8 @@ impl FileCache {
         ctime_ns: i64,
         size: u64,
     ) -> Option<&Vec<ChunkRef>> {
-        let entry = self.entries.get(path)?;
+        let key = hash_path(path);
+        let entry = self.entries.get(&key)?;
         if entry.device == device
             && entry.inode == inode
             && entry.mtime_ns == mtime_ns
@@ -84,7 +108,7 @@ impl FileCache {
     #[allow(clippy::too_many_arguments)]
     pub fn insert(
         &mut self,
-        path: String,
+        path: &str,
         device: u64,
         inode: u64,
         mtime_ns: i64,
@@ -93,7 +117,7 @@ impl FileCache {
         chunk_refs: Vec<ChunkRef>,
     ) {
         self.entries.insert(
-            path,
+            hash_path(path),
             FileCacheEntry {
                 device,
                 inode,
@@ -107,7 +131,7 @@ impl FileCache {
 
     /// Return the cached entry for a path, if present.
     pub fn get(&self, path: &str) -> Option<&FileCacheEntry> {
-        self.entries.get(path)
+        self.entries.get(&hash_path(path))
     }
 
     pub fn len(&self) -> usize {
@@ -130,20 +154,21 @@ impl FileCache {
     ) -> usize {
         let before = self.entries.len();
         self.entries
-            .retain(|_path, entry| entry.chunk_refs.iter().all(|cr| chunk_exists(&cr.id)));
+            .retain(|_key, entry| entry.chunk_refs.iter().all(|cr| chunk_exists(&cr.id)));
         before - self.entries.len()
     }
 
     /// Decode from msgpack plaintext with pre-allocated HashMap capacity.
     /// Parses the msgpack envelope to extract the map entry count, applies a
     /// safety cap based on plaintext length, then deserializes entries into a
-    /// pre-sized HashMap. Falls back to rmp_serde::from_slice on parse error.
+    /// pre-sized HashMap. Falls back to legacy String-key deserialization on
+    /// parse error (handles old cache files with String keys).
     fn decode_from_plaintext(plaintext: &[u8]) -> Result<Self> {
         match Self::try_decode_preallocated(plaintext) {
             Ok(cache) => Ok(cache),
             Err(_) => {
-                // Envelope parsing failed — fall back to derived Deserialize.
-                Ok(rmp_serde::from_slice(plaintext)?)
+                // Envelope parsing failed — fall back to legacy String-key format.
+                Self::try_decode_legacy_fallback(plaintext)
             }
         }
     }
@@ -203,9 +228,24 @@ impl FileCache {
         let mut de = rmp_serde::Deserializer::new(remaining);
         let mut entries = HashMap::with_capacity(capacity);
         for _ in 0..map_len {
-            let key: String = Deserialize::deserialize(&mut de)?;
+            let key = PathHashKey::deserialize(&mut de)?;
             let val: FileCacheEntry = Deserialize::deserialize(&mut de)?;
-            entries.insert(key, val);
+            entries.insert(key.0, val);
+        }
+        Ok(FileCache { entries })
+    }
+
+    /// Fallback deserializer for legacy caches with String keys.
+    fn try_decode_legacy_fallback(plaintext: &[u8]) -> Result<Self> {
+        #[derive(Deserialize)]
+        struct LegacyFileCache {
+            entries: HashMap<String, FileCacheEntry>,
+        }
+
+        let legacy: LegacyFileCache = rmp_serde::from_slice(plaintext)?;
+        let mut entries = HashMap::with_capacity(legacy.entries.len());
+        for (path, entry) in legacy.entries {
+            entries.insert(hash_path(&path), entry);
         }
         Ok(FileCache { entries })
     }
@@ -269,7 +309,7 @@ impl FileCache {
         }
         // Stream-serialize directly into the output buffer to avoid a separate
         // plaintext allocation (~89M savings for large caches).
-        let estimated = self.entries.len().saturating_mul(240);
+        let estimated = self.entries.len().saturating_mul(120);
         let packed = pack_object_streaming_with_context(
             ObjectType::FileCache,
             b"filecache",
@@ -285,6 +325,47 @@ impl FileCache {
         );
         std::fs::write(&path, packed)?;
         Ok(())
+    }
+}
+
+/// Visitor that deserializes a map key as either a String (legacy format,
+/// hashed on load) or raw bytes (new compact format, copied directly).
+struct PathHashKey(PathHash);
+
+impl<'de> Deserialize<'de> for PathHashKey {
+    fn deserialize<D: serde::Deserializer<'de>>(
+        deserializer: D,
+    ) -> std::result::Result<Self, D::Error> {
+        struct PathHashKeyVisitor;
+
+        impl<'de> serde::de::Visitor<'de> for PathHashKeyVisitor {
+            type Value = PathHashKey;
+
+            fn expecting(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                formatter.write_str("a string path or 16-byte path hash")
+            }
+
+            fn visit_str<E: serde::de::Error>(
+                self,
+                v: &str,
+            ) -> std::result::Result<PathHashKey, E> {
+                Ok(PathHashKey(hash_path(v)))
+            }
+
+            fn visit_bytes<E: serde::de::Error>(
+                self,
+                v: &[u8],
+            ) -> std::result::Result<PathHashKey, E> {
+                if v.len() != 16 {
+                    return Err(E::invalid_length(v.len(), &"16 bytes"));
+                }
+                let mut arr = [0u8; 16];
+                arr.copy_from_slice(v);
+                Ok(PathHashKey(PathHash(arr)))
+            }
+        }
+
+        deserializer.deserialize_any(PathHashKeyVisitor)
     }
 }
 
@@ -305,7 +386,7 @@ mod tests {
     fn lookup_hit() {
         let mut cache = FileCache::new();
         cache.insert(
-            "/tmp/test.txt".into(),
+            "/tmp/test.txt",
             1,
             1000,
             1234567890,
@@ -323,7 +404,7 @@ mod tests {
     fn lookup_miss_wrong_path() {
         let mut cache = FileCache::new();
         cache.insert(
-            "/tmp/test.txt".into(),
+            "/tmp/test.txt",
             1,
             1000,
             1234567890,
@@ -340,7 +421,7 @@ mod tests {
     fn lookup_miss_changed_mtime() {
         let mut cache = FileCache::new();
         cache.insert(
-            "/tmp/test.txt".into(),
+            "/tmp/test.txt",
             1,
             1000,
             1234567890,
@@ -357,7 +438,7 @@ mod tests {
     fn lookup_miss_changed_ctime() {
         let mut cache = FileCache::new();
         cache.insert(
-            "/tmp/test.txt".into(),
+            "/tmp/test.txt",
             1,
             1000,
             1234567890,
@@ -374,7 +455,7 @@ mod tests {
     fn lookup_miss_changed_size() {
         let mut cache = FileCache::new();
         cache.insert(
-            "/tmp/test.txt".into(),
+            "/tmp/test.txt",
             1,
             1000,
             1234567890,
@@ -391,7 +472,7 @@ mod tests {
     fn lookup_miss_changed_inode() {
         let mut cache = FileCache::new();
         cache.insert(
-            "/tmp/test.txt".into(),
+            "/tmp/test.txt",
             1,
             1000,
             1234567890,
@@ -408,7 +489,7 @@ mod tests {
     fn lookup_miss_changed_device() {
         let mut cache = FileCache::new();
         cache.insert(
-            "/tmp/test.txt".into(),
+            "/tmp/test.txt",
             1,
             1000,
             1234567890,
@@ -425,7 +506,7 @@ mod tests {
     fn insert_overwrites_existing() {
         let mut cache = FileCache::new();
         cache.insert(
-            "/tmp/test.txt".into(),
+            "/tmp/test.txt",
             1,
             1000,
             1234567890,
@@ -434,7 +515,7 @@ mod tests {
             sample_chunk_refs(),
         );
         cache.insert(
-            "/tmp/test.txt".into(),
+            "/tmp/test.txt",
             1,
             1000,
             9999999999,
@@ -467,7 +548,7 @@ mod tests {
         let mut cache = FileCache::new();
         for i in 0..100 {
             cache.insert(
-                format!("/tmp/file_{i}.txt"),
+                &format!("/tmp/file_{i}.txt"),
                 1,
                 1000 + i as u64,
                 1234567890,
@@ -477,7 +558,7 @@ mod tests {
             );
         }
 
-        // Serialize with derived Serialize (struct-as-array).
+        // Serialize with derived Serialize (struct-as-array, PathHash bin keys).
         let plaintext = rmp_serde::to_vec(&cache).unwrap();
 
         // Decode with the pre-allocating decoder.
@@ -519,10 +600,52 @@ mod tests {
 
     #[test]
     fn decode_from_plaintext_falls_back_on_garbage() {
-        // Completely invalid msgpack — should fall through to rmp_serde and error.
+        // Completely invalid msgpack — should fall through to legacy fallback and error.
         let garbage = vec![0xFF, 0xFE, 0xFD];
         let result = FileCache::decode_from_plaintext(&garbage);
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn decode_legacy_string_keys() {
+        // Simulate old format: FileCache serialized with HashMap<String, FileCacheEntry>.
+        // Build a legacy cache using serde's derived serialization for HashMap<String, _>.
+        #[derive(Serialize)]
+        struct LegacyFileCache {
+            entries: HashMap<String, FileCacheEntry>,
+        }
+
+        let mut legacy_entries = HashMap::new();
+        for i in 0..5 {
+            legacy_entries.insert(
+                format!("/tmp/legacy_{i}.txt"),
+                FileCacheEntry {
+                    device: 1,
+                    inode: 2000 + i as u64,
+                    mtime_ns: 1234567890,
+                    ctime_ns: 1234567890,
+                    size: 4096,
+                    chunk_refs: sample_chunk_refs(),
+                },
+            );
+        }
+        let legacy = LegacyFileCache {
+            entries: legacy_entries,
+        };
+        let plaintext = rmp_serde::to_vec(&legacy).unwrap();
+
+        // Decode with our new decoder — should handle String keys via hashing.
+        let decoded = FileCache::decode_from_plaintext(&plaintext).unwrap();
+        assert_eq!(decoded.len(), 5);
+        for i in 0..5 {
+            let path = format!("/tmp/legacy_{i}.txt");
+            assert!(
+                decoded
+                    .lookup(&path, 1, 2000 + i as u64, 1234567890, 1234567890, 4096)
+                    .is_some(),
+                "missing legacy entry for {path}"
+            );
+        }
     }
 
     #[test]

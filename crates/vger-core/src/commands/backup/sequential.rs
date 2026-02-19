@@ -179,7 +179,7 @@ fn flush_cross_file_batch(
         )?;
 
         new_file_cache.insert(
-            file.abs_path,
+            &file.abs_path,
             file.metadata_summary.device,
             file.metadata_summary.inode,
             file.metadata_summary.mtime_ns,
@@ -255,7 +255,7 @@ pub(super) fn process_regular_file_item(
         super::commit::commit_cache_hit(repo, item, cached_refs, stats);
 
         new_file_cache.insert(
-            abs_path,
+            &abs_path,
             metadata_summary.device,
             metadata_summary.inode,
             metadata_summary.mtime_ns,
@@ -320,7 +320,7 @@ pub(super) fn process_regular_file_item(
 
     // Update file cache with the chunks we just stored.
     new_file_cache.insert(
-        abs_path,
+        &abs_path,
         metadata_summary.device,
         metadata_summary.inode,
         metadata_summary.mtime_ns,
@@ -520,7 +520,7 @@ pub(super) fn process_source_path(
                     super::commit::commit_cache_hit(repo, &mut item, cached_refs, stats);
 
                     new_file_cache.insert(
-                        abs_path,
+                        &abs_path,
                         metadata_summary.device,
                         metadata_summary.inode,
                         metadata_summary.mtime_ns,

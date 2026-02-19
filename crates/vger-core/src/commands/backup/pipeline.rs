@@ -344,7 +344,7 @@ fn consume_processed_entry(
             )?;
 
             new_file_cache.insert(
-                abs_path,
+                &abs_path,
                 metadata.device,
                 metadata.inode,
                 metadata.mtime_ns,
@@ -414,7 +414,7 @@ fn consume_processed_entry(
                 )?;
 
                 new_file_cache.insert(
-                    accum.abs_path.to_string(),
+                    &accum.abs_path,
                     accum.metadata.device,
                     accum.metadata.inode,
                     accum.metadata.mtime_ns,
@@ -451,7 +451,7 @@ fn consume_processed_entry(
             )?;
 
             new_file_cache.insert(
-                abs_path,
+                &abs_path,
                 metadata.device,
                 metadata.inode,
                 metadata.mtime_ns,
