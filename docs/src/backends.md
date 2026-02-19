@@ -9,6 +9,22 @@ The repository URL in your config determines which backend is used. S3 storage i
 | SFTP | `sftp://host/path` |
 | REST (vger-server) | `https://host/repo` |
 
+## Transport security
+
+HTTP transport is blocked by default for remote backends.
+
+- `https://...` is accepted by default.
+- `http://...` requires explicit opt-in with `allow_insecure_http: true`.
+
+```yaml
+repositories:
+  - url: "http://localhost:8484/myrepo"  # or endpoint: "http://minio.local:9000"
+    label: "dev-only"
+    allow_insecure_http: true
+```
+
+Use plaintext HTTP only on trusted local/dev networks.
+
 ## Local filesystem
 
 Store backups on a local or mounted disk. No extra configuration needed.
@@ -57,6 +73,7 @@ repositories:
 | `access_key_id` | AWS access key (falls back to AWS SDK defaults) |
 | `secret_access_key` | AWS secret key |
 | `endpoint` | Override the endpoint derived from the URL |
+| `allow_insecure_http` | Permit `http://` repository URL or endpoint (unsafe; default: `false`) |
 
 ## SFTP
 
@@ -99,6 +116,7 @@ repositories:
 | Field | Description |
 |-------|-------------|
 | `rest_token` | Bearer token sent as `Authorization: Bearer <token>` |
+| `allow_insecure_http` | Permit `http://` REST URLs (unsafe; default: `false`) |
 
 See [Server Mode](server-mode.md) for how to set up and configure the server.
 

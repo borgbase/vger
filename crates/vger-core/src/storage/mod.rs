@@ -244,6 +244,9 @@ pub fn parse_repo_url(raw: &str) -> Result<ParsedUrl> {
 /// Heuristic: if the host contains a `.` or has a port, it's treated as a
 /// custom endpoint and the first path segment is the bucket. Otherwise
 /// the host IS the bucket (AWS default endpoint).
+///
+/// Custom endpoints default to HTTPS; plaintext HTTP requires explicit
+/// `repository.allow_insecure_http: true` plus an `endpoint: http://...` override.
 fn parse_s3_url(url: &Url) -> Result<ParsedUrl> {
     let host = url
         .host_str()
@@ -254,13 +257,8 @@ fn parse_s3_url(url: &Url) -> Result<ParsedUrl> {
 
     if has_dot || has_port {
         // Custom endpoint — first path segment is bucket
-        let scheme = if has_port && !host.contains("amazonaws.com") {
-            "http"
-        } else {
-            "https"
-        };
         let port_suffix = url.port().map(|p| format!(":{p}")).unwrap_or_default();
-        let endpoint = format!("{scheme}://{host}{port_suffix}");
+        let endpoint = format!("https://{host}{port_suffix}");
 
         let path = url.path().trim_start_matches('/');
         let (bucket, root) = path.split_once('/').unwrap_or((path, ""));
@@ -307,6 +305,23 @@ fn parse_sftp_url(url: &Url) -> Result<ParsedUrl> {
     })
 }
 
+fn enforce_secure_http(url: &str, allow_insecure_http: bool, field_name: &str) -> Result<()> {
+    let lowered = url.to_ascii_lowercase();
+    if lowered.starts_with("http://") {
+        if allow_insecure_http {
+            tracing::warn!(
+                "{field_name} uses plaintext HTTP; repository.allow_insecure_http=true enables this unsafe mode"
+            );
+            return Ok(());
+        }
+        return Err(VgerError::Config(format!(
+            "{field_name} uses insecure HTTP and is blocked by default. \
+Use HTTPS, or set repository.allow_insecure_http: true to permit plaintext HTTP (unsafe)."
+        )));
+    }
+    Ok(())
+}
+
 /// Apply OpenDAL's `RetryLayer` to an operator if retries are enabled.
 fn apply_retry(op: Operator, retry: &RetryConfig) -> Operator {
     if retry.max_retries == 0 {
@@ -339,6 +354,21 @@ pub fn backend_from_config(
     throttle_bytes_per_sec: Option<u32>,
 ) -> Result<Box<dyn StorageBackend>> {
     let parsed = parse_repo_url(&cfg.url)?;
+
+    if let ParsedUrl::Rest { url } = &parsed {
+        enforce_secure_http(url, cfg.allow_insecure_http, "repository.url")?;
+    }
+
+    if let ParsedUrl::S3 {
+        endpoint: url_endpoint,
+        ..
+    } = &parsed
+    {
+        let endpoint = cfg.endpoint.as_deref().or(url_endpoint.as_deref());
+        if let Some(endpoint) = endpoint {
+            enforce_secure_http(endpoint, cfg.allow_insecure_http, "repository.endpoint")?;
+        }
+    }
 
     match parsed {
         ParsedUrl::Local { path } => Ok(Box::new(local_backend::LocalBackend::new(&path)?)),
@@ -501,7 +531,7 @@ mod tests {
             ParsedUrl::S3 {
                 bucket: "my-bucket".into(),
                 root: "vger".into(),
-                endpoint: Some("http://minio.local:9000".into()),
+                endpoint: Some("https://minio.local:9000".into()),
             }
         );
     }
@@ -605,5 +635,68 @@ mod tests {
     fn test_empty_url_rejected() {
         let err = parse_repo_url("   ").unwrap_err();
         assert!(err.to_string().contains("must not be empty"));
+    }
+
+    fn test_config(url: &str) -> RepositoryConfig {
+        RepositoryConfig {
+            url: url.to_string(),
+            region: None,
+            access_key_id: None,
+            secret_access_key: None,
+            endpoint: None,
+            sftp_key: None,
+            sftp_known_hosts: None,
+            sftp_max_connections: None,
+            rest_token: None,
+            allow_insecure_http: false,
+            min_pack_size: 32 * 1024 * 1024,
+            max_pack_size: 128 * 1024 * 1024,
+            retry: RetryConfig::default(),
+        }
+    }
+
+    #[test]
+    fn test_backend_rejects_http_rest_by_default() {
+        let cfg = test_config("http://localhost:8080/repo");
+        let err = match backend_from_config(&cfg, None) {
+            Ok(_) => panic!("expected HTTP REST URL to be rejected"),
+            Err(err) => err,
+        };
+        let msg = err.to_string();
+        assert!(msg.contains("repository.url"));
+        assert!(msg.contains("repository.allow_insecure_http: true"));
+    }
+
+    #[test]
+    fn test_backend_rejects_http_s3_endpoint_by_default() {
+        let mut cfg = test_config("s3://my-bucket/vger");
+        cfg.endpoint = Some("http://minio.local:9000".into());
+        let err = match backend_from_config(&cfg, None) {
+            Ok(_) => panic!("expected HTTP S3 endpoint to be rejected"),
+            Err(err) => err,
+        };
+        let msg = err.to_string();
+        assert!(msg.contains("repository.endpoint"));
+        assert!(msg.contains("repository.allow_insecure_http: true"));
+    }
+
+    #[test]
+    fn test_backend_allows_http_rest_when_opted_in() {
+        let mut cfg = test_config("http://localhost:8080/repo");
+        cfg.allow_insecure_http = true;
+        let backend = backend_from_config(&cfg, None);
+        assert!(backend.is_ok(), "expected HTTP REST URL to be allowed when opted in");
+    }
+
+    #[test]
+    fn test_backend_allows_http_s3_endpoint_when_opted_in() {
+        let mut cfg = test_config("s3://my-bucket/vger");
+        cfg.endpoint = Some("http://minio.local:9000".into());
+        cfg.allow_insecure_http = true;
+        let backend = backend_from_config(&cfg, None);
+        assert!(
+            backend.is_ok(),
+            "expected HTTP S3 endpoint to be allowed when opted in"
+        );
     }
 }

@@ -34,6 +34,10 @@ pub(super) fn default_max_pack_size() -> u32 {
     128 * 1024 * 1024 // 128 MiB
 }
 
+pub(super) fn default_allow_insecure_http() -> bool {
+    false
+}
+
 pub(super) fn default_max_retries() -> usize {
     3
 }

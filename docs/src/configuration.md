@@ -55,6 +55,16 @@ repositories:
 
 Each entry accepts an optional `label` for CLI targeting (`vger list --repo local`) and optional pack size tuning (`min_pack_size`, `max_pack_size`). Defaults are `min_pack_size = 32 MiB` and `max_pack_size = 128 MiB`; `max_pack_size` has a hard ceiling of `512 MiB`. See [Storage Backends](backends.md) for all backend-specific options.
 
+For remote repositories, transport is HTTPS-first by default. To intentionally use plaintext HTTP (for local/dev setups), set:
+
+```yaml
+repositories:
+  - url: "http://localhost:8484/myrepo"
+    allow_insecure_http: true
+```
+
+`allow_insecure_http` also controls `repository.endpoint` for S3-compatible backends.
+
 ## Sources
 
 Sources can be a simple list of paths (auto-labeled from directory name) or rich entries with per-source options.

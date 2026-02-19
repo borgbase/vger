@@ -133,6 +133,9 @@ pub struct RepositoryConfig {
     pub sftp_max_connections: Option<usize>,
     /// Bearer token for REST backend authentication.
     pub rest_token: Option<String>,
+    /// Allow plaintext HTTP for REST/S3 endpoints (unsafe; defaults to false).
+    #[serde(default = "default_allow_insecure_http")]
+    pub allow_insecure_http: bool,
     #[serde(default = "default_min_pack_size")]
     pub min_pack_size: u32,
     #[serde(default = "default_max_pack_size")]
