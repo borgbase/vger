@@ -262,8 +262,14 @@ impl StorageBackend for RestBackend {
             req.call()
         }) {
             Ok(resp) => {
-                let mut buf = Vec::new();
+                let cap = usize::try_from(length).map_err(|_| {
+                    VgerError::Other(format!(
+                        "REST GET_RANGE {key}: length {length} exceeds platform usize"
+                    ))
+                })?;
+                let mut buf = Vec::with_capacity(cap);
                 resp.into_reader()
+                    .take(length)
                     .read_to_end(&mut buf)
                     .map_err(VgerError::Io)?;
                 Ok(Some(buf))

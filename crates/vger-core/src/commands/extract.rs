@@ -1,5 +1,8 @@
 use std::collections::{HashMap, HashSet};
+#[cfg(not(unix))]
 use std::io::{Seek, Write as IoWrite};
+#[cfg(unix)]
+use std::os::unix::fs::FileExt;
 use std::path::{Component, Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
@@ -687,8 +690,13 @@ fn process_read_group(
             let fh = file_handles
                 .get_mut(&target.file_idx)
                 .ok_or_else(|| VgerError::Other("missing file handle in restore worker".into()))?;
-            fh.seek(std::io::SeekFrom::Start(target.file_offset))?;
-            fh.write_all(&plaintext)?;
+            #[cfg(unix)]
+            fh.write_all_at(&plaintext, target.file_offset)?;
+            #[cfg(not(unix))]
+            {
+                fh.seek(std::io::SeekFrom::Start(target.file_offset))?;
+                fh.write_all(&plaintext)?;
+            }
             bytes_written.fetch_add(plaintext.len() as u64, Ordering::Relaxed);
         }
     }
