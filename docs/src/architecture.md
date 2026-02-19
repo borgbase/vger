@@ -15,7 +15,7 @@ Rationale:
 - `auto` mode benchmarks `AES-256-GCM` vs `ChaCha20-Poly1305` at init and stores one concrete mode per repo
 - Strong performance across mixed CPU capabilities (AES acceleration and non-AES acceleration)
 - 32-byte symmetric keys (simpler key management than split-key schemes)
-- The 1-byte type tag is passed as AAD (authenticated additional data), binding the ciphertext to its intended object type
+- AEAD AAD always includes the 1-byte type tag; for identity-bound objects it also includes a domain-separated object context (for example: `manifest`, `index`, snapshot ID, chunk ID, or `filecache`)
 
 ### Key Derivation
 
@@ -104,10 +104,10 @@ The type tag identifies the object kind via the `ObjectType` enum:
 | 2 | SnapshotMeta | Per-snapshot metadata |
 | 3 | ChunkData | Compressed file/item-stream chunks |
 | 4 | ChunkIndex | Chunk-to-pack mapping |
-| 5 | PackHeader | Trailing header inside pack files |
+| 5 | PackHeader | Reserved legacy tag (current pack files have no trailing header object) |
 | 6 | FileCache | File-level cache (inode/mtime skip) |
 
-The type tag byte is passed as AAD (authenticated additional data) to the selected AEAD mode. This binds each ciphertext to its intended object type, preventing an attacker from substituting one object type for another (e.g., swapping a manifest for a snapshot).
+The type tag byte is always included in AAD (authenticated additional data). For identity-bound objects, AAD also includes a domain-separated object context, binding ciphertext to both object type and identity (for example, `ChunkData` to its `ChunkId`, `SnapshotMeta` to snapshot ID, and manifest/index to fixed context labels).
 
 ---
 
@@ -215,14 +215,12 @@ Chunks are grouped into **pack files** (~32 MiB) instead of being stored as indi
 [4B blob_1_len LE][blob_1_data]
 ...
 [4B blob_N_len LE][blob_N_data]
-[encrypted_header][4B header_length LE]
 ```
 
-- **Per-blob length prefix** (4 bytes): enables forward scanning to recover individual blobs even if the trailing header is corrupted
+- **Per-blob length prefix** (4 bytes): enables forward scanning of all blobs from byte 9 to EOF
 - Each blob is a complete RepoObj envelope: `[1B type_tag][12B nonce][ciphertext+16B AEAD tag]`
 - Each blob is independently encrypted (can read one chunk without decrypting the whole pack)
-- Header at the END allows streaming writes without knowing final header size
-- Header is encrypted as `pack_object(ObjectType::PackHeader, msgpack(Vec<PackHeaderEntry>))`
+- No trailing per-pack header object; pack analysis/compaction enumerate blobs via length-prefix scan
 - Pack ID = unkeyed BLAKE2b-256 of entire pack contents, stored at `packs/<shard>/<hex_pack_id>`
 
 #### Data Packs vs Tree Packs
@@ -372,7 +370,7 @@ After `delete` or `prune`, chunk refcounts are decremented and entries with refc
 
 **Phase 1 â€” Analysis (read-only):**
 1. Enumerate all pack files across 256 shard dirs (`packs/00/` through `packs/ff/`)
-2. Read each pack's trailing header to get `Vec<PackHeaderEntry>`
+2. Forward-scan each pack's length-prefixed blob stream to enumerate `(offset, length)` entries
 3. Classify each blob as live (exists in `ChunkIndex` at matching pack+offset) or dead
 4. Compute `unused_ratio = dead_bytes / total_bytes` per pack
 5. Track pack health counters (`packs_corrupt`, `packs_orphan`) in addition to live/dead bytes
@@ -404,7 +402,7 @@ vger compact [--threshold 10] [--max-repack-size 2G] [-n/--dry-run]
 Backup uses a bounded pipeline:
 
 1. Sequential walk stage emits file work
-2. Parallel workers (pariter-based) read/chunk/hash files and classify chunks (hash-only vs prepacked)
+2. Parallel workers in a crossbeam-channel pipeline read/chunk/hash files and classify chunks (hash-only vs prepacked)
 3. A `ByteBudget` enforces a hard cap on in-flight pipeline bytes (`pipeline_buffer_mib`)
 4. Consumer stage commits chunks and updates dedup/index state sequentially (including segment-order validation for large files)
 5. Pack uploads run in background with bounded in-flight upload concurrency
@@ -572,7 +570,7 @@ Pack files contain encrypted blobs. Compaction does **encrypted passthrough** â€
    ```
 4. Server reads live blobs from disk, writes new pack files (magic + version + length-prefixed blobs, no trailing header), deletes old packs
 5. Server returns new pack keys and blob offsets so the client can update its index
-6. Client writes the encrypted pack header separately, updates ChunkIndex, calls `save_state`
+6. Client updates `ChunkIndex` mappings and calls `save_state`
 
 For packs with `keep_blobs: []`, the server simply deletes the pack.
 
@@ -581,7 +579,7 @@ For packs with `keep_blobs: []`, the server simply deletes the pack.
 `GET /{repo}?verify-structure` checks (no encryption key needed):
 - Required files exist (`config`, `manifest`, `index`, `keys/repokey`)
 - Pack files follow `<2-char-hex>/<64-char-hex>` shard pattern
-- No zero-byte packs (minimum valid = magic 9 bytes + header length 4 bytes = 13 bytes)
+- No zero-byte packs (minimum valid = magic 8 bytes + version 1 byte = 9 bytes)
 - Pack files start with `VGERPACK` magic bytes
 - Reports stale lock count, total size, and pack counts
 
