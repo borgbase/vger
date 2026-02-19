@@ -132,13 +132,13 @@ where
         buf[1..13].copy_from_slice(&nonce);
         // Append the authentication tag
         buf.extend_from_slice(&gcm_tag);
-        Ok(buf)
+        Ok(buf[..].to_vec())
     } else {
         // Plaintext engine: [tag][plaintext]
         let mut buf = Vec::with_capacity(1 + estimated_plaintext_size);
         buf.push(tag);
         write_plaintext(&mut buf)?;
-        Ok(buf)
+        Ok(buf[..].to_vec())
     }
 }
 
@@ -172,13 +172,13 @@ where
         buf[1..13].copy_from_slice(&nonce);
         // Append the authentication tag
         buf.extend_from_slice(&gcm_tag);
-        Ok(buf)
+        Ok(buf[..].to_vec())
     } else {
         // Plaintext engine: [tag][plaintext]
         let mut buf = Vec::with_capacity(1 + estimated_plaintext_size);
         buf.push(tag);
         write_plaintext(&mut buf)?;
-        Ok(buf)
+        Ok(buf[..].to_vec())
     }
 }
 
