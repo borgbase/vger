@@ -10,7 +10,7 @@ use tokio::net::TcpListener;
 use tracing::{info, warn};
 
 use crate::config::ServerConfig;
-use crate::state::AppState;
+use crate::state::{write_unpoisoned, AppState};
 
 #[derive(Parser)]
 #[command(name = "vger-server", version, about = "vger backup server")]
@@ -90,7 +90,7 @@ async fn main() {
 }
 
 fn cleanup_expired_locks(state: &AppState) {
-    let mut locks = state.inner.locks.write().unwrap();
+    let mut locks = write_unpoisoned(&state.inner.locks, "locks");
     for (_repo, repo_locks) in locks.iter_mut() {
         repo_locks.retain(|_id, info| !info.is_expired());
     }

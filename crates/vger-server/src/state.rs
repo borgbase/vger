@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, RwLock};
+use std::sync::{Arc, RwLock, RwLockReadGuard, RwLockWriteGuard};
 
 use chrono::{DateTime, Utc};
 
@@ -40,7 +40,40 @@ impl LockInfo {
         let elapsed = Utc::now()
             .signed_duration_since(self.acquired_at)
             .num_seconds();
-        elapsed as u64 > self.ttl_seconds
+        let ttl_i64 = i64::try_from(self.ttl_seconds).unwrap_or(i64::MAX);
+        elapsed > ttl_i64
+    }
+}
+
+pub(crate) fn read_unpoisoned<'a, T>(
+    lock: &'a RwLock<T>,
+    lock_name: &'static str,
+) -> RwLockReadGuard<'a, T> {
+    match lock.read() {
+        Ok(guard) => guard,
+        Err(poisoned) => {
+            tracing::error!(
+                lock = lock_name,
+                "rwlock poisoned; continuing with inner state"
+            );
+            poisoned.into_inner()
+        }
+    }
+}
+
+pub(crate) fn write_unpoisoned<'a, T>(
+    lock: &'a RwLock<T>,
+    lock_name: &'static str,
+) -> RwLockWriteGuard<'a, T> {
+    match lock.write() {
+        Ok(guard) => guard,
+        Err(poisoned) => {
+            tracing::error!(
+                lock = lock_name,
+                "rwlock poisoned; continuing with inner state"
+            );
+            poisoned.into_inner()
+        }
     }
 }
 
@@ -104,10 +137,7 @@ impl AppState {
 
     /// Get current quota usage for a repo.
     pub fn quota_used(&self, repo: &str) -> u64 {
-        self.inner
-            .quota_usage
-            .read()
-            .unwrap()
+        read_unpoisoned(&self.inner.quota_usage, "quota_usage")
             .get(repo)
             .copied()
             .unwrap_or(0)
@@ -115,14 +145,14 @@ impl AppState {
 
     /// Update quota usage after a write.
     pub fn add_quota_usage(&self, repo: &str, bytes: u64) {
-        let mut usage = self.inner.quota_usage.write().unwrap();
+        let mut usage = write_unpoisoned(&self.inner.quota_usage, "quota_usage");
         let entry = usage.entry(repo.to_string()).or_insert(0);
         *entry += bytes;
     }
 
     /// Update quota usage after a delete.
     pub fn sub_quota_usage(&self, repo: &str, bytes: u64) {
-        let mut usage = self.inner.quota_usage.write().unwrap();
+        let mut usage = write_unpoisoned(&self.inner.quota_usage, "quota_usage");
         if let Some(entry) = usage.get_mut(repo) {
             *entry = entry.saturating_sub(bytes);
         }
@@ -130,7 +160,7 @@ impl AppState {
 
     /// Record that a manifest was written (backup completed).
     pub fn record_backup(&self, repo: &str) {
-        let mut map = self.inner.last_backup_at.write().unwrap();
+        let mut map = write_unpoisoned(&self.inner.last_backup_at, "last_backup_at");
         map.insert(repo.to_string(), Utc::now());
     }
 }

@@ -3,7 +3,7 @@ use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 
 use crate::error::ServerError;
-use crate::state::{AppState, LockInfo};
+use crate::state::{read_unpoisoned, write_unpoisoned, AppState, LockInfo};
 
 #[derive(serde::Deserialize)]
 pub struct LockRequest {
@@ -20,7 +20,7 @@ pub async fn acquire_lock(
 ) -> Result<Response, ServerError> {
     let ttl = state.inner.config.lock_ttl_seconds;
 
-    let mut locks = state.inner.locks.write().unwrap();
+    let mut locks = write_unpoisoned(&state.inner.locks, "locks");
     let repo_locks = locks.entry(repo.clone()).or_default();
 
     // Check if lock already exists and is not expired
@@ -51,7 +51,7 @@ pub async fn release_lock(
     State(state): State<AppState>,
     Path((repo, id)): Path<(String, String)>,
 ) -> Result<Response, ServerError> {
-    let mut locks = state.inner.locks.write().unwrap();
+    let mut locks = write_unpoisoned(&state.inner.locks, "locks");
     if let Some(repo_locks) = locks.get_mut(&repo) {
         if repo_locks.remove(&id).is_some() {
             return Ok(StatusCode::NO_CONTENT.into_response());
@@ -65,7 +65,7 @@ pub async fn list_locks(
     State(state): State<AppState>,
     Path(repo): Path<String>,
 ) -> Result<Response, ServerError> {
-    let locks = state.inner.locks.read().unwrap();
+    let locks = read_unpoisoned(&state.inner.locks, "locks");
     let repo_locks = locks.get(&repo);
 
     let result: Vec<serde_json::Value> = repo_locks

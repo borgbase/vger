@@ -5,7 +5,7 @@ use blake2::digest::{Update, VariableOutput};
 use blake2::Blake2bVar;
 
 use crate::error::ServerError;
-use crate::state::AppState;
+use crate::state::{read_unpoisoned, AppState};
 
 const PACK_MAGIC: &[u8; 8] = b"VGERPACK";
 const MAX_REPACK_OPS: usize = 10_000;
@@ -130,11 +130,7 @@ async fn repo_stats(state: AppState, repo: &str) -> Result<Response, ServerError
             .await
             .map_err(|e| ServerError::Internal(e.to_string()))?;
 
-    let last_backup = state
-        .inner
-        .last_backup_at
-        .read()
-        .unwrap()
+    let last_backup = read_unpoisoned(&state.inner.last_backup_at, "last_backup_at")
         .get(&repo_name)
         .cloned();
 
