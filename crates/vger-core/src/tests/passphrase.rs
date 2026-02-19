@@ -2,7 +2,7 @@ use std::sync::Mutex;
 
 use zeroize::Zeroizing;
 
-use crate::app::passphrase::{resolve_passphrase, PassphrasePrompt};
+use crate::app::passphrase::{reset_env_passphrase_cache, resolve_passphrase, PassphrasePrompt};
 use crate::config::EncryptionModeConfig;
 
 use super::helpers::make_test_config;
@@ -16,6 +16,7 @@ fn set_vger_passphrase(value: Option<&str>) {
             None => std::env::remove_var("VGER_PASSPHRASE"),
         }
     }
+    reset_env_passphrase_cache();
 }
 
 #[cfg(not(windows))]

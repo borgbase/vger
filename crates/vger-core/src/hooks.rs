@@ -106,9 +106,10 @@ fn run_hook_list(cmds: &[String], ctx: &HookContext) -> Result<()> {
 
 fn execute_hook_command(cmd: &str, ctx: &HookContext) -> Result<()> {
     let expanded = substitute_variables(cmd, ctx);
-    tracing::info!("Running hook: {expanded}");
+    tracing::info!("Running hook: {cmd}");
 
     let mut child = shell::command_for_script(&expanded);
+    child.env_remove("VGER_PASSPHRASE");
 
     // Set environment variables
     child.env("VGER_COMMAND", &ctx.command);
@@ -132,16 +133,14 @@ fn execute_hook_command(cmd: &str, ctx: &HookContext) -> Result<()> {
     // Use the non-capturing variant: hooks inherit stdout/stderr so output
     // goes directly to the user's terminal (better UX than capturing).
     let status = shell::run_command_status_with_timeout(&mut child, HOOK_TIMEOUT)
-        .map_err(|e| VgerError::Hook(format!("failed to execute '{expanded}': {e}")))?;
+        .map_err(|e| VgerError::Hook(format!("failed to execute hook '{cmd}': {e}")))?;
 
     if !status.success() {
         let code = status
             .code()
             .map(|c| c.to_string())
             .unwrap_or_else(|| "signal".to_string());
-        return Err(VgerError::Hook(format!(
-            "hook '{expanded}' exited with {code}"
-        )));
+        return Err(VgerError::Hook(format!("hook '{cmd}' exited with {code}")));
     }
 
     Ok(())

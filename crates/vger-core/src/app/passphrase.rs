@@ -1,3 +1,4 @@
+use std::sync::Mutex;
 use std::time::Duration;
 
 use zeroize::{Zeroize, Zeroizing};
@@ -18,12 +19,17 @@ pub struct PassphrasePrompt {
 
 pub fn configured_passphrase(config: &VgerConfig) -> Result<Option<Zeroizing<String>>> {
     if let Some(ref p) = config.encryption.passphrase {
+        tracing::warn!(
+            "using plaintext encryption.passphrase from config; prefer encryption.passcommand or VGER_PASSPHRASE"
+        );
         return Ok(Some(Zeroizing::new(p.clone())));
     }
 
     if let Some(ref cmd) = config.encryption.passcommand {
-        let output =
-            shell::run_script_with_timeout(cmd, PASSCOMMAND_TIMEOUT).map_err(VgerError::Io)?;
+        let mut command = shell::command_for_script(cmd);
+        command.env_remove("VGER_PASSPHRASE");
+        let output = shell::run_command_with_timeout(&mut command, PASSCOMMAND_TIMEOUT)
+            .map_err(VgerError::Io)?;
 
         if !output.status.success() {
             return Err(VgerError::Config(format!(
@@ -46,13 +52,43 @@ pub fn configured_passphrase(config: &VgerConfig) -> Result<Option<Zeroizing<Str
         return Ok(Some(pass));
     }
 
-    if let Ok(pass) = std::env::var("VGER_PASSPHRASE") {
-        if !pass.is_empty() {
-            return Ok(Some(Zeroizing::new(pass)));
-        }
+    if let Some(pass) = take_env_passphrase() {
+        return Ok(Some(pass));
     }
 
     Ok(None)
+}
+
+/// Cache for `VGER_PASSPHRASE`: `None` = not yet read, `Some(v)` = already consumed.
+static ENV_PASSPHRASE: Mutex<Option<Option<Zeroizing<String>>>> = Mutex::new(None);
+
+/// Read `VGER_PASSPHRASE` from the process environment on first call,
+/// remove it from the environment, and cache the value for subsequent calls.
+fn take_env_passphrase() -> Option<Zeroizing<String>> {
+    let mut cache = ENV_PASSPHRASE.lock().unwrap();
+    if let Some(ref cached) = *cache {
+        return cached.clone();
+    }
+    let val = std::env::var("VGER_PASSPHRASE")
+        .ok()
+        .filter(|s| !s.is_empty());
+    if val.is_some() {
+        // Remove from env to reduce exposure window.
+        // Safety: called during single-threaded startup before any thread pool.
+        #[allow(unused_unsafe)]
+        unsafe {
+            std::env::remove_var("VGER_PASSPHRASE");
+        }
+    }
+    let result = val.map(Zeroizing::new);
+    *cache = Some(result.clone());
+    result
+}
+
+/// Reset the cached env passphrase. Only used by tests.
+#[cfg(test)]
+pub(crate) fn reset_env_passphrase_cache() {
+    *ENV_PASSPHRASE.lock().unwrap() = None;
 }
 
 pub fn resolve_passphrase<F>(
