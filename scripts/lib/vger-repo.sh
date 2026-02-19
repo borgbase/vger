@@ -61,6 +61,12 @@ repositories:
     url: "$url_q"
 CFG
 
+  if [[ "$url" == http://* ]]; then
+    cat >>"$out" <<CFG
+    allow_insecure_http: true
+CFG
+  fi
+
   if [[ "$backend" == "rest" ]]; then
     cat >>"$out" <<CFG
     rest_token: "$(yaml_escape "$REST_TOKEN")"
