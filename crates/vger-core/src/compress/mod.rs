@@ -72,10 +72,19 @@ pub fn compress_append(compression: Compression, data: &[u8], buf: &mut Vec<u8>)
             buf.extend_from_slice(&(data.len() as u32).to_le_bytes());
             let start = buf.len();
             let max_out = lz4_flex::block::get_maximum_output_size(data.len());
-            buf.resize(start + max_out, 0);
-            let actual = lz4_flex::block::compress_into(data, &mut buf[start..start + max_out])
-                .map_err(|e| VgerError::Other(format!("lz4: {e}")))?;
-            buf.truncate(start + actual);
+            buf.reserve(max_out);
+            // SAFETY: `reserve` guarantees `buf.capacity() >= start + max_out`.
+            // `compress_into` writes exactly `actual` bytes to the output slice
+            // and never reads from uninitialized memory. `actual <= max_out` is
+            // guaranteed by the LZ4 specification.
+            let actual = unsafe {
+                let dst = std::slice::from_raw_parts_mut(buf.as_mut_ptr().add(start), max_out);
+                lz4_flex::block::compress_into(data, dst)
+                    .map_err(|e| VgerError::Other(format!("lz4: {e}")))?
+            };
+            // SAFETY: `compress_into` initialized exactly `actual` bytes at
+            // `start`, all prior bytes were already initialized.
+            unsafe { buf.set_len(start + actual) };
             Ok(())
         }
         Compression::Zstd { level } => {
@@ -96,11 +105,18 @@ pub fn compress_append(compression: Compression, data: &[u8], buf: &mut Vec<u8>)
                 }
                 let (_, cx) = slot.as_mut().unwrap();
 
-                let compressed = cx
-                    .compress(data)
-                    .map_err(|e| VgerError::Other(format!("zstd compress: {e}")))?;
                 buf.push(TAG_ZSTD);
-                buf.extend_from_slice(&compressed);
+                // Write compressed data directly into buf's spare capacity
+                // via a Cursor, eliminating the intermediate Vec from
+                // cx.compress(). The Cursor offsets the write pointer by its
+                // position so ZSTD writes after the tag byte.
+                let bound = zstd::zstd_safe::compress_bound(data.len());
+                buf.reserve(bound);
+                let pos = buf.len() as u64;
+                let mut cursor = std::io::Cursor::new(&mut *buf);
+                cursor.set_position(pos);
+                cx.compress_to_buffer(data, &mut cursor)
+                    .map_err(|e| VgerError::Other(format!("zstd compress: {e}")))?;
                 Ok(())
             })
         }
