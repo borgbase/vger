@@ -71,7 +71,7 @@ fn read_hidden_line(buf: &mut String) -> io::Result<()> {
 
 #[cfg(windows)]
 fn read_hidden_line(buf: &mut String) -> io::Result<()> {
-    use windows_sys::Win32::Foundation::INVALID_HANDLE_VALUE;
+    use windows_sys::Win32::Foundation::{HANDLE, INVALID_HANDLE_VALUE};
     use windows_sys::Win32::System::Console::{
         GetConsoleMode, GetStdHandle, SetConsoleMode, ENABLE_ECHO_INPUT, STD_INPUT_HANDLE,
     };
@@ -87,7 +87,7 @@ fn read_hidden_line(buf: &mut String) -> io::Result<()> {
         GetStdHandle(STD_INPUT_HANDLE)
     };
 
-    if handle == 0 || handle == INVALID_HANDLE_VALUE {
+    if handle.is_null() || handle == INVALID_HANDLE_VALUE {
         stdin.lock().read_line(buf)?;
         return Ok(());
     }
@@ -112,7 +112,7 @@ fn read_hidden_line(buf: &mut String) -> io::Result<()> {
     }
 
     struct RestoreConsoleMode {
-        handle: isize,
+        handle: HANDLE,
         mode: u32,
     }
 
