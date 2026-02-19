@@ -1,3 +1,5 @@
+use std::sync::atomic::{AtomicU64, Ordering::Relaxed};
+
 use axum::extract::{Path, Query, State};
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
@@ -6,6 +8,8 @@ use blake2::Blake2bVar;
 
 use crate::error::ServerError;
 use crate::state::{read_unpoisoned, AppState};
+
+static REPACK_TEMP_COUNTER: AtomicU64 = AtomicU64::new(0);
 
 const PACK_MAGIC: &[u8; 8] = b"VGERPACK";
 const MAX_REPACK_OPS: usize = 10_000;
@@ -305,7 +309,7 @@ struct RepackOpResult {
 }
 
 fn execute_repack(state: &AppState, repo: &str, plan: &RepackPlan) -> Result<RepackResult, String> {
-    use std::io::{Read, Seek, SeekFrom};
+    use std::io::{BufWriter, Read, Seek, SeekFrom, Write};
 
     let mut completed = Vec::new();
 
@@ -330,7 +334,7 @@ fn execute_repack(state: &AppState, repo: &str, plan: &RepackPlan) -> Result<Rep
             continue;
         }
 
-        // Read live blobs from source pack
+        // Open source pack
         let mut source = std::fs::File::open(&source_path)
             .map_err(|e| format!("open {}: {e}", op.source_pack))?;
         let source_len = source
@@ -338,63 +342,102 @@ fn execute_repack(state: &AppState, repo: &str, plan: &RepackPlan) -> Result<Rep
             .map_err(|e| format!("stat {}: {e}", op.source_pack))?
             .len();
 
-        let mut blobs: Vec<Vec<u8>> = Vec::with_capacity(op.keep_blobs.len());
-        for blob_ref in &op.keep_blobs {
-            if blob_ref.length == 0 {
-                return Err("repack blob length must be > 0".to_string());
+        // Create temp file for streaming write
+        let temp_id = REPACK_TEMP_COUNTER.fetch_add(1, Relaxed);
+        let temp_path =
+            source_path.with_file_name(format!(".repack_tmp.{temp_id}"));
+
+        // Write new pack to temp file. Collect write errors so we can
+        // drop the file handle before cleanup (required on Windows).
+        let temp_file = std::fs::File::create(&temp_path)
+            .map_err(|e| format!("create temp: {e}"))?;
+        let mut writer = BufWriter::new(temp_file);
+        let mut hasher = Blake2bVar::new(32).expect("valid output size");
+
+        let mut pack_offset: u64 = 9; // PACK_MAGIC(8) + version(1)
+        let mut new_offsets = Vec::with_capacity(op.keep_blobs.len());
+        let mut scratch = Vec::new();
+
+        let write_result: Result<(), String> = (|| {
+            // Write pack header: magic + version
+            write_and_hash(&mut writer, &mut hasher, PACK_MAGIC)
+                .map_err(|e| format!("write header: {e}"))?;
+            write_and_hash(&mut writer, &mut hasher, &[1u8])
+                .map_err(|e| format!("write version: {e}"))?;
+
+            for blob_ref in &op.keep_blobs {
+                if blob_ref.length == 0 {
+                    return Err("repack blob length must be > 0".to_string());
+                }
+                let end = blob_ref
+                    .offset
+                    .checked_add(blob_ref.length)
+                    .ok_or_else(|| "repack blob range overflow".to_string())?;
+                if end > source_len {
+                    return Err(format!(
+                        "repack blob range out of bounds: offset={} length={} file_size={source_len}",
+                        blob_ref.offset, blob_ref.length
+                    ));
+                }
+
+                // Read blob from source into reusable scratch buffer
+                scratch.resize(blob_ref.length as usize, 0);
+                source
+                    .seek(SeekFrom::Start(blob_ref.offset))
+                    .map_err(|e| format!("seek: {e}"))?;
+                source
+                    .read_exact(&mut scratch)
+                    .map_err(|e| format!("read: {e}"))?;
+
+                // Write length prefix
+                let blob_len = blob_ref.length as u32;
+                write_and_hash(&mut writer, &mut hasher, &blob_len.to_le_bytes())
+                    .map_err(|e| format!("write len: {e}"))?;
+
+                // Record offset past the length prefix
+                new_offsets.push(pack_offset + 4);
+
+                // Write blob data
+                write_and_hash(&mut writer, &mut hasher, &scratch)
+                    .map_err(|e| format!("write blob: {e}"))?;
+
+                pack_offset += 4 + blob_ref.length;
             }
-            let end = blob_ref
-                .offset
-                .checked_add(blob_ref.length)
-                .ok_or_else(|| "repack blob range overflow".to_string())?;
-            if end > source_len {
-                return Err(format!(
-                    "repack blob range out of bounds: offset={} length={} file_size={source_len}",
-                    blob_ref.offset, blob_ref.length
-                ));
-            }
-            source
-                .seek(SeekFrom::Start(blob_ref.offset))
-                .map_err(|e| format!("seek: {e}"))?;
-            let mut buf = vec![0u8; blob_ref.length as usize];
-            source
-                .read_exact(&mut buf)
-                .map_err(|e| format!("read: {e}"))?;
-            blobs.push(buf);
+
+            writer.flush().map_err(|e| format!("flush: {e}"))?;
+            Ok(())
+        })();
+
+        // Drop writer (closes file handle) before any cleanup or rename
+        drop(writer);
+
+        if let Err(e) = write_result {
+            let _ = std::fs::remove_file(&temp_path);
+            return Err(e);
         }
 
-        // Write new pack (magic + version + length-prefixed blobs, no trailing header)
-        let mut new_pack_data = Vec::new();
-        new_pack_data.extend_from_slice(PACK_MAGIC);
-        new_pack_data.push(1u8); // version
-
-        let mut new_offsets = Vec::with_capacity(blobs.len());
-        for blob in &blobs {
-            let blob_len = blob.len() as u32;
-            let offset = new_pack_data.len() as u64 + 4; // past the length prefix
-            new_pack_data.extend_from_slice(&blob_len.to_le_bytes());
-            new_pack_data.extend_from_slice(blob);
-            new_offsets.push(offset);
-        }
-
-        // Compute pack ID from pack contents
-        let pack_id_hex = blake2b_256_hex(&new_pack_data);
+        // Finalize hash → pack ID
+        let pack_id_hex = finalize_blake2b_256_hex(hasher);
         let shard = &pack_id_hex[..2];
         let new_pack_key = format!("packs/{shard}/{pack_id_hex}");
 
         let new_pack_path = state
             .file_path(repo, &new_pack_key)
-            .ok_or_else(|| "invalid new pack path".to_string())?;
+            .ok_or_else(|| {
+                let _ = std::fs::remove_file(&temp_path);
+                "invalid new pack path".to_string()
+            })?;
 
         if let Some(parent) = new_pack_path.parent() {
-            std::fs::create_dir_all(parent).map_err(|e| format!("mkdir: {e}"))?;
+            std::fs::create_dir_all(parent)
+                .map_err(|e| { let _ = std::fs::remove_file(&temp_path); format!("mkdir: {e}") })?;
         }
 
-        std::fs::write(&new_pack_path, &new_pack_data)
-            .map_err(|e| format!("write new pack: {e}"))?;
+        std::fs::rename(&temp_path, &new_pack_path)
+            .map_err(|e| { let _ = std::fs::remove_file(&temp_path); format!("rename new pack: {e}") })?;
 
         // Update quota
-        state.add_quota_usage(repo, new_pack_data.len() as u64);
+        state.add_quota_usage(repo, pack_offset);
 
         // Delete source if requested
         if op.delete_after {
@@ -414,9 +457,18 @@ fn execute_repack(state: &AppState, repo: &str, plan: &RepackPlan) -> Result<Rep
     Ok(RepackResult { completed })
 }
 
-fn blake2b_256_hex(data: &[u8]) -> String {
-    let mut hasher = Blake2bVar::new(32).expect("valid output size");
+/// Write data to writer and feed to hasher in one step.
+fn write_and_hash(
+    writer: &mut impl std::io::Write,
+    hasher: &mut Blake2bVar,
+    data: &[u8],
+) -> std::io::Result<()> {
+    writer.write_all(data)?;
     hasher.update(data);
+    Ok(())
+}
+
+fn finalize_blake2b_256_hex(hasher: Blake2bVar) -> String {
     let mut out = [0u8; 32];
     hasher
         .finalize_variable(&mut out)
@@ -611,4 +663,235 @@ fn get_disk_free(path: &std::path::Path) -> u64 {
         }
     }
     0
+}
+
+#[cfg(test)]
+mod tests {
+    use axum::http::StatusCode;
+    use blake2::digest::{Update, VariableOutput};
+    use blake2::Blake2bVar;
+
+    use super::super::test_helpers::*;
+    use super::PACK_MAGIC;
+
+    /// Build a minimal pack file: PACK_MAGIC + version(1) + [u32_le_len | blob]...
+    /// Returns (pack bytes, vec of (offset, length) for each blob — offset points
+    /// past the length prefix, matching what repack's keep_blobs expects).
+    fn build_pack(blobs: &[&[u8]]) -> (Vec<u8>, Vec<(u64, u64)>) {
+        let mut buf = Vec::new();
+        buf.extend_from_slice(PACK_MAGIC);
+        buf.push(0x01); // version
+
+        let mut refs = Vec::new();
+        for blob in blobs {
+            let offset = buf.len() as u64;
+            let len = blob.len() as u32;
+            buf.extend_from_slice(&len.to_le_bytes());
+            buf.extend_from_slice(blob);
+            // The repack code reads from the raw file offsets, so the BlobRef
+            // offset should include the length prefix. We'll store the offset
+            // of the length prefix and the total length (prefix + data) for
+            // keep_blobs. Actually, looking at the repack code, keep_blobs
+            // offset/length refer to arbitrary byte ranges in the source file.
+            // The repack reads [offset..offset+length] verbatim and writes it
+            // to the new pack with a new u32_le length prefix.
+            //
+            // For our tests, we want to keep just the blob data (without the
+            // source length prefix), so offset = past the length prefix,
+            // length = blob data length.
+            refs.push((offset + 4, blob.len() as u64));
+        }
+        (buf, refs)
+    }
+
+    /// Write a pack file to disk and return its storage key (packs/<shard>/<hex>).
+    fn write_pack(tmp: &std::path::Path, pack_bytes: &[u8]) -> String {
+        // Hash the content to get the pack name (matches how repack hashes)
+        let pack_id = blake2b_256_hex(pack_bytes);
+        let shard = &pack_id[..2];
+        let key = format!("packs/{shard}/{pack_id}");
+        let path = tmp.join(TEST_REPO).join("packs").join(shard).join(&pack_id);
+        std::fs::write(&path, pack_bytes).expect("write pack file");
+        key
+    }
+
+    fn blake2b_256_hex(data: &[u8]) -> String {
+        let mut hasher = Blake2bVar::new(32).expect("valid output size");
+        hasher.update(data);
+        let mut out = [0u8; 32];
+        hasher
+            .finalize_variable(&mut out)
+            .expect("valid output buffer length");
+        hex::encode(out)
+    }
+
+    fn repack_body(ops: &[serde_json::Value]) -> Vec<u8> {
+        serde_json::to_vec(&serde_json::json!({ "operations": ops })).unwrap()
+    }
+
+    fn repack_op(
+        source_pack: &str,
+        keep_blobs: &[(u64, u64)],
+        delete_after: bool,
+    ) -> serde_json::Value {
+        let blobs: Vec<serde_json::Value> = keep_blobs
+            .iter()
+            .map(|(offset, length)| {
+                serde_json::json!({ "offset": offset, "length": length })
+            })
+            .collect();
+        serde_json::json!({
+            "source_pack": source_pack,
+            "keep_blobs": blobs,
+            "delete_after": delete_after,
+        })
+    }
+
+    #[tokio::test]
+    async fn repack_single_blob() {
+        let (router, _state, tmp) = setup_app(0);
+
+        let blob = b"hello world repack";
+        let (pack_bytes, refs) = build_pack(&[blob]);
+        let source_key = write_pack(tmp.path(), &pack_bytes);
+
+        let body = repack_body(&[repack_op(&source_key, &refs, false)]);
+        let resp = authed_post(
+            router.clone(),
+            &format!("/{TEST_REPO}?repack"),
+            body,
+        )
+        .await;
+        assert_status(&resp, StatusCode::OK);
+
+        let result: serde_json::Value = serde_json::from_slice(&body_bytes(resp).await).unwrap();
+        let completed = result["completed"].as_array().unwrap();
+        assert_eq!(completed.len(), 1);
+
+        let op = &completed[0];
+        let new_pack_key = op["new_pack"].as_str().unwrap();
+        assert!(new_pack_key.starts_with("packs/"));
+
+        // Read the new pack file and verify magic + version
+        let new_pack_path = tmp.path().join(TEST_REPO).join(new_pack_key);
+        let new_pack_data = std::fs::read(&new_pack_path).expect("read new pack");
+        assert_eq!(&new_pack_data[..8], PACK_MAGIC);
+        assert_eq!(new_pack_data[8], 0x01);
+
+        // Verify the returned offset points to the correct blob data
+        let new_offset = op["new_offsets"][0].as_u64().unwrap();
+        let blob_data =
+            &new_pack_data[new_offset as usize..new_offset as usize + blob.len()];
+        assert_eq!(blob_data, blob);
+    }
+
+    #[tokio::test]
+    async fn repack_multiple_blobs_offsets() {
+        let (router, _state, tmp) = setup_app(0);
+
+        let blobs: Vec<&[u8]> = vec![b"first", b"second-blob", b"third!!"];
+        let (pack_bytes, refs) = build_pack(&blobs);
+        let source_key = write_pack(tmp.path(), &pack_bytes);
+
+        let body = repack_body(&[repack_op(&source_key, &refs, false)]);
+        let resp = authed_post(router, &format!("/{TEST_REPO}?repack"), body).await;
+        assert_status(&resp, StatusCode::OK);
+
+        let result: serde_json::Value = serde_json::from_slice(&body_bytes(resp).await).unwrap();
+        let op = &result["completed"][0];
+        let new_pack_key = op["new_pack"].as_str().unwrap();
+        let new_offsets: Vec<u64> = op["new_offsets"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|v| v.as_u64().unwrap())
+            .collect();
+        assert_eq!(new_offsets.len(), 3);
+
+        let new_pack_path = tmp.path().join(TEST_REPO).join(new_pack_key);
+        let new_pack_data = std::fs::read(&new_pack_path).expect("read new pack");
+
+        // Each returned offset should read back the original blob
+        for (i, blob) in blobs.iter().enumerate() {
+            let off = new_offsets[i] as usize;
+            let actual = &new_pack_data[off..off + blob.len()];
+            assert_eq!(actual, *blob, "blob {i} mismatch");
+        }
+    }
+
+    #[tokio::test]
+    async fn repack_hash_matches_content() {
+        let (router, _state, tmp) = setup_app(0);
+
+        let (pack_bytes, refs) = build_pack(&[b"hash-check-data"]);
+        let source_key = write_pack(tmp.path(), &pack_bytes);
+
+        let body = repack_body(&[repack_op(&source_key, &refs, false)]);
+        let resp = authed_post(router, &format!("/{TEST_REPO}?repack"), body).await;
+        assert_status(&resp, StatusCode::OK);
+
+        let result: serde_json::Value = serde_json::from_slice(&body_bytes(resp).await).unwrap();
+        let new_pack_key = result["completed"][0]["new_pack"].as_str().unwrap();
+
+        // The pack key is packs/<shard>/<hex>. The hex should be blake2b-256 of contents.
+        let pack_hex = new_pack_key.split('/').next_back().unwrap();
+        let new_pack_path = tmp.path().join(TEST_REPO).join(new_pack_key);
+        let new_pack_data = std::fs::read(&new_pack_path).expect("read new pack");
+        let actual_hash = blake2b_256_hex(&new_pack_data);
+        assert_eq!(actual_hash, pack_hex);
+    }
+
+    #[tokio::test]
+    async fn repack_delete_source() {
+        let (router, state, tmp) = setup_app(0);
+
+        let (pack_bytes, refs) = build_pack(&[b"delete-me"]);
+        let source_key = write_pack(tmp.path(), &pack_bytes);
+        let source_path = tmp.path().join(TEST_REPO).join(&source_key);
+        assert!(source_path.exists());
+
+        // Seed quota with the source pack size
+        state.add_quota_usage(TEST_REPO, pack_bytes.len() as u64);
+
+        let body = repack_body(&[repack_op(&source_key, &refs, true)]);
+        let resp = authed_post(router, &format!("/{TEST_REPO}?repack"), body).await;
+        assert_status(&resp, StatusCode::OK);
+
+        let result: serde_json::Value = serde_json::from_slice(&body_bytes(resp).await).unwrap();
+        let op = &result["completed"][0];
+        assert!(op["deleted"].as_bool().unwrap());
+        assert!(op["new_pack"].as_str().is_some());
+
+        // Source should be gone
+        assert!(!source_path.exists(), "source pack not deleted");
+    }
+
+    #[tokio::test]
+    async fn repack_empty_keeps_deletes_only() {
+        let (router, state, tmp) = setup_app(0);
+
+        let (pack_bytes, _refs) = build_pack(&[b"going-away"]);
+        let source_key = write_pack(tmp.path(), &pack_bytes);
+        let source_path = tmp.path().join(TEST_REPO).join(&source_key);
+
+        state.add_quota_usage(TEST_REPO, pack_bytes.len() as u64);
+        let used_before = state.quota_used(TEST_REPO);
+
+        // Repack with empty keep_blobs + delete_after
+        let body = repack_body(&[repack_op(&source_key, &[], true)]);
+        let resp = authed_post(router, &format!("/{TEST_REPO}?repack"), body).await;
+        assert_status(&resp, StatusCode::OK);
+
+        let result: serde_json::Value = serde_json::from_slice(&body_bytes(resp).await).unwrap();
+        let op = &result["completed"][0];
+        assert!(op["new_pack"].is_null());
+        assert!(op["deleted"].as_bool().unwrap());
+        assert!(op["new_offsets"].as_array().unwrap().is_empty());
+
+        assert!(!source_path.exists(), "source pack not deleted");
+        assert!(
+            state.quota_used(TEST_REPO) < used_before,
+            "quota should have decreased"
+        );
+    }
 }

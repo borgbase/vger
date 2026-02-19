@@ -41,5 +41,12 @@ blake2.workspace = true
 # System info
 sysinfo = "0.32"
 
+# Streaming
+futures-util = "0.3"
+
 # Hex encoding
 hex.workspace = true
+
+[dev-dependencies]
+tempfile = { workspace = true }
+http-body-util = "0.1"

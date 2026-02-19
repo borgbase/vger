@@ -2,6 +2,9 @@ pub mod admin;
 pub mod locks;
 pub mod objects;
 
+#[cfg(test)]
+pub(crate) mod test_helpers;
+
 use axum::body::Body;
 use axum::extract::{DefaultBodyLimit, State};
 use axum::http::{Request, StatusCode};

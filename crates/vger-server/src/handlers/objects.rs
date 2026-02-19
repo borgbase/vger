@@ -1,12 +1,17 @@
+use std::sync::atomic::{AtomicU64, Ordering::Relaxed};
+
 use axum::body::Body;
 use axum::extract::{Path, Query, State};
 use axum::http::{HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
-use tokio::io::{AsyncReadExt, AsyncSeekExt, SeekFrom};
-use tokio_util::io::ReaderStream;
+use futures_util::TryStreamExt;
+use tokio::io::{AsyncReadExt, AsyncSeekExt, AsyncWriteExt, BufWriter, SeekFrom};
+use tokio_util::io::{ReaderStream, StreamReader};
 
 use crate::error::ServerError;
 use crate::state::AppState;
+
+static TEMP_COUNTER: AtomicU64 = AtomicU64::new(0);
 
 #[derive(serde::Deserialize, Default)]
 pub struct ObjectQuery {
@@ -64,11 +69,14 @@ pub async fn head_object(
 }
 
 /// PUT /{repo}/{*path} — write object. Enforces append-only and quota.
+///
+/// Streams the request body to a temp file to avoid buffering large uploads
+/// in memory. Atomic rename on completion.
 pub async fn put_object(
     State(state): State<AppState>,
     Path((repo, key)): Path<(String, String)>,
-    _headers: HeaderMap,
-    body: axum::body::Bytes,
+    headers: HeaderMap,
+    body: axum::body::Body,
 ) -> Result<Response, ServerError> {
     let file_path = state
         .file_path(&repo, &key)
@@ -87,20 +95,25 @@ pub async fn put_object(
         ));
     }
 
-    // Quota enforcement
-    let quota = state.inner.config.quota_bytes;
-    if quota > 0 {
-        let used = state.quota_used(&repo);
-        if used + body.len() as u64 > quota {
-            return Err(ServerError::PayloadTooLarge(format!(
-                "quota exceeded: used {used}, limit {quota}, request {}",
-                body.len()
-            )));
-        }
-    }
-
     // Track old file size for quota accounting
     let old_size = existing_meta.as_ref().map_or(0, |m| m.len());
+
+    // Quota pre-check using Content-Length if available
+    let quota = state.inner.config.quota_bytes;
+    if quota > 0 {
+        if let Some(content_length) = headers
+            .get("Content-Length")
+            .and_then(|v| v.to_str().ok())
+            .and_then(|v| v.parse::<u64>().ok())
+        {
+            let used = state.quota_used(&repo);
+            if used.saturating_sub(old_size) + content_length > quota {
+                return Err(ServerError::PayloadTooLarge(format!(
+                    "quota exceeded: used {used}, limit {quota}, request {content_length}",
+                )));
+            }
+        }
+    }
 
     // Ensure parent directory exists
     if let Some(parent) = file_path.parent() {
@@ -109,10 +122,70 @@ pub async fn put_object(
             .map_err(ServerError::from)?;
     }
 
-    let data_len = body.len() as u64;
-    tokio::fs::write(&file_path, &body)
-        .await
-        .map_err(ServerError::from)?;
+    // Generate a unique temp file name
+    let unique_id = TEMP_COUNTER.fetch_add(1, Relaxed);
+    let file_name = file_path
+        .file_name()
+        .unwrap_or_default()
+        .to_string_lossy();
+    let temp_path = file_path.with_file_name(format!(".tmp.{file_name}.{unique_id}"));
+
+    // Stream body to temp file. The write block scopes writer/reader so
+    // file handles are closed before rename (required on Windows).
+    let data_len = {
+        let stream = body.into_data_stream();
+        let stream = TryStreamExt::map_err(stream, std::io::Error::other);
+        let mut reader = StreamReader::new(stream);
+
+        let temp_file = tokio::fs::File::create(&temp_path)
+            .await
+            .map_err(ServerError::from)?;
+        let mut writer = BufWriter::new(temp_file);
+
+        let mut data_len: u64 = 0;
+        let mut buf = vec![0u8; 256 * 1024]; // 256 KiB read buffer
+        let write_result: Result<(), ServerError> = async {
+            loop {
+                let n = reader.read(&mut buf).await.map_err(ServerError::from)?;
+                if n == 0 {
+                    break;
+                }
+
+                data_len += n as u64;
+
+                // Per-chunk quota enforcement
+                if quota > 0 {
+                    let used = state.quota_used(&repo);
+                    if used.saturating_sub(old_size) + data_len > quota {
+                        return Err(ServerError::PayloadTooLarge(format!(
+                            "quota exceeded during upload: used {used}, limit {quota}, written {data_len}",
+                        )));
+                    }
+                }
+
+                writer.write_all(&buf[..n]).await.map_err(ServerError::from)?;
+            }
+            writer.flush().await.map_err(ServerError::from)?;
+            Ok(())
+        }
+        .await;
+
+        // Drop writer (closes file handle) before any cleanup or rename
+        drop(writer);
+
+        if let Err(e) = write_result {
+            let _ = tokio::fs::remove_file(&temp_path).await;
+            return Err(e);
+        }
+
+        data_len
+    };
+
+    // Atomic rename temp → final path (file handle already closed)
+    if let Err(e) = tokio::fs::rename(&temp_path, &file_path).await {
+        let _ = tokio::fs::remove_file(&temp_path).await;
+        return Err(ServerError::from(e));
+    }
 
     // Update quota
     if data_len > old_size {
@@ -241,6 +314,26 @@ fn list_files_recursive(dir: &std::path::Path, prefix: &str) -> Vec<String> {
     keys
 }
 
+/// PUT without Content-Length header (for concurrent test).
+#[cfg(test)]
+pub(crate) async fn authed_put_no_cl(
+    router: axum::Router,
+    path: &str,
+    body: Vec<u8>,
+) -> axum::response::Response {
+    use tower::ServiceExt;
+    let req = axum::http::Request::builder()
+        .method("PUT")
+        .uri(path)
+        .header(
+            "Authorization",
+            format!("Bearer {}", super::test_helpers::TEST_TOKEN),
+        )
+        .body(Body::from(body))
+        .unwrap();
+    router.oneshot(req).await.unwrap()
+}
+
 async fn handle_range_read(
     file_path: &std::path::Path,
     range_header: &str,
@@ -308,4 +401,161 @@ async fn handle_range_read(
         body,
     )
         .into_response())
+}
+
+#[cfg(test)]
+mod tests {
+    use axum::http::StatusCode;
+
+    use super::super::test_helpers::*;
+
+    const CONFIG_PATH: &str = "/test-repo/config";
+
+    #[tokio::test]
+    async fn put_then_get_round_trip() {
+        let (router, _state, _tmp) = setup_app(0);
+        let data = vec![0xAB; 4096];
+
+        let resp = authed_put(router.clone(), CONFIG_PATH, data.clone()).await;
+        assert_status(&resp, StatusCode::CREATED);
+
+        let resp = authed_get(router, CONFIG_PATH).await;
+        assert_status(&resp, StatusCode::OK);
+        assert_eq!(body_bytes(resp).await, data);
+    }
+
+    #[tokio::test]
+    async fn put_overwrite_returns_no_content() {
+        let (router, _state, _tmp) = setup_app(0);
+
+        let resp = authed_put(router.clone(), CONFIG_PATH, vec![1; 100]).await;
+        assert_status(&resp, StatusCode::CREATED);
+
+        let resp = authed_put(router.clone(), CONFIG_PATH, vec![2; 200]).await;
+        assert_status(&resp, StatusCode::NO_CONTENT);
+
+        // Verify content was updated
+        let resp = authed_get(router, CONFIG_PATH).await;
+        assert_eq!(body_bytes(resp).await, vec![2u8; 200]);
+    }
+
+    #[tokio::test]
+    async fn put_quota_rejected() {
+        let (router, _state, _tmp) = setup_app(1024); // 1 KiB quota
+        let data = vec![0xFF; 2048]; // 2 KiB body
+
+        let resp = authed_put(router, CONFIG_PATH, data).await;
+        assert_status(&resp, StatusCode::PAYLOAD_TOO_LARGE);
+    }
+
+    #[tokio::test]
+    async fn put_overwrite_net_quota() {
+        let (router, _state, _tmp) = setup_app(10 * 1024); // 10 KiB
+
+        // Upload 8 KiB — should succeed
+        let resp = authed_put(router.clone(), CONFIG_PATH, vec![0xAA; 8 * 1024]).await;
+        assert_status(&resp, StatusCode::CREATED);
+
+        // Overwrite with 4 KiB — should succeed, net usage drops to 4 KiB
+        let resp = authed_put(router.clone(), CONFIG_PATH, vec![0xBB; 4 * 1024]).await;
+        assert_status(&resp, StatusCode::NO_CONTENT);
+
+        // Upload another 6 KiB to a different key — total would be 10 KiB, should succeed
+        let resp = authed_put(router.clone(), "/test-repo/index", vec![0xCC; 6 * 1024]).await;
+        assert_status(&resp, StatusCode::CREATED);
+
+        // Verify first file has new content
+        let resp = authed_get(router, CONFIG_PATH).await;
+        assert_eq!(body_bytes(resp).await.len(), 4 * 1024);
+    }
+
+    #[tokio::test]
+    async fn put_no_leftover_temp_files() {
+        let (router, _state, tmp) = setup_app(0);
+
+        let resp = authed_put(router, CONFIG_PATH, vec![0x42; 512]).await;
+        assert_status(&resp, StatusCode::CREATED);
+
+        // Check no .tmp.* files in the repo dir
+        assert_no_temp_files(tmp.path());
+    }
+
+    #[tokio::test]
+    async fn put_quota_rejection_cleans_temp() {
+        let (router, _state, tmp) = setup_app(256);
+
+        // Upload that will be rejected by Content-Length pre-check
+        let resp = authed_put(router, CONFIG_PATH, vec![0xFF; 512]).await;
+        assert_status(&resp, StatusCode::PAYLOAD_TOO_LARGE);
+
+        assert_no_temp_files(tmp.path());
+    }
+
+    #[tokio::test]
+    async fn put_concurrent_same_key() {
+        let (router, _state, tmp) = setup_app(0);
+        let data_a = vec![0xAA; 1024];
+        let data_b = vec![0xBB; 1024];
+
+        let router_a = router.clone();
+        let router_b = router.clone();
+        let da = data_a.clone();
+        let db = data_b.clone();
+
+        let (ra, rb) = tokio::join!(
+            super::authed_put_no_cl(router_a, CONFIG_PATH, da),
+            super::authed_put_no_cl(router_b, CONFIG_PATH, db),
+        );
+
+        // Both should succeed (one creates, one overwrites — or both create
+        // depending on race). Accept CREATED or NO_CONTENT for either.
+        assert!(
+            ra.status() == StatusCode::CREATED || ra.status() == StatusCode::NO_CONTENT,
+            "unexpected status A: {}",
+            ra.status()
+        );
+        assert!(
+            rb.status() == StatusCode::CREATED || rb.status() == StatusCode::NO_CONTENT,
+            "unexpected status B: {}",
+            rb.status()
+        );
+
+        // File content should match one of the two payloads
+        let resp = authed_get(router, CONFIG_PATH).await;
+        let body = body_bytes(resp).await;
+        assert!(
+            body == data_a || body == data_b,
+            "file content doesn't match either payload"
+        );
+
+        // No orphan temp files
+        assert_no_temp_files(tmp.path());
+    }
+
+    /// Recursively check that no `.tmp.*` files exist under the given path.
+    fn assert_no_temp_files(dir: &std::path::Path) {
+        for path in walk_file_paths(dir) {
+            let name = path.file_name().unwrap().to_string_lossy();
+            assert!(
+                !name.starts_with(".tmp."),
+                "leftover temp file: {}",
+                path.display()
+            );
+        }
+    }
+
+    fn walk_file_paths(dir: &std::path::Path) -> Vec<std::path::PathBuf> {
+        let mut out = Vec::new();
+        if let Ok(entries) = std::fs::read_dir(dir) {
+            for entry in entries.flatten() {
+                let path = entry.path();
+                if path.is_dir() {
+                    out.extend(walk_file_paths(&path));
+                } else {
+                    out.push(path);
+                }
+            }
+        }
+        out
+    }
 }
