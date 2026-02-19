@@ -4,17 +4,13 @@ use std::path::PathBuf;
 use std::time::Instant;
 
 use memmap2::MmapMut;
-use serde::{Deserialize, Serialize};
 use tracing::warn;
 
 use crate::config::CHUNK_MAX_SIZE_HARD_CAP;
 use crate::crypto::chunk_id::ChunkId;
 use crate::crypto::pack_id::PackId;
-use crate::crypto::CryptoEngine;
 use crate::error::{Result, VgerError};
 use crate::storage::StorageBackend;
-
-use super::format::{pack_object, unpack_object_expect, ObjectType};
 
 /// Magic bytes at the start of every pack file.
 pub const PACK_MAGIC: &[u8; 8] = b"VGERPACK";
@@ -30,22 +26,10 @@ pub enum PackType {
     Tree,
 }
 
-/// One entry in the pack's trailing header. Describes a single blob.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct PackHeaderEntry {
-    pub obj_type: u8,
-    pub chunk_id: ChunkId,
-    pub offset: u64,
-    pub length: u32,
-    pub uncompressed_size: u32,
-}
-
 /// Lightweight metadata for a blob whose data lives in the pack buffer.
 struct BlobMeta {
-    obj_type: u8,
     chunk_id: ChunkId,
     stored_size: u32,
-    uncompressed_size: u32,
 }
 
 /// Maximum number of blobs in a single pack file.
@@ -62,10 +46,6 @@ pub const PACK_MAX_AGE_SECS: u64 = 300;
 /// 1-byte compression tag = 30 bytes, rounded up to 1024 for margin), plus
 /// 4-byte length prefix.
 pub const DEFAULT_MAX_BLOB_OVERHEAD: usize = CHUNK_MAX_SIZE_HARD_CAP as usize + 1024 + 4;
-
-/// Headroom for the encrypted pack header trailer.
-/// Conservative estimate: 10K entries × ~73 bytes each + encryption envelope + 4-byte trailer.
-const HEADER_HEADROOM: usize = 1024 * 1024; // 1 MiB
 
 /// Tuple describing one chunk's location and refcount in a sealed/flushed pack.
 pub type PackedChunkEntry = (ChunkId, u32, u64, u32);
@@ -151,7 +131,7 @@ impl PackWriter {
     /// Create a new pack writer with explicit max_blob_overhead.
     ///
     /// `max_blob_overhead` controls the mmap allocation size:
-    ///   `alloc_size = target_size + max_blob_overhead + HEADER_HEADROOM`
+    ///   `alloc_size = PACK_HEADER_SIZE + target_size + max_blob_overhead`
     ///
     /// For backup, use `DEFAULT_MAX_BLOB_OVERHEAD`. For compact, pre-scan
     /// existing blobs to find the maximum per-blob append size.
@@ -181,9 +161,9 @@ impl PackWriter {
 
     /// Compute the mmap allocation size for data packs.
     fn alloc_size(&self) -> usize {
-        self.target_size
+        PACK_HEADER_SIZE
+            .saturating_add(self.target_size)
             .saturating_add(self.max_blob_overhead)
-            .saturating_add(HEADER_HEADROOM)
     }
 
     /// Initialize the buffer on first blob.
@@ -292,13 +272,7 @@ impl PackWriter {
 
     /// Add an encrypted blob to the pack buffer. Returns the offset within the pack
     /// where the blob data starts (after the 4-byte length prefix).
-    pub fn add_blob(
-        &mut self,
-        obj_type: u8,
-        chunk_id: ChunkId,
-        encrypted_blob: Vec<u8>,
-        uncompressed_size: u32,
-    ) -> Result<u64> {
+    pub fn add_blob(&mut self, chunk_id: ChunkId, encrypted_blob: Vec<u8>) -> Result<u64> {
         let blob_len = encrypted_blob.len() as u32;
 
         // On first blob: initialize the buffer.
@@ -337,10 +311,8 @@ impl PackWriter {
         }
         self.pending.insert(chunk_id, (blob_len, 1));
         self.blob_meta.push(BlobMeta {
-            obj_type,
             chunk_id,
             stored_size: blob_len,
-            uncompressed_size,
         });
 
         Ok(offset)
@@ -401,59 +373,30 @@ impl PackWriter {
         self.target_size
     }
 
-    /// Seal the pack: append encrypted header trailer, compute PackId, return
-    /// a `SealedPack` that can be destructured for upload.
-    ///
-    /// The only fallible step is header encryption (`pack_object`). On crypto
-    /// failure the buffer is untouched (header not yet written), metadata intact,
-    /// retry safe.
-    pub fn seal(&mut self, crypto: &dyn CryptoEngine) -> Result<SealedPack> {
+    /// Seal the pack: compute PackId, return a `SealedPack` that can be
+    /// destructured for upload.
+    pub fn seal(&mut self) -> Result<SealedPack> {
         if self.blob_meta.is_empty() {
             return Err(VgerError::Other("cannot seal empty pack writer".into()));
         }
 
-        // Phase 1: Build header entries and results from blob_meta.
-        let mut header_entries: Vec<PackHeaderEntry> = Vec::with_capacity(self.blob_meta.len());
+        // Build results from blob_meta.
+        let mut results: Vec<PackedChunkEntry> = Vec::with_capacity(self.blob_meta.len());
         let mut running_offset = PACK_HEADER_SIZE;
         for meta in &self.blob_meta {
             let offset = running_offset as u64 + 4;
             running_offset += 4 + meta.stored_size as usize;
 
-            header_entries.push(PackHeaderEntry {
-                obj_type: meta.obj_type,
-                chunk_id: meta.chunk_id,
-                offset,
-                length: meta.stored_size,
-                uncompressed_size: meta.uncompressed_size,
-            });
-        }
-
-        let mut results: Vec<PackedChunkEntry> = Vec::with_capacity(header_entries.len());
-        for entry in &header_entries {
             let refcount = self
                 .pending
-                .get(&entry.chunk_id)
+                .get(&meta.chunk_id)
                 .map(|(_, rc)| *rc)
                 .unwrap_or(1);
-            results.push((entry.chunk_id, entry.length, entry.offset, refcount));
+            results.push((meta.chunk_id, meta.stored_size, offset, refcount));
         }
 
-        // Phase 2: Fallible work — serialize and encrypt the header.
-        // Buffer is untouched until Phase 3; on error the caller can retry.
-        let header_bytes = rmp_serde::to_vec(&header_entries)?;
-        let encrypted_header = pack_object(ObjectType::PackHeader, &header_bytes, crypto)?;
-
-        // Phase 3: All fallible ops succeeded — append header trailer to buffer.
-        let header_len = encrypted_header.len() as u32;
-
         let sealed_data = match self.buffer.take().expect("buffer was initialized") {
-            PackBuffer::Mmap(mut mb) => {
-                let needed = encrypted_header.len() + 4;
-                let pos = mb.write_pos;
-                mb.mmap[pos..pos + encrypted_header.len()].copy_from_slice(&encrypted_header);
-                mb.mmap[pos + encrypted_header.len()..pos + needed]
-                    .copy_from_slice(&header_len.to_le_bytes());
-                mb.write_pos += needed;
+            PackBuffer::Mmap(mb) => {
                 let len = mb.write_pos;
                 SealedData::Mmap {
                     mmap: mb.mmap,
@@ -461,11 +404,7 @@ impl PackWriter {
                     len,
                 }
             }
-            PackBuffer::Memory(mut v) => {
-                v.extend_from_slice(&encrypted_header);
-                v.extend_from_slice(&header_len.to_le_bytes());
-                SealedData::Memory(v)
-            }
+            PackBuffer::Memory(v) => SealedData::Memory(v),
         };
 
         let pack_id = PackId::compute(sealed_data.as_slice());
@@ -485,16 +424,12 @@ impl PackWriter {
 
     /// Flush the buffered blobs into a pack file (seal + upload).
     /// Returns (pack_id, vec of (chunk_id, stored_size, offset, refcount)).
-    pub fn flush(
-        &mut self,
-        storage: &dyn StorageBackend,
-        crypto: &dyn CryptoEngine,
-    ) -> Result<FlushedPackResult> {
+    pub fn flush(&mut self, storage: &dyn StorageBackend) -> Result<FlushedPackResult> {
         let SealedPack {
             pack_id,
             entries,
             data,
-        } = self.seal(crypto)?;
+        } = self.seal()?;
         storage.put(&pack_id.storage_key(), data.as_slice())?;
         Ok((pack_id, entries))
     }
@@ -539,43 +474,7 @@ pub fn read_blob_from_pack(
     Ok(data)
 }
 
-/// Read and decrypt the trailing header from a pack file.
-pub fn read_pack_header(
-    storage: &dyn StorageBackend,
-    pack_id: &PackId,
-    crypto: &dyn CryptoEngine,
-) -> Result<Vec<PackHeaderEntry>> {
-    let pack_data = storage
-        .get(&pack_id.storage_key())?
-        .ok_or_else(|| VgerError::Other(format!("pack not found: {pack_id}")))?;
-
-    if pack_data.len() < PACK_HEADER_SIZE + 4 {
-        return Err(VgerError::InvalidFormat("pack too small".into()));
-    }
-
-    // Read header length from last 4 bytes
-    let len_offset = pack_data.len() - 4;
-    let header_len = u32::from_le_bytes(
-        pack_data[len_offset..len_offset + 4]
-            .try_into()
-            .map_err(|_| VgerError::InvalidFormat("invalid pack header length field".into()))?,
-    ) as usize;
-
-    if header_len + 4 > pack_data.len() - PACK_HEADER_SIZE {
-        return Err(VgerError::InvalidFormat(
-            "invalid pack header length".into(),
-        ));
-    }
-
-    let header_start = len_offset - header_len;
-    let encrypted_header = &pack_data[header_start..len_offset];
-
-    let header_bytes = unpack_object_expect(encrypted_header, ObjectType::PackHeader, crypto)?;
-    let entries: Vec<PackHeaderEntry> = rmp_serde::from_slice(&header_bytes)?;
-    Ok(entries)
-}
-
-/// Forward-scan a pack file using per-blob length prefixes (for recovery).
+/// Forward-scan a pack file using per-blob length prefixes.
 /// Returns (offset, length) pairs for each blob.
 pub fn scan_pack_blobs(storage: &dyn StorageBackend, pack_id: &PackId) -> Result<Vec<(u64, u32)>> {
     let pack_data = storage
@@ -592,27 +491,8 @@ pub fn scan_pack_blobs(storage: &dyn StorageBackend, pack_id: &PackId) -> Result
     }
 
     let mut pos = PACK_HEADER_SIZE;
+    let blobs_end = pack_data.len();
     let mut blobs = Vec::new();
-
-    if pack_data.len() < PACK_HEADER_SIZE + 4 {
-        return Err(VgerError::InvalidFormat("pack too small for header".into()));
-    }
-
-    // Read header length from last 4 bytes to know where blobs end
-    let len_offset = pack_data.len() - 4;
-    let header_len = u32::from_le_bytes(
-        pack_data[len_offset..len_offset + 4]
-            .try_into()
-            .map_err(|_| VgerError::InvalidFormat("invalid pack header length field".into()))?,
-    ) as usize;
-
-    if header_len > len_offset.saturating_sub(PACK_HEADER_SIZE) {
-        return Err(VgerError::InvalidFormat(
-            "invalid pack header length".into(),
-        ));
-    }
-
-    let blobs_end = len_offset - header_len;
 
     while pos + 4 <= blobs_end {
         let blob_len = u32::from_le_bytes(
@@ -620,12 +500,19 @@ pub fn scan_pack_blobs(storage: &dyn StorageBackend, pack_id: &PackId) -> Result
                 .try_into()
                 .map_err(|_| VgerError::InvalidFormat("invalid blob length field".into()))?,
         );
-        let blob_offset = (pos + 4) as u64;
         if pos + 4 + blob_len as usize > blobs_end {
             break;
         }
+        let blob_offset = (pos + 4) as u64;
         blobs.push((blob_offset, blob_len));
         pos += 4 + blob_len as usize;
+    }
+
+    if pos != blobs_end {
+        let trailing = blobs_end - pos;
+        return Err(VgerError::InvalidFormat(format!(
+            "truncated or corrupt pack: {trailing} trailing bytes"
+        )));
     }
 
     Ok(blobs)
@@ -661,8 +548,7 @@ mod tests {
     fn should_flush_on_size() {
         let mut w = PackWriter::new_default(PackType::Data, 100, None);
         assert!(!w.should_flush());
-        w.add_blob(1, dummy_chunk_id(0), vec![0u8; 120], 120)
-            .unwrap();
+        w.add_blob(dummy_chunk_id(0), vec![0u8; 120]).unwrap();
         assert!(w.should_flush());
     }
 
@@ -674,7 +560,7 @@ mod tests {
             assert!(!w.should_flush(), "should not flush at {i} blobs");
             let mut id_bytes = [0u8; 32];
             id_bytes[0..4].copy_from_slice(&(i as u32).to_le_bytes());
-            w.add_blob(1, ChunkId(id_bytes), vec![1], 1).unwrap();
+            w.add_blob(ChunkId(id_bytes), vec![1]).unwrap();
         }
         assert!(w.should_flush());
     }
@@ -682,25 +568,21 @@ mod tests {
     #[test]
     fn seal_resets_first_blob_time() {
         let mut w = PackWriter::new_default(PackType::Data, usize::MAX, None);
-        w.add_blob(1, dummy_chunk_id(0), vec![0u8; 10], 10).unwrap();
+        w.add_blob(dummy_chunk_id(0), vec![0u8; 10]).unwrap();
         assert!(w.first_blob_time.is_some());
 
-        let engine = crate::crypto::PlaintextEngine::new(&[0u8; 32]);
-        let _ = w.seal(&engine).unwrap();
+        let _ = w.seal().unwrap();
         assert!(w.first_blob_time.is_none());
     }
 
-    /// Golden-byte regression test using PlaintextEngine (deterministic — no nonces).
-    /// Any change to wire format, header serialization, or byte ordering will fail this.
+    /// Golden-byte regression test. No header trailer — just magic + blobs.
+    /// Any change to wire format or byte ordering will fail this.
     #[test]
     fn seal_deterministic_bytes() {
         // Hard-coded expected output. Structure:
         //   [0..9]   VGERPACK\x01  — magic + version
         //   [9..15]  blob 0: 4B len LE (2) + 2B data (0xDE 0xAD)
         //   [15..22] blob 1: 4B len LE (3) + 3B data (0xBE 0xEF 0x42)
-        //   [22..23] 0x05 — ObjectType::PackHeader type tag
-        //   [23..168] msgpack-encoded Vec<PackHeaderEntry>
-        //   [168..172] 4B header_len LE (146 = 0x92)
         #[rustfmt::skip]
         const EXPECTED: &[u8] = &[
             // Pack header: VGERPACK + version 1
@@ -709,40 +591,14 @@ mod tests {
             0x02, 0x00, 0x00, 0x00, 0xde, 0xad,
             // Blob 1: len=3 LE, data=0xBE 0xEF 0x42
             0x03, 0x00, 0x00, 0x00, 0xbe, 0xef, 0x42,
-            // Encrypted header envelope: type tag (PackHeader=5) + msgpack payload
-            0x05, 0x92, 0x95, 0x01, 0xdc, 0x00, 0x20,
-            0xcc, 0xaa, 0xcc, 0xaa, 0xcc, 0xaa, 0xcc, 0xaa,
-            0xcc, 0xaa, 0xcc, 0xaa, 0xcc, 0xaa, 0xcc, 0xaa,
-            0xcc, 0xaa, 0xcc, 0xaa, 0xcc, 0xaa, 0xcc, 0xaa,
-            0xcc, 0xaa, 0xcc, 0xaa, 0xcc, 0xaa, 0xcc, 0xaa,
-            0xcc, 0xaa, 0xcc, 0xaa, 0xcc, 0xaa, 0xcc, 0xaa,
-            0xcc, 0xaa, 0xcc, 0xaa, 0xcc, 0xaa, 0xcc, 0xaa,
-            0xcc, 0xaa, 0xcc, 0xaa, 0xcc, 0xaa, 0xcc, 0xaa,
-            0xcc, 0xaa, 0xcc, 0xaa, 0xcc, 0xaa, 0xcc, 0xaa,
-            0x0d, 0x02, 0x02,
-            0x95, 0x01, 0xdc, 0x00, 0x20,
-            0xcc, 0xbb, 0xcc, 0xbb, 0xcc, 0xbb, 0xcc, 0xbb,
-            0xcc, 0xbb, 0xcc, 0xbb, 0xcc, 0xbb, 0xcc, 0xbb,
-            0xcc, 0xbb, 0xcc, 0xbb, 0xcc, 0xbb, 0xcc, 0xbb,
-            0xcc, 0xbb, 0xcc, 0xbb, 0xcc, 0xbb, 0xcc, 0xbb,
-            0xcc, 0xbb, 0xcc, 0xbb, 0xcc, 0xbb, 0xcc, 0xbb,
-            0xcc, 0xbb, 0xcc, 0xbb, 0xcc, 0xbb, 0xcc, 0xbb,
-            0xcc, 0xbb, 0xcc, 0xbb, 0xcc, 0xbb, 0xcc, 0xbb,
-            0xcc, 0xbb, 0xcc, 0xbb, 0xcc, 0xbb, 0xcc, 0xbb,
-            0x13, 0x03, 0x03,
-            // Header length trailer: 146 bytes LE
-            0x92, 0x00, 0x00, 0x00,
         ];
 
-        let engine = crate::crypto::PlaintextEngine::new(&[0u8; 32]);
-
         let mut w = PackWriter::new_default(PackType::Data, usize::MAX, None);
-        w.add_blob(1, dummy_chunk_id(0xAA), vec![0xDE, 0xAD], 2)
-            .unwrap();
-        w.add_blob(1, dummy_chunk_id(0xBB), vec![0xBE, 0xEF, 0x42], 3)
+        w.add_blob(dummy_chunk_id(0xAA), vec![0xDE, 0xAD]).unwrap();
+        w.add_blob(dummy_chunk_id(0xBB), vec![0xBE, 0xEF, 0x42])
             .unwrap();
 
-        let sealed = w.seal(&engine).unwrap();
+        let sealed = w.seal().unwrap();
 
         assert_eq!(
             sealed.data.as_slice(),
@@ -751,196 +607,94 @@ mod tests {
         );
     }
 
-    /// Roundtrip: seal a pack, then parse it back via read_pack_header + scan_pack_blobs.
+    /// Roundtrip: seal a pack, then parse it back via scan_pack_blobs.
     #[test]
-    fn seal_roundtrip_header_and_scan() {
+    fn seal_roundtrip_scan() {
         use crate::testutil::MemoryBackend;
 
-        let engine = crate::crypto::PlaintextEngine::new(&[0u8; 32]);
         let storage = MemoryBackend::new();
 
-        let blobs: Vec<(u8, ChunkId, Vec<u8>, u32)> = vec![
-            (1, dummy_chunk_id(1), vec![10u8; 50], 50),
-            (1, dummy_chunk_id(2), vec![20u8; 80], 80),
-            (1, dummy_chunk_id(3), vec![30u8; 30], 30),
+        let blobs: Vec<(ChunkId, Vec<u8>)> = vec![
+            (dummy_chunk_id(1), vec![10u8; 50]),
+            (dummy_chunk_id(2), vec![20u8; 80]),
+            (dummy_chunk_id(3), vec![30u8; 30]),
         ];
 
         let mut w = PackWriter::new_default(PackType::Data, usize::MAX, None);
-        for (obj_type, chunk_id, data, uncompressed) in &blobs {
-            w.add_blob(*obj_type, *chunk_id, data.clone(), *uncompressed)
-                .unwrap();
+        for (chunk_id, data) in &blobs {
+            w.add_blob(*chunk_id, data.clone()).unwrap();
         }
 
-        let sealed = w.seal(&engine).unwrap();
+        let sealed = w.seal().unwrap();
 
-        // Store the pack so read_pack_header / scan_pack_blobs can access it.
+        // Store the pack so scan_pack_blobs can access it.
         storage
             .put(&sealed.pack_id.storage_key(), sealed.data.as_slice())
             .unwrap();
-
-        // Verify read_pack_header returns matching entries.
-        let header = read_pack_header(&storage, &sealed.pack_id, &engine).unwrap();
-        assert_eq!(header.len(), blobs.len());
-        for (i, he) in header.iter().enumerate() {
-            assert_eq!(he.chunk_id, blobs[i].1, "chunk_id mismatch at {i}");
-            assert_eq!(he.length, blobs[i].2.len() as u32, "length mismatch at {i}");
-            assert_eq!(
-                he.uncompressed_size, blobs[i].3,
-                "uncompressed mismatch at {i}"
-            );
-            // Verify offset matches what seal returned.
-            assert_eq!(he.offset, sealed.entries[i].2, "offset mismatch at {i}");
-        }
 
         // Verify scan_pack_blobs returns matching (offset, length) pairs.
         let scanned = scan_pack_blobs(&storage, &sealed.pack_id).unwrap();
         assert_eq!(scanned.len(), blobs.len());
         for (i, (offset, length)) in scanned.iter().enumerate() {
-            assert_eq!(*offset, header[i].offset, "scan offset mismatch at {i}");
-            assert_eq!(*length, header[i].length, "scan length mismatch at {i}");
+            assert_eq!(*offset, sealed.entries[i].2, "scan offset mismatch at {i}");
+            assert_eq!(*length, sealed.entries[i].1, "scan length mismatch at {i}");
         }
     }
 
-    /// After seal fails (crypto error), writer state is intact and retry succeeds.
+    /// Seal clears writer state after success.
     #[test]
-    fn seal_failure_preserves_state() {
-        use crate::crypto::CryptoEngine;
-
-        /// A CryptoEngine that fails on encrypt (used to trigger seal error).
-        struct FailingEngine;
-
-        impl CryptoEngine for FailingEngine {
-            fn encrypt(&self, _plaintext: &[u8], _aad: &[u8]) -> crate::error::Result<Vec<u8>> {
-                Err(VgerError::Other("simulated encrypt failure".into()))
-            }
-            fn decrypt(&self, _data: &[u8], _aad: &[u8]) -> crate::error::Result<Vec<u8>> {
-                unreachable!()
-            }
-            fn encrypt_in_place_detached(
-                &self,
-                _buffer: &mut [u8],
-                _aad: &[u8],
-            ) -> crate::error::Result<([u8; 12], [u8; 16])> {
-                unreachable!()
-            }
-            fn is_encrypting(&self) -> bool {
-                false
-            }
-            fn chunk_id_key(&self) -> &[u8; 32] {
-                &[0u8; 32]
-            }
-        }
-
+    fn seal_clears_state() {
         let mut w = PackWriter::new_default(PackType::Data, usize::MAX, None);
-        w.add_blob(1, dummy_chunk_id(1), vec![0xAA; 100], 100)
-            .unwrap();
-        w.add_blob(1, dummy_chunk_id(2), vec![0xBB; 200], 200)
-            .unwrap();
+        w.add_blob(dummy_chunk_id(1), vec![0xAA; 100]).unwrap();
+        w.add_blob(dummy_chunk_id(2), vec![0xBB; 200]).unwrap();
 
-        let blob_meta_len_before = w.blob_meta.len();
-
-        // Attempt seal with failing engine — should error.
-        let result = w.seal(&FailingEngine);
-        assert!(result.is_err());
-
-        // Writer state must be intact after failure.
-        assert_eq!(w.blob_meta.len(), blob_meta_len_before);
-        assert!(w.has_pending());
-        assert!(w.buffer.is_some());
-
-        // Retry with working engine — should succeed.
-        let good_engine = crate::crypto::PlaintextEngine::new(&[0u8; 32]);
-        let sealed = w.seal(&good_engine).unwrap();
+        let sealed = w.seal().unwrap();
 
         assert_eq!(sealed.entries.len(), 2);
         assert!(!sealed.pack_id.0.iter().all(|&b| b == 0));
         // Writer should be clear now.
         assert!(!w.has_pending());
         assert!(w.buffer.is_none());
+        assert_eq!(w.current_size, 0);
     }
 
     /// Data packs use mmap, tree packs use Vec.
     #[test]
     fn data_packs_use_mmap_tree_packs_use_vec() {
         let mut data_w = PackWriter::new_default(PackType::Data, 1024, None);
-        data_w
-            .add_blob(1, dummy_chunk_id(0), vec![0u8; 10], 10)
-            .unwrap();
+        data_w.add_blob(dummy_chunk_id(0), vec![0u8; 10]).unwrap();
         assert!(
             matches!(data_w.buffer, Some(PackBuffer::Mmap(_))),
             "data pack should use mmap buffer"
         );
 
         let mut tree_w = PackWriter::new_default(PackType::Tree, 1024, None);
-        tree_w
-            .add_blob(1, dummy_chunk_id(0), vec![0u8; 10], 10)
-            .unwrap();
+        tree_w.add_blob(dummy_chunk_id(0), vec![0u8; 10]).unwrap();
         assert!(
             matches!(tree_w.buffer, Some(PackBuffer::Memory(_))),
             "tree pack should use Vec buffer"
         );
     }
 
-    /// Validates `current_size` tracks correctly across add → fail → add → seal.
+    /// Validates `current_size` tracks correctly across add → add → seal.
     #[test]
     fn current_size_invariant() {
-        use crate::crypto::CryptoEngine;
-
-        struct FailingEngine;
-        impl CryptoEngine for FailingEngine {
-            fn encrypt(&self, _: &[u8], _: &[u8]) -> crate::error::Result<Vec<u8>> {
-                Err(VgerError::Other("fail".into()))
-            }
-            fn decrypt(&self, _: &[u8], _: &[u8]) -> crate::error::Result<Vec<u8>> {
-                unreachable!()
-            }
-            fn encrypt_in_place_detached(
-                &self,
-                _: &mut [u8],
-                _: &[u8],
-            ) -> crate::error::Result<([u8; 12], [u8; 16])> {
-                unreachable!()
-            }
-            fn is_encrypting(&self) -> bool {
-                false
-            }
-            fn chunk_id_key(&self) -> &[u8; 32] {
-                &[0u8; 32]
-            }
-        }
-
         let mut w = PackWriter::new_default(PackType::Tree, usize::MAX, None);
 
         // Add blobs, check invariant after each (Vec path).
-        w.add_blob(1, dummy_chunk_id(1), vec![0xAA; 100], 100)
-            .unwrap();
+        w.add_blob(dummy_chunk_id(1), vec![0xAA; 100]).unwrap();
         if let Some(PackBuffer::Memory(ref v)) = w.buffer {
             assert_eq!(v.len(), PACK_HEADER_SIZE + w.current_size);
         }
 
-        w.add_blob(1, dummy_chunk_id(2), vec![0xBB; 50], 50)
-            .unwrap();
-        if let Some(PackBuffer::Memory(ref v)) = w.buffer {
-            assert_eq!(v.len(), PACK_HEADER_SIZE + w.current_size);
-        }
-
-        // Failed seal must not break the invariant.
-        assert!(w.seal(&FailingEngine).is_err());
-        if let Some(PackBuffer::Memory(ref v)) = w.buffer {
-            assert_eq!(v.len(), PACK_HEADER_SIZE + w.current_size);
-        }
-
-        // Adding another blob after failure must still hold.
-        w.add_blob(1, dummy_chunk_id(3), vec![0xCC; 25], 25)
-            .unwrap();
+        w.add_blob(dummy_chunk_id(2), vec![0xBB; 50]).unwrap();
         if let Some(PackBuffer::Memory(ref v)) = w.buffer {
             assert_eq!(v.len(), PACK_HEADER_SIZE + w.current_size);
         }
 
         // Successful seal clears everything.
-        let engine = crate::crypto::PlaintextEngine::new(&[0u8; 32]);
-        let sealed = w.seal(&engine).unwrap();
-        assert_eq!(sealed.entries.len(), 3);
+        let sealed = w.seal().unwrap();
+        assert_eq!(sealed.entries.len(), 2);
         assert!(w.buffer.is_none());
         assert_eq!(w.current_size, 0);
     }
@@ -948,13 +702,12 @@ mod tests {
     /// Bounds-check error when a blob would overflow the mmap buffer.
     #[test]
     fn mmap_overflow_returns_error() {
-        // Small target + overhead so the mmap is alloc_size = 64 + 64 + 1 MiB ≈ 1 MiB.
         let mut w = PackWriter::new(PackType::Data, 64, 64, None);
         // First small blob succeeds.
-        w.add_blob(1, dummy_chunk_id(0), vec![0u8; 10], 10).unwrap();
-        // A blob larger than the remaining mmap capacity (~1 MiB) should fail.
-        let big = vec![0u8; 2 * 1024 * 1024];
-        let result = w.add_blob(1, dummy_chunk_id(1), big, 2 * 1024 * 1024);
+        w.add_blob(dummy_chunk_id(0), vec![0u8; 10]).unwrap();
+        // A blob larger than the remaining mmap capacity should fail.
+        let big = vec![0u8; 256];
+        let result = w.add_blob(dummy_chunk_id(1), big);
         assert!(result.is_err(), "should fail when blob overflows mmap");
     }
 
@@ -963,13 +716,11 @@ mod tests {
     fn small_backup_on_mmap() {
         let mut w = PackWriter::new_default(PackType::Data, 256 * 1024, None);
 
-        w.add_blob(1, dummy_chunk_id(0), vec![0xAB; 1024], 1024)
-            .unwrap();
+        w.add_blob(dummy_chunk_id(0), vec![0xAB; 1024]).unwrap();
 
-        let engine = crate::crypto::PlaintextEngine::new(&[0u8; 32]);
-        let sealed = w.seal(&engine).unwrap();
+        let sealed = w.seal().unwrap();
         assert_eq!(sealed.entries.len(), 1);
-        // Output should be small: header(9) + len(4) + blob(1024) + trailer < 2 KiB
+        // Output should be small: header(9) + len(4) + blob(1024) < 2 KiB
         assert!(
             sealed.data.as_slice().len() < 2048,
             "sealed output unexpectedly large: {}",
@@ -985,11 +736,36 @@ mod tests {
         let unusable_dir = blocker.join("subdir");
 
         let mut w = PackWriter::new_default(PackType::Data, 1024, Some(unusable_dir));
-        w.add_blob(1, dummy_chunk_id(1), vec![0u8; 16], 16).unwrap();
+        w.add_blob(dummy_chunk_id(1), vec![0u8; 16]).unwrap();
 
         assert!(
             matches!(w.buffer, Some(PackBuffer::Mmap(_))),
             "expected mmap buffer after falling back to system temp"
+        );
+    }
+
+    #[test]
+    fn scan_pack_blobs_rejects_truncated_pack() {
+        use crate::testutil::MemoryBackend;
+
+        let storage = MemoryBackend::new();
+        let pack_id = PackId([0xAB; 32]);
+
+        // Valid pack with one 2-byte blob, then 3 trailing garbage bytes
+        let mut data = Vec::new();
+        data.extend_from_slice(PACK_MAGIC);
+        data.push(PACK_VERSION);
+        data.extend_from_slice(&2u32.to_le_bytes()); // blob len = 2
+        data.extend_from_slice(&[0xDE, 0xAD]); // blob data
+        data.extend_from_slice(&[0xFF, 0xFF, 0xFF]); // trailing garbage (incomplete frame)
+
+        storage.put(&pack_id.storage_key(), &data).unwrap();
+
+        let err = scan_pack_blobs(&storage, &pack_id).unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            msg.contains("trailing bytes"),
+            "expected truncation error, got: {msg}"
         );
     }
 }

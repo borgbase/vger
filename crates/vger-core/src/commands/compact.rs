@@ -4,11 +4,11 @@ use tracing::{info, warn};
 
 use super::util::{open_repo, with_repo_lock};
 use crate::config::VgerConfig;
+use crate::crypto::chunk_id::ChunkId;
 use crate::crypto::pack_id::PackId;
 use crate::error::{Result, VgerError};
 use crate::repo::pack::{
-    read_blob_from_pack, read_pack_header, PackHeaderEntry, PackType, PackWriter,
-    DEFAULT_MAX_BLOB_OVERHEAD,
+    read_blob_from_pack, scan_pack_blobs, PackType, PackWriter, DEFAULT_MAX_BLOB_OVERHEAD,
 };
 use crate::repo::Repository;
 use crate::storage::{RepackBlobRef, RepackOperationRequest, RepackPlanRequest};
@@ -26,12 +26,19 @@ pub struct CompactStats {
     pub packs_orphan: u64,
 }
 
+/// A live blob entry with its location in the source pack.
+struct LiveEntry {
+    chunk_id: ChunkId,
+    offset: u64,
+    length: u32,
+}
+
 /// Per-pack analysis of live vs dead blobs.
 struct PackAnalysis {
     pack_id: PackId,
     storage_key: String,
-    entries: Vec<PackHeaderEntry>,
-    live_entries: Vec<PackHeaderEntry>,
+    total_blobs: usize,
+    live_entries: Vec<LiveEntry>,
     total_bytes: u64,
     dead_bytes: u64,
 }
@@ -58,16 +65,18 @@ pub fn compact_repo(
 ) -> Result<CompactStats> {
     let mut stats = CompactStats::default();
 
-    // Phase 1: Enumerate all packs and analyze live/dead blobs
+    // Phase 1: Enumerate all packs and analyze live/dead blobs.
+    // Build a per-pack offset lookup from the chunk index:
+    //   pack_id → { offset → (chunk_id, stored_size) }
+    let mut per_pack_lookup: HashMap<PackId, HashMap<u64, (ChunkId, u32)>> = HashMap::new();
+    for (chunk_id, entry) in repo.chunk_index().iter() {
+        per_pack_lookup
+            .entry(entry.pack_id)
+            .or_default()
+            .insert(entry.pack_offset, (*chunk_id, entry.stored_size));
+    }
+
     let mut analyses: Vec<PackAnalysis> = Vec::new();
-
-    // Build a set of (pack_id, offset) pairs from the chunk index for fast lookup
-    let live_set: HashSet<(PackId, u64)> = repo
-        .chunk_index()
-        .iter()
-        .map(|(_, entry)| (entry.pack_id, entry.pack_offset))
-        .collect();
-
     let mut discovered_pack_ids: HashSet<PackId> = HashSet::new();
 
     for shard in 0u16..256 {
@@ -90,26 +99,33 @@ pub fn compact_repo(
             stats.packs_total += 1;
             discovered_pack_ids.insert(pack_id);
 
-            let entries =
-                match read_pack_header(repo.storage.as_ref(), &pack_id, repo.crypto.as_ref()) {
-                    Ok(e) => e,
-                    Err(e) => {
-                        warn!("Skipping corrupt pack {}: {}", pack_id, e);
-                        stats.packs_corrupt += 1;
-                        continue;
-                    }
-                };
+            let scanned = match scan_pack_blobs(repo.storage.as_ref(), &pack_id) {
+                Ok(s) => s,
+                Err(e) => {
+                    warn!("Skipping corrupt pack {}: {}", pack_id, e);
+                    stats.packs_corrupt += 1;
+                    continue;
+                }
+            };
+
+            let offset_map = per_pack_lookup.get(&pack_id);
 
             let mut live_entries = Vec::new();
+            let mut total_blobs = 0usize;
             let mut total_bytes: u64 = 0;
             let mut dead_bytes: u64 = 0;
 
-            for entry in &entries {
-                let blob_size = 4 + entry.length as u64;
+            for (offset, length) in &scanned {
+                let blob_size = 4 + *length as u64;
                 total_bytes += blob_size;
+                total_blobs += 1;
 
-                if live_set.contains(&(pack_id, entry.offset)) {
-                    live_entries.push(entry.clone());
+                if let Some((chunk_id, _stored_size)) = offset_map.and_then(|m| m.get(offset)) {
+                    live_entries.push(LiveEntry {
+                        chunk_id: *chunk_id,
+                        offset: *offset,
+                        length: *length,
+                    });
                     stats.blobs_live += 1;
                 } else {
                     dead_bytes += blob_size;
@@ -128,10 +144,14 @@ pub fn compact_repo(
             };
 
             if unused_ratio >= threshold {
+                // Sort live entries by source offset for deterministic output
+                // and sequential source reads.
+                live_entries.sort_by_key(|e| e.offset);
+
                 analyses.push(PackAnalysis {
                     pack_id,
                     storage_key: key.clone(),
-                    entries,
+                    total_blobs,
                     live_entries,
                     total_bytes,
                     dead_bytes,
@@ -141,9 +161,8 @@ pub fn compact_repo(
     }
 
     // Detect orphan packs: packs on disk but not referenced by the chunk index
-    let indexed_packs: HashSet<PackId> = live_set.iter().map(|(pack_id, _)| *pack_id).collect();
     for pack_id in &discovered_pack_ids {
-        if !indexed_packs.contains(pack_id) {
+        if !per_pack_lookup.contains_key(pack_id) {
             stats.packs_orphan += 1;
         }
     }
@@ -171,9 +190,7 @@ pub fn compact_repo(
             if a.live_entries.is_empty() {
                 info!(
                     "Would delete empty pack {} ({:.1}% unused, {} dead blobs)",
-                    a.pack_id,
-                    pct,
-                    a.entries.len(),
+                    a.pack_id, pct, a.total_blobs,
                 );
                 stats.packs_deleted_empty += 1;
             } else {
@@ -182,7 +199,7 @@ pub fn compact_repo(
                     a.pack_id,
                     pct,
                     a.live_entries.len(),
-                    a.entries.len() - a.live_entries.len(),
+                    a.total_blobs - a.live_entries.len(),
                 );
                 stats.packs_repacked += 1;
             }
@@ -221,12 +238,6 @@ pub fn compact_repo(
             analysis.live_entries.len(),
         );
 
-        let pack_type = if analysis.live_entries[0].obj_type == 5 {
-            PackType::Tree
-        } else {
-            PackType::Data
-        };
-
         // Pre-scan for max blob overhead: legacy repos may contain blobs larger
         // than the current 16 MiB chunk cap, so the compact path sizes dynamically.
         let max_blob_overhead = analysis
@@ -237,7 +248,7 @@ pub fn compact_repo(
             .unwrap_or(DEFAULT_MAX_BLOB_OVERHEAD);
 
         let mut writer = PackWriter::new(
-            pack_type,
+            PackType::Data,
             pack_target,
             max_blob_overhead,
             repo.repo_cache_dir(),
@@ -251,16 +262,10 @@ pub fn compact_repo(
                 entry.length,
             )?;
 
-            writer.add_blob(
-                entry.obj_type,
-                entry.chunk_id,
-                blob_data,
-                entry.uncompressed_size,
-            )?;
+            writer.add_blob(entry.chunk_id, blob_data)?;
         }
 
-        let (new_pack_id, new_entries) =
-            writer.flush(repo.storage.as_ref(), repo.crypto.as_ref())?;
+        let (new_pack_id, new_entries) = writer.flush(repo.storage.as_ref())?;
 
         for (chunk_id, stored_size, offset, _refcount) in &new_entries {
             repo.chunk_index_mut()

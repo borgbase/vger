@@ -1063,7 +1063,7 @@ impl Repository {
             &compressed,
             self.crypto.as_ref(),
         )?;
-        self.commit_prepacked_chunk(chunk_id, packed, data.len() as u32, pack_type)
+        self.commit_prepacked_chunk(chunk_id, packed, pack_type)
     }
 
     /// Commit a pre-compressed and pre-encrypted chunk to the selected pack writer.
@@ -1072,7 +1072,6 @@ impl Repository {
         &mut self,
         chunk_id: ChunkId,
         packed: Vec<u8>,
-        uncompressed_size: u32,
         pack_type: PackType,
     ) -> Result<u32> {
         let stored_size = packed.len() as u32;
@@ -1083,12 +1082,7 @@ impl Repository {
                 PackType::Data => &mut self.data_pack_writer,
                 PackType::Tree => &mut self.tree_pack_writer,
             };
-            writer.add_blob(
-                ObjectType::ChunkData as u8,
-                chunk_id,
-                packed,
-                uncompressed_size,
-            )?;
+            writer.add_blob(chunk_id, packed)?;
             writer.should_flush()
         };
 
@@ -1146,8 +1140,8 @@ impl Repository {
             entries,
             data,
         } = match pack_type {
-            PackType::Data => self.data_pack_writer.seal(self.crypto.as_ref())?,
-            PackType::Tree => self.tree_pack_writer.seal(self.crypto.as_ref())?,
+            PackType::Data => self.data_pack_writer.seal()?,
+            PackType::Tree => self.tree_pack_writer.seal()?,
         };
 
         self.apply_sealed_entries(pack_id, entries);
@@ -1179,7 +1173,6 @@ impl Repository {
 
         // Compress
         let compressed = compress::compress(compression, data)?;
-        let uncompressed_size = data.len() as u32;
 
         // Encrypt and wrap in repo object envelope
         let packed = pack_object_with_context(
@@ -1188,8 +1181,7 @@ impl Repository {
             &compressed,
             self.crypto.as_ref(),
         )?;
-        let stored_size =
-            self.commit_prepacked_chunk(chunk_id, packed, uncompressed_size, pack_type)?;
+        let stored_size = self.commit_prepacked_chunk(chunk_id, packed, pack_type)?;
 
         Ok((chunk_id, stored_size, true))
     }

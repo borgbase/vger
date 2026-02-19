@@ -39,7 +39,6 @@ pub(super) fn process_worker_chunks(
                     let csize = repo.commit_prepacked_chunk(
                         prepared.chunk_id,
                         prepared.packed,
-                        prepared.uncompressed_size,
                         PackType::Data,
                     )?;
                     stats.original_size += size as u64;

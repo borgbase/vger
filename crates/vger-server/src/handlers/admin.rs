@@ -344,13 +344,12 @@ fn execute_repack(state: &AppState, repo: &str, plan: &RepackPlan) -> Result<Rep
 
         // Create temp file for streaming write
         let temp_id = REPACK_TEMP_COUNTER.fetch_add(1, Relaxed);
-        let temp_path =
-            source_path.with_file_name(format!(".repack_tmp.{temp_id}"));
+        let temp_path = source_path.with_file_name(format!(".repack_tmp.{temp_id}"));
 
         // Write new pack to temp file. Collect write errors so we can
         // drop the file handle before cleanup (required on Windows).
-        let temp_file = std::fs::File::create(&temp_path)
-            .map_err(|e| format!("create temp: {e}"))?;
+        let temp_file =
+            std::fs::File::create(&temp_path).map_err(|e| format!("create temp: {e}"))?;
         let mut writer = BufWriter::new(temp_file);
         let mut hasher = Blake2bVar::new(32).expect("valid output size");
 
@@ -421,20 +420,22 @@ fn execute_repack(state: &AppState, repo: &str, plan: &RepackPlan) -> Result<Rep
         let shard = &pack_id_hex[..2];
         let new_pack_key = format!("packs/{shard}/{pack_id_hex}");
 
-        let new_pack_path = state
-            .file_path(repo, &new_pack_key)
-            .ok_or_else(|| {
-                let _ = std::fs::remove_file(&temp_path);
-                "invalid new pack path".to_string()
-            })?;
+        let new_pack_path = state.file_path(repo, &new_pack_key).ok_or_else(|| {
+            let _ = std::fs::remove_file(&temp_path);
+            "invalid new pack path".to_string()
+        })?;
 
         if let Some(parent) = new_pack_path.parent() {
-            std::fs::create_dir_all(parent)
-                .map_err(|e| { let _ = std::fs::remove_file(&temp_path); format!("mkdir: {e}") })?;
+            std::fs::create_dir_all(parent).map_err(|e| {
+                let _ = std::fs::remove_file(&temp_path);
+                format!("mkdir: {e}")
+            })?;
         }
 
-        std::fs::rename(&temp_path, &new_pack_path)
-            .map_err(|e| { let _ = std::fs::remove_file(&temp_path); format!("rename new pack: {e}") })?;
+        std::fs::rename(&temp_path, &new_pack_path).map_err(|e| {
+            let _ = std::fs::remove_file(&temp_path);
+            format!("rename new pack: {e}")
+        })?;
 
         // Update quota
         state.add_quota_usage(repo, pack_offset);
@@ -572,8 +573,8 @@ fn check_structure(repo_dir: &std::path::Path) -> serde_json::Value {
                             let size = meta.len();
                             total_size += size;
 
-                            // Check minimum size (magic 8 + version 1 + header_len 4 = 13)
-                            if size < 13 {
+                            // Check minimum size: magic(8) + version(1) = 9
+                            if size < 9 {
                                 errors.push(format!(
                                     "pack too small ({size} bytes): packs/{shard_name}/{pack_name}"
                                 ));
@@ -736,9 +737,7 @@ mod tests {
     ) -> serde_json::Value {
         let blobs: Vec<serde_json::Value> = keep_blobs
             .iter()
-            .map(|(offset, length)| {
-                serde_json::json!({ "offset": offset, "length": length })
-            })
+            .map(|(offset, length)| serde_json::json!({ "offset": offset, "length": length }))
             .collect();
         serde_json::json!({
             "source_pack": source_pack,
@@ -756,12 +755,7 @@ mod tests {
         let source_key = write_pack(tmp.path(), &pack_bytes);
 
         let body = repack_body(&[repack_op(&source_key, &refs, false)]);
-        let resp = authed_post(
-            router.clone(),
-            &format!("/{TEST_REPO}?repack"),
-            body,
-        )
-        .await;
+        let resp = authed_post(router.clone(), &format!("/{TEST_REPO}?repack"), body).await;
         assert_status(&resp, StatusCode::OK);
 
         let result: serde_json::Value = serde_json::from_slice(&body_bytes(resp).await).unwrap();
@@ -780,8 +774,7 @@ mod tests {
 
         // Verify the returned offset points to the correct blob data
         let new_offset = op["new_offsets"][0].as_u64().unwrap();
-        let blob_data =
-            &new_pack_data[new_offset as usize..new_offset as usize + blob.len()];
+        let blob_data = &new_pack_data[new_offset as usize..new_offset as usize + blob.len()];
         assert_eq!(blob_data, blob);
     }
 
