@@ -231,11 +231,6 @@ mod tests {
         let since_epoch = mtime.duration_since(SystemTime::UNIX_EPOCH).unwrap();
         let diff = (since_epoch.as_secs() as i64 - target_secs).unsigned_abs();
         assert!(diff <= 1, "mtime off by {diff} seconds");
-
-        // Restore write permissions for cleanup
-        let mut perms = std::fs::metadata(&path).unwrap().permissions();
-        perms.set_readonly(false);
-        std::fs::set_permissions(&path, perms).unwrap();
     }
 
     #[test]
