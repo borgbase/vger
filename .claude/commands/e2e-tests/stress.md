@@ -27,9 +27,12 @@ bash "$REPO_ROOT/scripts/stress.sh" --help
 
 ## Defaults
 
-- `vger` binary: discovered on `PATH` (override with `--vger-bin`)
-- Corpus: `~/corpus-local` (override with `--corpus-dir`)
-- Runtime root: `~/runtime/stress` (override with `STRESS_ROOT`)
+All defaults live in `scripts/lib/defaults.sh` and can be overridden via env vars.
+
+- `vger` binary: discovered on `PATH`
+- Corpus: `~/corpus-local` (override with `CORPUS_LOCAL` env var)
+- Backend: `local` (override with `--backend local|rest|s3`)
+- Runtime root: `~/runtime/stress/<backend>` (override with `STRESS_ROOT` env var)
 
 ## Quick Runs
 
@@ -51,6 +54,16 @@ bash "$REPO_ROOT/scripts/stress.sh" \
   --iterations 1000 \
   --check-every 50 \
   --verify-data-every 0
+```
+
+Server run with cache dropping and timing:
+
+```bash
+bash "$REPO_ROOT/scripts/stress.sh" \
+  --iterations 100 \
+  --backend rest \
+  --drop-caches \
+  --time-v
 ```
 
 ## Outputs and Artifacts

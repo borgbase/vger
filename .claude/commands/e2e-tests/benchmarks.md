@@ -40,26 +40,29 @@ Dataset layout expected by the harness:
 
 Use the bundled harness (preferred; produces comparable outputs every run).
 
-Scripts live under the repository at `scripts/`.
+Scripts live under the repository at `scripts/`. Defaults come from `scripts/lib/defaults.sh`.
 
 ```bash
 REPO_ROOT="$(git rev-parse --show-toplevel)"
 
 # Basic: repeated /usr/bin/time -v runs + averaged report metrics
-RUNS=5 WARMUP_RUNS=1 "$REPO_ROOT/scripts/benchmark.sh" ~/corpus-remote
+bash "$REPO_ROOT/scripts/benchmark.sh" --runs 5
 
-# Add strace/perf on top of default profiling (if allowed on host)
-PROFILE_STRACE=1 PROFILE_PERF=1 RUNS=3 WARMUP_RUNS=1 "$REPO_ROOT/scripts/benchmark.sh" ~/corpus-remote
+# Single tool + strace/perf on top of default profiling
+bash "$REPO_ROOT/scripts/benchmark.sh" --tool vger --runs 3 --strace --perf
+
+# Custom dataset path
+bash "$REPO_ROOT/scripts/benchmark.sh" --dataset ~/corpus-local --runs 3
 ```
 
 The harness writes to `~/runtime/benchmarks/<UTC_STAMP>/`.
 
-Post-processing (summary table + chart):
+Post-processing (summary table + chart) runs automatically. Can also be invoked manually:
 ```bash
-python3 "$REPO_ROOT/scripts/bench_report.py" all ~/runtime/benchmarks/<UTC_STAMP>
+python3 "$REPO_ROOT/scripts/benchmark_report.py" all ~/runtime/benchmarks/<UTC_STAMP>
 ```
 
-`run.sh` now calls the reporter automatically at the end of each run and writes:
+Each run writes:
 - `~/runtime/benchmarks/<UTC_STAMP>/reports/summary.tsv`
 - `~/runtime/benchmarks/<UTC_STAMP>/reports/summary.md`
 - `~/runtime/benchmarks/<UTC_STAMP>/reports/summary.json`
@@ -74,7 +77,7 @@ From `reports/summary.tsv`:
 - `fs_out`: write amplification during restore
 - `throughput_mib_s`: based on top-level dataset size (`snapshot-1 + snapshot-2`)
 
-From `strace.summary.txt` (when `PROFILE_STRACE=1`):
+From `strace.summary.txt` (when `--strace` is enabled):
 - Heavy `futex` can indicate contention/over-threading.
 - Heavy `statx/newfstatat/llistxattr/getdents64` indicates metadata-walk cost (tree scan).
 
@@ -93,8 +96,8 @@ Decide what you are measuring:
 The harness defaults to an “incremental-like” loop once initialized, but you can rerun it multiple times and compare across stamps. For full-ingest benchmarks, patch the harness to re-init repos per run or wrap each command with repo wipe + init.
 
 Run controls:
-- `RUNS` (default `3`): number of measured runs per operation.
-- `WARMUP_RUNS` (default `1`): unmeasured warmup runs per operation.
+- `--runs N` (default `3`): number of measured runs per operation.
+- 1 unmeasured warmup run is always performed per operation.
 
 Per warmup/measured run workflow:
 1. Drop cache and reset/init the tool repo.

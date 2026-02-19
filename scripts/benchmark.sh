@@ -1,92 +1,86 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Reproducible benchmark harness for vger vs restic vs rustic vs borg vs kopia on a local repo.
-#
-# Per measured run:
-# - drop caches and reset repo for the tool
-# - take an untimed seed backup of snapshot-1
-# - benchmark top-level dataset backup (includes snapshot-1 + snapshot-2)
-#   or restore-from-top-level backup (restore phase)
-#
-# Outputs to ~/runtime/benchmarks/<UTC_STAMP>/ with:
-# - repeated /usr/bin/time -v runs for timing/resource distributions
-# - optional: perf stat + strace -c summaries (enable via env vars)
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+source "$SCRIPT_DIR/lib/common.sh"
+source "$SCRIPT_DIR/lib/defaults.sh"
 
-DATASET_DIR=${1:-"$HOME/corpus-remote"}
+usage() {
+  cat <<USAGE
+Usage: $(basename "$0") [options]
+
+Reproducible benchmark harness for vger vs restic vs rustic vs borg vs kopia.
+
+Per measured run: drop caches, reset repo, init, untimed seed backup of snapshot-1,
+then timed benchmark of full dataset backup or restore.
+
+Options:
+  --dataset PATH   Dataset directory (default: \$CORPUS_REMOTE)
+  --tool NAME      Single tool: vger|restic|rustic|borg|kopia (default: all)
+  --runs N         Timed runs per operation (default: 3)
+  --warmups N      Warmup runs per operation (default: 0)
+  --perf           Run perf stat summary after timed runs
+  --strace         Run strace -c summary after timed runs
+  --help           Show help
+
+Environment overrides: CORPUS_REMOTE, REPO_ROOT, PASSPHRASE
+USAGE
+}
+
+# --- Parse args ---
+
+DATASET_DIR="$CORPUS_REMOTE"
+TOOL=""
+RUNS=3
+WARMUP_RUNS=0
+PROFILE_PERF=0
+PROFILE_STRACE=0
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --dataset)  DATASET_DIR="${2:-}"; shift 2 ;;
+    --tool)     TOOL="${2:-}"; shift 2 ;;
+    --runs)     RUNS="${2:-}"; shift 2 ;;
+    --warmups)  WARMUP_RUNS="${2:-}"; shift 2 ;;
+    --perf)     PROFILE_PERF=1; shift ;;
+    --strace)   PROFILE_STRACE=1; shift ;;
+    --help|-h)  usage; exit 0 ;;
+    *)          die "unknown option: $1" ;;
+  esac
+done
+
 DATASET_SNAPSHOT1="$DATASET_DIR/snapshot-1"
 DATASET_SNAPSHOT2="$DATASET_DIR/snapshot-2"
 DATASET_BENCHMARK="$DATASET_DIR"
-RUNS=${RUNS:-3}
-WARMUP_RUNS=${WARMUP_RUNS:-1}
-PASSPHRASE=${PASSPHRASE:-123}
-TOOL=${TOOL:-}
-SCRIPT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 
-if [[ ! -d "$DATASET_DIR" ]]; then
-  echo "dataset dir not found: $DATASET_DIR" >&2
-  exit 2
-fi
-if [[ ! -d "$DATASET_SNAPSHOT1" ]]; then
-  echo "missing required seed folder: $DATASET_SNAPSHOT1" >&2
-  exit 2
-fi
-if [[ ! -d "$DATASET_SNAPSHOT2" ]]; then
-  echo "missing required benchmark folder: $DATASET_SNAPSHOT2" >&2
-  exit 2
-fi
+[[ -d "$DATASET_DIR" ]] || die "dataset dir not found: $DATASET_DIR"
+[[ -d "$DATASET_SNAPSHOT1" ]] || die "missing required seed folder: $DATASET_SNAPSHOT1"
+[[ -d "$DATASET_SNAPSHOT2" ]] || die "missing required benchmark folder: $DATASET_SNAPSHOT2"
+[[ "$RUNS" =~ ^[1-9][0-9]*$ ]] || die "--runs must be a positive integer"
+[[ "$WARMUP_RUNS" =~ ^[0-9]+$ ]] || die "--warmups must be a non-negative integer"
 
-need() { command -v "$1" >/dev/null 2>&1 || { echo "missing: $1" >&2; exit 2; }; }
 need /usr/bin/time
 command -v perf >/dev/null 2>&1 && HAVE_PERF=1 || HAVE_PERF=0
 command -v strace >/dev/null 2>&1 && HAVE_STRACE=1 || HAVE_STRACE=0
 
 case "$TOOL" in
   "")
-    need vger
-    need restic
-    need rustic
-    need borg
-    need kopia
-    ;;
+    need vger; need restic; need rustic; need borg; need kopia ;;
   vger|restic|rustic|borg|kopia)
-    need "$TOOL"
-    ;;
+    need "$TOOL" ;;
   *)
-    echo "TOOL must be one of: vger, restic, rustic, borg, kopia (or empty for all); got: $TOOL" >&2
-    exit 2
-    ;;
+    die "TOOL must be one of: vger, restic, rustic, borg, kopia (or empty for all); got: $TOOL" ;;
 esac
 
-if ! [[ "$RUNS" =~ ^[0-9]+$ ]] || [[ "$RUNS" -lt 1 ]]; then
-  echo "RUNS must be a positive integer; got: $RUNS" >&2
-  exit 2
-fi
-if ! [[ "$WARMUP_RUNS" =~ ^[0-9]+$ ]]; then
-  echo "WARMUP_RUNS must be a non-negative integer; got: $WARMUP_RUNS" >&2
-  exit 2
-fi
+# --- Output layout ---
 
 STAMP=$(date -u +%Y%m%dT%H%M%SZ)
-OUT_ROOT="$HOME/runtime/benchmarks/$STAMP"
+OUT_ROOT="$RUNTIME_ROOT/benchmarks/$STAMP"
 LOGS="$OUT_ROOT/logs"
 mkdir -p "$LOGS"
 
-cleanup_restore_dirs() {
-  # Always remove restore artifacts and transient cache from runtime after run completion/failure.
-  # Keep benchmark metrics/logs/reports intact.
-  local dirs=("${RESTORE_VGER:-}" "${RESTORE_RESTIC:-}" "${RESTORE_RUSTIC:-}" "${RESTORE_BORG:-}" "${RESTORE_KOPIA:-}")
-  local d=""
-  for d in "${dirs[@]}"; do
-    [[ -n "$d" ]] && rm -rf "$d"
-  done
-  [[ -n "${KOPIA_CACHE:-}" ]] && rm -rf "$KOPIA_CACHE"
-}
-trap cleanup_restore_dirs EXIT
+# --- Repos ---
 
-# Repos on fast local mount. Keep paths stable for easier diffing across runs.
-# Override with REPO_ROOT env var if /mnt/repos is not available.
-REPO_ROOT=${REPO_ROOT:-/mnt/repos}
 VGER_REPO="$REPO_ROOT/bench-vger"
 RESTIC_REPO="$REPO_ROOT/bench-restic"
 RUSTIC_REPO="$REPO_ROOT/bench-rustic"
@@ -98,7 +92,8 @@ KOPIA_CACHE="$OUT_ROOT/kopia-cache"
 sudo -n mkdir -p "$VGER_REPO" "$RESTIC_REPO" "$RUSTIC_REPO" "$BORG_REPO" "$KOPIA_REPO"
 sudo -n chown -R "$USER:$USER" "$VGER_REPO" "$RESTIC_REPO" "$RUSTIC_REPO" "$BORG_REPO" "$KOPIA_REPO"
 
-# vger config (local path repo)
+# --- Tool config ---
+
 VGER_CFG="$OUT_ROOT/vger.bench.yaml"
 cat >"$VGER_CFG" <<YAML
 repositories:
@@ -110,19 +105,18 @@ YAML
 chmod 600 "$VGER_CFG"
 
 export VGER_CONFIG="$VGER_CFG"
-export VGER_PASSPHRASE="$PASSPHRASE"  # passphrase via env, not config file
-
+export VGER_PASSPHRASE="$PASSPHRASE"
 export RESTIC_REPOSITORY="$RESTIC_REPO"
 export RESTIC_PASSWORD="$PASSPHRASE"
-
 export RUSTIC_REPOSITORY="$RUSTIC_REPO"
 export RUSTIC_PASSWORD="$PASSPHRASE"
-
 export BORG_REPO="$BORG_REPO"
 export BORG_PASSPHRASE="$PASSPHRASE"
 export KOPIA_PASSWORD="$PASSPHRASE"
 
 DROP_CACHES_CMD="sync; if sudo -n true 2>/dev/null; then echo 3 | sudo -n tee /proc/sys/vm/drop_caches >/dev/null 2>&1 || true; fi"
+
+# --- Restore dirs ---
 
 RESTORE_VGER="$OUT_ROOT/restore-vger"
 RESTORE_RESTIC="$OUT_ROOT/restore-restic"
@@ -131,75 +125,41 @@ RESTORE_BORG="$OUT_ROOT/restore-borg"
 RESTORE_KOPIA="$OUT_ROOT/restore-kopia"
 mkdir -p "$RESTORE_VGER" "$RESTORE_RESTIC" "$RESTORE_RUSTIC" "$RESTORE_BORG" "$RESTORE_KOPIA"
 
+cleanup_restore_dirs() {
+  rm -rf "$RESTORE_VGER" "$RESTORE_RESTIC" "$RESTORE_RUSTIC" "$RESTORE_BORG" "$RESTORE_KOPIA"
+  [[ -n "${KOPIA_CACHE:-}" ]] && rm -rf "$KOPIA_CACHE"
+}
+trap cleanup_restore_dirs EXIT
+
+# --- Operation list ---
+
 if [[ -n "$TOOL" ]]; then
-  OPS=(
-    "${TOOL}_backup"
-    "${TOOL}_restore"
-  )
+  OPS=("${TOOL}_backup" "${TOOL}_restore")
 else
   OPS=(
-    vger_backup
-    vger_restore
-    restic_backup
-    restic_restore
-    rustic_backup
-    rustic_restore
-    borg_backup
-    borg_restore
-    kopia_backup
-    kopia_restore
+    vger_backup vger_restore
+    restic_backup restic_restore
+    rustic_backup rustic_restore
+    borg_backup borg_restore
+    kopia_backup kopia_restore
   )
 fi
 
-list_previous_run_roots() {
-  local base="$HOME/runtime/benchmarks"
-  local stamps=()
-  local d=""
-  local bn=""
+# --- Tool helpers ---
 
-  [[ -d "$base" ]] || return 0
-
-  for d in "$base"/*; do
-    [[ -d "$d" ]] || continue
-    bn=$(basename "$d")
-    [[ "$bn" =~ ^[0-9]{8}T[0-9]{6}Z$ ]] || continue
-    [[ "$bn" < "$STAMP" ]] || continue
-    stamps+=("$bn")
-  done
-
-  if [[ "${#stamps[@]}" -gt 0 ]]; then
-    while IFS= read -r bn; do
-      echo "$base/$bn"
-    done < <(printf "%s\n" "${stamps[@]}" | sort -r)
-  fi
-}
-
-tool_from_op() {
-  local op="$1"
-  echo "${op%%_*}"
-}
-
-phase_from_op() {
-  local op="$1"
-  echo "${op##*_}"
-}
-
-drop_caches() {
-  bash -lc "$DROP_CACHES_CMD"
-}
+tool_from_op()  { echo "${1%%_*}"; }
+phase_from_op() { echo "${1##*_}"; }
 
 reset_repo_for_tool() {
-  local tool="$1"
-  local repo=""
+  local tool="$1" repo=""
   case "$tool" in
-    vger) repo="$VGER_REPO" ;;
+    vger)   repo="$VGER_REPO" ;;
     restic) repo="$RESTIC_REPO" ;;
     rustic) repo="$RUSTIC_REPO" ;;
-    borg) repo="$BORG_REPO" ;;
-    kopia) repo="$KOPIA_REPO" ;;
-    *) echo "unknown tool: $tool" >&2; return 2 ;;
+    borg)   repo="$BORG_REPO" ;;
+    kopia)  repo="$KOPIA_REPO" ;;
+    *)      die "unknown tool: $tool" ;;
   esac
-
   sudo -n rm -rf "$repo"
   sudo -n mkdir -p "$repo"
   sudo -n chown -R "$USER:$USER" "$repo"
@@ -211,190 +171,103 @@ reset_repo_for_tool() {
 }
 
 init_repo_for_tool() {
-  local tool="$1"
-  case "$tool" in
-    vger) vger init -R bench ;;
+  case "$1" in
+    vger)   vger init -R bench ;;
     restic) restic init ;;
     rustic) rustic init ;;
-    borg) borg init --encryption=repokey-blake2 ;;
+    borg)   borg init --encryption=repokey-blake2 ;;
     kopia)
       kopia --config-file "$KOPIA_CONFIG" repository create filesystem --path="$KOPIA_REPO" --cache-directory="$KOPIA_CACHE"
       kopia --config-file "$KOPIA_CONFIG" policy set --global --compression=zstd
       ;;
-    *) echo "unknown tool: $tool" >&2; return 2 ;;
+    *) die "unknown tool: $1" ;;
   esac
 }
 
 backup_adhoc_for_tool() {
-  local tool="$1"
-  local src="$2"
+  local tool="$1" src="$2"
   case "$tool" in
-    vger) vger backup -R bench -l bench "$src" ;;
+    vger)   vger backup -R bench -l bench "$src" ;;
     restic) restic backup "$src" ;;
     rustic) rustic backup "$src" ;;
     borg)
-      local arch=""
-      arch="bench-$(date -u +%Y%m%dT%H%M%S)-$RANDOM"
+      local arch="bench-$(date -u +%Y%m%dT%H%M%S)-$RANDOM"
       borg create --compression zstd,3 --stats "::$arch" "$src"
       ;;
     kopia) kopia --config-file "$KOPIA_CONFIG" snapshot create "$src" ;;
-    *) echo "unknown tool: $tool" >&2; return 2 ;;
+    *) die "unknown tool: $tool" ;;
   esac
 }
 
 measured_cmd_for_op() {
-  local op="$1"
-  case "$op" in
-    vger_backup)
-      echo "$DROP_CACHES_CMD; vger backup -R bench -l bench '$DATASET_BENCHMARK'"
-      ;;
-    vger_restore)
-      echo "$DROP_CACHES_CMD; rm -rf '$RESTORE_VGER'/*; SNAP=\$(vger list -R bench --last 1 | awk 'NR==2{print \$1}'); vger restore -R bench \"\$SNAP\" '$RESTORE_VGER'"
-      ;;
-    restic_backup)
-      echo "$DROP_CACHES_CMD; restic backup '$DATASET_BENCHMARK'"
-      ;;
-    restic_restore)
-      echo "$DROP_CACHES_CMD; rm -rf '$RESTORE_RESTIC'/*; restic restore latest --target '$RESTORE_RESTIC'"
-      ;;
-    rustic_backup)
-      echo "$DROP_CACHES_CMD; rustic backup '$DATASET_BENCHMARK'"
-      ;;
-    rustic_restore)
-      echo "$DROP_CACHES_CMD; rm -rf '$RESTORE_RUSTIC'/*; rustic restore latest '$RESTORE_RUSTIC'"
-      ;;
-    borg_backup)
-      echo "$DROP_CACHES_CMD; ARCH=bench-\$(date -u +%Y%m%dT%H%M%S)-\$RANDOM; borg create --compression zstd,3 --stats \"::\$ARCH\" '$DATASET_BENCHMARK'"
-      ;;
-    borg_restore)
-      echo "$DROP_CACHES_CMD; rm -rf '$RESTORE_BORG'/*; ARCH=\$(borg list --short | tail -n1); (cd '$RESTORE_BORG' && borg extract \"::\$ARCH\")"
-      ;;
-    kopia_backup)
-      echo "$DROP_CACHES_CMD; kopia --config-file '$KOPIA_CONFIG' snapshot create '$DATASET_BENCHMARK'"
-      ;;
-    kopia_restore)
-      echo "$DROP_CACHES_CMD; rm -rf '$RESTORE_KOPIA'/*; kopia --config-file '$KOPIA_CONFIG' snapshot restore '$DATASET_BENCHMARK' '$RESTORE_KOPIA' --snapshot-time latest"
-      ;;
-    *)
-      echo "unknown operation: $op" >&2
-      return 2
-      ;;
-  esac
-}
-
-prepare_cmds_for_op() {
-  local op="$1"
-  local tool=""
-  local phase=""
-
-  tool=$(tool_from_op "$op")
-  phase=$(phase_from_op "$op")
-
-  case "$tool" in
-    vger)
-      if [[ "$phase" == "backup" ]]; then
-        echo "drop caches"
-        echo "reset repo: rm -rf '$VGER_REPO' && mkdir -p '$VGER_REPO'"
-        echo "init repo: vger init -R bench"
-        echo "seed backup: vger backup -R bench -l bench '$DATASET_SNAPSHOT1'"
-      else
-        echo "none (uses repo state from preceding timed vger_backup)"
-      fi
-      ;;
-    restic)
-      if [[ "$phase" == "backup" ]]; then
-        echo "drop caches"
-        echo "reset repo: rm -rf '$RESTIC_REPO' && mkdir -p '$RESTIC_REPO'"
-        echo "init repo: restic init"
-        echo "seed backup: restic backup '$DATASET_SNAPSHOT1'"
-      else
-        echo "none (uses repo state from preceding timed restic_backup)"
-      fi
-      ;;
-    rustic)
-      if [[ "$phase" == "backup" ]]; then
-        echo "drop caches"
-        echo "reset repo: rm -rf '$RUSTIC_REPO' && mkdir -p '$RUSTIC_REPO'"
-        echo "init repo: rustic init"
-        echo "seed backup: rustic backup '$DATASET_SNAPSHOT1'"
-      else
-        echo "none (uses repo state from preceding timed rustic_backup)"
-      fi
-      ;;
-    borg)
-      if [[ "$phase" == "backup" ]]; then
-        echo "drop caches"
-        echo "reset repo: rm -rf '$BORG_REPO' && mkdir -p '$BORG_REPO'"
-        echo "init repo: borg init --encryption=repokey-blake2"
-        echo "seed backup: borg create --compression zstd,3 --stats '::bench-<utc>-<rand>' '$DATASET_SNAPSHOT1'"
-      else
-        echo "none (uses repo state from preceding timed borg_backup)"
-      fi
-      ;;
-    kopia)
-      if [[ "$phase" == "backup" ]]; then
-        echo "drop caches"
-        echo "reset repo: rm -rf '$KOPIA_REPO' && mkdir -p '$KOPIA_REPO'; rm -f '$KOPIA_CONFIG'; rm -rf '$KOPIA_CACHE' && mkdir -p '$KOPIA_CACHE'"
-        echo "init repo: kopia --config-file '$KOPIA_CONFIG' repository create filesystem --path='$KOPIA_REPO' --cache-directory='$KOPIA_CACHE' && kopia --config-file '$KOPIA_CONFIG' policy set --global --compression=zstd"
-        echo "seed backup: kopia --config-file '$KOPIA_CONFIG' snapshot create '$DATASET_SNAPSHOT1'"
-      else
-        echo "none (uses repo state from preceding timed kopia_backup)"
-      fi
-      ;;
-    *)
-      echo "unknown operation: $op" >&2
-      return 2
-      ;;
+  case "$1" in
+    vger_backup)    echo "$DROP_CACHES_CMD; vger backup -R bench -l bench '$DATASET_BENCHMARK'" ;;
+    vger_restore)   echo "$DROP_CACHES_CMD; rm -rf '$RESTORE_VGER'/*; SNAP=\$(vger list -R bench --last 1 | awk 'NR==2{print \$1}'); vger restore -R bench \"\$SNAP\" '$RESTORE_VGER'" ;;
+    restic_backup)  echo "$DROP_CACHES_CMD; restic backup '$DATASET_BENCHMARK'" ;;
+    restic_restore) echo "$DROP_CACHES_CMD; rm -rf '$RESTORE_RESTIC'/*; restic restore latest --target '$RESTORE_RESTIC'" ;;
+    rustic_backup)  echo "$DROP_CACHES_CMD; rustic backup '$DATASET_BENCHMARK'" ;;
+    rustic_restore) echo "$DROP_CACHES_CMD; rm -rf '$RESTORE_RUSTIC'/*; rustic restore latest '$RESTORE_RUSTIC'" ;;
+    borg_backup)    echo "$DROP_CACHES_CMD; ARCH=bench-\$(date -u +%Y%m%dT%H%M%S)-\$RANDOM; borg create --compression zstd,3 --stats \"::\$ARCH\" '$DATASET_BENCHMARK'" ;;
+    borg_restore)   echo "$DROP_CACHES_CMD; rm -rf '$RESTORE_BORG'/*; ARCH=\$(borg list --short | tail -n1); (cd '$RESTORE_BORG' && borg extract \"::\$ARCH\")" ;;
+    kopia_backup)   echo "$DROP_CACHES_CMD; kopia --config-file '$KOPIA_CONFIG' snapshot create '$DATASET_BENCHMARK'" ;;
+    kopia_restore)  echo "$DROP_CACHES_CMD; rm -rf '$RESTORE_KOPIA'/*; kopia --config-file '$KOPIA_CONFIG' snapshot restore '$DATASET_BENCHMARK' '$RESTORE_KOPIA' --snapshot-time latest" ;;
+    *) die "unknown operation: $1" ;;
   esac
 }
 
 should_prepare_op_run() {
-  local op="$1"
-  local phase=""
-  phase=$(phase_from_op "$op")
-  [[ "$phase" == "backup" ]]
+  [[ "$(phase_from_op "$1")" == "backup" ]]
 }
 
 prepare_op_run() {
-  local op="$1"
-  local prep_log="$2"
-  local tool=""
-  local phase=""
-
+  local op="$1" prep_log="$2"
+  local tool
   tool=$(tool_from_op "$op")
-  phase=$(phase_from_op "$op")
 
-  {
-    echo "[prepare] op=$op"
-    echo "[prepare] drop caches"
-  } >>"$prep_log"
+  { echo "[prepare] op=$op"; echo "[prepare] drop caches"; } >>"$prep_log"
   drop_caches >>"$prep_log" 2>&1
-
   echo "[prepare] reset repo" >>"$prep_log"
   reset_repo_for_tool "$tool" >>"$prep_log" 2>&1
-
   echo "[prepare] init repo" >>"$prep_log"
   init_repo_for_tool "$tool" >>"$prep_log" 2>&1
-
   echo "[prepare] seed backup snapshot-1 (untimed)" >>"$prep_log"
   backup_adhoc_for_tool "$tool" "$DATASET_SNAPSHOT1" >>"$prep_log" 2>&1
-
 }
+
+# --- Backfill helper ---
+
+list_previous_run_roots() {
+  local base="$RUNTIME_ROOT/benchmarks"
+  [[ -d "$base" ]] || return 0
+  local stamps=()
+  for d in "$base"/*; do
+    [[ -d "$d" ]] || continue
+    local bn
+    bn=$(basename "$d")
+    [[ "$bn" =~ ^[0-9]{8}T[0-9]{6}Z$ ]] || continue
+    [[ "$bn" < "$STAMP" ]] || continue
+    stamps+=("$bn")
+  done
+  if [[ "${#stamps[@]}" -gt 0 ]]; then
+    printf "%s\n" "${stamps[@]}" | sort -r | while IFS= read -r bn; do
+      echo "$base/$bn"
+    done
+  fi
+}
+
+# --- Run one operation ---
 
 run_one() {
   local op="$1"
-  local cmd=""
-  local prep_cmds=""
-  local phase=""
+  local cmd phase
   cmd=$(measured_cmd_for_op "$op")
-  prep_cmds=$(prepare_cmds_for_op "$op")
   phase=$(phase_from_op "$op")
 
   local out="$OUT_ROOT/profile.$op"
   local runs_dir="$out/runs"
-  mkdir -p "$out"
   mkdir -p "$runs_dir"
 
+  # Meta
   {
     echo "name=$op"
     echo "dataset=$DATASET_DIR"
@@ -402,44 +275,32 @@ run_one() {
     echo "dataset_snapshot_2=$DATASET_SNAPSHOT2"
     echo "dataset_benchmark=$DATASET_BENCHMARK"
     echo "timed_cmd=$cmd"
-    echo "prepare_steps<<EOF"
-    echo "$prep_cmds"
-    echo "EOF"
     echo "runs=$RUNS"
     echo "warmup_runs=$WARMUP_RUNS"
     echo "timestamp_utc=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
   } >"$out/meta.txt"
 
-  local i=0
-  local rc=0
-  local failed_runs=0
-  local failed_warmups=0
-  local run_label=""
-  local run_stdout=""
-  local run_timev=""
-  local run_rc_file=""
+  local i rc=0 failed_runs=0 failed_warmups=0
 
-  if [[ "$WARMUP_RUNS" -gt 0 ]]; then
-    for ((i = 1; i <= WARMUP_RUNS; i++)); do
-      run_label=$(printf "%03d" "$i")
-      if [[ "$phase" == "restore" ]]; then
-        echo "[warmup] $op $i/$WARMUP_RUNS (no prep; uses preceding timed backup state)"
-      else
-        echo "[warmup] $op $i/$WARMUP_RUNS"
-      fi
-      if should_prepare_op_run "$op"; then
-        if ! prepare_op_run "$op" "$out/warmup-$run_label.prep.log"; then
-          failed_warmups=$((failed_warmups + 1))
-          continue
-        fi
-      fi
-      if ! bash -lc "$cmd" >"$out/warmup-$run_label.stdout.txt" 2>"$out/warmup-$run_label.stderr.txt"; then
+  # Warmup
+  for ((i = 1; i <= WARMUP_RUNS; i++)); do
+    local run_label
+    run_label=$(printf "%03d" "$i")
+    echo "[warmup] $op $i/$WARMUP_RUNS"
+    if should_prepare_op_run "$op"; then
+      if ! prepare_op_run "$op" "$out/warmup-$run_label.prep.log"; then
         failed_warmups=$((failed_warmups + 1))
+        continue
       fi
-    done
-  fi
+    fi
+    if ! bash -lc "$cmd" >"$out/warmup-$run_label.stdout.txt" 2>"$out/warmup-$run_label.stderr.txt"; then
+      failed_warmups=$((failed_warmups + 1))
+    fi
+  done
 
+  # Timed runs
   for ((i = 1; i <= RUNS; i++)); do
+    local run_label run_stdout run_timev run_rc_file
     run_label=$(printf "%03d" "$i")
     run_stdout="$runs_dir/run-$run_label.stdout.txt"
     run_timev="$runs_dir/run-$run_label.timev.txt"
@@ -453,8 +314,7 @@ run_one() {
 
     if should_prepare_op_run "$op"; then
       if ! prepare_op_run "$op" "$runs_dir/run-$run_label.prep.log"; then
-        rc=1
-        failed_runs=$((failed_runs + 1))
+        rc=1; failed_runs=$((failed_runs + 1))
         : >"$run_timev"
         echo "$rc" >"$run_rc_file"
         continue
@@ -464,8 +324,7 @@ run_one() {
     if /usr/bin/time -v bash -lc "$cmd" >"$run_stdout" 2>"$run_timev"; then
       rc=0
     else
-      rc=$?
-      failed_runs=$((failed_runs + 1))
+      rc=$?; failed_runs=$((failed_runs + 1))
     fi
     echo "$rc" >"$run_rc_file"
   done
@@ -476,42 +335,41 @@ run_one() {
     echo "FAILED (time -v failed_runs=$failed_runs/$RUNS failed_warmups=$failed_warmups/$WARMUP_RUNS)" >"$out/status.txt"
   fi
 
-  if [[ "${PROFILE_PERF:-0}" == "1" && "$HAVE_PERF" == "1" ]]; then
+  # Optional perf stat
+  if [[ "$PROFILE_PERF" == "1" && "$HAVE_PERF" == "1" ]]; then
     if should_prepare_op_run "$op"; then
-      if prepare_op_run "$op" "$out/perf.prep.log"; then
+      prepare_op_run "$op" "$out/perf.prep.log" && \
         perf stat -d -r 1 -- bash -lc "$cmd" >"$out/perf.stdout.txt" 2>"$out/perf.stat.txt" || true
-      fi
     else
       perf stat -d -r 1 -- bash -lc "$cmd" >"$out/perf.stdout.txt" 2>"$out/perf.stat.txt" || true
     fi
   fi
 
-  if [[ "${PROFILE_STRACE:-0}" == "1" && "$HAVE_STRACE" == "1" ]]; then
+  # Optional strace
+  if [[ "$PROFILE_STRACE" == "1" && "$HAVE_STRACE" == "1" ]]; then
     if should_prepare_op_run "$op"; then
-      if prepare_op_run "$op" "$out/strace.prep.log"; then
+      prepare_op_run "$op" "$out/strace.prep.log" && \
         strace -c -f -qq -o "$out/strace.summary.txt" bash -lc "$cmd" >/dev/null 2>&1 || true
-      fi
     else
       strace -c -f -qq -o "$out/strace.summary.txt" bash -lc "$cmd" >/dev/null 2>&1 || true
     fi
   fi
 }
 
+# --- Main ---
+
 cd "$OUT_ROOT"
+
+# Write commands manifest
 {
   echo "workflow: per warmup/run => drop caches + reset repo + init + untimed backup snapshot-1"
   echo "restore workflow: no repo prep; restore uses state from preceding timed <tool>_backup op"
   for op in "${OPS[@]}"; do
-    echo "$op:"
-    echo "  timed: $(measured_cmd_for_op "$op")"
-    while IFS= read -r prep_cmd; do
-      echo "  prep: $prep_cmd"
-    done < <(prepare_cmds_for_op "$op")
+    echo "$op: $(measured_cmd_for_op "$op")"
   done
 } >"$OUT_ROOT/commands.txt"
 
-echo "[config] dataset=$DATASET_DIR runs=$RUNS warmup_runs=$WARMUP_RUNS tool=${TOOL:-all}"
-
+echo "[config] dataset=$DATASET_DIR runs=$RUNS tool=${TOOL:-all}"
 echo "[dataset] seed=$DATASET_SNAPSHOT1"
 echo "[dataset] benchmark=$DATASET_BENCHMARK"
 
@@ -520,57 +378,21 @@ for op in "${OPS[@]}"; do
 done
 
 # Repo size stats
-# Repos reflect the final state from the last run per tool.
 du -sh "$VGER_REPO" "$RESTIC_REPO" "$RUSTIC_REPO" "$BORG_REPO" "$KOPIA_REPO" >"$OUT_ROOT/repo-sizes.txt"
 
-# Tool-specific repo stats (helps explain performance/space deltas).
-{
-  echo "== vger info =="
-  vger info -R bench || true
-} >"$OUT_ROOT/vger.info.txt" 2>&1
+# Tool-specific repo stats
+{ echo "== vger info =="; vger info -R bench || true; } >"$OUT_ROOT/vger.info.txt" 2>&1
+{ echo "== restic snapshots =="; restic snapshots || true; echo; echo "== restic stats (raw-data) =="; restic stats --mode raw-data || true; } >"$OUT_ROOT/restic.stats.txt" 2>&1
+{ echo "== rustic snapshots =="; rustic snapshots || true; echo; echo "== rustic stats =="; rustic stats || true; } >"$OUT_ROOT/rustic.stats.txt" 2>&1
+{ echo "== borg info =="; borg info || true; echo; echo "== borg list =="; borg list || true; } >"$OUT_ROOT/borg.stats.txt" 2>&1
+{ echo "== kopia repository status =="; kopia --config-file "$KOPIA_CONFIG" repository status || true; echo; echo "== kopia snapshots =="; kopia --config-file "$KOPIA_CONFIG" snapshot list || true; echo; echo "== kopia content stats =="; kopia --config-file "$KOPIA_CONFIG" content stats || true; } >"$OUT_ROOT/kopia.stats.txt" 2>&1
 
-{
-  echo "== restic snapshots =="
-  restic snapshots || true
-  echo
-  echo "== restic stats (raw-data) =="
-  restic stats --mode raw-data || true
-} >"$OUT_ROOT/restic.stats.txt" 2>&1
-
-{
-  echo "== rustic snapshots =="
-  rustic snapshots || true
-  echo
-  echo "== rustic stats =="
-  rustic stats || true
-} >"$OUT_ROOT/rustic.stats.txt" 2>&1
-
-{
-  echo "== borg info =="
-  borg info || true
-  echo
-  echo "== borg list =="
-  borg list || true
-} >"$OUT_ROOT/borg.stats.txt" 2>&1
-
-{
-  echo "== kopia repository status =="
-  kopia --config-file "$KOPIA_CONFIG" repository status || true
-  echo
-  echo "== kopia snapshots =="
-  kopia --config-file "$KOPIA_CONFIG" snapshot list || true
-  echo
-  echo "== kopia content stats =="
-  kopia --config-file "$KOPIA_CONFIG" content stats || true
-} >"$OUT_ROOT/kopia.stats.txt" 2>&1
-
-cat >"$OUT_ROOT/README.txt" <<EOF2
+cat >"$OUT_ROOT/README.txt" <<EOF
 Benchmark run: $STAMP
 Dataset root: $DATASET_DIR
 Seed snapshot (untimed): $DATASET_SNAPSHOT1
 Benchmark dataset (timed): $DATASET_BENCHMARK
 Runs per benchmark: $RUNS
-Warmup runs per benchmark: $WARMUP_RUNS
 Selected tool: ${TOOL:-all}
 
 Workflow per run:
@@ -581,30 +403,23 @@ Workflow per run:
    - restore ops: timed restore of latest from preceding timed backup op state
 
 Outputs:
-- commands.txt
-- repo-sizes.txt
-- vger.info.txt / restic.stats.txt / rustic.stats.txt / borg.stats.txt / kopia.stats.txt
-- profile.<op>/runs/run-*.timev.txt (+ stdout/rc/prep logs)
-- reports/summary.tsv / reports/summary.md / reports/summary.json
+- commands.txt / repo-sizes.txt
+- profile.<op>/runs/run-*.timev.txt
+- reports/summary.{tsv,md,json}
 - reports/benchmark.summary.png
-EOF2
+EOF
 
-# Post-processing outputs (summary + chart)
+# Summary + chart report
 REPORT_ARGS=()
 if [[ -n "$TOOL" ]]; then
   mapfile -t PREV_RUN_ROOTS < <(list_previous_run_roots || true)
   if [[ "${#PREV_RUN_ROOTS[@]}" -gt 0 ]]; then
     echo "[report] backfill roots (${#PREV_RUN_ROOTS[@]}):"
-    for PREV_RUN_ROOT in "${PREV_RUN_ROOTS[@]}"; do
-      echo "  - $PREV_RUN_ROOT"
-      REPORT_ARGS+=(
-        --backfill-root "$PREV_RUN_ROOT"
-      )
+    for prev in "${PREV_RUN_ROOTS[@]}"; do
+      echo "  - $prev"
+      REPORT_ARGS+=(--backfill-root "$prev")
     done
-    REPORT_ARGS+=(
-      --backfill-mode nonselected
-      --selected-tool "$TOOL"
-    )
+    REPORT_ARGS+=(--backfill-mode nonselected --selected-tool "$TOOL")
   else
     echo "[report] no previous run found for backfill"
   fi
