@@ -224,7 +224,11 @@ impl StorageBackend for RestBackend {
 
     fn list(&self, prefix: &str) -> Result<Vec<String>> {
         let prefix = prefix.trim_start_matches('/');
-        let url = format!("{}?list", self.url(prefix));
+        let url = if prefix.is_empty() {
+            format!("{}?list", self.base_url)
+        } else {
+            format!("{}?list", self.url(prefix))
+        };
         let resp = self
             .retry_call(&format!("LIST {prefix}"), || {
                 let req = self.apply_auth(self.agent.get(&url));

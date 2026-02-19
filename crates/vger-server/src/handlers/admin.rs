@@ -24,6 +24,7 @@ pub struct RepoQuery {
     #[serde(rename = "batch-delete")]
     pub batch_delete: Option<String>,
     pub repack: Option<String>,
+    pub list: Option<String>,
 }
 
 /// GET /{repo} — dispatches based on query parameter.
@@ -38,8 +39,11 @@ pub async fn repo_dispatch(
     if query.verify_structure.is_some() {
         return verify_structure(state, &repo).await;
     }
+    if query.list.is_some() {
+        return repo_list_all(state, &repo).await;
+    }
     Err(ServerError::BadRequest(
-        "missing query parameter (stats, verify-structure)".into(),
+        "missing query parameter (stats, verify-structure, list)".into(),
     ))
 }
 
@@ -272,6 +276,54 @@ async fn verify_structure(state: AppState, repo: &str) -> Result<Response, Serve
         .map_err(|e| ServerError::Internal(e.to_string()))?;
 
     Ok(axum::Json(result).into_response())
+}
+
+/// GET /{repo}?list — list all keys in the repository.
+async fn repo_list_all(state: AppState, repo: &str) -> Result<Response, ServerError> {
+    let repo_dir = state
+        .repo_path(repo)
+        .ok_or_else(|| ServerError::BadRequest("invalid repo".into()))?;
+
+    match tokio::fs::metadata(&repo_dir).await {
+        Ok(_) => {}
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            return Err(ServerError::NotFound(format!("repo '{repo}' not found")));
+        }
+        Err(e) => return Err(ServerError::from(e)),
+    }
+
+    let repo_dir_clone = repo_dir.clone();
+    let keys = tokio::task::spawn_blocking(move || -> std::io::Result<Vec<String>> {
+        let mut keys = Vec::new();
+        list_all_recursive(&repo_dir_clone, &repo_dir_clone, &mut keys)?;
+        keys.sort();
+        Ok(keys)
+    })
+    .await
+    .map_err(|e| ServerError::Internal(e.to_string()))?
+    .map_err(ServerError::from)?;
+
+    Ok(axum::Json(keys).into_response())
+}
+
+/// Recursively list all files under `dir`, producing keys relative to `root`.
+fn list_all_recursive(
+    dir: &std::path::Path,
+    root: &std::path::Path,
+    out: &mut Vec<String>,
+) -> std::io::Result<()> {
+    for entry in std::fs::read_dir(dir)? {
+        let entry = entry?;
+        let path = entry.path();
+        if path.is_dir() {
+            list_all_recursive(&path, root, out)?;
+        } else if let Ok(rel) = path.strip_prefix(root) {
+            // Use forward slashes for storage keys regardless of platform.
+            let key: String = rel.iter().map(|c| c.to_string_lossy()).collect::<Vec<_>>().join("/");
+            out.push(key);
+        }
+    }
+    Ok(())
 }
 
 // --- Repack types and logic ---
@@ -885,6 +937,43 @@ mod tests {
         assert!(
             state.quota_used(TEST_REPO) < used_before,
             "quota should have decreased"
+        );
+    }
+
+    #[tokio::test]
+    async fn list_all_keys_in_repo() {
+        let (router, _state, _tmp) = setup_app(0);
+
+        // PUT two known keys
+        let resp = authed_put(
+            router.clone(),
+            &format!("/{TEST_REPO}/config"),
+            b"cfg".to_vec(),
+        )
+        .await;
+        assert_status(&resp, StatusCode::CREATED);
+
+        let resp = authed_put(
+            router.clone(),
+            &format!("/{TEST_REPO}/manifest"),
+            b"man".to_vec(),
+        )
+        .await;
+        assert_status(&resp, StatusCode::CREATED);
+
+        // GET /{repo}?list should return both keys
+        let resp = authed_get(router.clone(), &format!("/{TEST_REPO}?list")).await;
+        assert_status(&resp, StatusCode::OK);
+
+        let keys: Vec<String> =
+            serde_json::from_slice(&body_bytes(resp).await).expect("parse JSON");
+        assert!(
+            keys.contains(&"config".to_string()),
+            "expected 'config' in {keys:?}"
+        );
+        assert!(
+            keys.contains(&"manifest".to_string()),
+            "expected 'manifest' in {keys:?}"
         );
     }
 }
