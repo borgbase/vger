@@ -114,7 +114,12 @@ impl StorageBackend for OpendalBackend {
 
     fn list(&self, prefix: &str) -> Result<Vec<String>> {
         let mut keys = Vec::new();
-        let entries = self.op.list(prefix).map_err(VgerError::from)?;
+        let entries = self
+            .op
+            .list_with(prefix)
+            .recursive(true)
+            .call()
+            .map_err(VgerError::from)?;
         for entry in entries {
             let path = entry.path().to_string();
             // Skip directory markers

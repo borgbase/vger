@@ -113,7 +113,11 @@ impl StorageBackend for LocalBackend {
     }
 
     fn list(&self, prefix: &str) -> Result<Vec<String>> {
-        let dir = self.resolve(prefix)?;
+        let dir = if prefix.is_empty() {
+            self.root.clone()
+        } else {
+            self.resolve(prefix)?
+        };
         match fs::metadata(&dir) {
             Ok(meta) if meta.is_dir() => {
                 let mut keys = Vec::new();
@@ -258,6 +262,31 @@ mod tests {
         // Parent directory "locks" doesn't exist yet — put should create it
         backend.put("locks/abc.json", b"lock").unwrap();
         assert_eq!(backend.get("locks/abc.json").unwrap().unwrap(), b"lock");
+    }
+
+    #[test]
+    fn list_empty_prefix_returns_all_files() {
+        let dir = tempfile::tempdir().unwrap();
+        let backend = LocalBackend::new(dir.path().to_str().unwrap()).unwrap();
+        backend.put("config", b"cfg").unwrap();
+        backend.put("manifest", b"mfst").unwrap();
+        backend.put("keys/repokey", b"key").unwrap();
+        backend.put("packs/ab/pack1", b"p1").unwrap();
+        backend.put("snapshots/snap1", b"s1").unwrap();
+
+        let mut keys = backend.list("").unwrap();
+        keys.sort();
+
+        assert_eq!(
+            keys,
+            vec![
+                "config",
+                "keys/repokey",
+                "manifest",
+                "packs/ab/pack1",
+                "snapshots/snap1",
+            ]
+        );
     }
 
     #[test]

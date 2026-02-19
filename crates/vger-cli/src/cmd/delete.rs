@@ -82,9 +82,35 @@ pub(crate) fn run_delete_repo(
         .map_err(|e| -> Box<dyn std::error::Error> { Box::new(e) })?;
 
     let repo_name = label.unwrap_or(&config.repository.url);
-    println!(
-        "Repository '{repo_name}' deleted ({} keys removed).",
-        stats.keys_deleted
-    );
+
+    if stats.unknown_entries.is_empty() {
+        println!(
+            "Repository '{repo_name}' deleted ({} keys removed).",
+            stats.keys_deleted
+        );
+    } else {
+        println!(
+            "Repository '{repo_name}' deleted ({} keys removed, {} unknown entries left).",
+            stats.keys_deleted,
+            stats.unknown_entries.len()
+        );
+        eprintln!();
+        eprintln!(
+            "Warning: {} unknown entries were not removed:",
+            stats.unknown_entries.len()
+        );
+        for entry in &stats.unknown_entries {
+            eprintln!("  {entry}");
+        }
+    }
+
+    if stats.is_local && !stats.root_removed && stats.unknown_entries.is_empty() {
+        eprintln!(
+            "Note: repository directory '{}' could not be fully removed; \
+             it may contain empty directories or other non-file entries.",
+            config.repository.url
+        );
+    }
+
     Ok(())
 }
