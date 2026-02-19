@@ -56,7 +56,7 @@ compression:
 #     exclude_if_present:
 #       - .nobackup
 #       - CACHEDIR.TAG
-#     one_file_system: true
+#     one_file_system: false
 #     git_ignore: false
 #     xattrs:
 #       enabled: false
@@ -171,7 +171,7 @@ compression:
 # exclude_if_present:
 #   - .nobackup
 #   - CACHEDIR.TAG
-# one_file_system: true
+# one_file_system: false
 # git_ignore: false
 # xattrs:
 #   enabled: true

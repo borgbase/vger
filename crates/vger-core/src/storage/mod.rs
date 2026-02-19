@@ -685,7 +685,10 @@ mod tests {
         let mut cfg = test_config("http://localhost:8080/repo");
         cfg.allow_insecure_http = true;
         let backend = backend_from_config(&cfg, None);
-        assert!(backend.is_ok(), "expected HTTP REST URL to be allowed when opted in");
+        assert!(
+            backend.is_ok(),
+            "expected HTTP REST URL to be allowed when opted in"
+        );
     }
 
     #[test]

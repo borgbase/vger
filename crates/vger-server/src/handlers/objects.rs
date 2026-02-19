@@ -124,10 +124,7 @@ pub async fn put_object(
 
     // Generate a unique temp file name
     let unique_id = TEMP_COUNTER.fetch_add(1, Relaxed);
-    let file_name = file_path
-        .file_name()
-        .unwrap_or_default()
-        .to_string_lossy();
+    let file_name = file_path.file_name().unwrap_or_default().to_string_lossy();
     let temp_path = file_path.with_file_name(format!(".tmp.{file_name}.{unique_id}"));
 
     // Stream body to temp file. The write block scopes writer/reader so

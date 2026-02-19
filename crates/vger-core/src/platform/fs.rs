@@ -140,11 +140,18 @@ pub fn set_file_mtime(path: &Path, secs: i64, nanos: u32) -> std::io::Result<()>
         use std::ffi::CString;
         use std::os::unix::ffi::OsStrExt;
 
-        let c_path = CString::new(path.as_os_str().as_bytes())
-            .map_err(|_| std::io::Error::new(std::io::ErrorKind::InvalidInput, "path contains null"))?;
+        let c_path = CString::new(path.as_os_str().as_bytes()).map_err(|_| {
+            std::io::Error::new(std::io::ErrorKind::InvalidInput, "path contains null")
+        })?;
         let times = [
-            libc::timespec { tv_sec: 0, tv_nsec: libc::UTIME_OMIT },
-            libc::timespec { tv_sec: secs as _, tv_nsec: nanos as _ },
+            libc::timespec {
+                tv_sec: 0,
+                tv_nsec: libc::UTIME_OMIT,
+            },
+            libc::timespec {
+                tv_sec: secs as _,
+                tv_nsec: nanos as _,
+            },
         ];
         if unsafe { libc::utimensat(libc::AT_FDCWD, c_path.as_ptr(), times.as_ptr(), 0) } == 0 {
             Ok(())
@@ -163,8 +170,7 @@ pub fn set_file_mtime(path: &Path, secs: i64, nanos: u32) -> std::io::Result<()>
         let time = if secs >= 0 {
             SystemTime::UNIX_EPOCH + Duration::new(secs as u64, nanos)
         } else {
-            SystemTime::UNIX_EPOCH - Duration::new(secs.unsigned_abs(), 0)
-                + Duration::new(0, nanos)
+            SystemTime::UNIX_EPOCH - Duration::new(secs.unsigned_abs(), 0) + Duration::new(0, nanos)
         };
         let file = OpenOptions::new()
             .access_mode(FILE_WRITE_ATTRIBUTES)

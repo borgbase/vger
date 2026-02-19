@@ -154,7 +154,7 @@ exclude_patterns:                    # Global gitignore-style patterns (merged w
 exclude_if_present:                  # Skip dirs containing any marker file
   - ".nobackup"
   - "CACHEDIR.TAG"
-one_file_system: true                # Do not cross filesystem/mount boundaries (default true)
+one_file_system: false               # Do not cross filesystem/mount boundaries (default false)
 git_ignore: false                    # Respect .gitignore files (default false)
 xattrs:                              # Extended attribute handling
   enabled: true                      # Preserve xattrs on backup/restore (default true, Unix-only)

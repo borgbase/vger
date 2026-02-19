@@ -51,7 +51,7 @@ pub(super) fn default_retry_max_delay_ms() -> u64 {
 }
 
 pub(super) fn default_one_file_system() -> bool {
-    true
+    false
 }
 
 pub(super) fn default_xattrs_enabled() -> bool {

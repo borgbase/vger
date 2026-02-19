@@ -1568,13 +1568,13 @@ sources:
 
         let repos = load_and_resolve(&path).unwrap();
         assert!(repos[0].config.exclude_if_present.is_empty());
-        assert!(repos[0].config.one_file_system);
+        assert!(!repos[0].config.one_file_system);
         assert!(!repos[0].config.git_ignore);
         assert!(repos[0].config.xattrs.enabled);
 
         let src = &repos[0].sources[0];
         assert!(src.exclude_if_present.is_empty());
-        assert!(src.one_file_system);
+        assert!(!src.one_file_system);
         assert!(!src.git_ignore);
         assert!(src.xattrs_enabled);
     }
