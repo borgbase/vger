@@ -39,7 +39,6 @@ url = "2"
 tempfile.workspace = true
 globset = "0.4"
 ignore = "0.4"
-filetime = "0.2"
 
 # Time
 chrono.workspace = true

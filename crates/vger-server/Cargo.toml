@@ -49,4 +49,3 @@ hex.workspace = true
 
 [dev-dependencies]
 tempfile = { workspace = true }
-http-body-util = "0.1"

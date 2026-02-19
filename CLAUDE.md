@@ -131,7 +131,7 @@ The type tag byte is used as AAD (authenticated additional data) in AES-GCM.
 | Storage | `opendal` 0.51 (services-s3), `std::fs` for local |
 | Serialization | `rmp-serde` 1, `serde_json` 1 |
 | CLI | `clap` 4 (derive), `serde_yaml` 0.9 |
-| Filesystem | `walkdir` 2, `globset` 0.4, `filetime` 0.2, `xattr` 1 |
+| Filesystem | `walkdir` 2, `globset` 0.4, `xattr` 1 |
 
 ## Release
 

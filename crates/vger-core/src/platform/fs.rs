@@ -134,8 +134,118 @@ pub fn create_symlink(link_target: &Path, target: &Path) -> std::io::Result<()> 
     }
 }
 
+pub fn set_file_mtime(path: &Path, secs: i64, nanos: u32) -> std::io::Result<()> {
+    #[cfg(unix)]
+    {
+        use std::ffi::CString;
+        use std::os::unix::ffi::OsStrExt;
+
+        let c_path = CString::new(path.as_os_str().as_bytes())
+            .map_err(|_| std::io::Error::new(std::io::ErrorKind::InvalidInput, "path contains null"))?;
+        let times = [
+            libc::timespec { tv_sec: 0, tv_nsec: libc::UTIME_OMIT },
+            libc::timespec { tv_sec: secs as _, tv_nsec: nanos as _ },
+        ];
+        if unsafe { libc::utimensat(libc::AT_FDCWD, c_path.as_ptr(), times.as_ptr(), 0) } == 0 {
+            Ok(())
+        } else {
+            Err(std::io::Error::last_os_error())
+        }
+    }
+
+    #[cfg(windows)]
+    {
+        use std::fs::{FileTimes, OpenOptions};
+        use std::os::windows::fs::OpenOptionsExt;
+        use std::time::{Duration, SystemTime};
+
+        const FILE_WRITE_ATTRIBUTES: u32 = 0x0100;
+        let time = if secs >= 0 {
+            SystemTime::UNIX_EPOCH + Duration::new(secs as u64, nanos)
+        } else {
+            SystemTime::UNIX_EPOCH - Duration::new(secs.unsigned_abs(), 0)
+                + Duration::new(0, nanos)
+        };
+        let file = OpenOptions::new()
+            .access_mode(FILE_WRITE_ATTRIBUTES)
+            .open(path)?;
+        file.set_times(FileTimes::new().set_modified(time))
+    }
+
+    #[cfg(not(any(unix, windows)))]
+    {
+        let _ = (path, secs, nanos);
+        Ok(())
+    }
+}
+
 pub fn xattrs_supported() -> bool {
     cfg!(unix)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::time::SystemTime;
+
+    #[test]
+    fn set_file_mtime_roundtrips() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("test.txt");
+        std::fs::write(&path, b"hello").unwrap();
+
+        let target_secs: i64 = 1_700_000_000;
+        set_file_mtime(&path, target_secs, 0).unwrap();
+
+        let meta = std::fs::metadata(&path).unwrap();
+        let mtime = meta.modified().unwrap();
+        let since_epoch = mtime.duration_since(SystemTime::UNIX_EPOCH).unwrap();
+        let diff = (since_epoch.as_secs() as i64 - target_secs).unsigned_abs();
+        assert!(diff <= 1, "mtime off by {diff} seconds");
+    }
+
+    #[test]
+    fn set_file_mtime_on_readonly_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("readonly.txt");
+        std::fs::write(&path, b"data").unwrap();
+
+        // Make file read-only
+        let mut perms = std::fs::metadata(&path).unwrap().permissions();
+        perms.set_readonly(true);
+        std::fs::set_permissions(&path, perms).unwrap();
+
+        let target_secs: i64 = 1_600_000_000;
+        // Both Unix (utimensat is path-based) and Windows (FILE_WRITE_ATTRIBUTES)
+        // should succeed on read-only files.
+        set_file_mtime(&path, target_secs, 0).unwrap();
+
+        let meta = std::fs::metadata(&path).unwrap();
+        let mtime = meta.modified().unwrap();
+        let since_epoch = mtime.duration_since(SystemTime::UNIX_EPOCH).unwrap();
+        let diff = (since_epoch.as_secs() as i64 - target_secs).unsigned_abs();
+        assert!(diff <= 1, "mtime off by {diff} seconds");
+
+        // Restore write permissions for cleanup
+        let mut perms = std::fs::metadata(&path).unwrap().permissions();
+        perms.set_readonly(false);
+        std::fs::set_permissions(&path, perms).unwrap();
+    }
+
+    #[test]
+    fn set_file_mtime_negative_timestamp() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("old.txt");
+        std::fs::write(&path, b"ancient").unwrap();
+
+        // 1969-12-31T23:59:59 UTC — one second before the Unix epoch.
+        let target_secs: i64 = -1;
+        // Should not panic on any platform.
+        let result = set_file_mtime(&path, target_secs, 0);
+        // Unix handles negative timestamps natively. Windows SystemTime can
+        // represent pre-epoch times, so this should succeed on both.
+        assert!(result.is_ok(), "pre-epoch mtime failed: {result:?}");
+    }
 }
 
 #[cfg(windows)]

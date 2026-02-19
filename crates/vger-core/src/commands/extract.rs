@@ -298,8 +298,7 @@ where
                 apply_item_xattrs(&pf.target_path, pf.xattrs.as_ref());
             }
             let (mtime_secs, mtime_nanos) = split_unix_nanos(pf.mtime);
-            let mtime = filetime::FileTime::from_unix_time(mtime_secs, mtime_nanos);
-            let _ = filetime::set_file_mtime(&pf.target_path, mtime);
+            let _ = fs::set_file_mtime(&pf.target_path, mtime_secs, mtime_nanos);
         }
 
         stats.files = planned_files.len() as u64;
@@ -1075,9 +1074,13 @@ mod tests {
         let payload = b"abc";
         let compressed = crate::compress::compress(Compression::None, payload).unwrap();
         let crypto = PlaintextEngine::new(&test_chunk_id_key());
-        let packed =
-            pack_object_with_context(ObjectType::ChunkData, &dummy_chunk_id(0xAA).0, &compressed, &crypto)
-                .unwrap();
+        let packed = pack_object_with_context(
+            ObjectType::ChunkData,
+            &dummy_chunk_id(0xAA).0,
+            &compressed,
+            &crypto,
+        )
+        .unwrap();
 
         let pack_id = dummy_pack_id(9);
         let backend = Arc::new(MemoryBackend::new());

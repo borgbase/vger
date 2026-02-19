@@ -1,7 +1,6 @@
 use axum::body::Body;
 use axum::http::{Request, StatusCode};
 use axum::Router;
-use http_body_util::BodyExt;
 use tower::ServiceExt;
 
 use crate::config::ServerSection;
@@ -65,11 +64,7 @@ pub async fn authed_get(router: Router, path: &str) -> axum::response::Response 
 }
 
 /// Send an authenticated POST request with the given body bytes.
-pub async fn authed_post(
-    router: Router,
-    path: &str,
-    body: Vec<u8>,
-) -> axum::response::Response {
+pub async fn authed_post(router: Router, path: &str, body: Vec<u8>) -> axum::response::Response {
     let req = Request::builder()
         .method("POST")
         .uri(path)
@@ -83,12 +78,9 @@ pub async fn authed_post(
 
 /// Read full response body into `Vec<u8>`.
 pub async fn body_bytes(response: axum::response::Response) -> Vec<u8> {
-    response
-        .into_body()
-        .collect()
+    axum::body::to_bytes(response.into_body(), usize::MAX)
         .await
         .expect("collect body")
-        .to_bytes()
         .to_vec()
 }
 
