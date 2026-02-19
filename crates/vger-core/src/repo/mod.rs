@@ -1148,11 +1148,8 @@ impl Repository {
 
         let storage = Arc::clone(&self.storage);
         let key = pack_id.storage_key();
-        self.pending_uploads.push_back(std::thread::spawn(move || {
-            let result = storage.put(&key, data.as_slice());
-            drop(data); // releases mmap + temp file
-            result
-        }));
+        self.pending_uploads
+            .push_back(std::thread::spawn(move || data.put_to(&*storage, &key)));
 
         Ok(())
     }

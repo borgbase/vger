@@ -319,7 +319,11 @@ fn list_all_recursive(
             list_all_recursive(&path, root, out)?;
         } else if let Ok(rel) = path.strip_prefix(root) {
             // Use forward slashes for storage keys regardless of platform.
-            let key: String = rel.iter().map(|c| c.to_string_lossy()).collect::<Vec<_>>().join("/");
+            let key: String = rel
+                .iter()
+                .map(|c| c.to_string_lossy())
+                .collect::<Vec<_>>()
+                .join("/");
             out.push(key);
         }
     }

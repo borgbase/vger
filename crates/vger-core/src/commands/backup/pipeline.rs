@@ -71,6 +71,15 @@ pub(crate) enum ProcessedEntry {
     },
 }
 
+/// Estimate the number of chunks a file will produce, for pre-sizing Vecs.
+fn estimate_chunk_count(data_len: u64, avg_chunk_size: u32) -> usize {
+    if avg_chunk_size == 0 {
+        return 1;
+    }
+    let est = (data_len / avg_chunk_size as u64).saturating_add(1);
+    est.min(4096) as usize
+}
+
 /// Process a single walk entry in a parallel worker thread.
 ///
 /// Budget bytes are pre-acquired by the walk thread; `pre_acquired_bytes`
@@ -131,7 +140,8 @@ fn process_file_worker(
                 chunker_config,
             );
 
-            let mut worker_chunks = Vec::new();
+            let mut worker_chunks =
+                Vec::with_capacity(estimate_chunk_count(file_size, chunker_config.avg_size));
             for chunk_result in chunk_stream {
                 let chunk = chunk_result.map_err(|e| {
                     VgerError::Other(format!("chunking failed for {abs_path}: {e}"))
@@ -178,7 +188,8 @@ fn process_file_worker(
                 chunker_config,
             );
 
-            let mut worker_chunks = Vec::new();
+            let mut worker_chunks =
+                Vec::with_capacity(estimate_chunk_count(len, chunker_config.avg_size));
             for chunk_result in chunk_stream {
                 let chunk = chunk_result.map_err(|e| {
                     VgerError::Other(format!("chunking failed for {abs_path}: {e}"))
@@ -1215,5 +1226,31 @@ mod tests {
             "full budget should be available after panic cleanup"
         );
         budget.release(200);
+    }
+
+    // -----------------------------------------------------------------------
+    // estimate_chunk_count tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn estimate_chunk_count_basic() {
+        // 10 MiB file, 128 KiB avg → ~80 chunks + 1
+        assert_eq!(estimate_chunk_count(10 * 1024 * 1024, 128 * 1024), 81);
+    }
+
+    #[test]
+    fn estimate_chunk_count_zero_avg() {
+        assert_eq!(estimate_chunk_count(1024, 0), 1);
+    }
+
+    #[test]
+    fn estimate_chunk_count_zero_data() {
+        assert_eq!(estimate_chunk_count(0, 128 * 1024), 1);
+    }
+
+    #[test]
+    fn estimate_chunk_count_clamps_large() {
+        // u64::MAX should clamp to 4096
+        assert_eq!(estimate_chunk_count(u64::MAX, 1), 4096);
     }
 }

@@ -168,6 +168,19 @@ impl RestBackend {
     }
 }
 
+impl RestBackend {
+    /// Shared PUT implementation for both borrowed and owned data.
+    fn put_bytes(&self, key: &str, data: &[u8]) -> Result<()> {
+        let url = self.url(key);
+        self.retry_call(&format!("PUT {key}"), || {
+            let req = self.apply_auth(self.agent.put(&url));
+            req.send_bytes(data)
+        })
+        .map_err(|e| VgerError::Other(format!("REST PUT {key}: {e}")))?;
+        Ok(())
+    }
+}
+
 impl StorageBackend for RestBackend {
     fn get(&self, key: &str) -> Result<Option<Vec<u8>>> {
         let url = self.url(key);
@@ -188,14 +201,11 @@ impl StorageBackend for RestBackend {
     }
 
     fn put(&self, key: &str, data: &[u8]) -> Result<()> {
-        let url = self.url(key);
-        let data = data.to_vec();
-        self.retry_call(&format!("PUT {key}"), || {
-            let req = self.apply_auth(self.agent.put(&url));
-            req.send_bytes(&data)
-        })
-        .map_err(|e| VgerError::Other(format!("REST PUT {key}: {e}")))?;
-        Ok(())
+        self.put_bytes(key, data)
+    }
+
+    fn put_owned(&self, key: &str, data: Vec<u8>) -> Result<()> {
+        self.put_bytes(key, &data)
     }
 
     fn delete(&self, key: &str) -> Result<()> {

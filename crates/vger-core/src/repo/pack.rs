@@ -100,6 +100,20 @@ impl SealedData {
             SealedData::Memory(v) => v.as_slice(),
         }
     }
+
+    /// Upload pack data, choosing the zero-copy path when possible.
+    ///
+    /// - `Memory(Vec<u8>)`: passes owned Vec via `put_owned` (zero-copy for OpenDAL/REST).
+    /// - `Mmap`: borrows the mapped region via `put` (no materialization to Vec).
+    pub fn put_to(self, storage: &dyn StorageBackend, key: &str) -> Result<()> {
+        match self {
+            SealedData::Memory(v) => storage.put_owned(key, v),
+            SealedData::Mmap { mmap, len, _file } => {
+                storage.put(key, &mmap[..len])
+                // mmap + _file dropped here after put returns
+            }
+        }
+    }
 }
 
 /// Accumulates encrypted blobs and flushes them as pack files.
@@ -741,6 +755,78 @@ mod tests {
         assert!(
             matches!(w.buffer, Some(PackBuffer::Mmap(_))),
             "expected mmap buffer after falling back to system temp"
+        );
+    }
+
+    /// SealedData::put_to dispatches Memory to put_owned and Mmap to put.
+    #[test]
+    fn put_to_dispatches_correctly() {
+        use std::sync::atomic::{AtomicU8, Ordering};
+
+        const CALLED_PUT: u8 = 1;
+        const CALLED_PUT_OWNED: u8 = 2;
+
+        struct RecordingBackend {
+            called: AtomicU8,
+        }
+        impl StorageBackend for RecordingBackend {
+            fn get(&self, _: &str) -> Result<Option<Vec<u8>>> {
+                Ok(None)
+            }
+            fn put(&self, _: &str, _: &[u8]) -> Result<()> {
+                self.called.store(CALLED_PUT, Ordering::SeqCst);
+                Ok(())
+            }
+            fn put_owned(&self, _: &str, _: Vec<u8>) -> Result<()> {
+                self.called.store(CALLED_PUT_OWNED, Ordering::SeqCst);
+                Ok(())
+            }
+            fn delete(&self, _: &str) -> Result<()> {
+                Ok(())
+            }
+            fn exists(&self, _: &str) -> Result<bool> {
+                Ok(false)
+            }
+            fn list(&self, _: &str) -> Result<Vec<String>> {
+                Ok(vec![])
+            }
+            fn get_range(&self, _: &str, _: u64, _: u64) -> Result<Option<Vec<u8>>> {
+                Ok(None)
+            }
+            fn create_dir(&self, _: &str) -> Result<()> {
+                Ok(())
+            }
+        }
+
+        // Memory variant → put_owned
+        let backend = RecordingBackend {
+            called: AtomicU8::new(0),
+        };
+        let data = SealedData::Memory(vec![1, 2, 3]);
+        data.put_to(&backend, "test").unwrap();
+        assert_eq!(
+            backend.called.load(Ordering::SeqCst),
+            CALLED_PUT_OWNED,
+            "Memory variant should call put_owned"
+        );
+
+        // Mmap variant → put
+        let backend = RecordingBackend {
+            called: AtomicU8::new(0),
+        };
+        let file = tempfile::tempfile().unwrap();
+        file.set_len(64).unwrap();
+        let mmap = unsafe { memmap2::MmapMut::map_mut(&file) }.unwrap();
+        let data = SealedData::Mmap {
+            mmap,
+            _file: file,
+            len: 32,
+        };
+        data.put_to(&backend, "test").unwrap();
+        assert_eq!(
+            backend.called.load(Ordering::SeqCst),
+            CALLED_PUT,
+            "Mmap variant should call put"
         );
     }
 
