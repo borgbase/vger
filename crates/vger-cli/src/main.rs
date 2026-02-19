@@ -5,6 +5,7 @@ mod dispatch;
 mod format;
 mod passphrase;
 mod progress;
+mod prompt;
 mod table;
 
 use clap::Parser;

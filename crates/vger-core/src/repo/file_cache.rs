@@ -6,6 +6,7 @@ use tracing::debug;
 
 use crate::crypto::CryptoEngine;
 use crate::error::{Result, VgerError};
+use crate::platform::paths;
 use crate::snapshot::item::ChunkRef;
 
 use super::format::{
@@ -19,7 +20,7 @@ use super::format::{
 pub(crate) fn repo_cache_dir(repo_id: &[u8], cache_dir_override: Option<&Path>) -> Option<PathBuf> {
     let base = match cache_dir_override {
         Some(dir) => Some(dir.to_path_buf()),
-        None => dirs::cache_dir().map(|d| d.join("vger")),
+        None => paths::cache_dir().map(|d| d.join("vger")),
     };
     base.map(|b| b.join(hex::encode(repo_id)))
 }

@@ -1,4 +1,5 @@
 pub mod fs;
+pub mod paths;
 pub mod shell;
 
 /// Return the system hostname, or `"unknown"` if it cannot be determined.

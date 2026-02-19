@@ -1,5 +1,6 @@
 use zeroize::Zeroizing;
 
+use crate::prompt::prompt_hidden;
 use vger_core::config::{EncryptionModeConfig, VgerConfig};
 
 pub(crate) fn with_repo_passphrase<T>(
@@ -28,7 +29,7 @@ pub(crate) fn get_passphrase(
         Some(l) => format!("Enter passphrase for '{l}': "),
         None => "Enter passphrase: ".to_string(),
     };
-    let pass = Zeroizing::new(rpassword::prompt_password(prompt)?);
+    let pass = Zeroizing::new(prompt_hidden(&prompt)?);
     Ok(Some(pass))
 }
 
@@ -51,12 +52,8 @@ pub(crate) fn get_init_passphrase(
     }
 
     let suffix = label.map(|l| format!(" for '{l}'")).unwrap_or_default();
-    let p1 = Zeroizing::new(rpassword::prompt_password(format!(
-        "Enter new passphrase{suffix}: "
-    ))?);
-    let p2 = Zeroizing::new(rpassword::prompt_password(format!(
-        "Confirm passphrase{suffix}: "
-    ))?);
+    let p1 = Zeroizing::new(prompt_hidden(&format!("Enter new passphrase{suffix}: "))?);
+    let p2 = Zeroizing::new(prompt_hidden(&format!("Confirm passphrase{suffix}: "))?);
     if *p1 != *p2 {
         return Err("passphrases do not match".into());
     }

@@ -3,6 +3,8 @@ use std::path::{Path, PathBuf};
 
 use serde::Deserialize;
 
+use crate::platform::paths;
+
 use super::defaults::*;
 use super::deserialize::*;
 use super::hooks::HooksConfig;
@@ -490,13 +492,13 @@ pub fn default_config_search_paths() -> Vec<(PathBuf, &'static str)> {
     let mut paths = vec![(PathBuf::from("vger.yaml"), "project")];
 
     #[cfg(windows)]
-    let user_config = dirs::config_dir().map(|base| base.join("vger").join("config.yaml"));
+    let user_config = paths::config_dir().map(|base| base.join("vger").join("config.yaml"));
 
     #[cfg(not(windows))]
     let user_config = std::env::var_os("XDG_CONFIG_HOME")
         .map(PathBuf::from)
         .filter(|p| p.is_absolute())
-        .or_else(|| dirs::home_dir().map(|h| h.join(".config")))
+        .or_else(|| paths::home_dir().map(|h| h.join(".config")))
         .map(|base| base.join("vger").join("config.yaml"));
 
     if let Some(p) = user_config {
@@ -837,7 +839,7 @@ sources:
         fs::write(&path, yaml).unwrap();
 
         let repos = load_and_resolve(&path).unwrap();
-        let home = dirs::home_dir().expect("home dir should be available in test env");
+        let home = paths::home_dir().expect("home dir should be available in test env");
         let expected = home.join("vger-cache").to_string_lossy().to_string();
         assert_eq!(
             repos[0].config.cache_dir.as_deref(),
@@ -1720,7 +1722,7 @@ sources:
         fs::write(&path, yaml).unwrap();
 
         let repos = load_and_resolve(&path).unwrap();
-        let home = dirs::home_dir().unwrap().to_string_lossy().to_string();
+        let home = paths::home_dir().unwrap().to_string_lossy().to_string();
 
         // Repository URL should be expanded
         assert!(

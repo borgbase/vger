@@ -12,6 +12,7 @@ use tokio::io::{AsyncReadExt, AsyncSeekExt, AsyncWriteExt};
 
 use crate::config::RetryConfig;
 use crate::error::{Result, VgerError};
+use crate::platform::paths;
 use crate::storage::StorageBackend;
 
 use super::opendal_backend::ASYNC_RUNTIME;
@@ -459,7 +460,7 @@ fn resolve_known_hosts_path(explicit: Option<&str>) -> Result<PathBuf> {
         return Ok(expand_tilde_path(path));
     }
 
-    let home = dirs::home_dir()
+    let home = paths::home_dir()
         .ok_or_else(|| VgerError::Other("cannot determine home directory".into()))?;
 
     #[cfg(target_os = "windows")]
@@ -475,13 +476,13 @@ fn resolve_known_hosts_path(explicit: Option<&str>) -> Result<PathBuf> {
 
 fn expand_tilde_path(raw: &str) -> PathBuf {
     if raw == "~" {
-        if let Some(home) = dirs::home_dir() {
+        if let Some(home) = paths::home_dir() {
             return home;
         }
     }
 
     if let Some(rest) = raw.strip_prefix("~/").or_else(|| raw.strip_prefix("~\\")) {
-        if let Some(home) = dirs::home_dir() {
+        if let Some(home) = paths::home_dir() {
             return home.join(rest);
         }
     }
@@ -564,7 +565,7 @@ fn load_key(explicit: &Option<PathBuf>) -> RetryResult<PrivateKey> {
     }
 
     // Try default key locations.
-    let home = dirs::home_dir().ok_or_else(|| {
+    let home = paths::home_dir().ok_or_else(|| {
         RetryError::permanent(VgerError::Other("cannot determine home directory".into()))
     })?;
     let candidates = ["id_ed25519", "id_rsa", "id_ecdsa"];

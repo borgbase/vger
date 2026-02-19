@@ -1,14 +1,16 @@
 use std::path::Path;
 
+use crate::platform::paths;
+
 /// Expand a leading `~` or `~/` to the user's home directory.
 pub fn expand_tilde(path: &str) -> String {
     if path == "~" {
-        if let Some(home) = dirs::home_dir() {
+        if let Some(home) = paths::home_dir() {
             return home.to_string_lossy().to_string();
         }
     }
     if let Some(suffix) = path.strip_prefix("~/") {
-        if let Some(home) = dirs::home_dir() {
+        if let Some(home) = paths::home_dir() {
             return home.join(suffix).to_string_lossy().to_string();
         }
     }
@@ -29,7 +31,7 @@ mod tests {
 
     #[test]
     fn test_expand_tilde_home_only() {
-        let home = dirs::home_dir().unwrap();
+        let home = paths::home_dir().unwrap();
         assert_eq!(expand_tilde("~"), home.to_string_lossy().to_string());
     }
 }

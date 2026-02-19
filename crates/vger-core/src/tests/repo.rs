@@ -1,5 +1,6 @@
 use crate::compress::Compression;
 use crate::config::ChunkerConfig;
+use crate::platform::paths;
 use crate::repo::pack::PackType;
 use crate::repo::EncryptionMode;
 use crate::repo::Repository;
@@ -356,7 +357,7 @@ fn index_delta_is_empty() {
 
 /// Compute the file cache path the same way `FileCache::cache_path` does.
 fn file_cache_path(repo_id: &[u8]) -> Option<PathBuf> {
-    dirs::cache_dir().map(|base| {
+    paths::cache_dir().map(|base| {
         base.join("vger")
             .join(hex::encode(repo_id))
             .join("filecache")

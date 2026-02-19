@@ -44,9 +44,6 @@ filetime = "0.2"
 # Time
 chrono.workspace = true
 
-# OS
-dirs = "6"
-
 # Memory-mapped I/O
 memmap2 = "0.9"
 
