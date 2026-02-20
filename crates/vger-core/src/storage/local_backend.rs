@@ -166,6 +166,41 @@ impl StorageBackend for LocalBackend {
         Ok(Some(buf))
     }
 
+    fn get_range_into(
+        &self,
+        key: &str,
+        offset: u64,
+        length: u64,
+        buf: &mut Vec<u8>,
+    ) -> Result<bool> {
+        let path = self.resolve(key)?;
+        let mut file = match fs::File::open(&path) {
+            Ok(f) => f,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                buf.clear();
+                return Ok(false);
+            }
+            Err(e) => return Err(e.into()),
+        };
+        file.seek(SeekFrom::Start(offset))?;
+        buf.clear();
+        buf.resize(length as usize, 0);
+        let mut filled = 0;
+        while filled < buf.len() {
+            match file.read(&mut buf[filled..]) {
+                Ok(0) => break,
+                Ok(n) => filled += n,
+                Err(e) => return Err(e.into()),
+            }
+        }
+        if filled != length as usize {
+            return Err(VgerError::Other(format!(
+                "short read on {key} at offset {offset}: expected {length} bytes, got {filled}"
+            )));
+        }
+        Ok(true)
+    }
+
     fn create_dir(&self, key: &str) -> Result<()> {
         let path = self.resolve(key.trim_end_matches('/'))?;
         fs::create_dir_all(&path)?;

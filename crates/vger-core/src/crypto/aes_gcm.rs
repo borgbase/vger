@@ -61,6 +61,22 @@ impl CryptoEngine for Aes256GcmEngine {
             .map_err(|_| VgerError::DecryptionFailed)
     }
 
+    fn decrypt_into(&self, data: &[u8], aad: &[u8], output: &mut Vec<u8>) -> Result<()> {
+        if data.len() < 12 + 16 {
+            return Err(VgerError::DecryptionFailed);
+        }
+        let (nonce_bytes, ct_and_tag) = data.split_at(12);
+        let nonce = Nonce::from_slice(nonce_bytes);
+        let (ciphertext, tag_bytes) = ct_and_tag.split_at(ct_and_tag.len() - 16);
+        let tag = aes_gcm::Tag::from_slice(tag_bytes);
+        output.clear();
+        output.extend_from_slice(ciphertext); // reuses existing capacity
+        self.cipher
+            .decrypt_in_place_detached(nonce, aad, output, tag)
+            .map_err(|_| VgerError::DecryptionFailed)?;
+        Ok(())
+    }
+
     fn encrypt_in_place_detached(
         &self,
         buffer: &mut [u8],

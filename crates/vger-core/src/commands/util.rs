@@ -27,6 +27,16 @@ pub fn open_repo_without_index(
     Repository::open_without_index(backend, passphrase, cache_dir_from_config(config))
 }
 
+/// Open a repository without loading the chunk index or file cache.
+/// Suitable for operations (e.g. restore) that need neither.
+pub fn open_repo_without_index_or_cache(
+    config: &VgerConfig,
+    passphrase: Option<&str>,
+) -> Result<Repository> {
+    let backend = storage::backend_from_config(&config.repository, None)?;
+    Repository::open_without_index_or_cache(backend, passphrase, cache_dir_from_config(config))
+}
+
 /// Open a repository and execute a mutation while holding an advisory lock.
 pub fn with_open_repo_lock<T>(
     config: &VgerConfig,

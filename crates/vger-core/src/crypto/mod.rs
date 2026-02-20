@@ -26,6 +26,13 @@ pub trait CryptoEngine: Send + Sync {
         aad: &[u8],
     ) -> Result<([u8; 12], [u8; 16])>;
 
+    /// Decrypt data produced by `encrypt` into a caller-provided buffer.
+    /// Reuses existing capacity in `output` to reduce allocation churn.
+    fn decrypt_into(&self, data: &[u8], aad: &[u8], output: &mut Vec<u8>) -> Result<()> {
+        *output = self.decrypt(data, aad)?;
+        Ok(())
+    }
+
     /// Whether this engine actually encrypts data.
     /// `PlaintextEngine` returns false; real ciphers return true.
     fn is_encrypting(&self) -> bool;
@@ -54,6 +61,12 @@ impl CryptoEngine for PlaintextEngine {
 
     fn decrypt(&self, data: &[u8], _aad: &[u8]) -> Result<Vec<u8>> {
         Ok(data.to_vec())
+    }
+
+    fn decrypt_into(&self, data: &[u8], _aad: &[u8], output: &mut Vec<u8>) -> Result<()> {
+        output.clear();
+        output.extend_from_slice(data);
+        Ok(())
     }
 
     fn encrypt_in_place_detached(

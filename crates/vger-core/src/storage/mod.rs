@@ -64,6 +64,31 @@ pub trait StorageBackend: Send + Sync {
     /// `length` must be > 0 (callers must not request zero-length reads).
     fn get_range(&self, key: &str, offset: u64, length: u64) -> Result<Option<Vec<u8>>>;
 
+    /// Read a byte range from an object into a caller-provided buffer.
+    ///
+    /// Returns `Ok(true)` when the key exists (buf filled), `Ok(false)` when
+    /// not found (buf cleared). LocalBackend overrides this to read directly
+    /// into `buf`, achieving true buffer reuse. Other backends fall through to
+    /// `get_range()` + move.
+    fn get_range_into(
+        &self,
+        key: &str,
+        offset: u64,
+        length: u64,
+        buf: &mut Vec<u8>,
+    ) -> Result<bool> {
+        match self.get_range(key, offset, length)? {
+            Some(data) => {
+                *buf = data;
+                Ok(true)
+            }
+            None => {
+                buf.clear();
+                Ok(false)
+            }
+        }
+    }
+
     /// Create a directory marker (no-op for flat object stores).
     fn create_dir(&self, key: &str) -> Result<()>;
 
@@ -133,6 +158,15 @@ impl StorageBackend for Arc<dyn StorageBackend> {
     }
     fn get_range(&self, key: &str, offset: u64, length: u64) -> Result<Option<Vec<u8>>> {
         (**self).get_range(key, offset, length)
+    }
+    fn get_range_into(
+        &self,
+        key: &str,
+        offset: u64,
+        length: u64,
+        buf: &mut Vec<u8>,
+    ) -> Result<bool> {
+        (**self).get_range_into(key, offset, length, buf)
     }
     fn create_dir(&self, key: &str) -> Result<()> {
         (**self).create_dir(key)

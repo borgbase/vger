@@ -187,6 +187,71 @@ pub fn decompress_with_hint(data: &[u8], expected_size: Option<usize>) -> Result
     }
 }
 
+/// Decompress data into a caller-provided buffer, reusing its allocation.
+///
+/// `expected_size` is a best-effort capacity hint (capped by `MAX_DECOMPRESS_SIZE`).
+/// All three codec paths reuse the existing allocation in `output` from prior calls.
+pub fn decompress_into_with_hint(
+    data: &[u8],
+    expected_size: Option<usize>,
+    output: &mut Vec<u8>,
+) -> Result<()> {
+    if data.is_empty() {
+        return Err(VgerError::Decompression("empty data".into()));
+    }
+    let tag = data[0];
+    let payload = &data[1..];
+    match tag {
+        TAG_NONE => {
+            output.clear();
+            output.extend_from_slice(payload);
+            Ok(())
+        }
+        TAG_LZ4 => {
+            if payload.len() < 4 {
+                return Err(VgerError::Decompression("lz4: payload too short".into()));
+            }
+            let uncompressed_size = u32::from_le_bytes(payload[..4].try_into().unwrap()) as usize;
+            if uncompressed_size as u64 > MAX_DECOMPRESS_SIZE {
+                return Err(VgerError::Decompression(format!(
+                    "lz4: decompressed size ({uncompressed_size}) exceeds limit of {MAX_DECOMPRESS_SIZE} bytes"
+                )));
+            }
+            output.clear();
+            output.resize(uncompressed_size, 0);
+            let written = lz4_flex::block::decompress_into(&payload[4..], output)
+                .map_err(|e| VgerError::Decompression(format!("lz4: {e}")))?;
+            if written != uncompressed_size {
+                return Err(VgerError::Decompression(format!(
+                    "lz4: declared size {uncompressed_size} but decompressed {written} bytes"
+                )));
+            }
+            output.truncate(written);
+            Ok(())
+        }
+        TAG_ZSTD => {
+            let hinted_capacity = expected_size.unwrap_or(0).min(MAX_DECOMPRESS_SIZE as usize);
+            output.clear();
+            output.reserve(hinted_capacity);
+            let mut decoder = zstd::stream::Decoder::new(std::io::Cursor::new(payload))
+                .map_err(|e| VgerError::Decompression(format!("zstd init: {e}")))?;
+            decoder
+                .by_ref()
+                .take(MAX_DECOMPRESS_SIZE + 1)
+                .read_to_end(output)
+                .map_err(|e| VgerError::Decompression(format!("zstd: {e}")))?;
+            if output.len() as u64 > MAX_DECOMPRESS_SIZE {
+                return Err(VgerError::Decompression(format!(
+                    "zstd: decompressed size exceeds limit of {} bytes",
+                    MAX_DECOMPRESS_SIZE
+                )));
+            }
+            Ok(())
+        }
+        _ => Err(VgerError::UnknownCompressionTag(tag)),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

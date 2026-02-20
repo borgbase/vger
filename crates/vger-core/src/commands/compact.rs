@@ -56,7 +56,7 @@ pub fn run(
     max_repack_size: Option<u64>,
     dry_run: bool,
 ) -> Result<CompactStats> {
-    let threshold = if !threshold.is_finite() || threshold < 0.0 || threshold > 100.0 {
+    let threshold = if !threshold.is_finite() || !(0.0..=100.0).contains(&threshold) {
         let default = config.compact.threshold;
         warn!(
             value = threshold,

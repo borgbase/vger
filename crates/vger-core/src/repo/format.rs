@@ -235,3 +235,26 @@ pub fn unpack_object_expect_with_context(
     }
     Ok(plaintext)
 }
+
+/// Context-bound variant that decrypts into a caller-provided buffer.
+/// Reduces allocation churn when called repeatedly in a hot loop.
+pub fn unpack_object_expect_with_context_into(
+    data: &[u8],
+    expected_type: ObjectType,
+    context: &[u8],
+    crypto: &dyn CryptoEngine,
+    output: &mut Vec<u8>,
+) -> Result<()> {
+    let (tag, obj_type, encrypted) = parse_object_envelope(data)?;
+    let aad = contextual_aad(tag, context);
+    // Always run AEAD before checking type (must decrypt to authenticate).
+    crypto.decrypt_into(encrypted, &aad, output)?;
+    if obj_type != expected_type {
+        output.clear();
+        return Err(VgerError::InvalidFormat(format!(
+            "unexpected object type: expected {:?}, got {:?}",
+            expected_type, obj_type
+        )));
+    }
+    Ok(())
+}

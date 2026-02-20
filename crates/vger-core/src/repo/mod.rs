@@ -336,12 +336,31 @@ impl Repository {
         Self::open_base(storage, passphrase, cache_dir)
     }
 
+    /// Open a repository without loading the chunk index or file cache.
+    /// Suitable for read-only operations (e.g. restore) that need neither.
+    pub fn open_without_index_or_cache(
+        storage: Box<dyn StorageBackend>,
+        passphrase: Option<&str>,
+        cache_dir: Option<PathBuf>,
+    ) -> Result<Self> {
+        Self::open_base_inner(storage, passphrase, cache_dir, true)
+    }
+
     /// Shared open logic: reads config, builds crypto, loads manifest and file cache.
     /// Does NOT load the chunk index — callers either load it themselves or skip it.
     fn open_base(
         storage: Box<dyn StorageBackend>,
         passphrase: Option<&str>,
         cache_dir: Option<PathBuf>,
+    ) -> Result<Self> {
+        Self::open_base_inner(storage, passphrase, cache_dir, false)
+    }
+
+    fn open_base_inner(
+        storage: Box<dyn StorageBackend>,
+        passphrase: Option<&str>,
+        cache_dir: Option<PathBuf>,
+        skip_file_cache: bool,
     ) -> Result<Self> {
         let storage: Arc<dyn StorageBackend> = Arc::from(storage);
 
@@ -418,7 +437,11 @@ impl Repository {
         let manifest: Manifest = rmp_serde::from_slice(&manifest_bytes)?;
 
         // Load file cache from local disk (not from the repo).
-        let file_cache = FileCache::load(&repo_config.id, crypto.as_ref(), cache_dir.as_deref());
+        let file_cache = if skip_file_cache {
+            FileCache::new()
+        } else {
+            FileCache::load(&repo_config.id, crypto.as_ref(), cache_dir.as_deref())
+        };
 
         // Use min_pack_size as default pack target (recalculated after index load).
         let data_target = repo_config.min_pack_size as usize;

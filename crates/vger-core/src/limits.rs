@@ -228,6 +228,22 @@ impl StorageBackend for ThrottledStorageBackend {
         Ok(out)
     }
 
+    fn get_range_into(
+        &self,
+        key: &str,
+        offset: u64,
+        length: u64,
+        buf: &mut Vec<u8>,
+    ) -> Result<bool> {
+        let found = self.inner.get_range_into(key, offset, length, buf)?;
+        if found {
+            if let Some(limiter) = self.read_limiter.as_ref() {
+                limiter.consume(buf.len());
+            }
+        }
+        Ok(found)
+    }
+
     fn create_dir(&self, key: &str) -> Result<()> {
         self.inner.create_dir(key)
     }
