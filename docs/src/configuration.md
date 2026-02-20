@@ -286,6 +286,23 @@ Common service URL examples:
 
 You can pass multiple URLs in a single command to notify several services at once. See the [Apprise wiki](https://github.com/caronc/apprise/wiki) for the full list of supported services and URL formats.
 
+## Schedule
+
+Configure the built-in daemon scheduler for automatic periodic backups. Used with `vger daemon`.
+
+```yaml
+schedule:
+  enabled: true                        # Enable scheduled backups (default false)
+  every: "6h"                          # Interval between runs: "30m", "6h", "2d", or integer days (default "24h")
+  on_startup: false                    # Run a backup immediately when the daemon starts (default false)
+  jitter_seconds: 0                    # Random delay 0–N seconds added to each interval (default 0)
+  passphrase_prompt_timeout_seconds: 300  # Timeout for interactive passphrase prompts (default 300)
+```
+
+The `every` field accepts `m` (minutes), `h` (hours), or `d` (days) suffixes; a plain integer is treated as days.
+
+When multiple repositories are configured, schedule values are merged: `enabled` and `on_startup` are OR'd across repos, `jitter_seconds` and `passphrase_prompt_timeout_seconds` take the maximum, and `every` uses the shortest interval.
+
 ## Environment Variable Expansion
 
 Config files support environment variable placeholders in values:
