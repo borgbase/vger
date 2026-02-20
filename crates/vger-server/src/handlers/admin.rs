@@ -92,28 +92,10 @@ pub async fn list_repos(State(state): State<AppState>) -> Result<Response, Serve
 }
 
 /// GET /health — unauthenticated health check.
-pub async fn health(State(state): State<AppState>) -> impl IntoResponse {
-    let uptime = state.inner.start_time.elapsed().as_secs();
-
-    // Count repos
-    let data_dir = state.inner.data_dir.clone();
-    let repo_count = tokio::task::spawn_blocking(move || {
-        std::fs::read_dir(&data_dir)
-            .map(|entries| entries.flatten().filter(|e| e.path().is_dir()).count())
-            .unwrap_or(0)
-    })
-    .await
-    .unwrap_or(0);
-
-    // Get disk free space
-    let disk_free = get_disk_free(&state.inner.data_dir);
-
+pub async fn health() -> impl IntoResponse {
     axum::Json(serde_json::json!({
         "status": "ok",
         "version": env!("CARGO_PKG_VERSION"),
-        "uptime_seconds": uptime,
-        "disk_free_bytes": disk_free,
-        "repos": repo_count,
     }))
 }
 
@@ -709,17 +691,6 @@ fn count_repo_stats(repo_dir: &std::path::Path) -> (u64, u64, u64) {
     }
 
     (total_bytes, total_objects, total_packs)
-}
-
-fn get_disk_free(path: &std::path::Path) -> u64 {
-    use sysinfo::Disks;
-    let disks = Disks::new_with_refreshed_list();
-    for disk in disks.list() {
-        if path.starts_with(disk.mount_point()) {
-            return disk.available_space();
-        }
-    }
-    0
 }
 
 #[cfg(test)]

@@ -495,14 +495,7 @@ Lock endpoints:
 
 ### Authentication
 
-Single shared bearer token, constant-time compared via the `subtle` crate. Configured in `vger-server.toml`:
-
-```toml
-[server]
-listen = "127.0.0.1:8484"
-data_dir = "/var/lib/vger"
-token = "some-secret-token"
-```
+Single shared bearer token, constant-time compared via the `subtle` crate. Set via the `VGER_TOKEN` environment variable.
 
 `GET /health` is the only unauthenticated endpoint.
 
@@ -587,18 +580,14 @@ Full content verification (decrypt + recompute chunk IDs) stays client-side via 
 
 ### Server Configuration
 
-```toml
-[server]
-listen = "127.0.0.1:8484"
-data_dir = "/var/lib/vger"
-token = "some-secret-token"
-append_only = false
-log_format = "json"              # "json" or "pretty"
+All settings are passed as CLI flags. The authentication token is read from the `VGER_TOKEN` environment variable.
 
-# Optional limits
-# quota_bytes = 0                # per-repo quota. 0 = unlimited.
-# lock_ttl_seconds = 3600        # default lock TTL
+```bash
+export VGER_TOKEN="some-secret-token"
+vger-server --listen 127.0.0.1:8585 --data-dir /var/lib/vger --append-only --log-format json --quota 10G
 ```
+
+See `vger-server --help` for the full list of flags and defaults.
 
 ### RestBackend (Client Side)
 

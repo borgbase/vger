@@ -15,8 +15,6 @@ pub struct AppState {
 pub struct AppStateInner {
     pub config: ServerSection,
     pub data_dir: PathBuf,
-    pub start_time: std::time::Instant,
-
     /// Per-repo quota usage in bytes. repo_name -> bytes_used.
     pub quota_usage: RwLock<HashMap<String, u64>>,
 
@@ -91,7 +89,6 @@ impl AppState {
             inner: Arc::new(AppStateInner {
                 config,
                 data_dir,
-                start_time: std::time::Instant::now(),
                 quota_usage: RwLock::new(quota_usage),
                 last_backup_at: RwLock::new(HashMap::new()),
                 locks: RwLock::new(HashMap::new()),

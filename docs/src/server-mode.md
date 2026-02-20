@@ -17,43 +17,48 @@ Dumb storage backends (S3, WebDAV, SFTP) work well for basic backups, but they c
 
 All data remains client-side encrypted. The server never has the encryption key and cannot read backup contents.
 
-## Build the server
+## Install
 
-```bash
-cargo build --release -p vger-server
-# Binary at target/release/vger-server
-```
-
-## Build the client with REST support
-
-```bash
-cargo build --release -p vger-cli --features vger-core/backend-rest
-```
+Download a binary for your platform from the [releases page](https://github.com/borgbase/vger/releases).
 
 ## Server configuration
 
-Create `vger-server.toml`:
+All settings are passed as CLI flags. The authentication token is read from the `VGER_TOKEN` environment variable (kept out of process arguments to avoid exposure in `ps` output).
 
-```toml
-[server]
-listen = "127.0.0.1:8484"
-data_dir = "/var/lib/vger"
-token = "some-secret-token"
-append_only = false              # true = reject all deletes
-log_format = "pretty"           # "json" for structured logging
+### CLI flags
 
-# Optional limits
-# quota_bytes = 5368709120       # 5 GiB per-repo quota. 0 = unlimited.
-# lock_ttl_seconds = 3600        # auto-expire locks after 1 hour (default)
-```
+| Flag | Default | Description |
+|------|---------|-------------|
+| `-l, --listen` | `127.0.0.1:8585` | Address to listen on |
+| `-d, --data-dir` | `/var/lib/vger` | Root directory where repositories are stored |
+| `--append-only` | `false` | Reject DELETE and overwrite operations on pack files |
+| `--log-format` | `pretty` | Log output format: `json` or `pretty` |
+| `--quota` | `0` | Per-repo storage quota (`500M`, `10G`, plain bytes). 0 = unlimited |
+| `--lock-ttl-seconds` | `3600` | Auto-expire locks after this many seconds |
+
+### Environment variables
+
+| Variable | Required | Description |
+|----------|----------|-------------|
+| `VGER_TOKEN` | Yes | Shared bearer token for authentication |
 
 ## Start the server
 
 ```bash
-vger-server --config vger-server.toml
+export VGER_TOKEN="some-secret-token"
+vger-server --listen 127.0.0.1:8585 --data-dir /var/lib/vger
 ```
 
 ## Run as a systemd service
+
+Create an environment file at `/etc/vger/vger-server.env` with restricted permissions:
+
+```bash
+sudo mkdir -p /etc/vger
+echo 'VGER_TOKEN=some-secret-token' | sudo tee /etc/vger/vger-server.env
+sudo chmod 600 /etc/vger/vger-server.env
+sudo chown vger:vger /etc/vger/vger-server.env
+```
 
 Create `/etc/systemd/system/vger-server.service`:
 
@@ -67,7 +72,8 @@ Wants=network-online.target
 Type=simple
 User=vger
 Group=vger
-ExecStart=/usr/local/bin/vger-server --config /etc/vger/vger-server.toml
+EnvironmentFile=/etc/vger/vger-server.env
+ExecStart=/usr/local/bin/vger-server --listen 127.0.0.1:8585 --data-dir /var/lib/vger
 Restart=on-failure
 RestartSec=2
 NoNewPrivileges=true
@@ -109,7 +115,7 @@ All standard commands (`init`, `backup`, `list`, `info`, `restore`, `delete`, `p
 
 ```bash
 # No auth required
-curl http://localhost:8484/health
+curl http://localhost:8585/health
 ```
 
-Returns server status, uptime, disk free space, and repository count.
+Returns `{"status": "ok", "version": "..."}`. No authentication required.

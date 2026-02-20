@@ -15,8 +15,8 @@ RUNTIME_ROOT="${RUNTIME_ROOT:-$HOME/runtime}"
 PASSPHRASE="${PASSPHRASE:-123}"
 
 # REST backend
-REST_URL="${REST_URL:-http://127.0.0.1:8484}"
-REST_TOKEN="${VGER_REST_TOKEN:-vger-e2e-local-token}"
+REST_URL="${REST_URL:-http://127.0.0.1:8585}"
+REST_TOKEN="${REST_TOKEN:-${VGER_REST_TOKEN:-${VGER_TOKEN:-vger-e2e-local-token}}}"
 REST_DATA_DIR="${REST_DATA_DIR:-/mnt/repos/bench-vger/vger-server-data}"
 
 # S3 / MinIO

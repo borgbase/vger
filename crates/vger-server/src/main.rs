@@ -7,48 +7,62 @@ use std::time::Duration;
 
 use clap::Parser;
 use tokio::net::TcpListener;
-use tracing::{info, warn};
+use tracing::info;
 
-use crate::config::ServerConfig;
+use crate::config::{parse_size, ServerSection};
 use crate::state::{write_unpoisoned, AppState};
 
 #[derive(Parser)]
 #[command(name = "vger-server", version, about = "vger backup server")]
 struct Cli {
-    /// Path to configuration file
-    #[arg(short, long, default_value = "vger-server.toml")]
-    config: String,
+    /// Address to listen on
+    #[arg(short, long, default_value = "127.0.0.1:8585")]
+    listen: String,
+
+    /// Root directory where repositories are stored
+    #[arg(short, long, default_value = "/var/lib/vger")]
+    data_dir: String,
+
+    /// Reject DELETE and overwrite operations on pack files
+    #[arg(long, default_value_t = false)]
+    append_only: bool,
+
+    /// Log output format: "json" or "pretty"
+    #[arg(long, default_value = "pretty")]
+    log_format: String,
+
+    /// Per-repo storage quota (e.g. "500M", "10G", plain bytes). 0 = unlimited.
+    #[arg(long, default_value = "0", value_parser = parse_size)]
+    quota: u64,
+
+    /// Lock TTL in seconds
+    #[arg(long, default_value_t = 3600)]
+    lock_ttl_seconds: u64,
 }
 
 #[tokio::main]
 async fn main() {
     let cli = Cli::parse();
 
-    // Load config
-    let config_str = std::fs::read_to_string(&cli.config).unwrap_or_else(|e| {
-        eprintln!("Error: cannot read config file '{}': {e}", cli.config);
-        std::process::exit(1);
-    });
-    let config: ServerConfig = toml::from_str(&config_str).unwrap_or_else(|e| {
-        eprintln!("Error: invalid config file '{}': {e}", cli.config);
-        std::process::exit(1);
-    });
-
-    if config.server.token.is_empty() {
-        eprintln!("Error: server.token must be set in config");
+    // Read token from environment
+    let token = std::env::var("VGER_TOKEN").unwrap_or_default();
+    if token.is_empty() {
+        eprintln!("Error: VGER_TOKEN environment variable must be set");
         std::process::exit(1);
     }
 
-    if config.server.rate_limit_rps > 0 || config.server.rate_limit_mbps > 0 {
-        warn!(
-            rate_limit_rps = config.server.rate_limit_rps,
-            rate_limit_mbps = config.server.rate_limit_mbps,
-            "rate limiting is configured but not yet enforced by vger-server"
-        );
-    }
+    let config = ServerSection {
+        listen: cli.listen,
+        data_dir: cli.data_dir,
+        token,
+        append_only: cli.append_only,
+        log_format: cli.log_format,
+        quota_bytes: cli.quota,
+        lock_ttl_seconds: cli.lock_ttl_seconds,
+    };
 
     // Initialize tracing
-    match config.server.log_format.as_str() {
+    match config.log_format.as_str() {
         "json" => {
             tracing_subscriber::fmt().json().init();
         }
@@ -58,16 +72,16 @@ async fn main() {
     }
 
     // Ensure data directory exists
-    std::fs::create_dir_all(&config.server.data_dir).unwrap_or_else(|e| {
+    std::fs::create_dir_all(&config.data_dir).unwrap_or_else(|e| {
         eprintln!(
             "Error: cannot create data directory '{}': {e}",
-            config.server.data_dir
+            config.data_dir
         );
         std::process::exit(1);
     });
 
-    let listen_addr = config.server.listen.clone();
-    let state = AppState::new(config.server);
+    let listen_addr = config.listen.clone();
+    let state = AppState::new(config);
 
     // Spawn lock cleanup background task
     let cleanup_state = state.clone();

@@ -26,7 +26,8 @@ Options:
   --compact-threshold N    Compact threshold percentage (default: 10)
   --help                   Show help
 
-Environment overrides: CORPUS_LOCAL, RUNTIME_ROOT, VGER_CONFIG, PERF_EVENTS
+Environment overrides: CORPUS_LOCAL, RUNTIME_ROOT, VGER_CONFIG, REST_URL,
+REST_TOKEN, VGER_REST_TOKEN, VGER_TOKEN, PERF_EVENTS
 If VGER_CONFIG is set, it overrides --backend and uses the given config as-is.
 USAGE
 }

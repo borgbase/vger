@@ -23,7 +23,8 @@ Options:
   --help                 Show help
 
 Environment overrides (via env vars or scripts/lib/defaults.sh):
-  CORPUS_LOCAL, REPO_URL, REST_TOKEN, REST_DATA_DIR,
+  CORPUS_LOCAL, REPO_URL, REST_URL, REST_TOKEN, VGER_REST_TOKEN, VGER_TOKEN,
+  REST_DATA_DIR,
   S3_REGION, S3_ACCESS_KEY, S3_SECRET_KEY,
   MINIO_SERVICE, MINIO_DATA_DIR, MINIO_HEALTH_URL, STRESS_ROOT
 USAGE
