@@ -141,9 +141,15 @@ pub fn decompress(data: &[u8]) -> Result<Vec<u8>> {
 
 /// Decompress data by reading the 1-byte tag prefix and dispatching.
 ///
-/// `expected_size` is a best-effort capacity hint used to reduce `Vec` growth
-/// during streaming decode. It is always capped by `MAX_DECOMPRESS_SIZE` and
-/// never bypasses size-limit checks.
+/// `expected_size` controls ZSTD decode strategy:
+/// - `Some(n)`: uses a bulk decompressor with `n` as the output buffer capacity
+///   (capped by `MAX_DECOMPRESS_SIZE`). The value must be >= the actual
+///   decompressed size or the call will error. Best for restore paths where
+///   the exact size is known from snapshot metadata.
+/// - `None`: uses a streaming decoder that handles unknown sizes. Slightly
+///   slower due to per-call decoder initialization.
+///
+/// For LZ4 and None codecs the parameter is unused.
 pub fn decompress_with_hint(data: &[u8], expected_size: Option<usize>) -> Result<Vec<u8>> {
     if data.is_empty() {
         return Err(VgerError::Decompression("empty data".into()));
@@ -166,22 +172,55 @@ pub fn decompress_with_hint(data: &[u8], expected_size: Option<usize>) -> Result
                 .map_err(|e| VgerError::Decompression(format!("lz4: {e}")))
         }
         TAG_ZSTD => {
-            let mut decoder = zstd::stream::Decoder::new(std::io::Cursor::new(payload))
-                .map_err(|e| VgerError::Decompression(format!("zstd init: {e}")))?;
-            let hinted_capacity = expected_size.unwrap_or(0).min(MAX_DECOMPRESS_SIZE as usize);
-            let mut output = Vec::with_capacity(hinted_capacity);
-            decoder
-                .by_ref()
-                .take(MAX_DECOMPRESS_SIZE + 1)
-                .read_to_end(&mut output)
-                .map_err(|e| VgerError::Decompression(format!("zstd: {e}")))?;
-            if output.len() as u64 > MAX_DECOMPRESS_SIZE {
-                return Err(VgerError::Decompression(format!(
-                    "zstd: decompressed size exceeds limit of {} bytes",
-                    MAX_DECOMPRESS_SIZE
-                )));
+            if let Some(hint) = expected_size {
+                // Hot path (restore): reuse thread-local bulk decompressor
+                use std::cell::RefCell;
+                thread_local! {
+                    static ZSTD_DX: RefCell<Option<zstd::bulk::Decompressor<'static>>> =
+                        const { RefCell::new(None) };
+                }
+                ZSTD_DX.with(|cell| {
+                    let mut slot = cell.borrow_mut();
+                    if slot.is_none() {
+                        *slot =
+                            Some(zstd::bulk::Decompressor::new().map_err(|e| {
+                                VgerError::Decompression(format!("zstd init: {e}"))
+                            })?);
+                    }
+                    let dx = slot.as_mut().unwrap();
+                    // A zero hint means "unknown" — clamp to 1 so bulk::decompress
+                    // allocates a minimal buffer rather than returning an empty Vec
+                    // for what might be a valid non-empty frame.
+                    let cap = hint.max(1).min(MAX_DECOMPRESS_SIZE as usize);
+                    let output = dx
+                        .decompress(payload, cap)
+                        .map_err(|e| VgerError::Decompression(format!("zstd: {e}")))?;
+                    if output.len() as u64 > MAX_DECOMPRESS_SIZE {
+                        return Err(VgerError::Decompression(format!(
+                            "zstd: decompressed size exceeds limit of {} bytes",
+                            MAX_DECOMPRESS_SIZE
+                        )));
+                    }
+                    Ok(output)
+                })
+            } else {
+                // Cold path: streaming decoder (handles unknown sizes efficiently)
+                let mut decoder = zstd::stream::Decoder::new(std::io::Cursor::new(payload))
+                    .map_err(|e| VgerError::Decompression(format!("zstd init: {e}")))?;
+                let mut output = Vec::new();
+                decoder
+                    .by_ref()
+                    .take(MAX_DECOMPRESS_SIZE + 1)
+                    .read_to_end(&mut output)
+                    .map_err(|e| VgerError::Decompression(format!("zstd: {e}")))?;
+                if output.len() as u64 > MAX_DECOMPRESS_SIZE {
+                    return Err(VgerError::Decompression(format!(
+                        "zstd: decompressed size exceeds limit of {} bytes",
+                        MAX_DECOMPRESS_SIZE
+                    )));
+                }
+                Ok(output)
             }
-            Ok(output)
         }
         _ => Err(VgerError::UnknownCompressionTag(tag)),
     }
@@ -189,8 +228,10 @@ pub fn decompress_with_hint(data: &[u8], expected_size: Option<usize>) -> Result
 
 /// Decompress data into a caller-provided buffer, reusing its allocation.
 ///
-/// `expected_size` is a best-effort capacity hint (capped by `MAX_DECOMPRESS_SIZE`).
-/// All three codec paths reuse the existing allocation in `output` from prior calls.
+/// `expected_size` controls ZSTD decode strategy (see [`decompress_with_hint`]).
+/// When `Some(n)`, ZSTD uses a bulk decompressor and `n` must be >= the actual
+/// decompressed size. All three codec paths reuse the existing allocation in
+/// `output` from prior calls.
 pub fn decompress_into_with_hint(
     data: &[u8],
     expected_size: Option<usize>,
@@ -230,23 +271,55 @@ pub fn decompress_into_with_hint(
             Ok(())
         }
         TAG_ZSTD => {
-            let hinted_capacity = expected_size.unwrap_or(0).min(MAX_DECOMPRESS_SIZE as usize);
-            output.clear();
-            output.reserve(hinted_capacity);
-            let mut decoder = zstd::stream::Decoder::new(std::io::Cursor::new(payload))
-                .map_err(|e| VgerError::Decompression(format!("zstd init: {e}")))?;
-            decoder
-                .by_ref()
-                .take(MAX_DECOMPRESS_SIZE + 1)
-                .read_to_end(output)
-                .map_err(|e| VgerError::Decompression(format!("zstd: {e}")))?;
-            if output.len() as u64 > MAX_DECOMPRESS_SIZE {
-                return Err(VgerError::Decompression(format!(
-                    "zstd: decompressed size exceeds limit of {} bytes",
-                    MAX_DECOMPRESS_SIZE
-                )));
+            if let Some(hint) = expected_size {
+                // Hot path (restore): reuse thread-local bulk decompressor
+                use std::cell::RefCell;
+                thread_local! {
+                    static ZSTD_DX_INTO: RefCell<Option<zstd::bulk::Decompressor<'static>>> =
+                        const { RefCell::new(None) };
+                }
+                ZSTD_DX_INTO.with(|cell| {
+                    let mut slot = cell.borrow_mut();
+                    if slot.is_none() {
+                        *slot =
+                            Some(zstd::bulk::Decompressor::new().map_err(|e| {
+                                VgerError::Decompression(format!("zstd init: {e}"))
+                            })?);
+                    }
+                    let dx = slot.as_mut().unwrap();
+                    let cap = hint.max(1).min(MAX_DECOMPRESS_SIZE as usize);
+                    output.clear();
+                    output.resize(cap, 0);
+                    let written = dx
+                        .decompress_to_buffer(payload, output)
+                        .map_err(|e| VgerError::Decompression(format!("zstd: {e}")))?;
+                    output.truncate(written);
+                    if output.len() as u64 > MAX_DECOMPRESS_SIZE {
+                        return Err(VgerError::Decompression(format!(
+                            "zstd: decompressed size exceeds limit of {} bytes",
+                            MAX_DECOMPRESS_SIZE
+                        )));
+                    }
+                    Ok(())
+                })
+            } else {
+                // Cold path: streaming decoder (handles unknown sizes efficiently)
+                output.clear();
+                let mut decoder = zstd::stream::Decoder::new(std::io::Cursor::new(payload))
+                    .map_err(|e| VgerError::Decompression(format!("zstd init: {e}")))?;
+                decoder
+                    .by_ref()
+                    .take(MAX_DECOMPRESS_SIZE + 1)
+                    .read_to_end(output)
+                    .map_err(|e| VgerError::Decompression(format!("zstd: {e}")))?;
+                if output.len() as u64 > MAX_DECOMPRESS_SIZE {
+                    return Err(VgerError::Decompression(format!(
+                        "zstd: decompressed size exceeds limit of {} bytes",
+                        MAX_DECOMPRESS_SIZE
+                    )));
+                }
+                Ok(())
             }
-            Ok(())
         }
         _ => Err(VgerError::UnknownCompressionTag(tag)),
     }

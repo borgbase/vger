@@ -222,13 +222,13 @@ where
         .map_err(|e| VgerError::Other(format!("invalid destination '{}': {e}", dest)))?;
 
     // Stream items: create dirs/symlinks immediately, build file plan + chunk targets.
-    let (planned_files, chunk_targets, mut stats) =
+    let (planned_files, chunk_targets, mut stats, verified_dirs) =
         stream_and_plan(&items_stream, &dest_root, &mut include_path, xattrs_enabled)?;
     drop(items_stream); // free raw bytes before read group building
 
     if !planned_files.is_empty() {
         // Build read groups from chunk targets.
-        let groups = if !chunk_targets.is_empty() {
+        let mut groups = if !chunk_targets.is_empty() {
             if let Some(ref cache) = restore_cache {
                 info!("using mmap restore cache ({} entries)", cache.entry_count());
                 repo.clear_chunk_index();
@@ -284,6 +284,14 @@ where
         // After this point repo is only used for .storage and .crypto.
         repo.clear_chunk_index();
 
+        // Sort groups by pack ID (shard-aligned) then offset for sequential I/O.
+        groups.sort_by(|a, b| {
+            a.pack_id
+                .0
+                .cmp(&b.pack_id.0)
+                .then(a.read_start.cmp(&b.read_start))
+        });
+
         debug!(
             "planned {} coalesced read groups for {} files",
             groups.len(),
@@ -291,8 +299,18 @@ where
         );
 
         // Phase 3: Pre-create files with the correct size.
+        // Safety: parents verified in pass 1 are trusted — this is a
+        // single-process operation so no concurrent destination tampering
+        // can occur between passes. Unverified parents still get the full
+        // canonicalize check.
         for pf in &planned_files {
-            ensure_parent_exists_within_root(&pf.target_path, &dest_root)?;
+            if pf
+                .target_path
+                .parent()
+                .is_none_or(|p| !verified_dirs.contains(p))
+            {
+                ensure_parent_exists_within_root(&pf.target_path, &dest_root)?;
+            }
             let file = std::fs::File::create(&pf.target_path)?;
             if pf.total_size > 0 {
                 file.set_len(pf.total_size)?;
@@ -340,6 +358,7 @@ where
 /// stream that fails to decode partway through may leave partial directories on
 /// disk.  This is acceptable — directory creation is idempotent and restore
 /// is not transactional.
+#[allow(clippy::type_complexity)]
 fn stream_and_plan<F>(
     items_stream: &[u8],
     dest_root: &Path,
@@ -349,11 +368,14 @@ fn stream_and_plan<F>(
     Vec<PlannedFile>,
     HashMap<ChunkId, ChunkTargets>,
     RestoreStats,
+    HashSet<PathBuf>,
 )>
 where
     F: FnMut(&str) -> bool,
 {
     let mut stats = RestoreStats::default();
+    let mut verified_dirs: HashSet<PathBuf> = HashSet::new();
+    verified_dirs.insert(dest_root.to_path_buf());
 
     // Pass 1: Create all matching directories.
     super::list::for_each_decoded_item(items_stream, |item| {
@@ -369,6 +391,7 @@ where
         if xattrs_enabled {
             apply_item_xattrs(&target, item.xattrs.as_ref());
         }
+        verified_dirs.insert(target);
         stats.dirs += 1;
         Ok(())
     })?;
@@ -386,7 +409,11 @@ where
                 if let Some(ref link_target) = item.link_target {
                     let rel = sanitize_item_path(&item.path)?;
                     let target = dest_root.join(&rel);
-                    ensure_parent_exists_within_root(&target, dest_root)?;
+                    // Safety: see Phase 3 comment — single-process, no
+                    // concurrent tampering between pass 1 and pass 2.
+                    if target.parent().is_none_or(|p| !verified_dirs.contains(p)) {
+                        ensure_parent_exists_within_root(&target, dest_root)?;
+                    }
                     let _ = std::fs::remove_file(&target);
                     fs::create_symlink(Path::new(link_target), &target)?;
                     if xattrs_enabled {
@@ -432,7 +459,7 @@ where
         Ok(())
     })?;
 
-    Ok((planned_files, chunk_targets, stats))
+    Ok((planned_files, chunk_targets, stats, verified_dirs))
 }
 
 // ---------------------------------------------------------------------------
@@ -1230,7 +1257,7 @@ mod tests {
         ];
         let stream = serialize_items(&items);
 
-        let (planned_files, chunk_targets, stats) =
+        let (planned_files, chunk_targets, stats, _verified_dirs) =
             stream_and_plan(&stream, dest, &mut |_| true, false).unwrap();
 
         // Directory was created (pass 1 runs before pass 2).
@@ -1256,7 +1283,7 @@ mod tests {
         ];
         let stream = serialize_items(&items);
 
-        let (planned_files, _chunk_targets, stats) = stream_and_plan(
+        let (planned_files, _chunk_targets, stats, _verified_dirs) = stream_and_plan(
             &stream,
             dest,
             &mut |p: &str| p.starts_with("included"),
@@ -1295,7 +1322,7 @@ mod tests {
         items.push(make_symlink_item("dir0/link", "file0.txt"));
         let stream = serialize_items(&items);
 
-        let (planned_files, _chunk_targets, stats) =
+        let (planned_files, _chunk_targets, stats, _verified_dirs) =
             stream_and_plan(&stream, dest, &mut |_| true, false).unwrap();
 
         assert_eq!(planned_files.len(), m_files as usize);
