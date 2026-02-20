@@ -1,5 +1,5 @@
 ---
-name: rust-perf-review
+name: performance-review
 description: >
   Review Rust codebases for performance anti-patterns, with emphasis on async
   runtimes, client-server networking, memory allocation, serialization, and

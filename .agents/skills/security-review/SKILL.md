@@ -1,5 +1,5 @@
 ---
-name: vger-security-review
+name: security-review
 description: "Security review skill for the vger backup tool (Rust). Use when reviewing code for security issues, auditing cryptographic implementations, checking for credential leaks, reviewing unsafe code, or validating the security model of the backup tool. Covers encryption, key management, repository integrity, hook execution, config parsing, dependency auditing, and backup-specific attack surfaces."
 ---
 

@@ -1,3 +1,8 @@
+---
+name: architecture-review
+description: "Review and improve Rust application architecture for large CLI and backup systems, including workspace layout, crate boundaries, error handling, async/sync design, and testing strategy."
+---
+
 # Skill: Rust Application Architecture Review
 
 Use this skill when reviewing, refactoring, or planning the structure of a large Rust application — especially CLI tools, backup utilities, or projects that combine local processing with REST API communication. This document covers workspace layout, module organization, error handling strategy, async/sync boundaries, CLI design, REST client patterns, testing, dependency management, performance optimization, CI enforcement, and state management.
