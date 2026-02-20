@@ -82,7 +82,7 @@ resolve_repo_url() {
   case "$BACKEND" in
     local) REPO_URL_RESOLVED="$REPO_DIR" ;;
     rest)  REPO_URL_RESOLVED="$REST_URL/$REPO_LABEL" ;;
-    s3)    REPO_URL_RESOLVED="s3://127.0.0.1:9000/vger-stress/$REPO_LABEL" ;;
+    s3)    REPO_URL_RESOLVED="s3+http://127.0.0.1:9000/vger-stress/$REPO_LABEL" ;;
   esac
 }
 

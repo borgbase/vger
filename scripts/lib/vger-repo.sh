@@ -61,7 +61,7 @@ repositories:
     url: "$url_q"
 CFG
 
-  if [[ "$url" == http://* ]]; then
+  if [[ "$url" == http://* || "$url" == s3+http://* ]]; then
     cat >>"$out" <<CFG
     allow_insecure_http: true
 CFG
@@ -126,7 +126,10 @@ reset_minio() {
 #   ensure_s3_bucket <repo_url>
 ensure_s3_bucket() {
   local url="$1"
-  local without_scheme="${url#s3://}"
+  local without_scheme="$url"
+  without_scheme="${without_scheme#s3://}"
+  without_scheme="${without_scheme#s3+http://}"
+  without_scheme="${without_scheme#s3+https://}"
   local host_and_path="${without_scheme%%\?*}"
   local host="${host_and_path%%/*}"
   local path="${host_and_path#*/}"

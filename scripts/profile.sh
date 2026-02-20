@@ -289,15 +289,26 @@ run_perf_profile() {
     rm -rf "$RESTORE_DEST"
     mkdir -p "$RESTORE_DEST"
   fi
-  {
-    if [[ -n "$PERF_EVENTS" ]]; then
-      perf stat -d -r 1 -e "$PERF_EVENTS" -- "${PROFILE_CMD[@]}" >"$PERF_STDOUT_TXT" 2>"$PERF_STAT_TXT"
-    else
-      perf stat -d -r 1 -- "${PROFILE_CMD[@]}" >"$PERF_STDOUT_TXT" 2>"$PERF_STAT_TXT"
-    fi
-    perf record -F "$PERF_RECORD_FREQ" -g --output "$PERF_DATA" -- "${PROFILE_CMD[@]}" >"$PERF_RECORD_TXT" 2>&1
-    perf report --stdio --input "$PERF_DATA" >"$PERF_REPORT_TXT" 2>&1
-  } | tee "$PERF_LOG"
+  : >"$PERF_LOG"
+  if [[ -n "$PERF_EVENTS" ]]; then
+    perf stat -d -r 1 -e "$PERF_EVENTS" -- "${PROFILE_CMD[@]}" >"$PERF_STDOUT_TXT" 2>"$PERF_STAT_TXT"
+  else
+    perf stat -d -r 1 -- "${PROFILE_CMD[@]}" >"$PERF_STDOUT_TXT" 2>"$PERF_STAT_TXT"
+  fi
+  echo "[4/6] perf stat complete -> $PERF_STAT_TXT" | tee -a "$PERF_LOG"
+
+  # Restore runs twice in perf mode (stat + record). Ensure a clean target for the second run.
+  if [[ "$MODE" == "restore" && -n "${RESTORE_DEST:-}" ]]; then
+    rm -rf "$RESTORE_DEST"
+    mkdir -p "$RESTORE_DEST"
+  fi
+
+  echo "[4/6] Running perf record for mode: $MODE" | tee -a "$PERF_LOG"
+  perf record -F "$PERF_RECORD_FREQ" -g --output "$PERF_DATA" -- "${PROFILE_CMD[@]}" >"$PERF_RECORD_TXT" 2>&1
+  echo "[4/6] perf record complete -> $PERF_DATA" | tee -a "$PERF_LOG"
+
+  echo "[5/6] Generating perf report..." | tee -a "$PERF_LOG"
+  perf report --stdio --input "$PERF_DATA" >"$PERF_REPORT_TXT" 2>&1
 }
 
 render_heaptrack_reports() {

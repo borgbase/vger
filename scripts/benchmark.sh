@@ -150,16 +150,32 @@ fi
 tool_from_op()  { echo "${1%%_*}"; }
 phase_from_op() { echo "${1##*_}"; }
 
+repo_dir_for_tool() {
+  case "$1" in
+    vger)   echo "$VGER_REPO" ;;
+    restic) echo "$RESTIC_REPO" ;;
+    rustic) echo "$RUSTIC_REPO" ;;
+    borg)   echo "$BORG_REPO" ;;
+    kopia)  echo "$KOPIA_REPO" ;;
+    *) die "unknown tool: $1" ;;
+  esac
+}
+
+write_repo_size_bytes_for_tool() {
+  local tool="$1" out_file="$2"
+  local repo bytes
+  repo="$(repo_dir_for_tool "$tool")"
+  bytes="NA"
+  if [[ -d "$repo" ]]; then
+    bytes="$(du -sb "$repo" 2>/dev/null | awk 'NR==1 { print $1 }')"
+    [[ "$bytes" =~ ^[0-9]+$ ]] || bytes="NA"
+  fi
+  printf '%s\n' "$bytes" >"$out_file"
+}
+
 reset_repo_for_tool() {
   local tool="$1" repo=""
-  case "$tool" in
-    vger)   repo="$VGER_REPO" ;;
-    restic) repo="$RESTIC_REPO" ;;
-    rustic) repo="$RUSTIC_REPO" ;;
-    borg)   repo="$BORG_REPO" ;;
-    kopia)  repo="$KOPIA_REPO" ;;
-    *)      die "unknown tool: $tool" ;;
-  esac
+  repo="$(repo_dir_for_tool "$tool")"
   sudo -n rm -rf "$repo"
   sudo -n mkdir -p "$repo"
   sudo -n chown -R "$USER:$USER" "$repo"
@@ -168,6 +184,15 @@ reset_repo_for_tool() {
     rm -rf "$KOPIA_CACHE"
     mkdir -p "$KOPIA_CACHE"
   fi
+}
+
+cleanup_repo_for_tool() {
+  local tool="$1" repo=""
+  repo="$(repo_dir_for_tool "$tool")"
+  # Remove repository contents to free disk between tools, then recreate empty dir for final stats.
+  sudo -n rm -rf "$repo"
+  sudo -n mkdir -p "$repo"
+  sudo -n chown -R "$USER:$USER" "$repo"
 }
 
 init_repo_for_tool() {
@@ -259,9 +284,10 @@ list_previous_run_roots() {
 
 run_one() {
   local op="$1"
-  local cmd phase
+  local cmd phase tool
   cmd=$(measured_cmd_for_op "$op")
   phase=$(phase_from_op "$op")
+  tool=$(tool_from_op "$op")
 
   local out="$OUT_ROOT/profile.$op"
   local runs_dir="$out/runs"
@@ -300,11 +326,12 @@ run_one() {
 
   # Timed runs
   for ((i = 1; i <= RUNS; i++)); do
-    local run_label run_stdout run_timev run_rc_file
+    local run_label run_stdout run_timev run_rc_file run_repo_size_file
     run_label=$(printf "%03d" "$i")
     run_stdout="$runs_dir/run-$run_label.stdout.txt"
     run_timev="$runs_dir/run-$run_label.timev.txt"
     run_rc_file="$runs_dir/run-$run_label.rc"
+    run_repo_size_file="$runs_dir/run-$run_label.repo-size-bytes.txt"
 
     if [[ "$phase" == "restore" ]]; then
       echo "[run] $op $i/$RUNS (no prep; uses preceding timed backup state)"
@@ -317,6 +344,7 @@ run_one() {
         rc=1; failed_runs=$((failed_runs + 1))
         : >"$run_timev"
         echo "$rc" >"$run_rc_file"
+        write_repo_size_bytes_for_tool "$tool" "$run_repo_size_file"
         continue
       fi
     fi
@@ -327,6 +355,7 @@ run_one() {
       rc=$?; failed_runs=$((failed_runs + 1))
     fi
     echo "$rc" >"$run_rc_file"
+    write_repo_size_bytes_for_tool "$tool" "$run_repo_size_file"
   done
 
   if [[ "$failed_runs" -eq 0 ]]; then
@@ -375,6 +404,9 @@ echo "[dataset] benchmark=$DATASET_BENCHMARK"
 
 for op in "${OPS[@]}"; do
   run_one "$op"
+  if [[ "$(phase_from_op "$op")" == "restore" ]]; then
+    cleanup_repo_for_tool "$(tool_from_op "$op")"
+  fi
 done
 
 # Repo size stats
@@ -405,6 +437,7 @@ Workflow per run:
 Outputs:
 - commands.txt / repo-sizes.txt
 - profile.<op>/runs/run-*.timev.txt
+- profile.<op>/runs/run-*.repo-size-bytes.txt
 - reports/summary.{tsv,md,json}
 - reports/benchmark.summary.png
 EOF

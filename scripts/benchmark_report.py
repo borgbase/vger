@@ -88,6 +88,31 @@ def parse_repo_sizes(path: pathlib.Path) -> Dict[str, str]:
     return out
 
 
+def parse_size_to_bytes(s: str) -> int | None:
+    if not s or s == "NA":
+        return None
+    clean = s.strip()
+    if clean.isdigit():
+        return int(clean)
+
+    match = re.match(r"^([0-9]+(?:\.[0-9]+)?)([KMGTP]?)(?:i?B?)?$", clean, re.IGNORECASE)
+    if not match:
+        return None
+    value = float(match.group(1))
+    suffix = match.group(2).upper()
+    scale = {
+        "": 1,
+        "K": 1024,
+        "M": 1024**2,
+        "G": 1024**3,
+        "T": 1024**4,
+        "P": 1024**5,
+    }.get(suffix)
+    if scale is None:
+        return None
+    return int(value * scale)
+
+
 def parse_elapsed_seconds(s: str) -> float | None:
     if not s or s == "NA":
         return None
@@ -150,6 +175,13 @@ def parse_run_rc(timev_path: pathlib.Path) -> int | None:
         return int(rc_file.read_text(errors="replace").strip())
     except ValueError:
         return None
+
+
+def parse_run_repo_size_bytes(timev_path: pathlib.Path) -> int | None:
+    repo_size_file = pathlib.Path(str(timev_path).replace(".timev.txt", ".repo-size-bytes.txt"))
+    if not repo_size_file.exists():
+        return None
+    return parse_int(repo_size_file.read_text(errors="replace").strip())
 
 
 def list_timev_files(op_dir: pathlib.Path) -> List[pathlib.Path]:
@@ -243,6 +275,7 @@ def infer_run_timestamp_utc(root: pathlib.Path) -> str | None:
 
 def build_records(root: pathlib.Path) -> tuple[List[dict], int | None, int | None]:
     repo_sizes = parse_repo_sizes(root / "repo-sizes.txt")
+    repo_sizes_bytes = {tool: parse_size_to_bytes(size) for tool, size in repo_sizes.items()}
     dataset_bytes = get_dataset_bytes(root)
     dataset_files = get_dataset_file_count(root)
     dataset_mib = (dataset_bytes / (1024.0 * 1024.0)) if dataset_bytes else None
@@ -277,6 +310,7 @@ def build_records(root: pathlib.Path) -> tuple[List[dict], int | None, int | Non
                     "involuntary_ctx_switches": parse_int(t.get("involuntary_ctx_switches", "NA")),
                     "fs_in": parse_int(t.get("fs_in", "NA")),
                     "fs_out": parse_int(t.get("fs_out", "NA")),
+                    "repo_size_bytes": parse_run_repo_size_bytes(run_file),
                     "exit_status": exit_status,
                 }
             )
@@ -306,6 +340,14 @@ def build_records(root: pathlib.Path) -> tuple[List[dict], int | None, int | Non
         fs_out, fs_out_std = mean_std(
             [float(r["fs_out"]) if r["fs_out"] is not None else None for r in run_metrics]
         )
+        repo_size_bytes, repo_size_bytes_std = mean_std(
+            [float(r["repo_size_bytes"]) if r["repo_size_bytes"] is not None else None for r in run_metrics]
+        )
+        if repo_size_bytes is None:
+            fallback_bytes = repo_sizes_bytes.get(tool)
+            if fallback_bytes is not None:
+                repo_size_bytes = float(fallback_bytes)
+                repo_size_bytes_std = 0.0
         run_count = len(run_metrics)
         failed_runs = 0
         nonzero_exits: List[int] = []
@@ -351,6 +393,8 @@ def build_records(root: pathlib.Path) -> tuple[List[dict], int | None, int | Non
                 "fs_in_std": fs_in_std,
                 "fs_out": fs_out,
                 "fs_out_std": fs_out_std,
+                "repo_size_bytes": repo_size_bytes,
+                "repo_size_bytes_std": repo_size_bytes_std,
                 "repo_size": repo_sizes.get(tool, "NA"),
                 "run_count": run_count,
                 "failed_runs": failed_runs,
@@ -444,7 +488,8 @@ def records_tsv(records: List[dict]) -> str:
         (
             "op\truns\tfailed_runs\tduration_s\tduration_s_std\tthroughput_mib_s\tthroughput_mib_s_std\tcpu%"
             "\tcpu_pct_std\tuser_s\tuser_s_std\tsys_s\tsys_s_std\tmaxrss_kb\tmaxrss_kb_std\tfs_in\tfs_in_std"
-            "\tfs_out\tfs_out_std\tvol_ctx_sw\tvol_ctx_sw_std\tinvol_ctx_sw\tinvol_ctx_sw_std\trepo_size\texit"
+            "\tfs_out\tfs_out_std\tvol_ctx_sw\tvol_ctx_sw_std\tinvol_ctx_sw\tinvol_ctx_sw_std"
+            "\trepo_size_bytes\trepo_size_bytes_std\trepo_size\texit"
         )
     ]
     for r in records:
@@ -474,6 +519,8 @@ def records_tsv(records: List[dict]) -> str:
                     fmt_float(r["voluntary_ctx_switches_std"], 0),
                     fmt_float(r["involuntary_ctx_switches"], 0),
                     fmt_float(r["involuntary_ctx_switches_std"], 0),
+                    fmt_float(r["repo_size_bytes"], 0),
+                    fmt_float(r["repo_size_bytes_std"], 0),
                     r["repo_size"],
                     fmt_int(r["exit_status"]),
                 ]
@@ -488,12 +535,9 @@ def records_markdown(records: List[dict]) -> str:
             "| op | runs | failed_runs | duration_s | duration_s_std | throughput_mib_s | throughput_mib_s_std | "
             "cpu% | cpu_pct_std | user_s | user_s_std | sys_s | sys_s_std | maxrss_kb | maxrss_kb_std | fs_in | "
             "fs_in_std | fs_out | fs_out_std | vol_ctx_sw | vol_ctx_sw_std | invol_ctx_sw | invol_ctx_sw_std | "
-            "repo_size | exit |"
+            "repo_size_bytes | repo_size_bytes_std | repo_size | exit |"
         ),
-        (
-            "|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|"
-            "---:|---:|---:|"
-        ),
+        "|---|" + "---:|" * 26,
     ]
     for r in records:
         lines.append(
@@ -523,6 +567,8 @@ def records_markdown(records: List[dict]) -> str:
                     fmt_float(r["voluntary_ctx_switches_std"], 0),
                     fmt_float(r["involuntary_ctx_switches"], 0),
                     fmt_float(r["involuntary_ctx_switches_std"], 0),
+                    fmt_float(r["repo_size_bytes"], 0),
+                    fmt_float(r["repo_size_bytes_std"], 0),
                     r["repo_size"],
                     fmt_int(r["exit_status"]),
                 ]
@@ -562,7 +608,8 @@ def print_summary(root: pathlib.Path, records: List[dict], dataset_bytes: int | 
         (
             "op\truns\tfailed_runs\tduration_s\tduration_s_std\tthroughput_mib_s\tthroughput_mib_s_std\tcpu%"
             "\tcpu_pct_std\tuser_s\tuser_s_std\tsys_s\tsys_s_std\tmaxrss_kb\tmaxrss_kb_std\tfs_in\tfs_in_std"
-            "\tfs_out\tfs_out_std\tvol_ctx_sw\tvol_ctx_sw_std\tinvol_ctx_sw\tinvol_ctx_sw_std\trepo_size\texit"
+            "\tfs_out\tfs_out_std\tvol_ctx_sw\tvol_ctx_sw_std\tinvol_ctx_sw\tinvol_ctx_sw_std"
+            "\trepo_size_bytes\trepo_size_bytes_std\trepo_size\texit"
         )
     )
     for r in records:
@@ -592,6 +639,8 @@ def print_summary(root: pathlib.Path, records: List[dict], dataset_bytes: int | 
                     fmt_float(r["voluntary_ctx_switches_std"], 0),
                     fmt_float(r["involuntary_ctx_switches"], 0),
                     fmt_float(r["involuntary_ctx_switches_std"], 0),
+                    fmt_float(r["repo_size_bytes"], 0),
+                    fmt_float(r["repo_size_bytes_std"], 0),
                     r["repo_size"],
                     fmt_int(r["exit_status"]),
                 ]
@@ -665,9 +714,11 @@ def generate_chart_with_deps(
     user_seconds = _chart_values(records, "user_s")
     sys_seconds = _chart_values(records, "sys_s")
     memory = _chart_values(records, "maxrss_kb")
-    voluntary_ctx_switches = _chart_values(records, "voluntary_ctx_switches")
+    repo_size_gb = _chart_values(records, "repo_size_bytes")
     memory["backup"] = [v / 1024.0 if not math.isnan(v) else v for v in memory["backup"]]
     memory["restore"] = [v / 1024.0 if not math.isnan(v) else v for v in memory["restore"]]
+    repo_size_gb["backup"] = [v / 1_000_000_000.0 if not math.isnan(v) else v for v in repo_size_gb["backup"]]
+    repo_size_gb["restore"] = [v / 1_000_000_000.0 if not math.isnan(v) else v for v in repo_size_gb["restore"]]
 
     # Match the original benchmark chart style.
     VGER = "#fb8c00"
@@ -696,7 +747,13 @@ def generate_chart_with_deps(
     backup_top_colors = ["#f57c00" if t == "V'Ger" else "#455a64" for t in tools_display]
     restore_top_colors = ["#ffa726" if t == "V'Ger" else "#607d8b" for t in tools_display]
 
-    def style_axis(ax, title: str, higher_is_better: bool) -> None:
+    def style_axis(
+        ax,
+        title: str,
+        higher_is_better: bool,
+        qualifier_override: str | None = None,
+        show_arrow: bool = True,
+    ) -> None:
         ax.set_xticks(x)
         ax.set_xticklabels(tools_display, fontsize=10)
         for label in ax.get_xticklabels():
@@ -704,8 +761,14 @@ def generate_chart_with_deps(
                 label.set_color(VGER)
                 label.set_fontweight("bold")
         arrow = "↑" if higher_is_better else "↓"
-        qualifier = "higher is better" if higher_is_better else "lower is better"
-        ax.set_title(f"{title}  ({arrow} {qualifier})", fontsize=10, color="#cfd8dc", pad=10)
+        qualifier = qualifier_override if qualifier_override is not None else (
+            "higher is better" if higher_is_better else "lower is better"
+        )
+        if show_arrow:
+            subtitle = f"{arrow} {qualifier}"
+        else:
+            subtitle = qualifier
+        ax.set_title(f"{title}  ({subtitle})", fontsize=10, color="#cfd8dc", pad=10)
         ax.set_axisbelow(True)
         ax.grid(axis="y", color="#2e3d44", linewidth=0.5)
         ax.spines["top"].set_visible(False)
@@ -719,6 +782,9 @@ def generate_chart_with_deps(
         vals: dict,
         higher_is_better: bool,
         use_k_labels: bool = False,
+        label_decimals: int | None = None,
+        qualifier_override: str | None = None,
+        show_arrow: bool = True,
     ) -> None:
         backup_vals = np.array(vals["backup"], dtype=float)
         restore_vals = np.array(vals["restore"], dtype=float)
@@ -734,7 +800,9 @@ def generate_chart_with_deps(
                 h = float(bar.get_height())
                 if not np.isfinite(h):
                     continue
-                if use_k_labels:
+                if label_decimals is not None:
+                    label = f"{h:.{label_decimals}f}"
+                elif use_k_labels:
                     label = f"{h / 1000.0:.1f}k"
                 else:
                     label = f"{h:.0f}" if h >= 10 else f"{h:.1f}"
@@ -752,7 +820,13 @@ def generate_chart_with_deps(
         if use_k_labels:
             ax.yaxis.set_major_formatter(FuncFormatter(lambda y, _pos: f"{y / 1000.0:.0f}k"))
 
-        style_axis(ax, title, higher_is_better)
+        style_axis(
+            ax,
+            title,
+            higher_is_better,
+            qualifier_override=qualifier_override,
+            show_arrow=show_arrow,
+        )
 
     def draw_cpu_seconds_stacked_panel(ax) -> None:
         user_backup = np.array(user_seconds["backup"], dtype=float)
@@ -1000,12 +1074,18 @@ def generate_chart_with_deps(
         2, 2, figure=fig, hspace=0.38, wspace=0.28, left=0.06, right=0.97, top=0.90, bottom=0.09
     )
     draw_standard_panel(fig.add_subplot(outer[0, 0]), "Duration (s)", duration, False)
-    draw_cpu_seconds_stacked_panel(fig.add_subplot(outer[0, 1]))
-    ctx_inner = gridspec.GridSpecFromSubplotSpec(2, 1, subplot_spec=outer[1, 0], height_ratios=[1, 3], hspace=0.08)
-    draw_ctx_switches_broken_panel(fig.add_subplot(ctx_inner[0]), fig.add_subplot(ctx_inner[1]), voluntary_ctx_switches)
-
-    inner = gridspec.GridSpecFromSubplotSpec(2, 1, subplot_spec=outer[1, 1], height_ratios=[1, 3], hspace=0.08)
+    inner = gridspec.GridSpecFromSubplotSpec(2, 1, subplot_spec=outer[0, 1], height_ratios=[1, 3], hspace=0.08)
     draw_memory_broken_panel(fig.add_subplot(inner[0]), fig.add_subplot(inner[1]), memory)
+    draw_cpu_seconds_stacked_panel(fig.add_subplot(outer[1, 0]))
+    draw_standard_panel(
+        fig.add_subplot(outer[1, 1]),
+        "Repo Size (GB)",
+        repo_size_gb,
+        False,
+        label_decimals=1,
+        qualifier_override="equivalent zstd compression",
+        show_arrow=False,
+    )
 
     legend_elements = [
         Patch(facecolor=VGER, label="V'Ger backup"),
