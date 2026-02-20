@@ -73,9 +73,16 @@ impl StorageBackend for AdvisoryLockBackend {
             return Ok(None);
         };
         let start = offset as usize;
-        let end = start.saturating_add(length as usize).min(data.len());
-        if start >= data.len() {
-            return Ok(Some(Vec::new()));
+        let end = start.checked_add(length as usize).ok_or_else(|| {
+            VgerError::Other(format!(
+                "short read on {key} at offset {offset}: offset + length overflows usize"
+            ))
+        })?;
+        if start >= data.len() || end > data.len() {
+            return Err(VgerError::Other(format!(
+                "short read on {key} at offset {offset}: expected {length} bytes, got {}",
+                data.len().saturating_sub(start)
+            )));
         }
         Ok(Some(data[start..end].to_vec()))
     }

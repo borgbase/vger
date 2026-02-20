@@ -178,6 +178,20 @@ pub async fn put_object(
         data_len
     };
 
+    // Validate Content-Length if it was present
+    if let Some(content_length) = headers
+        .get("Content-Length")
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.parse::<u64>().ok())
+    {
+        if data_len != content_length {
+            let _ = tokio::fs::remove_file(&temp_path).await;
+            return Err(ServerError::BadRequest(format!(
+                "upload size mismatch: Content-Length {content_length}, received {data_len}"
+            )));
+        }
+    }
+
     // Atomic rename temp → final path (file handle already closed)
     if let Err(e) = tokio::fs::rename(&temp_path, &file_path).await {
         let _ = tokio::fs::remove_file(&temp_path).await;
@@ -402,6 +416,7 @@ async fn handle_range_read(
 
 #[cfg(test)]
 mod tests {
+    use axum::body::Body;
     use axum::http::StatusCode;
 
     use super::super::test_helpers::*;
@@ -527,6 +542,50 @@ mod tests {
 
         // No orphan temp files
         assert_no_temp_files(tmp.path());
+    }
+
+    /// Send an authenticated PUT with a Content-Length that differs from the body.
+    async fn authed_put_with_cl(
+        router: axum::Router,
+        path: &str,
+        body: Vec<u8>,
+        content_length: u64,
+    ) -> axum::response::Response {
+        use tower::ServiceExt;
+        let req = axum::http::Request::builder()
+            .method("PUT")
+            .uri(path)
+            .header(
+                "Authorization",
+                format!("Bearer {}", super::super::test_helpers::TEST_TOKEN),
+            )
+            .header("Content-Length", content_length.to_string())
+            .body(Body::from(body))
+            .unwrap();
+        router.oneshot(req).await.unwrap()
+    }
+
+    #[tokio::test]
+    async fn put_object_rejects_content_length_mismatch() {
+        let (router, _state, tmp) = setup_app(0);
+        let body = vec![0xAB; 50];
+
+        // Content-Length says 100, but body is only 50 bytes
+        let resp = authed_put_with_cl(router.clone(), CONFIG_PATH, body, 100).await;
+        assert_status(&resp, StatusCode::BAD_REQUEST);
+        let body_raw = body_bytes(resp).await;
+        let body_text = String::from_utf8_lossy(&body_raw);
+        assert!(
+            body_text.contains("upload size mismatch"),
+            "expected upload size mismatch error, got: {body_text}"
+        );
+
+        // Verify no temp files left behind
+        assert_no_temp_files(tmp.path());
+
+        // Verify the final object was not created
+        let resp = authed_get(router, CONFIG_PATH).await;
+        assert_status(&resp, StatusCode::NOT_FOUND);
     }
 
     /// Recursively check that no `.tmp.*` files exist under the given path.

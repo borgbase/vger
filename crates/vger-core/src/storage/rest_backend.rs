@@ -169,6 +169,59 @@ impl RestBackend {
 }
 
 impl RestBackend {
+    /// Validate a `Content-Range: bytes {start}-{end}/{total}` header against
+    /// the requested offset and length.
+    fn validate_content_range(
+        header: &str,
+        expected_offset: u64,
+        expected_length: u64,
+        key: &str,
+    ) -> Result<()> {
+        // Expected format: "bytes {start}-{end}/{total}"
+        let rest = header.strip_prefix("bytes ").ok_or_else(|| {
+            VgerError::Other(format!(
+                "REST GET_RANGE {key}: malformed Content-Range header: {header}"
+            ))
+        })?;
+        let (range_part, _total) = rest.split_once('/').ok_or_else(|| {
+            VgerError::Other(format!(
+                "REST GET_RANGE {key}: malformed Content-Range header: {header}"
+            ))
+        })?;
+        let (start_str, end_str) = range_part.split_once('-').ok_or_else(|| {
+            VgerError::Other(format!(
+                "REST GET_RANGE {key}: malformed Content-Range header: {header}"
+            ))
+        })?;
+        let start: u64 = start_str.parse().map_err(|_| {
+            VgerError::Other(format!(
+                "REST GET_RANGE {key}: malformed Content-Range start: {header}"
+            ))
+        })?;
+        let end: u64 = end_str.parse().map_err(|_| {
+            VgerError::Other(format!(
+                "REST GET_RANGE {key}: malformed Content-Range end: {header}"
+            ))
+        })?;
+        let range_len = end
+            .checked_sub(start)
+            .and_then(|d| d.checked_add(1))
+            .ok_or_else(|| {
+                VgerError::Other(format!(
+                    "REST GET_RANGE {key}: Content-Range overflow or end < start: {header}"
+                ))
+            })?;
+        if start != expected_offset || range_len != expected_length {
+            return Err(VgerError::Other(format!(
+                "REST GET_RANGE {key}: Content-Range mismatch: got {header}, \
+                 expected bytes {expected_offset}-{}/{}",
+                expected_offset + expected_length - 1,
+                _total
+            )));
+        }
+        Ok(())
+    }
+
     /// Shared PUT implementation for both borrowed and owned data.
     fn put_bytes(&self, key: &str, data: &[u8]) -> Result<()> {
         let url = self.url(key);
@@ -252,8 +305,20 @@ impl StorageBackend for RestBackend {
     }
 
     fn get_range(&self, key: &str, offset: u64, length: u64) -> Result<Option<Vec<u8>>> {
+        if length == 0 {
+            return Err(VgerError::Other(format!(
+                "REST GET_RANGE {key}: zero-length read requested"
+            )));
+        }
         let url = self.url(key);
-        let end = offset + length - 1;
+        let end = offset
+            .checked_add(length)
+            .and_then(|n| n.checked_sub(1))
+            .ok_or_else(|| {
+                VgerError::Other(format!(
+                    "REST GET_RANGE {key}: offset {offset} + length {length} overflows u64"
+                ))
+            })?;
         let range_header = format!("bytes={offset}-{end}");
         match self.retry_call(&format!("GET_RANGE {key}"), || {
             let req = self
@@ -262,6 +327,29 @@ impl StorageBackend for RestBackend {
             req.call()
         }) {
             Ok(resp) => {
+                let status = resp.status();
+                if status == 200 {
+                    return Err(VgerError::Other(format!(
+                        "REST GET_RANGE {key}: server returned 200 instead of 206 (Range header ignored)"
+                    )));
+                }
+                if status != 206 {
+                    return Err(VgerError::Other(format!(
+                        "REST GET_RANGE {key}: unexpected status {status}"
+                    )));
+                }
+
+                // Validate Content-Range header
+                let content_range = resp
+                    .header("Content-Range")
+                    .ok_or_else(|| {
+                        VgerError::Other(format!(
+                            "REST GET_RANGE {key}: server returned 206 without Content-Range header"
+                        ))
+                    })?
+                    .to_string();
+                Self::validate_content_range(&content_range, offset, length, key)?;
+
                 let cap = usize::try_from(length).map_err(|_| {
                     VgerError::Other(format!(
                         "REST GET_RANGE {key}: length {length} exceeds platform usize"
@@ -272,6 +360,12 @@ impl StorageBackend for RestBackend {
                     .take(length)
                     .read_to_end(&mut buf)
                     .map_err(VgerError::Io)?;
+                if buf.len() != cap {
+                    return Err(VgerError::Other(format!(
+                        "short read on {key} at offset {offset}: expected {length} bytes, got {}",
+                        buf.len()
+                    )));
+                }
                 Ok(Some(buf))
             }
             Err(ureq::Error::Status(404, _)) => Ok(None),
@@ -304,5 +398,166 @@ impl StorageBackend for RestBackend {
 
     fn batch_delete_keys(&self, keys: &[String]) -> Result<()> {
         self.batch_delete(keys)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::config::RetryConfig;
+    use std::io::{BufRead, BufReader, Write};
+    use std::net::TcpListener;
+
+    // -----------------------------------------------------------------------
+    // validate_content_range unit tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn validate_content_range_accepts_valid_header() {
+        RestBackend::validate_content_range("bytes 0-99/1000", 0, 100, "test").unwrap();
+    }
+
+    #[test]
+    fn validate_content_range_rejects_mismatched_start() {
+        let err = RestBackend::validate_content_range("bytes 10-109/1000", 0, 100, "test")
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("Content-Range mismatch"), "got: {err}");
+    }
+
+    #[test]
+    fn validate_content_range_rejects_mismatched_length() {
+        let err = RestBackend::validate_content_range("bytes 0-49/1000", 0, 100, "test")
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("Content-Range mismatch"), "got: {err}");
+    }
+
+    #[test]
+    fn validate_content_range_rejects_end_less_than_start() {
+        let err = RestBackend::validate_content_range("bytes 10-5/1000", 10, 100, "test")
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("overflow or end < start"), "got: {err}");
+    }
+
+    #[test]
+    fn validate_content_range_rejects_u64_max_end() {
+        let header = format!("bytes 0-{}/99999", u64::MAX);
+        let err = RestBackend::validate_content_range(&header, 0, 100, "test")
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("overflow or end < start"), "got: {err}");
+    }
+
+    #[test]
+    fn validate_content_range_rejects_missing_bytes_prefix() {
+        let err = RestBackend::validate_content_range("0-99/1000", 0, 100, "test")
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("malformed Content-Range"), "got: {err}");
+    }
+
+    // -----------------------------------------------------------------------
+    // Mock-server integration tests for get_range status/header validation
+    // -----------------------------------------------------------------------
+
+    /// Spin up a TCP listener that responds with a canned HTTP response to
+    /// the first request, then return the listener's URL and a join handle.
+    fn mock_server(response: &str) -> (String, std::thread::JoinHandle<()>) {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let url = format!("http://127.0.0.1:{port}");
+        let response = response.to_string();
+        let handle = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            // Consume the request
+            let mut reader = BufReader::new(stream.try_clone().unwrap());
+            let mut line = String::new();
+            loop {
+                line.clear();
+                reader.read_line(&mut line).unwrap();
+                if line.trim().is_empty() {
+                    break;
+                }
+            }
+            // Send the canned response
+            stream.write_all(response.as_bytes()).unwrap();
+            stream.flush().unwrap();
+        });
+        (url, handle)
+    }
+
+    fn no_retry() -> RetryConfig {
+        RetryConfig {
+            max_retries: 0,
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn range_request_rejects_200_ok() {
+        let body = "full object content";
+        let resp = format!(
+            "HTTP/1.1 200 OK\r\nContent-Length: {}\r\n\r\n{body}",
+            body.len()
+        );
+        let (url, handle) = mock_server(&resp);
+        let backend = RestBackend::new(&url, None, no_retry()).unwrap();
+
+        let err = backend
+            .get_range("testkey", 10, 50)
+            .unwrap_err()
+            .to_string();
+        assert!(
+            err.contains("200 instead of 206"),
+            "expected 200-rejection error, got: {err}"
+        );
+        handle.join().unwrap();
+    }
+
+    #[test]
+    fn range_request_rejects_missing_content_range() {
+        let body = [0u8; 50];
+        let resp = format!(
+            "HTTP/1.1 206 Partial Content\r\nContent-Length: {}\r\n\r\n",
+            body.len()
+        );
+        let (url, handle) = mock_server(&resp);
+        let backend = RestBackend::new(&url, None, no_retry()).unwrap();
+
+        let err = backend
+            .get_range("testkey", 10, 50)
+            .unwrap_err()
+            .to_string();
+        assert!(
+            err.contains("without Content-Range header"),
+            "expected missing Content-Range error, got: {err}"
+        );
+        handle.join().unwrap();
+    }
+
+    #[test]
+    fn range_request_rejects_mismatched_content_range() {
+        let body = [0u8; 50];
+        // Content-Range says bytes 0-49 but we requested offset=10
+        let resp = format!(
+            "HTTP/1.1 206 Partial Content\r\n\
+             Content-Range: bytes 0-49/1000\r\n\
+             Content-Length: {}\r\n\r\n",
+            body.len()
+        );
+        let (url, handle) = mock_server(&resp);
+        let backend = RestBackend::new(&url, None, no_retry()).unwrap();
+
+        let err = backend
+            .get_range("testkey", 10, 50)
+            .unwrap_err()
+            .to_string();
+        assert!(
+            err.contains("Content-Range mismatch"),
+            "expected Content-Range mismatch error, got: {err}"
+        );
+        handle.join().unwrap();
     }
 }

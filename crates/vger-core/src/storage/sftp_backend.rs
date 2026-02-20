@@ -869,6 +869,11 @@ impl StorageBackend for SftpBackend {
                     }
                 }
                 buf.truncate(total);
+                if total != requested_len {
+                    return Err(RetryError::permanent(VgerError::Other(format!(
+                        "short read on {key} at offset {offset}: expected {length} bytes, got {total}"
+                    ))));
+                }
                 Ok(Some(buf))
             })
         })

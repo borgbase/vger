@@ -82,6 +82,10 @@ pub trait StorageBackend: Send + Sync {
     fn list(&self, prefix: &str) -> Result<Vec<String>>;
 
     /// Read a byte range from an object. Returns `None` if not found.
+    ///
+    /// When the key exists, the returned `Vec<u8>` **must** contain exactly
+    /// `length` bytes. A short read is an error, not a silent truncation.
+    /// `length` must be > 0 (callers must not request zero-length reads).
     fn get_range(&self, key: &str, offset: u64, length: u64) -> Result<Option<Vec<u8>>>;
 
     /// Create a directory marker (no-op for flat object stores).

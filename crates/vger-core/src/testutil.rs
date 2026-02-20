@@ -78,12 +78,18 @@ impl StorageBackend for MemoryBackend {
         match map.get(key) {
             Some(data) => {
                 let start = offset as usize;
-                let end = std::cmp::min(start + length as usize, data.len());
-                if start >= data.len() {
-                    Ok(Some(Vec::new()))
-                } else {
-                    Ok(Some(data[start..end].to_vec()))
+                let end = start.checked_add(length as usize).ok_or_else(|| {
+                    VgerError::Other(format!(
+                        "short read on {key} at offset {offset}: offset + length overflows usize"
+                    ))
+                })?;
+                if start >= data.len() || end > data.len() {
+                    return Err(VgerError::Other(format!(
+                        "short read on {key} at offset {offset}: expected {length} bytes, got {}",
+                        data.len().saturating_sub(start)
+                    )));
                 }
+                Ok(Some(data[start..end].to_vec()))
             }
             None => Ok(None),
         }

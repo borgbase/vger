@@ -485,6 +485,12 @@ pub fn read_blob_from_pack(
     let data = storage
         .get_range(&pack_id.storage_key(), offset, length as u64)?
         .ok_or_else(|| VgerError::Other(format!("pack not found: {pack_id}")))?;
+    if data.len() != length as usize {
+        return Err(VgerError::Other(format!(
+            "short read from pack {pack_id} at offset {offset}: expected {length} bytes, got {}",
+            data.len()
+        )));
+    }
     Ok(data)
 }
 
@@ -852,6 +858,69 @@ mod tests {
         assert!(
             msg.contains("trailing bytes"),
             "expected truncation error, got: {msg}"
+        );
+    }
+
+    /// Backend that intentionally returns truncated data from get_range,
+    /// bypassing normal backend enforcement, to test the defense-in-depth
+    /// check in read_blob_from_pack.
+    struct ShortReadBackend {
+        data: HashMap<String, Vec<u8>>,
+    }
+
+    impl StorageBackend for ShortReadBackend {
+        fn get(&self, key: &str) -> Result<Option<Vec<u8>>> {
+            Ok(self.data.get(key).cloned())
+        }
+        fn put(&self, _key: &str, _data: &[u8]) -> Result<()> {
+            Ok(())
+        }
+        fn delete(&self, _key: &str) -> Result<()> {
+            Ok(())
+        }
+        fn exists(&self, key: &str) -> Result<bool> {
+            Ok(self.data.contains_key(key))
+        }
+        fn list(&self, _prefix: &str) -> Result<Vec<String>> {
+            Ok(vec![])
+        }
+        fn get_range(&self, key: &str, offset: u64, _length: u64) -> Result<Option<Vec<u8>>> {
+            // Intentionally return truncated data (1 byte short)
+            match self.data.get(key) {
+                Some(data) => {
+                    let start = offset as usize;
+                    let end = data.len().min(start + _length as usize);
+                    if start >= data.len() {
+                        return Ok(Some(Vec::new()));
+                    }
+                    let mut result = data[start..end].to_vec();
+                    if !result.is_empty() {
+                        result.pop(); // truncate by 1 byte
+                    }
+                    Ok(Some(result))
+                }
+                None => Ok(None),
+            }
+        }
+        fn create_dir(&self, _key: &str) -> Result<()> {
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn read_blob_from_pack_rejects_short_read() {
+        let pack_id = PackId([0xCD; 32]);
+        let blob_data = vec![0xAB; 100];
+
+        let mut storage_data = HashMap::new();
+        storage_data.insert(pack_id.storage_key(), blob_data);
+        let storage = ShortReadBackend { data: storage_data };
+
+        let err = read_blob_from_pack(&storage, &pack_id, 0, 100).unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            msg.contains("short read from pack") && msg.contains("expected 100 bytes, got 99"),
+            "expected short read error, got: {msg}"
         );
     }
 }

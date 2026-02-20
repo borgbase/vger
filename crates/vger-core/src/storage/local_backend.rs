@@ -148,6 +148,11 @@ impl StorageBackend for LocalBackend {
             }
         }
         buf.truncate(filled);
+        if filled != length as usize {
+            return Err(VgerError::Other(format!(
+                "short read on {key} at offset {offset}: expected {length} bytes, got {filled}"
+            )));
+        }
         Ok(Some(buf))
     }
 

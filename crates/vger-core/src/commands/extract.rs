@@ -649,20 +649,32 @@ fn process_read_group(
         }
 
         let raw = &data[local_offset..local_end];
-        let compressed = unpack_object_expect_with_context(
-            raw,
-            ObjectType::ChunkData,
-            &blob.chunk_id.0,
-            crypto,
-        )?;
+        let compressed =
+            unpack_object_expect_with_context(raw, ObjectType::ChunkData, &blob.chunk_id.0, crypto)
+                .map_err(|e| {
+                    VgerError::Other(format!(
+                        "chunk {} in pack {} (offset {}, size {}): {e}",
+                        blob.chunk_id, group.pack_id, blob.pack_offset, blob.stored_size
+                    ))
+                })?;
         let plaintext =
-            compress::decompress_with_hint(&compressed, Some(blob.expected_size as usize))?;
+            compress::decompress_with_hint(&compressed, Some(blob.expected_size as usize))
+                .map_err(|e| {
+                    VgerError::Other(format!(
+                        "chunk {} in pack {} (offset {}, size {}): {e}",
+                        blob.chunk_id, group.pack_id, blob.pack_offset, blob.stored_size
+                    ))
+                })?;
         drop(compressed); // free decrypted buffer before file writes
 
         if plaintext.len() != blob.expected_size as usize {
             return Err(VgerError::InvalidFormat(format!(
-                "chunk {} size mismatch after restore decode: expected {} bytes, got {} bytes",
+                "chunk {} in pack {} (offset {}, size {}) size mismatch after restore decode: \
+                 expected {} bytes, got {} bytes",
                 blob.chunk_id,
+                group.pack_id,
+                blob.pack_offset,
+                blob.stored_size,
                 blob.expected_size,
                 plaintext.len()
             )));
@@ -1123,7 +1135,10 @@ mod tests {
         )
         .unwrap_err()
         .to_string();
-        assert!(err.contains("size mismatch after restore decode"));
+        assert!(
+            err.contains("size mismatch after restore decode"),
+            "expected size mismatch error, got: {err}"
+        );
     }
 
     // -----------------------------------------------------------------------

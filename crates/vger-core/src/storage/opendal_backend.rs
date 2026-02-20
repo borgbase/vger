@@ -131,8 +131,22 @@ impl StorageBackend for OpendalBackend {
     }
 
     fn get_range(&self, key: &str, offset: u64, length: u64) -> Result<Option<Vec<u8>>> {
-        match self.op.read_with(key).range(offset..offset + length).call() {
-            Ok(buf) => Ok(Some(buf.to_vec())),
+        let end = offset.checked_add(length).ok_or_else(|| {
+            VgerError::Other(format!(
+                "opendal get_range {key}: offset {offset} + length {length} overflows u64"
+            ))
+        })?;
+        match self.op.read_with(key).range(offset..end).call() {
+            Ok(buf) => {
+                let data = buf.to_vec();
+                if data.len() != length as usize {
+                    return Err(VgerError::Other(format!(
+                        "short read on {key} at offset {offset}: expected {length} bytes, got {}",
+                        data.len()
+                    )));
+                }
+                Ok(Some(data))
+            }
             Err(e) if e.kind() == opendal::ErrorKind::NotFound => Ok(None),
             Err(e) => Err(VgerError::from(e)),
         }
