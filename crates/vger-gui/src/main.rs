@@ -10,7 +10,7 @@ use std::time::{Duration, Instant};
 use chrono::{DateTime, Local};
 use crossbeam_channel::{Receiver, Sender};
 use notify::{Config as NotifyConfig, RecommendedWatcher, RecursiveMode, Watcher};
-use slint::{ModelRc, SharedString, StandardListViewItem, VecModel};
+use slint::{Model, ModelRc, SharedString, StandardListViewItem, VecModel};
 use tray_icon::menu::{Menu, MenuEvent, MenuId, MenuItem};
 use tray_icon::{Icon, TrayIconBuilder};
 use vger_core::app::{self, operations, passphrase};
@@ -2205,6 +2205,9 @@ fn ensure_log_model(ui: &MainWindow) -> Rc<VecModel<ModelRc<StandardListViewItem
     })
 }
 
+const MAX_LOG_ROWS: usize = 10_000;
+const TRIM_TARGET: usize = 9_000;
+
 fn append_log_row(ui: &MainWindow, timestamp: &str, message: &str) {
     let model = ensure_log_model(ui);
     let row: Vec<StandardListViewItem> = vec![
@@ -2212,6 +2215,15 @@ fn append_log_row(ui: &MainWindow, timestamp: &str, message: &str) {
         StandardListViewItem::from(SharedString::from(message)),
     ];
     model.push(ModelRc::new(VecModel::from(row)));
+    if model.row_count() > MAX_LOG_ROWS {
+        // Rebuild from the newest TRIM_TARGET rows in one shot to avoid
+        // O(n)-per-row front-removal and repeated model-change notifications.
+        let start = model.row_count() - TRIM_TARGET;
+        let keep: Vec<_> = (start..model.row_count()).map(|i| model.row_data(i).unwrap()).collect();
+        let fresh = Rc::new(VecModel::from(keep));
+        ui.set_log_rows(ModelRc::from(fresh.clone()));
+        LOG_MODEL.with(|cell| *cell.borrow_mut() = Some(fresh));
+    }
 }
 
 fn refresh_tree_view(rw: &RestoreWindow) {
