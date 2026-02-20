@@ -17,9 +17,14 @@
 
 - [Configuration](configuration.md)
 - [Command Reference](commands.md)
-- [Server Mode](server-mode.md)
 - [Design Goals](goals.md)
 - [Architecture](architecture.md)
+- [Roadmap](roadmap.md)
+
+# Server
+
+- [Setup](server-setup.md)
+- [Internals](server-internals.md)
 
 # Contribute
 

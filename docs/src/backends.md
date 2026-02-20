@@ -102,7 +102,7 @@ URL format: `sftp://[user@]host[:port]/path`. Default port is 22.
 
 ## REST (vger-server)
 
-Store backups on a dedicated [vger-server](server-mode.md) instance via HTTP/HTTPS. The server provides append-only enforcement, quotas, lock management, and server-side compaction.
+Store backups on a dedicated [vger-server](server-setup.md) instance via HTTP/HTTPS. The server provides append-only enforcement, quotas, lock management, and server-side compaction.
 
 ```yaml
 repositories:
@@ -118,6 +118,6 @@ repositories:
 | `rest_token` | Bearer token sent as `Authorization: Bearer <token>` |
 | `allow_insecure_http` | Permit `http://` REST URLs (unsafe; default: `false`) |
 
-See [Server Mode](server-mode.md) for how to set up and configure the server.
+See [Server Setup](server-setup.md) for how to set up and configure the server.
 
 All backends are included in the default build and in pre-built binaries from the [releases page](https://github.com/borgbase/vger/releases).

@@ -57,18 +57,14 @@ V'Ger leads in both speed and CPU efficiency, while maintaining competitive memo
 - [V'Ger](https://memory-alpha.fandom.com/wiki/V%27Ger) from *Star Trek: The Motion Picture* — a probe that assimilated everything it encountered and returned as something far more powerful.
 
 
-## Usage
+## Get Started
 
-- [Installing](install.md)
-- [Initialize and Set Up a Repository](init-setup.md)
-- [Storage Backends](backends.md)
-- [Make a Backup](backup.md)
-- [Restore a Backup](restore.md)
-- [Maintenance](maintenance.md)
+Follow the **[Quick Start guide](quickstart.md)** to install V'Ger, create a config, and run your first backup in under 5 minutes.
 
-## Reference
+Once you're up and running:
 
-- [Configuration](configuration.md)
-- [Command Reference](commands.md)
-- [Server Mode](server-mode.md)
-- [Architecture](architecture.md)
+- [Configure storage backends](backends.md) — connect S3, SFTP, or the REST server
+- [Set up hooks and command dumps](configuration.md#hooks) — run scripts before/after backups, capture database dumps
+- [Browse and restore snapshots](restore.md) — list, search, and restore files
+- [Maintain your repository](maintenance.md) — prune old snapshots, check integrity, compact packs
+- [Explore backup recipes](recipes.md) — common patterns for databases, containers, and filesystems

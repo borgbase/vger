@@ -13,21 +13,11 @@ Or download a pre-built binary from the [releases page](https://github.com/borgb
 
 ## Create a config file
 
-Generate a starter configuration in the current directory:
+Generate a starter config file, then edit it to set your repository path and source directories:
 
 ```bash
 vger config
 ```
-
-Or write it to a specific path:
-
-```bash
-vger config --dest ~/.config/vger/config.yaml
-```
-
-On Windows, use `%APPDATA%\\vger\\config.yaml` (for example: `vger config --dest "$env:APPDATA\\vger\\config.yaml"`).
-
-Edit the generated `vger.yaml` to set your repository path and source directories. Encryption is enabled by default. See [Configuration](configuration.md) for a full reference.
 
 ## Initialize and back up
 
@@ -41,6 +31,12 @@ Create a backup of all configured sources:
 
 ```bash
 vger backup
+```
+
+Or back up any folder directly:
+
+```bash
+vger backup ~/Documents
 ```
 
 ## Inspect snapshots

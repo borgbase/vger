@@ -1,4 +1,4 @@
-# Server Mode
+# Setup
 
 V'Ger includes a dedicated backup server for secure, policy-enforced remote backups. TLS is handled by a reverse proxy (nginx, caddy, and similar tools).
 
