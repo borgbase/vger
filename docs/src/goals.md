@@ -13,10 +13,11 @@ Configuration, scheduling, monitoring, hooks, and health checks belong in the ba
 Your entire backup strategy lives in a single YAML file that can be version-controlled, reviewed, and deployed across machines. A repository path and a list of sources is enough to get going.
 
 ```yaml
-repository: /backups/myrepo
+repositories:
+  - url: /backups/myrepo
 sources:
-  - /home/user/documents
-  - /home/user/photos
+  - path: /home/user/documents
+  - path: /home/user/photos
 ```
 
 
