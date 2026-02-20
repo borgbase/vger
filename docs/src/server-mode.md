@@ -36,6 +36,7 @@ All settings are passed as CLI flags. The authentication token is read from the 
 | `--log-format` | `pretty` | Log output format: `json` or `pretty` |
 | `--quota` | `0` | Per-repo storage quota (`500M`, `10G`, plain bytes). 0 = unlimited |
 | `--lock-ttl-seconds` | `3600` | Auto-expire locks after this many seconds |
+| `--max-blocking-threads` | `6` | Maximum number of blocking threads for file I/O |
 
 ### Environment variables
 

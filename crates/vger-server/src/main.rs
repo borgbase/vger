@@ -38,12 +38,36 @@ struct Cli {
     /// Lock TTL in seconds
     #[arg(long, default_value_t = 3600)]
     lock_ttl_seconds: u64,
+
+    /// Maximum number of blocking threads for file I/O (minimum 1)
+    #[arg(long, default_value_t = 6, value_parser = parse_blocking_threads)]
+    max_blocking_threads: usize,
 }
 
-#[tokio::main]
-async fn main() {
+fn parse_blocking_threads(s: &str) -> Result<usize, String> {
+    let n: usize = s.parse().map_err(|e| format!("{e}"))?;
+    if n == 0 {
+        return Err("value must be at least 1".into());
+    }
+    Ok(n)
+}
+
+fn main() {
     let cli = Cli::parse();
 
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .max_blocking_threads(cli.max_blocking_threads)
+        .build()
+        .unwrap_or_else(|e| {
+            eprintln!("Error: failed to build tokio runtime: {e}");
+            std::process::exit(1);
+        });
+
+    runtime.block_on(async_main(cli));
+}
+
+async fn async_main(cli: Cli) {
     // Read token from environment
     let token = std::env::var("VGER_TOKEN").unwrap_or_default();
     if token.is_empty() {
