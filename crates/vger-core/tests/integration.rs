@@ -2,8 +2,9 @@ use chrono::Utc;
 use vger_core::commands;
 use vger_core::compress::Compression;
 use vger_core::config::{
-    ChunkerConfig, CompressionConfig, EncryptionConfig, EncryptionModeConfig, RepositoryConfig,
-    ResourceLimitsConfig, RetentionConfig, RetryConfig, ScheduleConfig, VgerConfig, XattrsConfig,
+    ChunkerConfig, CompactConfig, CompressionConfig, EncryptionConfig, EncryptionModeConfig,
+    RepositoryConfig, ResourceLimitsConfig, RetentionConfig, RetryConfig, ScheduleConfig,
+    VgerConfig, XattrsConfig,
 };
 use vger_core::crypto::snapshot_id::SnapshotId;
 use vger_core::repo::manifest::SnapshotEntry;
@@ -80,6 +81,7 @@ fn make_test_config(repo_dir: &std::path::Path) -> VgerConfig {
         xattrs: XattrsConfig::default(),
         schedule: ScheduleConfig::default(),
         limits: ResourceLimitsConfig::default(),
+        compact: CompactConfig::default(),
         cache_dir: None,
     }
 }

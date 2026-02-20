@@ -31,6 +31,8 @@ pub struct VgerConfig {
     pub schedule: ScheduleConfig,
     #[serde(default)]
     pub limits: ResourceLimitsConfig,
+    #[serde(default)]
+    pub compact: CompactConfig,
     /// Root directory for all local caches and pack temp files.
     /// Default: platform cache dir + "vger" (e.g. ~/.cache/vger/).
     #[serde(default)]
@@ -272,6 +274,32 @@ impl Default for CompressionConfig {
         Self {
             algorithm: default_algorithm(),
             zstd_level: default_zstd_level(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CompactConfig {
+    #[serde(default = "default_compact_threshold")]
+    pub threshold: f64,
+}
+
+impl Default for CompactConfig {
+    fn default() -> Self {
+        Self {
+            threshold: default_compact_threshold(),
+        }
+    }
+}
+
+impl CompactConfig {
+    pub fn validate(&mut self) {
+        if !self.threshold.is_finite() || self.threshold < 0.0 || self.threshold > 100.0 {
+            tracing::warn!(
+                configured = self.threshold,
+                "compact.threshold out of range (0–100), resetting to default"
+            );
+            self.threshold = default_compact_threshold();
         }
     }
 }

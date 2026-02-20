@@ -111,6 +111,8 @@ struct ConfigDocument {
     schedule: ScheduleConfig,
     #[serde(default)]
     limits: ResourceLimitsConfig,
+    #[serde(default)]
+    compact: CompactConfig,
     /// Global hooks — apply to all repositories.
     #[serde(default)]
     hooks: HooksConfig,
@@ -300,6 +302,7 @@ fn resolve_document(mut raw: ConfigDocument) -> crate::error::Result<Vec<Resolve
     raw.hooks.validate()?;
     raw.limits.validate()?;
     raw.chunker.validate();
+    raw.compact.validate();
 
     // Validate per-repo hooks
     for entry in &raw.repositories {
@@ -400,6 +403,7 @@ fn resolve_document(mut raw: ConfigDocument) -> crate::error::Result<Vec<Resolve
                     xattrs: raw.xattrs.clone(),
                     schedule: raw.schedule.clone(),
                     limits: entry.limits.unwrap_or_else(|| raw.limits.clone()),
+                    compact: raw.compact.clone(),
                     cache_dir: raw
                         .cache_dir
                         .as_deref()
@@ -1186,6 +1190,7 @@ repositories:
                 xattrs: XattrsConfig::default(),
                 schedule: ScheduleConfig::default(),
                 limits: ResourceLimitsConfig::default(),
+                compact: CompactConfig::default(),
                 cache_dir: None,
             },
             global_hooks: HooksConfig::default(),

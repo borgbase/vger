@@ -4,9 +4,9 @@ use std::sync::Once;
 use crate::commands;
 use crate::compress::Compression;
 use crate::config::{
-    ChunkerConfig, CompressionConfig, EncryptionConfig, EncryptionModeConfig, RepositoryConfig,
-    ResourceLimitsConfig, RetentionConfig, RetryConfig, ScheduleConfig, SourceEntry,
-    SourceHooksConfig, VgerConfig, XattrsConfig,
+    ChunkerConfig, CompactConfig, CompressionConfig, EncryptionConfig, EncryptionModeConfig,
+    RepositoryConfig, ResourceLimitsConfig, RetentionConfig, RetryConfig, ScheduleConfig,
+    SourceEntry, SourceHooksConfig, VgerConfig, XattrsConfig,
 };
 use crate::snapshot::SnapshotStats;
 
@@ -60,6 +60,7 @@ pub fn make_test_config(repo_dir: &Path) -> VgerConfig {
         xattrs: XattrsConfig::default(),
         schedule: ScheduleConfig::default(),
         limits: ResourceLimitsConfig::default(),
+        compact: CompactConfig::default(),
         cache_dir: None,
     }
 }

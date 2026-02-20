@@ -58,6 +58,10 @@ pub(super) fn default_xattrs_enabled() -> bool {
     true
 }
 
+pub(super) fn default_compact_threshold() -> f64 {
+    20.0
+}
+
 pub(super) fn default_schedule_every() -> String {
     "24h".to_string()
 }

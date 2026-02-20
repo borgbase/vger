@@ -1926,7 +1926,7 @@ fn run_worker(
                 match vger_core::commands::compact::run(
                     &repo.config,
                     passphrase.as_deref().map(|s| s.as_str()),
-                    10.0,
+                    repo.config.compact.threshold,
                     None,
                     false,
                 ) {

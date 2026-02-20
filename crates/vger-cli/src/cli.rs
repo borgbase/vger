@@ -207,9 +207,9 @@ pub(crate) enum Commands {
         #[arg(short = 'R', long = "repo")]
         repo: Option<String>,
 
-        /// Minimum percentage of unused space to trigger repack (default: 10)
-        #[arg(long, default_value = "10")]
-        threshold: f64,
+        /// Minimum percentage of unused space to trigger repack
+        #[arg(long)]
+        threshold: Option<f64>,
 
         /// Maximum total bytes to repack (e.g. 500M, 2G)
         #[arg(long)]

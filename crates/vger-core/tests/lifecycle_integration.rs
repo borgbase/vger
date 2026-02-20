@@ -5,9 +5,9 @@ use std::time::Duration;
 use vger_core::commands;
 use vger_core::compress::Compression;
 use vger_core::config::{
-    ChunkerConfig, CommandDump, CompressionConfig, EncryptionConfig, EncryptionModeConfig,
-    RepositoryConfig, ResourceLimitsConfig, RetentionConfig, RetryConfig, ScheduleConfig,
-    SourceEntry, SourceHooksConfig, VgerConfig, XattrsConfig,
+    ChunkerConfig, CommandDump, CompactConfig, CompressionConfig, EncryptionConfig,
+    EncryptionModeConfig, RepositoryConfig, ResourceLimitsConfig, RetentionConfig, RetryConfig,
+    ScheduleConfig, SourceEntry, SourceHooksConfig, VgerConfig, XattrsConfig,
 };
 use vger_core::error::VgerError;
 use vger_core::repo::lock;
@@ -64,6 +64,7 @@ fn make_test_config(repo_dir: &Path) -> VgerConfig {
         xattrs: XattrsConfig::default(),
         schedule: ScheduleConfig::default(),
         limits: ResourceLimitsConfig::default(),
+        compact: CompactConfig::default(),
         cache_dir: None,
     }
 }

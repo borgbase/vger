@@ -50,7 +50,7 @@ pub(crate) fn run_prune(
     }
 
     if compact {
-        super::compact::run_compact(config, label, 10.0, None, dry_run)?;
+        super::compact::run_compact(config, label, config.compact.threshold, None, dry_run)?;
     }
 
     Ok(())

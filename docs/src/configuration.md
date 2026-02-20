@@ -172,6 +172,13 @@ retention:                           # Global retention policy (can be overridde
   keep_within: "2d"                  # Keep everything within this period (e.g. "2d", "48h", "1w")
 ```
 
+## Compact
+
+```yaml
+compact:
+  threshold: 20                      # Minimum % unused space to trigger repack (default 20)
+```
+
 ## Limits
 
 ```yaml

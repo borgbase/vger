@@ -393,7 +393,7 @@ After `delete` or `prune`, chunk refcounts are decremented and entries with refc
 4. Derive `dead_bytes = (pack_size - PACK_HEADER_SIZE) - live_bytes`; packs where `live_bytes > pack_payload` are marked corrupt
 5. Compute `unused_ratio = dead_bytes / pack_size` per pack
 6. Track pack health counters (`packs_corrupt`, `packs_orphan`) in addition to live/dead bytes
-7. Filter packs where `unused_ratio >= threshold` (default 10%)
+7. Filter packs where `unused_ratio >= threshold`
 
 **Phase 2 — Repack:**
 For each candidate pack (most wasteful first, respecting `--max-repack-size` cap):
@@ -412,7 +412,7 @@ The index never points to a deleted pack. Sequence: write new pack → save inde
 #### CLI
 
 ```text
-vger compact [--threshold 10] [--max-repack-size 2G] [-n/--dry-run]
+vger compact [--threshold N] [--max-repack-size 2G] [-n/--dry-run]
 ```
 
 ---

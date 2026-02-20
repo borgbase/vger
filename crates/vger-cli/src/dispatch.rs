@@ -121,7 +121,7 @@ pub(crate) fn run_default_actions(
             global_hooks,
             repo_hooks,
             &mut make_hook_ctx("compact", cfg, repo_label),
-            || cmd::compact::run_compact(cfg, label, 10.0, None, false),
+            || cmd::compact::run_compact(cfg, label, cfg.compact.threshold, None, false),
         ) {
             Ok(()) => steps.push(("compact", StepResult::Ok)),
             Err(e) => {
@@ -259,7 +259,10 @@ pub(crate) fn dispatch_command(
             max_repack_size,
             dry_run,
             ..
-        } => cmd::compact::run_compact(cfg, label, *threshold, max_repack_size.clone(), *dry_run),
+        } => {
+            let t = threshold.unwrap_or(cfg.compact.threshold);
+            cmd::compact::run_compact(cfg, label, t, max_repack_size.clone(), *dry_run)
+        }
         Commands::Config { .. } => {
             Err("'config' command should be handled before config resolution".into())
         }
