@@ -1,6 +1,9 @@
 use std::io::Read;
 use std::time::Duration;
 
+use blake2::digest::{Update, VariableOutput};
+use blake2::Blake2bVar;
+
 use crate::config::RetryConfig;
 use crate::error::{Result, VgerError};
 use crate::storage::{BackendLockInfo, RepackPlanRequest, RepackResultResponse, StorageBackend};
@@ -222,11 +225,39 @@ impl RestBackend {
         Ok(())
     }
 
+    /// Extract the 64-char hex pack ID from a storage key like `packs/ab/<hex>`.
+    /// Returns `None` for non-pack keys. Zero CPU cost — just a slice.
+    fn try_extract_pack_hex(key: &str) -> Option<&str> {
+        let rest = key.strip_prefix("packs/")?;
+        // Skip the 2-char shard + '/'
+        let hex = rest.get(3..)?;
+        if hex.len() == 64 && hex.bytes().all(|b| b.is_ascii_hexdigit()) {
+            Some(hex)
+        } else {
+            None
+        }
+    }
+
+    /// Compute unkeyed BLAKE2b-256 and return the 64-char hex string.
+    /// Used for non-pack objects (manifest, index, snapshots, config).
+    fn compute_blake2b_256_hex(data: &[u8]) -> String {
+        let mut hasher = Blake2bVar::new(32).expect("valid output size");
+        hasher.update(data);
+        let mut out = [0u8; 32];
+        hasher.finalize_variable(&mut out).expect("correct length");
+        hex::encode(out)
+    }
+
     /// Shared PUT implementation for both borrowed and owned data.
     fn put_bytes(&self, key: &str, data: &[u8]) -> Result<()> {
         let url = self.url(key);
+        let checksum = Self::try_extract_pack_hex(key)
+            .map(|h| h.to_string())
+            .unwrap_or_else(|| Self::compute_blake2b_256_hex(data));
         self.retry_call(&format!("PUT {key}"), || {
-            let req = self.apply_auth(self.agent.put(&url));
+            let req = self
+                .apply_auth(self.agent.put(&url))
+                .set("X-Content-BLAKE2b", &checksum);
             req.send_bytes(data)
         })
         .map_err(|e| VgerError::Other(format!("REST PUT {key}: {e}")))?;
@@ -535,6 +566,39 @@ mod tests {
             "expected missing Content-Range error, got: {err}"
         );
         handle.join().unwrap();
+    }
+
+    // -----------------------------------------------------------------------
+    // try_extract_pack_hex / compute_blake2b_256_hex unit tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn extract_pack_hex_returns_hex_for_pack_key() {
+        let hex = "ab".to_string() + &"cd".repeat(31);
+        let key = format!("packs/ab/{hex}");
+        assert_eq!(RestBackend::try_extract_pack_hex(&key), Some(hex.as_str()));
+    }
+
+    #[test]
+    fn extract_pack_hex_returns_none_for_non_pack_keys() {
+        assert_eq!(RestBackend::try_extract_pack_hex("manifest"), None);
+        assert_eq!(RestBackend::try_extract_pack_hex("index"), None);
+        assert_eq!(RestBackend::try_extract_pack_hex("snapshots/abc123"), None);
+        assert_eq!(RestBackend::try_extract_pack_hex("config"), None);
+    }
+
+    #[test]
+    fn extract_pack_hex_returns_none_for_short_hex() {
+        assert_eq!(RestBackend::try_extract_pack_hex("packs/ab/tooshort"), None);
+    }
+
+    #[test]
+    fn compute_blake2b_matches_pack_id() {
+        use crate::crypto::pack_id::PackId;
+        let data = b"hello world test data for blake2b verification";
+        let pack_id = PackId::compute(data);
+        let computed = RestBackend::compute_blake2b_256_hex(data);
+        assert_eq!(computed, pack_id.to_hex());
     }
 
     #[test]

@@ -13,6 +13,7 @@ Dumb storage backends (S3, WebDAV, SFTP) work well for basic backups, but they c
 | Quota enforcement | Requires external bucket policy/IAM setup | Built-in per-repo byte quota checks on writes |
 | Backup freshness monitoring | Requires external polling and parsing | Tracks `last_backup_at` on manifest writes |
 | Lock auto-expiry | Advisory locks can remain after crashes | TTL-based lock cleanup in the server |
+| Upload integrity | Relies on S3 Content-MD5 | Uses existing BLAKE2b checksum |
 | Structural health checks | Client has to fetch data to verify structure | Server validates repository shape directly |
 
 All data remains client-side encrypted. The server never has the encryption key and cannot read backup contents.

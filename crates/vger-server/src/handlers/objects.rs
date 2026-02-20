@@ -4,6 +4,8 @@ use axum::body::Body;
 use axum::extract::{Path, Query, State};
 use axum::http::{HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
+use blake2::digest::{Update, VariableOutput};
+use blake2::Blake2bVar;
 use futures_util::TryStreamExt;
 use tokio::io::{AsyncReadExt, AsyncSeekExt, AsyncWriteExt, BufWriter, SeekFrom};
 use tokio_util::io::{ReaderStream, StreamReader};
@@ -115,6 +117,28 @@ pub async fn put_object(
         }
     }
 
+    // Parse X-Content-BLAKE2b header
+    let is_pack = key.starts_with("packs/");
+    let expected_blake2b = match headers
+        .get("X-Content-BLAKE2b")
+        .and_then(|v| v.to_str().ok())
+    {
+        Some(hex_str) => {
+            if hex_str.len() != 64 || !hex_str.bytes().all(|b| b.is_ascii_hexdigit()) {
+                return Err(ServerError::BadRequest(
+                    "X-Content-BLAKE2b must be 64 hex characters".into(),
+                ));
+            }
+            Some(hex_str.to_ascii_lowercase())
+        }
+        None if is_pack => {
+            return Err(ServerError::BadRequest(
+                "X-Content-BLAKE2b header required for pack uploads".into(),
+            ));
+        }
+        None => None,
+    };
+
     // Ensure parent directory exists
     if let Some(parent) = file_path.parent() {
         tokio::fs::create_dir_all(parent)
@@ -129,7 +153,7 @@ pub async fn put_object(
 
     // Stream body to temp file. The write block scopes writer/reader so
     // file handles are closed before rename (required on Windows).
-    let data_len = {
+    let (data_len, hasher) = {
         let stream = body.into_data_stream();
         let stream = TryStreamExt::map_err(stream, std::io::Error::other);
         let mut reader = StreamReader::new(stream);
@@ -138,6 +162,10 @@ pub async fn put_object(
             .await
             .map_err(ServerError::from)?;
         let mut writer = BufWriter::new(temp_file);
+
+        let mut hasher = expected_blake2b
+            .as_ref()
+            .map(|_| Blake2bVar::new(32).expect("valid output size"));
 
         let mut data_len: u64 = 0;
         let mut buf = vec![0u8; 256 * 1024]; // 256 KiB read buffer
@@ -160,6 +188,10 @@ pub async fn put_object(
                     }
                 }
 
+                if let Some(ref mut h) = hasher {
+                    h.update(&buf[..n]);
+                }
+
                 writer.write_all(&buf[..n]).await.map_err(ServerError::from)?;
             }
             writer.flush().await.map_err(ServerError::from)?;
@@ -175,7 +207,7 @@ pub async fn put_object(
             return Err(e);
         }
 
-        data_len
+        (data_len, hasher)
     };
 
     // Validate Content-Length if it was present
@@ -188,6 +220,21 @@ pub async fn put_object(
             let _ = tokio::fs::remove_file(&temp_path).await;
             return Err(ServerError::BadRequest(format!(
                 "upload size mismatch: Content-Length {content_length}, received {data_len}"
+            )));
+        }
+    }
+
+    // Verify BLAKE2b checksum if header was present
+    if let (Some(expected), Some(hasher)) = (&expected_blake2b, hasher) {
+        let mut actual = [0u8; 32];
+        hasher
+            .finalize_variable(&mut actual)
+            .expect("correct length");
+        let actual_hex = hex::encode(actual);
+        if actual_hex != *expected {
+            let _ = tokio::fs::remove_file(&temp_path).await;
+            return Err(ServerError::Conflict(format!(
+                "BLAKE2b checksum mismatch: expected {expected}, got {actual_hex}"
             )));
         }
     }
@@ -613,5 +660,144 @@ mod tests {
             }
         }
         out
+    }
+
+    /// Compute BLAKE2b-256 hex of data (for test convenience).
+    fn blake2b_hex(data: &[u8]) -> String {
+        use blake2::digest::{Update, VariableOutput};
+        use blake2::Blake2bVar;
+        let mut hasher = Blake2bVar::new(32).unwrap();
+        hasher.update(data);
+        let mut out = [0u8; 32];
+        hasher.finalize_variable(&mut out).unwrap();
+        hex::encode(out)
+    }
+
+    /// Send an authenticated PUT with an X-Content-BLAKE2b header.
+    async fn authed_put_with_blake2b(
+        router: axum::Router,
+        path: &str,
+        body: Vec<u8>,
+        checksum: &str,
+    ) -> axum::response::Response {
+        use tower::ServiceExt;
+        let req = axum::http::Request::builder()
+            .method("PUT")
+            .uri(path)
+            .header(
+                "Authorization",
+                format!("Bearer {}", super::super::test_helpers::TEST_TOKEN),
+            )
+            .header("Content-Length", body.len().to_string())
+            .header("X-Content-BLAKE2b", checksum)
+            .body(Body::from(body))
+            .unwrap();
+        router.oneshot(req).await.unwrap()
+    }
+
+    // -----------------------------------------------------------------------
+    // BLAKE2b checksum verification tests
+    // -----------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn put_pack_with_valid_checksum_succeeds() {
+        let (router, _state, _tmp) = setup_app(0);
+        let data = vec![0xDE; 512];
+        let checksum = blake2b_hex(&data);
+        let pack_path = format!("/test-repo/packs/{}/{}", &checksum[..2], checksum);
+
+        let resp = authed_put_with_blake2b(router, &pack_path, data, &checksum).await;
+        assert_status(&resp, StatusCode::CREATED);
+    }
+
+    #[tokio::test]
+    async fn put_pack_with_wrong_checksum_returns_409() {
+        let (router, _state, tmp) = setup_app(0);
+        let data = vec![0xDE; 512];
+        let wrong_checksum = "a".repeat(64);
+        let real_checksum = blake2b_hex(&data);
+        let pack_path = format!("/test-repo/packs/{}/{}", &real_checksum[..2], real_checksum);
+
+        let resp = authed_put_with_blake2b(router.clone(), &pack_path, data, &wrong_checksum).await;
+        assert_status(&resp, StatusCode::CONFLICT);
+        let body_raw = body_bytes(resp).await;
+        let body_text = String::from_utf8_lossy(&body_raw);
+        assert!(
+            body_text.contains("BLAKE2b checksum mismatch"),
+            "got: {body_text}"
+        );
+
+        // Object should not exist
+        let resp = authed_get(router, &pack_path).await;
+        assert_status(&resp, StatusCode::NOT_FOUND);
+
+        // No temp files
+        assert_no_temp_files(tmp.path());
+    }
+
+    #[tokio::test]
+    async fn put_pack_without_checksum_returns_400() {
+        let (router, _state, _tmp) = setup_app(0);
+        let data = vec![0xDE; 512];
+        let hex = blake2b_hex(&data);
+        let pack_path = format!("/test-repo/packs/{}/{}", &hex[..2], hex);
+
+        // Use regular authed_put (no X-Content-BLAKE2b header)
+        let resp = authed_put(router, &pack_path, data).await;
+        assert_status(&resp, StatusCode::BAD_REQUEST);
+        let body_raw = body_bytes(resp).await;
+        let body_text = String::from_utf8_lossy(&body_raw);
+        assert!(
+            body_text.contains("X-Content-BLAKE2b header required"),
+            "got: {body_text}"
+        );
+    }
+
+    #[tokio::test]
+    async fn put_non_pack_without_checksum_succeeds() {
+        let (router, _state, _tmp) = setup_app(0);
+        let data = vec![0xAB; 128];
+
+        // Regular PUT to config (no checksum header) should succeed
+        let resp = authed_put(router, CONFIG_PATH, data).await;
+        assert_status(&resp, StatusCode::CREATED);
+    }
+
+    #[tokio::test]
+    async fn put_with_malformed_checksum_returns_400() {
+        let (router, _state, _tmp) = setup_app(0);
+        let data = vec![0xAB; 128];
+
+        // Too short
+        let resp = authed_put_with_blake2b(router.clone(), CONFIG_PATH, data.clone(), "abcd").await;
+        assert_status(&resp, StatusCode::BAD_REQUEST);
+        let body_raw = body_bytes(resp).await;
+        let body_text = String::from_utf8_lossy(&body_raw);
+        assert!(body_text.contains("64 hex characters"), "got: {body_text}");
+
+        // Right length but not hex
+        let bad = "g".repeat(64);
+        let resp = authed_put_with_blake2b(router, CONFIG_PATH, data, &bad).await;
+        assert_status(&resp, StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn put_non_pack_with_valid_checksum_succeeds() {
+        let (router, _state, _tmp) = setup_app(0);
+        let data = vec![0xAB; 128];
+        let checksum = blake2b_hex(&data);
+
+        let resp = authed_put_with_blake2b(router, CONFIG_PATH, data, &checksum).await;
+        assert_status(&resp, StatusCode::CREATED);
+    }
+
+    #[tokio::test]
+    async fn put_non_pack_with_wrong_checksum_returns_409() {
+        let (router, _state, _tmp) = setup_app(0);
+        let data = vec![0xAB; 128];
+        let wrong = "b".repeat(64);
+
+        let resp = authed_put_with_blake2b(router, CONFIG_PATH, data, &wrong).await;
+        assert_status(&resp, StatusCode::CONFLICT);
     }
 }
