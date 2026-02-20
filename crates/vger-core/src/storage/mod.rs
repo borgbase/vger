@@ -73,6 +73,14 @@ pub trait StorageBackend: Send + Sync {
         self.put(key, &data)
     }
 
+    /// Return the size in bytes of an object. Returns `None` if not found.
+    ///
+    /// Backends should override this with a metadata-only operation (e.g.
+    /// HTTP HEAD, `stat()`, `fs::metadata`) to avoid downloading the object.
+    fn size(&self, key: &str) -> Result<Option<u64>> {
+        Ok(self.get(key)?.map(|v| v.len() as u64))
+    }
+
     /// Acquire an advisory lock using a backend-native API.
     ///
     /// Backends that don't support a lock API should return
@@ -131,6 +139,9 @@ impl StorageBackend for Arc<dyn StorageBackend> {
     }
     fn put_owned(&self, key: &str, data: Vec<u8>) -> Result<()> {
         (**self).put_owned(key, data)
+    }
+    fn size(&self, key: &str) -> Result<Option<u64>> {
+        (**self).size(key)
     }
     fn acquire_advisory_lock(&self, lock_id: &str, info: &BackendLockInfo) -> Result<()> {
         (**self).acquire_advisory_lock(lock_id, info)

@@ -112,6 +112,16 @@ impl StorageBackend for LocalBackend {
         }
     }
 
+    fn size(&self, key: &str) -> Result<Option<u64>> {
+        let path = self.resolve(key)?;
+        match fs::metadata(&path) {
+            Ok(meta) if meta.is_file() => Ok(Some(meta.len())),
+            Ok(_) => Ok(None),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+            Err(e) => Err(e.into()),
+        }
+    }
+
     fn list(&self, prefix: &str) -> Result<Vec<String>> {
         let dir = if prefix.is_empty() {
             self.root.clone()

@@ -2219,7 +2219,9 @@ fn append_log_row(ui: &MainWindow, timestamp: &str, message: &str) {
         // Rebuild from the newest TRIM_TARGET rows in one shot to avoid
         // O(n)-per-row front-removal and repeated model-change notifications.
         let start = model.row_count() - TRIM_TARGET;
-        let keep: Vec<_> = (start..model.row_count()).map(|i| model.row_data(i).unwrap()).collect();
+        let keep: Vec<_> = (start..model.row_count())
+            .map(|i| model.row_data(i).unwrap())
+            .collect();
         let fresh = Rc::new(VecModel::from(keep));
         ui.set_log_rows(ModelRc::from(fresh.clone()));
         LOG_MODEL.with(|cell| *cell.borrow_mut() = Some(fresh));

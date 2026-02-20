@@ -1,4 +1,6 @@
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Mutex;
 
 use tracing::{info, warn};
 
@@ -8,10 +10,16 @@ use crate::crypto::chunk_id::ChunkId;
 use crate::crypto::pack_id::PackId;
 use crate::error::{Result, VgerError};
 use crate::repo::pack::{
-    read_blob_from_pack, scan_pack_blobs, PackType, PackWriter, DEFAULT_MAX_BLOB_OVERHEAD,
+    PackType, PackWriter, DEFAULT_MAX_BLOB_OVERHEAD, PACK_HEADER_SIZE, PACK_MAGIC,
+    PACK_VERSION_MAX, PACK_VERSION_MIN,
 };
 use crate::repo::Repository;
-use crate::storage::{RepackBlobRef, RepackOperationRequest, RepackPlanRequest};
+use crate::storage::{RepackBlobRef, RepackOperationRequest, RepackPlanRequest, StorageBackend};
+
+/// Concurrency for remote (REST/S3/SFTP) backends.
+const REMOTE_CONCURRENCY: usize = 16;
+/// Concurrency for local filesystem backends.
+const LOCAL_CONCURRENCY: usize = 4;
 
 /// Statistics returned by the compact command.
 #[derive(Debug, Default)]
@@ -20,7 +28,6 @@ pub struct CompactStats {
     pub packs_repacked: u64,
     pub packs_deleted_empty: u64,
     pub blobs_live: u64,
-    pub blobs_dead: u64,
     pub space_freed: u64,
     pub packs_corrupt: u64,
     pub packs_orphan: u64,
@@ -33,11 +40,10 @@ struct LiveEntry {
     length: u32,
 }
 
-/// Per-pack analysis of live vs dead blobs.
+/// Per-pack analysis of live vs dead space.
 struct PackAnalysis {
     pack_id: PackId,
     storage_key: String,
-    total_blobs: usize,
     live_entries: Vec<LiveEntry>,
     total_bytes: u64,
     dead_bytes: u64,
@@ -51,8 +57,16 @@ pub fn run(
     dry_run: bool,
 ) -> Result<CompactStats> {
     let mut repo = open_repo(config, passphrase)?;
+
+    let is_remote = matches!(
+        crate::storage::parse_repo_url(&config.repository.url),
+        Ok(crate::storage::ParsedUrl::Rest { .. }
+            | crate::storage::ParsedUrl::S3 { .. }
+            | crate::storage::ParsedUrl::Sftp { .. })
+    );
+
     with_repo_lock(&mut repo, |repo| {
-        compact_repo(repo, threshold, max_repack_size, dry_run)
+        compact_repo(repo, threshold, max_repack_size, dry_run, is_remote)
     })
 }
 
@@ -62,110 +76,150 @@ pub fn compact_repo(
     threshold: f64,
     max_repack_size: Option<u64>,
     dry_run: bool,
+    is_remote: bool,
 ) -> Result<CompactStats> {
     let mut stats = CompactStats::default();
 
-    // Phase 1: Enumerate all packs and analyze live/dead blobs.
-    // Build a per-pack offset lookup from the chunk index:
-    //   pack_id → { offset → (chunk_id, stored_size) }
-    let mut per_pack_lookup: HashMap<PackId, HashMap<u64, (ChunkId, u32)>> = HashMap::new();
+    let concurrency = if is_remote {
+        REMOTE_CONCURRENCY
+    } else {
+        LOCAL_CONCURRENCY
+    };
+
+    // Phase 1: Analyze live/dead space using the chunk index + pack sizes.
+    //
+    // Build a per-pack lookup from the chunk index:
+    //   pack_id → Vec<(chunk_id, stored_size, pack_offset)>
+    let mut per_pack_lookup: HashMap<PackId, Vec<(ChunkId, u32, u64)>> = HashMap::new();
     for (chunk_id, entry) in repo.chunk_index().iter() {
-        per_pack_lookup
-            .entry(entry.pack_id)
-            .or_default()
-            .insert(entry.pack_offset, (*chunk_id, entry.stored_size));
+        per_pack_lookup.entry(entry.pack_id).or_default().push((
+            *chunk_id,
+            entry.stored_size,
+            entry.pack_offset,
+        ));
     }
 
-    let mut analyses: Vec<PackAnalysis> = Vec::new();
-    let mut discovered_pack_ids: HashSet<PackId> = HashSet::new();
+    // Discover all packs on disk (256 LIST calls, parallelized).
+    let discovered = parallel_list_packs(repo.storage.as_ref(), concurrency)?;
 
-    for shard in 0u16..256 {
-        let prefix = format!("packs/{:02x}/", shard);
-        let keys = repo.storage.list(&prefix)?;
+    // For each discovered pack, compute live/dead space using size() + index.
+    let pack_header_size = PACK_HEADER_SIZE as u64;
 
-        for key in &keys {
-            if key.ends_with('/') {
-                continue;
-            }
+    let analyses_mu: Mutex<Vec<PackAnalysis>> = Mutex::new(Vec::new());
+    let packs_total = AtomicU64::new(0);
+    let packs_corrupt = AtomicU64::new(0);
+    let packs_orphan = AtomicU64::new(0);
+    let blobs_live = AtomicU64::new(0);
 
-            let pack_id = match PackId::from_storage_key(key) {
-                Ok(id) => id,
-                Err(e) => {
-                    warn!("Skipping invalid pack key '{}': {}", key, e);
-                    continue;
+    let storage = repo.storage.as_ref();
+    let work_idx = std::sync::atomic::AtomicUsize::new(0);
+
+    std::thread::scope(|s| {
+        for _ in 0..concurrency {
+            s.spawn(|| loop {
+                let idx = work_idx.fetch_add(1, Ordering::Relaxed);
+                if idx >= discovered.len() {
+                    break;
                 }
-            };
+                let (ref key, ref pack_id) = discovered[idx];
 
-            stats.packs_total += 1;
-            discovered_pack_ids.insert(pack_id);
+                packs_total.fetch_add(1, Ordering::Relaxed);
 
-            let scanned = match scan_pack_blobs(repo.storage.as_ref(), &pack_id) {
-                Ok(s) => s,
-                Err(e) => {
-                    warn!("Skipping corrupt pack {}: {}", pack_id, e);
-                    stats.packs_corrupt += 1;
-                    continue;
-                }
-            };
+                // Get pack size via metadata-only call (HEAD, stat, fs::metadata).
+                let pack_size = match storage.size(key) {
+                    Ok(Some(sz)) => sz,
+                    Ok(None) => {
+                        // Pack disappeared between list and size.
+                        warn!("Pack {} disappeared before size check, skipping", pack_id);
+                        packs_corrupt.fetch_add(1, Ordering::Relaxed);
+                        continue;
+                    }
+                    Err(e) => {
+                        warn!("Skipping pack {} (size check failed): {}", pack_id, e);
+                        packs_corrupt.fetch_add(1, Ordering::Relaxed);
+                        continue;
+                    }
+                };
 
-            let offset_map = per_pack_lookup.get(&pack_id);
+                let index_entries = per_pack_lookup.get(pack_id);
 
-            let mut live_entries = Vec::new();
-            let mut total_blobs = 0usize;
-            let mut total_bytes: u64 = 0;
-            let mut dead_bytes: u64 = 0;
+                if let Some(entries) = index_entries {
+                    // Case A: pack has index entries (normal pack).
+                    let live_bytes: u64 = entries
+                        .iter()
+                        .map(|(_, stored_size, _)| 4 + *stored_size as u64)
+                        .sum();
 
-            for (offset, length) in &scanned {
-                let blob_size = 4 + *length as u64;
-                total_bytes += blob_size;
-                total_blobs += 1;
+                    // Sanity check: live bytes can't exceed pack payload.
+                    if pack_size < pack_header_size || live_bytes > pack_size - pack_header_size {
+                        warn!(
+                            "Pack {} has inconsistent size (pack_size={}, live_bytes={}, header={}), marking corrupt",
+                            pack_id, pack_size, live_bytes, pack_header_size
+                        );
+                        packs_corrupt.fetch_add(1, Ordering::Relaxed);
+                        continue;
+                    }
 
-                if let Some((chunk_id, _stored_size)) = offset_map.and_then(|m| m.get(offset)) {
-                    live_entries.push(LiveEntry {
-                        chunk_id: *chunk_id,
-                        offset: *offset,
-                        length: *length,
-                    });
-                    stats.blobs_live += 1;
+                    let payload = pack_size - pack_header_size;
+                    let dead_bytes = payload - live_bytes;
+
+                    blobs_live.fetch_add(entries.len() as u64, Ordering::Relaxed);
+
+                    if dead_bytes == 0 {
+                        continue;
+                    }
+
+                    let unused_ratio = if payload > 0 {
+                        (dead_bytes as f64 / payload as f64) * 100.0
+                    } else {
+                        0.0
+                    };
+
+                    if unused_ratio >= threshold {
+                        let mut live_entries: Vec<LiveEntry> = entries
+                            .iter()
+                            .map(|(chunk_id, stored_size, pack_offset)| LiveEntry {
+                                chunk_id: *chunk_id,
+                                offset: *pack_offset,
+                                length: *stored_size,
+                            })
+                            .collect();
+                        // Sort by offset for deterministic output and sequential reads.
+                        live_entries.sort_by_key(|e| e.offset);
+
+                        analyses_mu.lock().unwrap().push(PackAnalysis {
+                            pack_id: *pack_id,
+                            storage_key: key.clone(),
+                            live_entries,
+                            total_bytes: payload,
+                            dead_bytes,
+                        });
+                    }
                 } else {
-                    dead_bytes += blob_size;
-                    stats.blobs_dead += 1;
+                    // Case B: orphan pack (no index entries).
+                    packs_orphan.fetch_add(1, Ordering::Relaxed);
+
+                    let payload = pack_size.saturating_sub(pack_header_size);
+                    if payload > 0 {
+                        analyses_mu.lock().unwrap().push(PackAnalysis {
+                            pack_id: *pack_id,
+                            storage_key: key.clone(),
+                            live_entries: Vec::new(),
+                            total_bytes: payload,
+                            dead_bytes: payload,
+                        });
+                    }
                 }
-            }
-
-            if dead_bytes == 0 {
-                continue;
-            }
-
-            let unused_ratio = if total_bytes > 0 {
-                (dead_bytes as f64 / total_bytes as f64) * 100.0
-            } else {
-                0.0
-            };
-
-            if unused_ratio >= threshold {
-                // Sort live entries by source offset for deterministic output
-                // and sequential source reads.
-                live_entries.sort_by_key(|e| e.offset);
-
-                analyses.push(PackAnalysis {
-                    pack_id,
-                    storage_key: key.clone(),
-                    total_blobs,
-                    live_entries,
-                    total_bytes,
-                    dead_bytes,
-                });
-            }
+            });
         }
-    }
+    });
 
-    // Detect orphan packs: packs on disk but not referenced by the chunk index
-    for pack_id in &discovered_pack_ids {
-        if !per_pack_lookup.contains_key(pack_id) {
-            stats.packs_orphan += 1;
-        }
-    }
+    stats.packs_total = packs_total.load(Ordering::Relaxed);
+    stats.packs_corrupt = packs_corrupt.load(Ordering::Relaxed);
+    stats.packs_orphan = packs_orphan.load(Ordering::Relaxed);
+    stats.blobs_live = blobs_live.load(Ordering::Relaxed);
+
+    let mut analyses = analyses_mu.into_inner().unwrap();
 
     if stats.packs_corrupt > 0 {
         warn!(
@@ -189,17 +243,17 @@ pub fn compact_repo(
             let pct = (a.dead_bytes as f64 / a.total_bytes as f64) * 100.0;
             if a.live_entries.is_empty() {
                 info!(
-                    "Would delete empty pack {} ({:.1}% unused, {} dead blobs)",
-                    a.pack_id, pct, a.total_blobs,
+                    "Would delete empty pack {} ({:.1}% unused, {} dead bytes)",
+                    a.pack_id, pct, a.dead_bytes,
                 );
                 stats.packs_deleted_empty += 1;
             } else {
                 info!(
-                    "Would repack {} ({:.1}% unused, {} live / {} dead blobs)",
+                    "Would repack {} ({:.1}% unused, {} live blobs, {} dead bytes)",
                     a.pack_id,
                     pct,
                     a.live_entries.len(),
-                    a.total_blobs - a.live_entries.len(),
+                    a.dead_bytes,
                 );
                 stats.packs_repacked += 1;
             }
@@ -238,6 +292,30 @@ pub fn compact_repo(
             analysis.live_entries.len(),
         );
 
+        // Validate pack header before trusting any blob offsets. Phase 1 only
+        // checked the file size, so a corrupt/truncated pack could slip through.
+        let header = repo
+            .storage
+            .get_range(&analysis.storage_key, 0, PACK_HEADER_SIZE as u64)?
+            .ok_or_else(|| {
+                VgerError::Other(format!(
+                    "pack {} disappeared during repack",
+                    analysis.pack_id
+                ))
+            })?;
+        if header.len() != PACK_HEADER_SIZE
+            || &header[..8] != PACK_MAGIC
+            || header[8] < PACK_VERSION_MIN
+            || header[8] > PACK_VERSION_MAX
+        {
+            warn!(
+                "Skipping pack {} with invalid header during repack",
+                analysis.pack_id
+            );
+            stats.packs_corrupt += 1;
+            continue;
+        }
+
         // Pre-scan for max blob overhead: legacy repos may contain blobs larger
         // than the current 16 MiB chunk cap, so the compact path sizes dynamically.
         let max_blob_overhead = analysis
@@ -255,12 +333,39 @@ pub fn compact_repo(
         );
 
         for entry in &analysis.live_entries {
-            let blob_data = read_blob_from_pack(
-                repo.storage.as_ref(),
-                &analysis.pack_id,
-                entry.offset,
-                entry.length,
-            )?;
+            // Read the 4-byte length prefix together with the blob data in a
+            // single range read. This cross-checks the on-disk length prefix
+            // against the index's stored_size, guarding against stale/corrupt
+            // index entries that could silently produce bad blobs.
+            let prefix_offset = entry.offset.checked_sub(4).ok_or_else(|| {
+                VgerError::Other(format!(
+                    "pack {}: blob at offset {} has no room for length prefix",
+                    analysis.pack_id, entry.offset,
+                ))
+            })?;
+            let read_len = 4u64 + entry.length as u64;
+            let combined = repo
+                .storage
+                .get_range(&analysis.storage_key, prefix_offset, read_len)?
+                .ok_or_else(|| VgerError::Other(format!("pack not found: {}", analysis.pack_id)))?;
+            if combined.len() != read_len as usize {
+                return Err(VgerError::Other(format!(
+                    "short read from pack {} at offset {}: expected {} bytes, got {}",
+                    analysis.pack_id,
+                    prefix_offset,
+                    read_len,
+                    combined.len()
+                )));
+            }
+            let on_disk_len = u32::from_le_bytes(combined[..4].try_into().expect("4 bytes"));
+            if on_disk_len != entry.length {
+                return Err(VgerError::Other(format!(
+                    "pack {}: blob at offset {} has on-disk length {} but index says {}; \
+                     run `vger check --verify-data`",
+                    analysis.pack_id, entry.offset, on_disk_len, entry.length,
+                )));
+            }
+            let blob_data = combined[4..].to_vec();
 
             writer.add_blob(entry.chunk_id, blob_data)?;
         }
@@ -287,6 +392,58 @@ pub fn compact_repo(
     }
 
     Ok(stats)
+}
+
+/// Discover all pack files across 256 shard directories, in parallel.
+fn parallel_list_packs(
+    storage: &dyn StorageBackend,
+    concurrency: usize,
+) -> Result<Vec<(String, PackId)>> {
+    let results: Mutex<Vec<(String, PackId)>> = Mutex::new(Vec::new());
+    let errors: Mutex<Vec<VgerError>> = Mutex::new(Vec::new());
+    let shard_idx = std::sync::atomic::AtomicU16::new(0);
+
+    std::thread::scope(|s| {
+        for _ in 0..concurrency {
+            s.spawn(|| loop {
+                let shard = shard_idx.fetch_add(1, Ordering::Relaxed);
+                if shard >= 256 {
+                    break;
+                }
+                let prefix = format!("packs/{:02x}/", shard);
+                let keys = match storage.list(&prefix) {
+                    Ok(k) => k,
+                    Err(e) => {
+                        errors.lock().unwrap().push(e);
+                        continue;
+                    }
+                };
+
+                let mut local = Vec::new();
+                for key in keys {
+                    if key.ends_with('/') {
+                        continue;
+                    }
+                    match PackId::from_storage_key(&key) {
+                        Ok(id) => local.push((key, id)),
+                        Err(e) => {
+                            warn!("Skipping invalid pack key '{}': {}", key, e);
+                        }
+                    }
+                }
+                if !local.is_empty() {
+                    results.lock().unwrap().extend(local);
+                }
+            });
+        }
+    });
+
+    let errs = errors.into_inner().unwrap();
+    if let Some(first) = errs.into_iter().next() {
+        return Err(first);
+    }
+
+    Ok(results.into_inner().unwrap())
 }
 
 fn select_analyses_by_cap(

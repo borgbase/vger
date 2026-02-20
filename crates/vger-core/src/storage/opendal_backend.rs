@@ -112,6 +112,14 @@ impl StorageBackend for OpendalBackend {
         }
     }
 
+    fn size(&self, key: &str) -> Result<Option<u64>> {
+        match self.op.stat(key) {
+            Ok(meta) => Ok(Some(meta.content_length())),
+            Err(e) if e.kind() == opendal::ErrorKind::NotFound => Ok(None),
+            Err(e) => Err(VgerError::from(e)),
+        }
+    }
+
     fn list(&self, prefix: &str) -> Result<Vec<String>> {
         let mut keys = Vec::new();
         let entries = self

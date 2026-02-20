@@ -835,6 +835,24 @@ impl StorageBackend for SftpBackend {
         })
     }
 
+    fn size(&self, key: &str) -> Result<Option<u64>> {
+        let path = self.full_path(key);
+        self.retry_op(&format!("SIZE {key}"), |sftp| {
+            ASYNC_RUNTIME.block_on(async {
+                match sftp.metadata(&path).await {
+                    Ok(meta) => match meta.size {
+                        Some(sz) => Ok(Some(sz)),
+                        None => Err(RetryError::permanent(VgerError::Other(format!(
+                            "SFTP stat '{path}': server did not return file size"
+                        )))),
+                    },
+                    Err(e) if is_not_found(&e) => Ok(None),
+                    Err(e) => Err(sftp_retry_error("stat", &path, e)),
+                }
+            })
+        })
+    }
+
     fn list(&self, prefix: &str) -> Result<Vec<String>> {
         let dir_path = self.full_path(prefix);
         let root = self.params.root.clone();

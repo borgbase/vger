@@ -239,6 +239,10 @@ impl StorageBackend for ThrottledStorageBackend {
         self.inner.put_owned(key, data)
     }
 
+    fn size(&self, key: &str) -> Result<Option<u64>> {
+        self.inner.size(key)
+    }
+
     fn acquire_advisory_lock(&self, lock_id: &str, info: &BackendLockInfo) -> Result<()> {
         self.inner.acquire_advisory_lock(lock_id, info)
     }

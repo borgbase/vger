@@ -24,9 +24,8 @@ pub(crate) fn run_compact(
             stats.packs_total, stats.packs_repacked, stats.packs_deleted_empty,
         );
         println!(
-            "  {} live blobs, {} dead blobs, {} would be freed",
+            "  {} live blobs, {} would be freed",
             stats.blobs_live,
-            stats.blobs_dead,
             format_bytes(stats.space_freed),
         );
     } else {

@@ -341,6 +341,30 @@ impl StorageBackend for RestBackend {
         }
     }
 
+    fn size(&self, key: &str) -> Result<Option<u64>> {
+        let url = self.url(key);
+        match self.retry_call(&format!("HEAD {key}"), || {
+            let req = self.apply_auth(self.agent.head(&url));
+            req.call()
+        }) {
+            Ok(resp) => {
+                let header = resp.header("Content-Length").ok_or_else(|| {
+                    VgerError::Other(format!(
+                        "REST HEAD {key}: response missing Content-Length header"
+                    ))
+                })?;
+                let len = header.parse::<u64>().map_err(|_| {
+                    VgerError::Other(format!(
+                        "REST HEAD {key}: invalid Content-Length header: {header}"
+                    ))
+                })?;
+                Ok(Some(len))
+            }
+            Err(ureq::Error::Status(404, _)) => Ok(None),
+            Err(e) => Err(VgerError::Other(format!("REST HEAD {key}: {e}"))),
+        }
+    }
+
     fn list(&self, prefix: &str) -> Result<Vec<String>> {
         let prefix = prefix.trim_start_matches('/');
         let url = if prefix.is_empty() {

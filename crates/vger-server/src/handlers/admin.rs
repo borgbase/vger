@@ -420,11 +420,34 @@ fn execute_repack(
                     ));
                 }
 
-                // Read blob from source into reusable scratch buffer
-                scratch.resize(blob_ref.length as usize, 0);
+                // Cross-check the on-disk 4-byte length prefix against the
+                // requested blob length. The prefix lives at offset - 4; if
+                // it doesn't match, the client's index metadata is stale.
+                let prefix_offset = blob_ref.offset.checked_sub(4).ok_or_else(|| {
+                    format!(
+                        "repack blob at offset {} has no room for length prefix",
+                        blob_ref.offset
+                    )
+                })?;
+                let mut prefix_buf = [0u8; 4];
                 source
-                    .seek(SeekFrom::Start(blob_ref.offset))
-                    .map_err(|e| format!("seek: {e}"))?;
+                    .seek(SeekFrom::Start(prefix_offset))
+                    .map_err(|e| format!("seek prefix: {e}"))?;
+                source
+                    .read_exact(&mut prefix_buf)
+                    .map_err(|e| format!("read prefix: {e}"))?;
+                let on_disk_len = u32::from_le_bytes(prefix_buf);
+                if on_disk_len as u64 != blob_ref.length {
+                    return Err(format!(
+                        "repack blob at offset {}: on-disk length prefix ({}) \
+                         does not match requested length ({})",
+                        blob_ref.offset, on_disk_len, blob_ref.length
+                    ));
+                }
+
+                // Read blob from source into reusable scratch buffer
+                // (cursor is already at blob_ref.offset after reading the prefix)
+                scratch.resize(blob_ref.length as usize, 0);
                 source
                     .read_exact(&mut scratch)
                     .map_err(|e| format!("read: {e}"))?;
