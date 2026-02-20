@@ -152,7 +152,7 @@ pub fn check_repo(
     passphrase: Option<&str>,
     verify_data: bool,
 ) -> Result<commands::check::CheckResult> {
-    commands::check::run(config, passphrase, verify_data)
+    commands::check::run(config, passphrase, verify_data, false)
 }
 
 pub fn delete_snapshot(

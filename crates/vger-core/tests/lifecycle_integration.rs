@@ -152,7 +152,7 @@ fn lifecycle_delete_compact_check_and_restore() {
     let compact_stats = commands::compact::run(&config, None, 0.0, None, false).unwrap();
     assert!(compact_stats.space_freed > 0);
 
-    let check = commands::check::run(&config, None, true).unwrap();
+    let check = commands::check::run(&config, None, true, false).unwrap();
     assert!(
         check.errors.is_empty(),
         "check errors: {:?}",
@@ -235,7 +235,7 @@ fn prune_compact_check_and_restore_kept_snapshots() {
             || compact_stats.space_freed > 0
     );
 
-    let check = commands::check::run(&config, None, true).unwrap();
+    let check = commands::check::run(&config, None, true, false).unwrap();
     assert!(check.errors.is_empty());
 
     let repo = open_local_repo(&repo_dir, None);
@@ -309,7 +309,7 @@ fn run_encrypted_lifecycle(mode: EncryptionModeConfig, expected_mode: Encryption
         Some(passphrase),
     );
 
-    let check = commands::check::run(&config, Some(passphrase), true).unwrap();
+    let check = commands::check::run(&config, Some(passphrase), true, false).unwrap();
     assert!(check.errors.is_empty());
 
     let restore_dir = tmp.path().join("restore");
@@ -341,7 +341,7 @@ fn run_encrypted_lifecycle(mode: EncryptionModeConfig, expected_mode: Encryption
     );
     assert!(matches!(wrong_extract, Err(VgerError::DecryptionFailed)));
 
-    let wrong_check = commands::check::run(&config, Some(wrong_passphrase), true);
+    let wrong_check = commands::check::run(&config, Some(wrong_passphrase), true, false);
     assert!(matches!(wrong_check, Err(VgerError::DecryptionFailed)));
 }
 

@@ -63,6 +63,51 @@ pub struct RepackResultResponse {
     pub completed: Vec<RepackOperationResult>,
 }
 
+// --- Verify-packs types ---
+
+/// A single blob expected at a given offset+length in a pack.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct VerifyBlobRef {
+    pub offset: u64,
+    pub length: u64,
+}
+
+/// Request to verify a single pack file.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct VerifyPackRequest {
+    pub pack_key: String,
+    /// Estimated on-disk size of the pack (used for server-side rate limiting).
+    #[serde(default)]
+    pub expected_size: u64,
+    pub expected_blobs: Vec<VerifyBlobRef>,
+}
+
+/// Batch request to verify multiple packs.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct VerifyPacksPlanRequest {
+    pub packs: Vec<VerifyPackRequest>,
+}
+
+/// Result of verifying a single pack file.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct VerifyPackResult {
+    pub pack_key: String,
+    pub hash_valid: bool,
+    pub header_valid: bool,
+    pub blobs_valid: bool,
+    pub error: Option<String>,
+}
+
+/// Batch response from verify-packs endpoint.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct VerifyPacksResponse {
+    pub results: Vec<VerifyPackResult>,
+    /// True when the server stopped early (e.g. byte-volume cap reached).
+    /// The client should re-queue unprocessed packs in a subsequent batch.
+    #[serde(default)]
+    pub truncated: bool,
+}
+
 /// Abstract key-value storage for repository objects.
 /// Keys are `/`-separated string paths (e.g. "packs/ab/ab01cd02...").
 pub trait StorageBackend: Send + Sync {
@@ -122,6 +167,13 @@ pub trait StorageBackend: Send + Sync {
     fn batch_delete_keys(&self, _keys: &[String]) -> Result<()> {
         Err(VgerError::UnsupportedBackend("batch delete API".into()))
     }
+
+    /// Server-side pack verification: hash check + header + blob boundary scan.
+    fn server_verify_packs(&self, _plan: &VerifyPacksPlanRequest) -> Result<VerifyPacksResponse> {
+        Err(VgerError::UnsupportedBackend(
+            "server-side verify-packs API".into(),
+        ))
+    }
 }
 
 impl StorageBackend for Arc<dyn StorageBackend> {
@@ -160,6 +212,9 @@ impl StorageBackend for Arc<dyn StorageBackend> {
     }
     fn batch_delete_keys(&self, keys: &[String]) -> Result<()> {
         (**self).batch_delete_keys(keys)
+    }
+    fn server_verify_packs(&self, plan: &VerifyPacksPlanRequest) -> Result<VerifyPacksResponse> {
+        (**self).server_verify_packs(plan)
     }
 }
 

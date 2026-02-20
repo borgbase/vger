@@ -146,6 +146,12 @@ pub(crate) enum Commands {
         /// Read and verify all data chunks (slow but thorough)
         #[arg(long)]
         verify_data: bool,
+
+        /// Force client-side download + crypto verification even when the
+        /// server supports server-side pack verification. Use this if you
+        /// don't trust the server to report honestly.
+        #[arg(long)]
+        distrust_server: bool,
     },
 
     /// Show repository statistics and snapshot totals

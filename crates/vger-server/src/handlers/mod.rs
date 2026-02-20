@@ -16,25 +16,30 @@ use tower_http::trace::TraceLayer;
 
 use crate::state::AppState;
 
-// High default to support large pack uploads while still preventing unlimited bodies.
-const MAX_REQUEST_BODY_BYTES: usize = 512 * 1024 * 1024; // 512 MiB
+/// Body limit for pack uploads (PUT /{repo}/{*path}).
+const MAX_OBJECT_BODY_BYTES: usize = 512 * 1024 * 1024; // 512 MiB
+/// Body limit for admin JSON requests (POST /{repo}?repack, verify-packs, etc.).
+/// Sized so the verify-packs byte-volume cap (MAX_VERIFY_BYTES) is always the
+/// binding constraint, even with very small chunk sizes (~4 KiB → ~24 MiB JSON).
+const MAX_ADMIN_BODY_BYTES: usize = 64 * 1024 * 1024; // 64 MiB
 
 pub fn router(state: AppState) -> Router {
-    let authed = Router::new()
-        // Lock endpoints
+    // Admin + lock routes — small body limit for JSON payloads.
+    let admin_routes = Router::new()
         .route(
             "/{repo}/locks/{id}",
             axum::routing::post(locks::acquire_lock).delete(locks::release_lock),
         )
         .route("/{repo}/locks", axum::routing::get(locks::list_locks))
-        // Admin endpoints (query-string dispatched)
         .route(
             "/{repo}",
             axum::routing::get(admin::repo_dispatch).post(admin::repo_action_dispatch),
         )
-        // Repo listing
         .route("/", axum::routing::get(admin::list_repos))
-        // Storage object endpoints — wildcard path
+        .layer(DefaultBodyLimit::max(MAX_ADMIN_BODY_BYTES));
+
+    // Storage object routes — large body limit for pack uploads.
+    let object_routes = Router::new()
         .route(
             "/{repo}/{*path}",
             axum::routing::get(objects::get_or_list)
@@ -43,6 +48,10 @@ pub fn router(state: AppState) -> Router {
                 .delete(objects::delete_object)
                 .post(objects::post_object),
         )
+        .layer(DefaultBodyLimit::max(MAX_OBJECT_BODY_BYTES));
+
+    let authed = admin_routes
+        .merge(object_routes)
         .layer(middleware::from_fn_with_state(
             state.clone(),
             auth_middleware,
@@ -53,8 +62,6 @@ pub fn router(state: AppState) -> Router {
 
     public
         .merge(authed)
-        // vger uploads pack files that exceed Axum's tiny default body limit.
-        .layer(DefaultBodyLimit::max(MAX_REQUEST_BODY_BYTES))
         .layer(TraceLayer::new_for_http())
         .with_state(state)
 }

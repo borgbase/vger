@@ -6,7 +6,10 @@ use blake2::Blake2bVar;
 
 use crate::config::RetryConfig;
 use crate::error::{Result, VgerError};
-use crate::storage::{BackendLockInfo, RepackPlanRequest, RepackResultResponse, StorageBackend};
+use crate::storage::{
+    BackendLockInfo, RepackPlanRequest, RepackResultResponse, StorageBackend,
+    VerifyPacksPlanRequest, VerifyPacksResponse,
+};
 
 /// HTTP REST backend for remote repository access via vger-server.
 pub struct RestBackend {
@@ -146,6 +149,28 @@ impl RestBackend {
             Err(ureq::Error::Status(404, _)) => Ok(()),
             Err(e) => Err(VgerError::Other(format!("REST lock release: {e}"))),
         }
+    }
+
+    /// Send a verify-packs plan to the server for server-side pack verification.
+    pub fn verify_packs(&self, plan: &VerifyPacksPlanRequest) -> Result<VerifyPacksResponse> {
+        let url = format!("{}?verify-packs", self.base_url);
+        let plan = plan.clone();
+        let resp = self
+            .retry_call("verify-packs", || {
+                let req = self.apply_auth(self.agent.post(&url));
+                req.send_json(plan.clone())
+            })
+            .map_err(|e| VgerError::Other(format!("REST verify-packs: {e}")))?;
+        if resp.status() >= 400 {
+            return Err(VgerError::Other(format!(
+                "REST verify-packs failed: HTTP {}",
+                resp.status()
+            )));
+        }
+        let val: VerifyPacksResponse = resp
+            .into_json()
+            .map_err(|e| VgerError::Other(format!("REST verify-packs parse: {e}")))?;
+        Ok(val)
     }
 
     /// Send a repack plan to the server for server-side compaction.
@@ -429,6 +454,10 @@ impl StorageBackend for RestBackend {
 
     fn batch_delete_keys(&self, keys: &[String]) -> Result<()> {
         self.batch_delete(keys)
+    }
+
+    fn server_verify_packs(&self, plan: &VerifyPacksPlanRequest) -> Result<VerifyPacksResponse> {
+        self.verify_packs(plan)
     }
 }
 

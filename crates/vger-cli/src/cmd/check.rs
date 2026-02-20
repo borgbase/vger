@@ -7,7 +7,15 @@ pub(crate) fn run_check(
     config: &VgerConfig,
     label: Option<&str>,
     verify_data: bool,
+    distrust_server: bool,
 ) -> Result<(), Box<dyn std::error::Error>> {
+    if distrust_server && !verify_data {
+        return Err(
+            "--distrust-server requires --verify-data (flag is meaningless without data verification)"
+                .into(),
+        );
+    }
+
     let result = with_repo_passphrase(config, label, |passphrase| {
         let mut on_progress = |event: commands::check::CheckProgressEvent| match event {
             commands::check::CheckProgressEvent::SnapshotStarted {
@@ -35,10 +43,25 @@ pub(crate) fn run_check(
             } => {
                 eprintln!("  verify-data: {verified}/{total_chunks}");
             }
+            commands::check::CheckProgressEvent::ServerVerifyPhaseStarted { total_packs } => {
+                eprintln!("Server-side verification of {total_packs} packs...");
+            }
+            commands::check::CheckProgressEvent::ServerVerifyProgress {
+                verified,
+                total_packs,
+            } => {
+                eprintln!("  server-verify: {verified}/{total_packs} packs");
+            }
         };
 
-        commands::check::run_with_progress(config, passphrase, verify_data, Some(&mut on_progress))
-            .map_err(|e| -> Box<dyn std::error::Error> { Box::new(e) })
+        commands::check::run_with_progress(
+            config,
+            passphrase,
+            verify_data,
+            distrust_server,
+            Some(&mut on_progress),
+        )
+        .map_err(|e| -> Box<dyn std::error::Error> { Box::new(e) })
     })?;
 
     if !result.errors.is_empty() {

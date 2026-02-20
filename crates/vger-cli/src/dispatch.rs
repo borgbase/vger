@@ -141,7 +141,7 @@ pub(crate) fn run_default_actions(
         global_hooks,
         repo_hooks,
         &mut make_hook_ctx("check", cfg, repo_label),
-        || cmd::check::run_check(cfg, label, false),
+        || cmd::check::run_check(cfg, label, false, false),
     ) {
         Ok(()) => steps.push(("check", StepResult::Ok)),
         Err(e) => {
@@ -233,7 +233,11 @@ pub(crate) fn dispatch_command(
             compact,
             ..
         } => cmd::prune::run_prune(cfg, label, *dry_run, *list, sources, source, *compact),
-        Commands::Check { verify_data, .. } => cmd::check::run_check(cfg, label, *verify_data),
+        Commands::Check {
+            verify_data,
+            distrust_server,
+            ..
+        } => cmd::check::run_check(cfg, label, *verify_data, *distrust_server),
         Commands::Info { .. } => cmd::info::run_info(cfg, label),
         Commands::Mount {
             snapshot,
