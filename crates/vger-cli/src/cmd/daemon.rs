@@ -1,0 +1,197 @@
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::time::{Duration, Instant};
+
+use vger_core::app::passphrase::configured_passphrase;
+use vger_core::app::scheduler;
+use vger_core::config::{EncryptionModeConfig, ResolvedRepo, ScheduleConfig};
+
+use crate::dispatch::{run_default_actions, warn_if_untrusted_rest};
+
+static SHUTDOWN: AtomicBool = AtomicBool::new(false);
+
+pub(crate) fn run_daemon(
+    repos: &[&ResolvedRepo],
+    schedule: &ScheduleConfig,
+) -> Result<(), Box<dyn std::error::Error>> {
+    if !schedule.enabled {
+        return Err(
+            "schedule.enabled is false; set it to true in your config to use daemon mode".into(),
+        );
+    }
+
+    let interval = scheduler::schedule_interval(schedule)?;
+
+    // Pre-validate passphrases for encrypted repos
+    for repo in repos {
+        let label = repo.label.as_deref().unwrap_or(&repo.config.repository.url);
+        if repo.config.encryption.mode != EncryptionModeConfig::None {
+            match configured_passphrase(&repo.config) {
+                Ok(Some(_)) => {}
+                Ok(None) => {
+                    return Err(format!(
+                        "encrypted repository '{label}' has no non-interactive passphrase source; \
+                         configure encryption.passcommand, encryption.passphrase, or set VGER_PASSPHRASE"
+                    ).into());
+                }
+                Err(e) => {
+                    return Err(format!("failed to validate passphrase for '{label}': {e}").into());
+                }
+            }
+        }
+    }
+
+    install_signal_handlers();
+
+    tracing::info!(
+        repos = repos.len(),
+        interval = ?interval,
+        on_startup = schedule.on_startup,
+        jitter_seconds = schedule.jitter_seconds,
+        "daemon starting"
+    );
+
+    for repo in repos {
+        let name = repo.label.as_deref().unwrap_or(&repo.config.repository.url);
+        tracing::info!(repo = name, "repository registered");
+    }
+
+    // Compute first run time
+    let mut next_run = if schedule.on_startup {
+        Instant::now()
+    } else {
+        let jitter = scheduler::random_jitter(schedule.jitter_seconds);
+        let next = Instant::now() + interval + jitter;
+        log_next_run(interval + jitter);
+        next
+    };
+
+    loop {
+        if SHUTDOWN.load(Ordering::SeqCst) {
+            tracing::info!("shutdown signal received, exiting");
+            return Ok(());
+        }
+
+        if Instant::now() >= next_run {
+            run_backup_cycle(repos);
+
+            if SHUTDOWN.load(Ordering::SeqCst) {
+                tracing::info!("shutdown signal received, exiting");
+                return Ok(());
+            }
+
+            // Schedule next run
+            let jitter = scheduler::random_jitter(schedule.jitter_seconds);
+            let delay = interval + jitter;
+            next_run = Instant::now() + delay;
+            log_next_run(delay);
+        }
+
+        std::thread::sleep(Duration::from_secs(1));
+    }
+}
+
+fn run_backup_cycle(repos: &[&ResolvedRepo]) {
+    tracing::info!("backup cycle starting");
+    let cycle_start = Instant::now();
+    let mut had_error = false;
+
+    for repo in repos {
+        if SHUTDOWN.load(Ordering::SeqCst) {
+            tracing::info!("shutdown signal received, skipping remaining repos");
+            break;
+        }
+
+        let name = repo.label.as_deref().unwrap_or(&repo.config.repository.url);
+        let multi = repos.len() > 1;
+        if multi {
+            eprintln!("--- Repository: {name} ---");
+        }
+
+        let label = repo.label.as_deref();
+        let cfg = &repo.config;
+        warn_if_untrusted_rest(cfg, label);
+
+        match run_default_actions(
+            cfg,
+            label,
+            &repo.sources,
+            &repo.global_hooks,
+            &repo.repo_hooks,
+            &repo.label,
+            Some(&SHUTDOWN),
+        ) {
+            Ok(()) => {}
+            Err(e) => {
+                tracing::error!(repo = name, error = %e, "backup cycle failed for repo");
+                had_error = true;
+            }
+        }
+    }
+
+    let elapsed = cycle_start.elapsed();
+    if had_error {
+        tracing::warn!(duration = ?elapsed, "backup cycle finished with errors");
+    } else {
+        tracing::info!(duration = ?elapsed, "backup cycle finished successfully");
+    }
+}
+
+fn log_next_run(delay: Duration) {
+    let next_wall = chrono::Local::now() + delay;
+    tracing::info!(
+        next_run = %next_wall.format("%Y-%m-%d %H:%M:%S %Z"),
+        delay = ?delay,
+        "next backup scheduled"
+    );
+}
+
+fn install_signal_handlers() {
+    #[cfg(unix)]
+    {
+        // Safety: signal handler only sets an atomic bool and restores default handler.
+        unsafe {
+            libc::signal(
+                libc::SIGTERM,
+                unix_signal_handler as *const () as libc::sighandler_t,
+            );
+            libc::signal(
+                libc::SIGINT,
+                unix_signal_handler as *const () as libc::sighandler_t,
+            );
+        }
+    }
+
+    #[cfg(windows)]
+    {
+        unsafe {
+            windows_sys::Win32::System::Console::SetConsoleCtrlHandler(
+                Some(windows_console_handler),
+                1, // TRUE
+            );
+        }
+    }
+}
+
+#[cfg(unix)]
+extern "C" fn unix_signal_handler(sig: libc::c_int) {
+    SHUTDOWN.store(true, Ordering::SeqCst);
+    // Restore default handler so a second signal kills immediately
+    unsafe {
+        libc::signal(sig, libc::SIG_DFL);
+    }
+}
+
+#[cfg(windows)]
+unsafe extern "system" fn windows_console_handler(ctrl_type: u32) -> i32 {
+    // CTRL_C_EVENT (0), CTRL_BREAK_EVENT (1), CTRL_CLOSE_EVENT (2)
+    if ctrl_type <= 2 {
+        SHUTDOWN.store(true, Ordering::SeqCst);
+        // Unregister this handler so a second signal terminates immediately
+        windows_sys::Win32::System::Console::SetConsoleCtrlHandler(
+            Some(windows_console_handler),
+            0, // FALSE = remove
+        );
+        return 1; // TRUE = handled this time
+    }
+    0 // FALSE = not handled
+}

@@ -20,8 +20,9 @@ use dispatch::{dispatch_command, run_default_actions, warn_if_untrusted_rest};
 fn main() {
     let cli = Cli::parse();
 
-    // Initialize logging
+    // Initialize logging — auto-upgrade to info for daemon
     let filter = match cli.verbose {
+        0 if matches!(&cli.command, Some(Commands::Daemon)) => "info",
         0 => "warn",
         1 => "info",
         2 => "debug",
@@ -66,6 +67,21 @@ fn main() {
         }
     };
 
+    // Handle `daemon` subcommand early — operates on all repos at once
+    if matches!(&cli.command, Some(Commands::Daemon)) {
+        let runtime = vger_core::app::RuntimeConfig {
+            source,
+            repos: all_repos,
+        };
+        let schedule = runtime.schedule();
+        let repo_refs: Vec<&ResolvedRepo> = runtime.repos.iter().collect();
+        if let Err(e) = cmd::daemon::run_daemon(&repo_refs, &schedule) {
+            eprintln!("Error: {e}");
+            std::process::exit(1);
+        }
+        return;
+    }
+
     // Filter by --repo if provided on the subcommand
     let repo_selector = cli.command.as_ref().and_then(|cmd| cmd.repo());
     let repos: Vec<&ResolvedRepo> = if let Some(selector) = repo_selector {
@@ -100,30 +116,37 @@ fn main() {
 
         let has_hooks = !repo.global_hooks.is_empty() || !repo.repo_hooks.is_empty();
 
-        let cmd_name = match &cli.command {
-            Some(cmd) => cmd.name(),
-            None => "run",
-        };
-
-        let run_action = || -> Result<(), Box<dyn std::error::Error>> {
-            match &cli.command {
-                Some(cmd) => dispatch_command(cmd, cfg, label, &repo.sources),
-                None => run_default_actions(cfg, label, &repo.sources),
+        let result = match &cli.command {
+            Some(cmd) => {
+                let run_action = || dispatch_command(cmd, cfg, label, &repo.sources);
+                if has_hooks {
+                    let mut ctx = HookContext {
+                        command: cmd.name().to_string(),
+                        repository: cfg.repository.url.clone(),
+                        label: repo.label.clone(),
+                        error: None,
+                        source_label: None,
+                        source_paths: None,
+                    };
+                    hooks::run_with_hooks(
+                        &repo.global_hooks,
+                        &repo.repo_hooks,
+                        &mut ctx,
+                        run_action,
+                    )
+                } else {
+                    run_action()
+                }
             }
-        };
-
-        let result = if has_hooks {
-            let mut ctx = HookContext {
-                command: cmd_name.to_string(),
-                repository: cfg.repository.url.clone(),
-                label: repo.label.clone(),
-                error: None,
-                source_label: None,
-                source_paths: None,
-            };
-            hooks::run_with_hooks(&repo.global_hooks, &repo.repo_hooks, &mut ctx, run_action)
-        } else {
-            run_action()
+            None => run_default_actions(
+                cfg,
+                label,
+                &repo.sources,
+                &repo.global_hooks,
+                &repo.repo_hooks,
+                &repo.label,
+                None,
+            ),
         };
 
         if let Err(e) = result {

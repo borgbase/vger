@@ -192,6 +192,9 @@ pub(crate) enum Commands {
         repo: Option<String>,
     },
 
+    /// Run scheduled backups as a foreground daemon
+    Daemon,
+
     /// Free repository space by compacting pack files
     Compact {
         /// Select repository by label or path
@@ -298,7 +301,7 @@ impl Commands {
             | Self::Mount { repo, .. }
             | Self::BreakLock { repo, .. }
             | Self::Compact { repo, .. } => repo.as_deref(),
-            Self::Config { .. } => None,
+            Self::Config { .. } | Self::Daemon => None,
         }
     }
 
@@ -317,6 +320,7 @@ impl Commands {
             Self::Compact { .. } => "compact",
             Self::Snapshot { .. } => "snapshot",
             Self::Config { .. } => "config",
+            Self::Daemon => "daemon",
         }
     }
 }

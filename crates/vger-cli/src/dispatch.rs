@@ -1,4 +1,7 @@
-use vger_core::config::{EncryptionModeConfig, SourceEntry, VgerConfig};
+use std::sync::atomic::{AtomicBool, Ordering};
+
+use vger_core::config::{EncryptionModeConfig, HooksConfig, SourceEntry, VgerConfig};
+use vger_core::hooks::{self, HookContext};
 use vger_core::storage::{parse_repo_url, ParsedUrl};
 
 use crate::cli::Commands;
@@ -31,17 +34,39 @@ enum StepResult {
     Skipped(&'static str),
 }
 
+fn make_hook_ctx(command: &str, cfg: &VgerConfig, repo_label: &Option<String>) -> HookContext {
+    HookContext {
+        command: command.to_string(),
+        repository: cfg.repository.url.clone(),
+        label: repo_label.clone(),
+        error: None,
+        source_label: None,
+        source_paths: None,
+    }
+}
+
 pub(crate) fn run_default_actions(
     cfg: &VgerConfig,
     label: Option<&str>,
     sources: &[SourceEntry],
+    global_hooks: &HooksConfig,
+    repo_hooks: &HooksConfig,
+    repo_label: &Option<String>,
+    shutdown: Option<&AtomicBool>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let start = std::time::Instant::now();
     let mut steps: Vec<(&str, StepResult)> = Vec::new();
 
+    let shutting_down = |s: Option<&AtomicBool>| s.is_some_and(|f| f.load(Ordering::SeqCst));
+
     // 1. Backup
     eprintln!("==> Starting backup");
-    let backup_ok = match cmd::backup::run_backup(cfg, label, None, None, vec![], sources, &[]) {
+    let backup_ok = match hooks::run_with_hooks(
+        global_hooks,
+        repo_hooks,
+        &mut make_hook_ctx("backup", cfg, repo_label),
+        || cmd::backup::run_backup(cfg, label, None, None, vec![], sources, &[]),
+    ) {
         Ok(()) => {
             steps.push(("backup", StepResult::Ok));
             true
@@ -52,6 +77,10 @@ pub(crate) fn run_default_actions(
             false
         }
     };
+
+    if shutting_down(shutdown) {
+        return print_summary(&steps, start);
+    }
 
     // 2. Prune — skip if no retention rules configured
     let has_retention = cfg.retention.has_any_rule()
@@ -65,7 +94,12 @@ pub(crate) fn run_default_actions(
         steps.push(("prune", StepResult::Skipped("backup failed")));
     } else {
         eprintln!("==> Starting prune");
-        match cmd::prune::run_prune(cfg, label, false, false, sources, &[], false) {
+        match hooks::run_with_hooks(
+            global_hooks,
+            repo_hooks,
+            &mut make_hook_ctx("prune", cfg, repo_label),
+            || cmd::prune::run_prune(cfg, label, false, false, sources, &[], false),
+        ) {
             Ok(()) => steps.push(("prune", StepResult::Ok)),
             Err(e) => {
                 eprintln!("Error: {e}");
@@ -74,12 +108,21 @@ pub(crate) fn run_default_actions(
         }
     }
 
+    if shutting_down(shutdown) {
+        return print_summary(&steps, start);
+    }
+
     // 3. Compact
     if !backup_ok {
         steps.push(("compact", StepResult::Skipped("backup failed")));
     } else {
         eprintln!("==> Starting compact");
-        match cmd::compact::run_compact(cfg, label, 10.0, None, false) {
+        match hooks::run_with_hooks(
+            global_hooks,
+            repo_hooks,
+            &mut make_hook_ctx("compact", cfg, repo_label),
+            || cmd::compact::run_compact(cfg, label, 10.0, None, false),
+        ) {
             Ok(()) => steps.push(("compact", StepResult::Ok)),
             Err(e) => {
                 eprintln!("Error: {e}");
@@ -88,9 +131,18 @@ pub(crate) fn run_default_actions(
         }
     }
 
+    if shutting_down(shutdown) {
+        return print_summary(&steps, start);
+    }
+
     // 4. Check (metadata-only)
     eprintln!("==> Starting check");
-    match cmd::check::run_check(cfg, label, false) {
+    match hooks::run_with_hooks(
+        global_hooks,
+        repo_hooks,
+        &mut make_hook_ctx("check", cfg, repo_label),
+        || cmd::check::run_check(cfg, label, false),
+    ) {
         Ok(()) => steps.push(("check", StepResult::Ok)),
         Err(e) => {
             eprintln!("Error: {e}");
@@ -98,13 +150,19 @@ pub(crate) fn run_default_actions(
         }
     }
 
-    // Print summary
+    print_summary(&steps, start)
+}
+
+fn print_summary(
+    steps: &[(&str, StepResult)],
+    start: std::time::Instant,
+) -> Result<(), Box<dyn std::error::Error>> {
     let elapsed = start.elapsed();
     let mut had_failure = false;
 
     eprintln!();
     eprintln!("=== Summary ===");
-    for (name, result) in &steps {
+    for (name, result) in steps {
         match result {
             StepResult::Ok => eprintln!("  {name:<12} ok"),
             StepResult::Failed(e) => {
@@ -200,6 +258,9 @@ pub(crate) fn dispatch_command(
         } => cmd::compact::run_compact(cfg, label, *threshold, max_repack_size.clone(), *dry_run),
         Commands::Config { .. } => {
             Err("'config' command should be handled before config resolution".into())
+        }
+        Commands::Daemon => {
+            Err("'daemon' command should be handled before per-repo dispatch".into())
         }
     }
 }

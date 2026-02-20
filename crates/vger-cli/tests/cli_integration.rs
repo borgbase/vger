@@ -486,3 +486,115 @@ fn cli_restore_missing_dest_fails() {
         "expected usage error about missing dest, got:\n{stderr}"
     );
 }
+
+// ── Daemon tests ────────────────────────────────────────────────────────────
+
+#[test]
+fn cli_daemon_rejects_disabled_schedule() {
+    let fx = CliFixture::new();
+    // Default config has schedule.enabled=false
+    write_plain_config(&fx.config_path, &fx.repo_dir);
+    let cfg = fx.config_path.to_string_lossy().to_string();
+
+    let (_stdout, stderr) = fx.run_err(&["--config", &cfg, "daemon"]);
+    assert!(
+        stderr.contains("schedule.enabled is false"),
+        "expected schedule.enabled error, got:\n{stderr}"
+    );
+}
+
+#[test]
+fn cli_daemon_encrypted_without_passphrase_fails() {
+    let fx = CliFixture::new();
+    let config = format!(
+        "repositories:\n  - url: {}\nencryption:\n  mode: aes256gcm\nsources: []\nschedule:\n  enabled: true\n  every: \"1h\"\n",
+        yaml_quote_path(&fx.repo_dir)
+    );
+    std::fs::write(&fx.config_path, config).unwrap();
+    let cfg = fx.config_path.to_string_lossy().to_string();
+
+    // Ensure no env passphrase leaks in from the test runner
+    let output = Command::new(vger_binary_path())
+        .args(["--config", &cfg, "daemon"])
+        .env("HOME", &fx.home_dir)
+        .env("XDG_CACHE_HOME", &fx.cache_dir)
+        .env("NO_COLOR", "1")
+        .env_remove("VGER_PASSPHRASE")
+        .output()
+        .unwrap();
+
+    assert!(!output.status.success());
+    let stderr_str = stderr(&output);
+    assert!(
+        stderr_str.contains("no non-interactive passphrase source"),
+        "expected passphrase error, got:\n{stderr_str}"
+    );
+}
+
+#[test]
+#[cfg(unix)]
+fn cli_daemon_on_startup_and_shutdown() {
+    use std::process::Stdio;
+
+    let fx = CliFixture::new();
+    let config = format!(
+        "repositories:\n  - url: {}\nencryption:\n  mode: none\nsources: []\nschedule:\n  enabled: true\n  every: \"1h\"\n  on_startup: true\n",
+        yaml_quote_path(&fx.repo_dir)
+    );
+    std::fs::write(&fx.config_path, config).unwrap();
+    let cfg = fx.config_path.to_string_lossy().to_string();
+
+    // Init repo first
+    fx.run_ok(&["--config", &cfg, "init"]);
+
+    // Spawn daemon as a background process
+    let mut child = Command::new(vger_binary_path())
+        .args(["--config", &cfg, "daemon"])
+        .env("HOME", &fx.home_dir)
+        .env("XDG_CACHE_HOME", &fx.cache_dir)
+        .env("NO_COLOR", "1")
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+
+    // Wait for the on_startup backup cycle to complete (empty sources = fast)
+    std::thread::sleep(Duration::from_secs(3));
+
+    // Send SIGTERM for graceful shutdown
+    Command::new("kill")
+        .args(["-TERM", &child.id().to_string()])
+        .status()
+        .unwrap();
+
+    // Wait for clean exit with a deadline to avoid hanging
+    let deadline = std::time::Instant::now() + Duration::from_secs(10);
+    loop {
+        match child.try_wait().unwrap() {
+            Some(_) => break,
+            None => {
+                if std::time::Instant::now() > deadline {
+                    child.kill().unwrap();
+                    panic!("daemon did not exit within 10 seconds after SIGTERM");
+                }
+                std::thread::sleep(Duration::from_millis(100));
+            }
+        }
+    }
+
+    let output = child.wait_with_output().unwrap();
+    let stderr_str = String::from_utf8_lossy(&output.stderr).to_string();
+
+    // Verify backup cycle ran
+    assert!(
+        stderr_str.contains("Summary"),
+        "daemon should have run a backup cycle, got stderr:\n{stderr_str}"
+    );
+
+    // Verify clean exit
+    assert!(
+        output.status.success(),
+        "daemon should exit cleanly after SIGTERM, got status: {}, stderr:\n{stderr_str}",
+        output.status
+    );
+}
