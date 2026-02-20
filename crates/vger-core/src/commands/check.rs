@@ -10,10 +10,13 @@ use crate::crypto::CryptoEngine;
 use crate::error::{Result, VgerError};
 use crate::index::ChunkIndexEntry;
 use crate::repo::format::{unpack_object_expect_with_context, ObjectType};
-use crate::repo::pack::{read_blob_from_pack, PACK_HEADER_SIZE, PACK_MAGIC};
+use crate::repo::pack::{
+    read_blob_from_pack, PACK_HEADER_SIZE, PACK_MAGIC, PACK_VERSION_MAX, PACK_VERSION_MIN,
+};
 use crate::snapshot::item::ItemType;
 use crate::storage::{
     StorageBackend, VerifyBlobRef, VerifyPackRequest, VerifyPacksPlanRequest, VerifyPacksResponse,
+    PROTOCOL_VERSION,
 };
 
 use super::list::{for_each_decoded_item, load_snapshot_item_stream, load_snapshot_meta};
@@ -488,7 +491,11 @@ pub(crate) fn verify_pack_full(
     };
 
     // Validate header
-    if pack_data.len() < PACK_HEADER_SIZE || &pack_data[..8] != PACK_MAGIC {
+    if pack_data.len() < PACK_HEADER_SIZE
+        || &pack_data[..8] != PACK_MAGIC
+        || pack_data[8] < PACK_VERSION_MIN
+        || pack_data[8] > PACK_VERSION_MAX
+    {
         errors.push(CheckError {
             context: "verify-data".into(),
             message: format!("pack {pack_id}: invalid pack header"),
@@ -788,7 +795,10 @@ fn build_verify_request(
             }
         })
         .collect();
-    VerifyPacksPlanRequest { packs }
+    VerifyPacksPlanRequest {
+        packs,
+        protocol_version: PROTOCOL_VERSION,
+    }
 }
 
 pub(crate) fn process_verify_response(

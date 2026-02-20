@@ -333,7 +333,10 @@ fn try_server_side_repack(
             delete_after: true,
         });
     }
-    let plan = RepackPlanRequest { operations };
+    let plan = RepackPlanRequest {
+        operations,
+        protocol_version: crate::storage::PROTOCOL_VERSION,
+    };
 
     let response = match repo.storage.server_repack(&plan) {
         Ok(resp) => resp,

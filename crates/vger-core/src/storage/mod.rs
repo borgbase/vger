@@ -32,81 +32,12 @@ pub struct BackendLockInfo {
     pub pid: u64,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct RepackBlobRef {
-    pub offset: u64,
-    pub length: u64,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct RepackOperationRequest {
-    pub source_pack: String,
-    pub keep_blobs: Vec<RepackBlobRef>,
-    pub delete_after: bool,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct RepackPlanRequest {
-    pub operations: Vec<RepackOperationRequest>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct RepackOperationResult {
-    pub source_pack: String,
-    pub new_pack: Option<String>,
-    pub new_offsets: Vec<u64>,
-    pub deleted: bool,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct RepackResultResponse {
-    pub completed: Vec<RepackOperationResult>,
-}
-
-// --- Verify-packs types ---
-
-/// A single blob expected at a given offset+length in a pack.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct VerifyBlobRef {
-    pub offset: u64,
-    pub length: u64,
-}
-
-/// Request to verify a single pack file.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct VerifyPackRequest {
-    pub pack_key: String,
-    /// Estimated on-disk size of the pack (used for server-side rate limiting).
-    #[serde(default)]
-    pub expected_size: u64,
-    pub expected_blobs: Vec<VerifyBlobRef>,
-}
-
-/// Batch request to verify multiple packs.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct VerifyPacksPlanRequest {
-    pub packs: Vec<VerifyPackRequest>,
-}
-
-/// Result of verifying a single pack file.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct VerifyPackResult {
-    pub pack_key: String,
-    pub hash_valid: bool,
-    pub header_valid: bool,
-    pub blobs_valid: bool,
-    pub error: Option<String>,
-}
-
-/// Batch response from verify-packs endpoint.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct VerifyPacksResponse {
-    pub results: Vec<VerifyPackResult>,
-    /// True when the server stopped early (e.g. byte-volume cap reached).
-    /// The client should re-queue unprocessed packs in a subsequent batch.
-    #[serde(default)]
-    pub truncated: bool,
-}
+// Re-export wire-format types from vger-protocol (shared with vger-server).
+pub use vger_protocol::{
+    RepackBlobRef, RepackOperationRequest, RepackOperationResult, RepackPlanRequest,
+    RepackResultResponse, VerifyBlobRef, VerifyPackRequest, VerifyPackResult,
+    VerifyPacksPlanRequest, VerifyPacksResponse, PROTOCOL_VERSION,
+};
 
 /// Abstract key-value storage for repository objects.
 /// Keys are `/`-separated string paths (e.g. "packs/ab/ab01cd02...").

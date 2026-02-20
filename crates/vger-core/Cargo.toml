@@ -8,6 +8,9 @@ license = "GPL-3.0-only"
 workspace = true
 
 [dependencies]
+# Internal
+vger-protocol.workspace = true
+
 # Serialization
 serde.workspace = true
 serde_json.workspace = true

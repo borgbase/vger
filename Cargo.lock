@@ -7378,6 +7378,7 @@ dependencies = [
  "tracing",
  "ureq",
  "url",
+ "vger-protocol",
  "xattr",
  "xorf",
  "zeroize",
@@ -7400,6 +7401,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "vger-protocol"
+version = "0.7.1"
+dependencies = [
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "vger-server"
 version = "0.7.1"
 dependencies = [
@@ -7419,6 +7428,7 @@ dependencies = [
  "tower-http",
  "tracing",
  "tracing-subscriber",
+ "vger-protocol",
 ]
 
 [[package]]

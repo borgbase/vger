@@ -6,12 +6,18 @@ use axum::response::{IntoResponse, Response};
 use blake2::digest::{Update, VariableOutput};
 use blake2::Blake2bVar;
 
+use vger_protocol::{
+    check_protocol_version, is_valid_pack_key, validate_blob_ref, RepackOperationResult,
+    RepackPlanRequest, RepackResultResponse, VerifyBlobRef as ProtoVerifyBlobRef,
+    VerifyPackRequest, VerifyPackResult, VerifyPacksPlanRequest, VerifyPacksResponse,
+    PACK_HEADER_SIZE, PACK_MAGIC, PACK_VERSION_CURRENT, PACK_VERSION_MAX, PACK_VERSION_MIN,
+};
+
 use crate::error::ServerError;
 use crate::state::{read_unpoisoned, AppState};
 
 static REPACK_TEMP_COUNTER: AtomicU64 = AtomicU64::new(0);
 
-const PACK_MAGIC: &[u8; 8] = b"VGERPACK";
 const MAX_REPACK_OPS: usize = 10_000;
 const MAX_KEEP_BLOBS_PER_OP: usize = 200_000;
 
@@ -222,7 +228,7 @@ async fn repack(
     repo: &str,
     body: axum::body::Bytes,
 ) -> Result<Response, ServerError> {
-    let plan: RepackPlan = serde_json::from_slice(&body)
+    let plan: RepackPlanRequest = serde_json::from_slice(&body)
         .map_err(|e| ServerError::BadRequest(format!("invalid repack plan: {e}")))?;
     validate_repack_plan(&plan)?;
 
@@ -249,7 +255,7 @@ async fn verify_packs(
     repo: &str,
     body: axum::body::Bytes,
 ) -> Result<Response, ServerError> {
-    let plan: VerifyPacksPlan = serde_json::from_slice(&body)
+    let plan: VerifyPacksPlanRequest = serde_json::from_slice(&body)
         .map_err(|e| ServerError::BadRequest(format!("invalid verify-packs plan: {e}")))?;
     validate_verify_packs_plan(&plan)?;
 
@@ -337,41 +343,13 @@ fn list_all_recursive(
     Ok(())
 }
 
-// --- Repack types and logic ---
+// --- Repack logic ---
 
-#[derive(serde::Deserialize)]
-struct RepackPlan {
-    operations: Vec<RepackOperation>,
-}
-
-#[derive(serde::Deserialize)]
-struct RepackOperation {
-    source_pack: String,
-    keep_blobs: Vec<BlobRef>,
-    delete_after: bool,
-}
-
-#[derive(serde::Deserialize)]
-struct BlobRef {
-    offset: u64,
-    length: u64,
-}
-
-#[derive(serde::Serialize)]
-struct RepackResult {
-    completed: Vec<RepackOpResult>,
-}
-
-#[derive(serde::Serialize)]
-struct RepackOpResult {
-    source_pack: String,
-    new_pack: Option<String>,
-    /// Offset of each kept blob in the new pack (in order of keep_blobs).
-    new_offsets: Vec<u64>,
-    deleted: bool,
-}
-
-fn execute_repack(state: &AppState, repo: &str, plan: &RepackPlan) -> Result<RepackResult, String> {
+fn execute_repack(
+    state: &AppState,
+    repo: &str,
+    plan: &RepackPlanRequest,
+) -> Result<RepackResultResponse, String> {
     use std::io::{BufWriter, Read, Seek, SeekFrom, Write};
 
     let mut completed = Vec::new();
@@ -388,7 +366,7 @@ fn execute_repack(state: &AppState, repo: &str, plan: &RepackPlan) -> Result<Rep
                 let _ = std::fs::remove_file(&source_path);
                 state.sub_quota_usage(repo, old_size);
             }
-            completed.push(RepackOpResult {
+            completed.push(RepackOperationResult {
                 source_pack: op.source_pack.clone(),
                 new_pack: None,
                 new_offsets: vec![],
@@ -416,7 +394,7 @@ fn execute_repack(state: &AppState, repo: &str, plan: &RepackPlan) -> Result<Rep
         let mut writer = BufWriter::new(temp_file);
         let mut hasher = Blake2bVar::new(32).expect("valid output size");
 
-        let mut pack_offset: u64 = 9; // PACK_MAGIC(8) + version(1)
+        let mut pack_offset: u64 = PACK_HEADER_SIZE as u64;
         let mut new_offsets = Vec::with_capacity(op.keep_blobs.len());
         let mut scratch = Vec::new();
 
@@ -424,7 +402,7 @@ fn execute_repack(state: &AppState, repo: &str, plan: &RepackPlan) -> Result<Rep
             // Write pack header: magic + version
             write_and_hash(&mut writer, &mut hasher, PACK_MAGIC)
                 .map_err(|e| format!("write header: {e}"))?;
-            write_and_hash(&mut writer, &mut hasher, &[1u8])
+            write_and_hash(&mut writer, &mut hasher, &[PACK_VERSION_CURRENT])
                 .map_err(|e| format!("write version: {e}"))?;
 
             for blob_ref in &op.keep_blobs {
@@ -510,7 +488,7 @@ fn execute_repack(state: &AppState, repo: &str, plan: &RepackPlan) -> Result<Rep
             state.sub_quota_usage(repo, old_size);
         }
 
-        completed.push(RepackOpResult {
+        completed.push(RepackOperationResult {
             source_pack: op.source_pack.clone(),
             new_pack: Some(new_pack_key),
             new_offsets,
@@ -518,7 +496,7 @@ fn execute_repack(state: &AppState, repo: &str, plan: &RepackPlan) -> Result<Rep
         });
     }
 
-    Ok(RepackResult { completed })
+    Ok(RepackResultResponse { completed })
 }
 
 /// Write data to writer and feed to hasher in one step.
@@ -540,7 +518,8 @@ fn finalize_blake2b_256_hex(hasher: Blake2bVar) -> String {
     hex::encode(out)
 }
 
-fn validate_repack_plan(plan: &RepackPlan) -> Result<(), ServerError> {
+fn validate_repack_plan(plan: &RepackPlanRequest) -> Result<(), ServerError> {
+    check_protocol_version(plan.protocol_version).map_err(ServerError::BadRequest)?;
     if plan.operations.len() > MAX_REPACK_OPS {
         return Err(ServerError::BadRequest(format!(
             "too many repack operations: {} (max {MAX_REPACK_OPS})",
@@ -561,68 +540,26 @@ fn validate_repack_plan(plan: &RepackPlan) -> Result<(), ServerError> {
             )));
         }
         for (blob_idx, blob) in op.keep_blobs.iter().enumerate() {
-            if blob.length == 0 {
-                return Err(ServerError::BadRequest(format!(
-                    "blob length must be > 0 at operation {idx} blob {blob_idx}"
-                )));
-            }
-            if blob.length > u32::MAX as u64 {
-                return Err(ServerError::BadRequest(format!(
-                    "blob length exceeds pack format max at operation {idx} blob {blob_idx}"
-                )));
-            }
-            if blob.offset.checked_add(blob.length).is_none() {
-                return Err(ServerError::BadRequest(format!(
-                    "blob range overflow at operation {idx} blob {blob_idx}"
-                )));
-            }
+            validate_blob_ref(
+                blob.offset,
+                blob.length,
+                &format!("operation {idx} blob {blob_idx}"),
+            )
+            .map_err(ServerError::BadRequest)?;
         }
     }
     Ok(())
 }
 
-// --- Verify-packs types and logic ---
+// --- Verify-packs logic ---
 
 /// Must match or slightly exceed client-side SERVER_VERIFY_BATCH_SIZE (100).
 const MAX_VERIFY_PACKS: usize = 100;
 /// Maximum estimated bytes of pack I/O per verify request (matches client-side cap).
 const MAX_VERIFY_BYTES: u64 = 2 * 1024 * 1024 * 1024; // 2 GiB
 
-#[derive(serde::Deserialize)]
-struct VerifyPacksPlan {
-    packs: Vec<VerifyPackEntry>,
-}
-
-#[derive(serde::Deserialize)]
-struct VerifyPackEntry {
-    pack_key: String,
-    #[serde(default)]
-    expected_size: u64,
-    expected_blobs: Vec<VerifyBlobRef>,
-}
-
-#[derive(serde::Deserialize)]
-struct VerifyBlobRef {
-    offset: u64,
-    length: u64,
-}
-
-#[derive(serde::Serialize)]
-struct VerifyPacksResult {
-    results: Vec<VerifyPackResultEntry>,
-    truncated: bool,
-}
-
-#[derive(serde::Serialize)]
-struct VerifyPackResultEntry {
-    pack_key: String,
-    hash_valid: bool,
-    header_valid: bool,
-    blobs_valid: bool,
-    error: Option<String>,
-}
-
-fn validate_verify_packs_plan(plan: &VerifyPacksPlan) -> Result<(), ServerError> {
+fn validate_verify_packs_plan(plan: &VerifyPacksPlanRequest) -> Result<(), ServerError> {
+    check_protocol_version(plan.protocol_version).map_err(ServerError::BadRequest)?;
     if plan.packs.len() > MAX_VERIFY_PACKS {
         return Err(ServerError::BadRequest(format!(
             "too many packs to verify: {} (max {MAX_VERIFY_PACKS})",
@@ -648,21 +585,12 @@ fn validate_verify_packs_plan(plan: &VerifyPacksPlan) -> Result<(), ServerError>
         }
 
         for (blob_idx, blob) in entry.expected_blobs.iter().enumerate() {
-            if blob.length == 0 {
-                return Err(ServerError::BadRequest(format!(
-                    "blob length must be > 0 at pack {idx} blob {blob_idx}"
-                )));
-            }
-            if blob.length > u32::MAX as u64 {
-                return Err(ServerError::BadRequest(format!(
-                    "blob length exceeds pack format max at pack {idx} blob {blob_idx}"
-                )));
-            }
-            if blob.offset.checked_add(blob.length).is_none() {
-                return Err(ServerError::BadRequest(format!(
-                    "blob range overflow at pack {idx} blob {blob_idx}"
-                )));
-            }
+            validate_blob_ref(
+                blob.offset,
+                blob.length,
+                &format!("pack {idx} blob {blob_idx}"),
+            )
+            .map_err(ServerError::BadRequest)?;
         }
         total_bytes = total_bytes.saturating_add(entry.expected_size);
     }
@@ -676,7 +604,11 @@ fn validate_verify_packs_plan(plan: &VerifyPacksPlan) -> Result<(), ServerError>
     Ok(())
 }
 
-fn execute_verify_packs(state: &AppState, repo: &str, plan: &VerifyPacksPlan) -> VerifyPacksResult {
+fn execute_verify_packs(
+    state: &AppState,
+    repo: &str,
+    plan: &VerifyPacksPlanRequest,
+) -> VerifyPacksResponse {
     let mut results = Vec::with_capacity(plan.packs.len());
     let mut bytes_read: u64 = 0;
     let mut truncated = false;
@@ -686,7 +618,7 @@ fn execute_verify_packs(state: &AppState, repo: &str, plan: &VerifyPacksPlan) ->
         let file_path = match state.file_path(repo, &entry.pack_key) {
             Some(p) => p,
             None => {
-                results.push(VerifyPackResultEntry {
+                results.push(VerifyPackResult {
                     pack_key: entry.pack_key.clone(),
                     hash_valid: false,
                     header_valid: false,
@@ -699,7 +631,7 @@ fn execute_verify_packs(state: &AppState, repo: &str, plan: &VerifyPacksPlan) ->
         let file_size = match std::fs::metadata(&file_path) {
             Ok(m) => m.len(),
             Err(e) => {
-                results.push(VerifyPackResultEntry {
+                results.push(VerifyPackResult {
                     pack_key: entry.pack_key.clone(),
                     hash_valid: false,
                     header_valid: false,
@@ -717,17 +649,14 @@ fn execute_verify_packs(state: &AppState, repo: &str, plan: &VerifyPacksPlan) ->
         results.push(verify_single_pack(&file_path, entry));
     }
 
-    VerifyPacksResult { results, truncated }
+    VerifyPacksResponse { results, truncated }
 }
 
-fn verify_single_pack(
-    file_path: &std::path::Path,
-    entry: &VerifyPackEntry,
-) -> VerifyPackResultEntry {
+fn verify_single_pack(file_path: &std::path::Path, entry: &VerifyPackRequest) -> VerifyPackResult {
     let pack_data = match std::fs::read(file_path) {
         Ok(d) => d,
         Err(e) => {
-            return VerifyPackResultEntry {
+            return VerifyPackResult {
                 pack_key: entry.pack_key.clone(),
                 hash_valid: false,
                 header_valid: false,
@@ -747,7 +676,9 @@ fn verify_single_pack(
     let hash_valid = actual_hash == expected_hash;
 
     // 2. Validate pack header (magic + version)
-    let header_valid = pack_data.len() >= 9 && &pack_data[..8] == PACK_MAGIC && pack_data[8] == 1;
+    let header_valid = pack_data.len() >= PACK_HEADER_SIZE
+        && &pack_data[..8] == PACK_MAGIC
+        && (PACK_VERSION_MIN..=PACK_VERSION_MAX).contains(&pack_data[8]);
 
     // 3. Forward-scan blobs and cross-reference against expected entries
     let blobs_valid = if header_valid {
@@ -768,7 +699,7 @@ fn verify_single_pack(
         None
     };
 
-    VerifyPackResultEntry {
+    VerifyPackResult {
         pack_key: entry.pack_key.clone(),
         hash_valid,
         header_valid,
@@ -779,9 +710,9 @@ fn verify_single_pack(
 
 /// Forward-scan the pack's blob boundaries and verify that every expected blob
 /// exists at the declared (offset, length).
-fn verify_blob_boundaries(pack_data: &[u8], expected_blobs: &[VerifyBlobRef]) -> bool {
+fn verify_blob_boundaries(pack_data: &[u8], expected_blobs: &[ProtoVerifyBlobRef]) -> bool {
     // Scan actual blob boundaries from the pack
-    let mut pos = 9usize; // past header
+    let mut pos = PACK_HEADER_SIZE;
     let mut actual_blobs: Vec<(u64, u64)> = Vec::new();
     let blobs_end = pack_data.len();
 
@@ -811,17 +742,6 @@ fn verify_blob_boundaries(pack_data: &[u8], expected_blobs: &[VerifyBlobRef]) ->
     }
 
     true
-}
-
-fn is_valid_pack_key(key: &str) -> bool {
-    let parts: Vec<&str> = key.trim_matches('/').split('/').collect();
-    if parts.len() != 3 || parts[0] != "packs" {
-        return false;
-    }
-    parts[1].len() == 2
-        && parts[1].chars().all(|c| c.is_ascii_hexdigit())
-        && parts[2].len() == 64
-        && parts[2].chars().all(|c| c.is_ascii_hexdigit())
 }
 
 fn check_structure(repo_dir: &std::path::Path) -> serde_json::Value {
@@ -957,7 +877,7 @@ mod tests {
     use blake2::Blake2bVar;
 
     use super::super::test_helpers::*;
-    use super::PACK_MAGIC;
+    use vger_protocol::PACK_MAGIC;
 
     /// Build a minimal pack file: PACK_MAGIC + version(1) + [u32_le_len | blob]...
     /// Returns (pack bytes, vec of (offset, length) for each blob — offset points

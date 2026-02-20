@@ -12,6 +12,9 @@ path = "src/main.rs"
 workspace = true
 
 [dependencies]
+# Internal
+vger-protocol.workspace = true
+
 # Web framework
 axum = "0.8"
 tokio = { workspace = true, features = ["full"] }

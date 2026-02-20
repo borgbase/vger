@@ -4,12 +4,14 @@ members = [
     "crates/vger-cli",
     "crates/vger-server",
     "crates/vger-gui",
+    "crates/vger-protocol",
 ]
 resolver = "2"
 
 [workspace.dependencies]
 # Internal crates
 vger-core = { path = "crates/vger-core" }
+vger-protocol = { path = "crates/vger-protocol" }
 
 # Serialization
 serde = { version = "1", features = ["derive"] }

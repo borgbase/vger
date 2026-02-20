@@ -12,12 +12,10 @@ use crate::crypto::pack_id::PackId;
 use crate::error::{Result, VgerError};
 use crate::storage::StorageBackend;
 
-/// Magic bytes at the start of every pack file.
-pub const PACK_MAGIC: &[u8; 8] = b"VGERPACK";
-/// Pack format version.
-pub const PACK_VERSION: u8 = 1;
-/// Size of the pack header (magic + version byte).
-pub const PACK_HEADER_SIZE: usize = 9;
+// Re-export pack format constants from vger-protocol.
+pub use vger_protocol::{
+    PACK_HEADER_SIZE, PACK_MAGIC, PACK_VERSION_CURRENT, PACK_VERSION_MAX, PACK_VERSION_MIN,
+};
 
 /// Distinguishes data packs (file content) from tree packs (item-stream metadata).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -193,7 +191,7 @@ impl PackWriter {
                         warn!("mmap pack buffer failed ({e}), falling back to Vec");
                         let mut v = Vec::with_capacity(self.target_size.min(512 * 1024 * 1024));
                         v.extend_from_slice(PACK_MAGIC);
-                        v.push(PACK_VERSION);
+                        v.push(PACK_VERSION_CURRENT);
                         self.buffer = Some(PackBuffer::Memory(v));
                         return Ok(());
                     }
@@ -202,7 +200,7 @@ impl PackWriter {
             PackType::Tree => {
                 let mut v = Vec::with_capacity(self.target_size.min(512 * 1024 * 1024));
                 v.extend_from_slice(PACK_MAGIC);
-                v.push(PACK_VERSION);
+                v.push(PACK_VERSION_CURRENT);
                 self.buffer = Some(PackBuffer::Memory(v));
             }
         }
@@ -210,7 +208,7 @@ impl PackWriter {
         // Write pack magic + version into mmap buffer if we used mmap
         if let Some(PackBuffer::Mmap(ref mut mb)) = self.buffer {
             mb.mmap[..8].copy_from_slice(PACK_MAGIC);
-            mb.mmap[8] = PACK_VERSION;
+            mb.mmap[8] = PACK_VERSION_CURRENT;
             mb.write_pos = PACK_HEADER_SIZE;
         }
 
@@ -508,6 +506,14 @@ pub fn scan_pack_blobs(storage: &dyn StorageBackend, pack_id: &PackId) -> Result
     // Verify magic
     if &pack_data[..8] != PACK_MAGIC {
         return Err(VgerError::InvalidFormat("invalid pack magic".into()));
+    }
+
+    // Verify version
+    let version = pack_data[8];
+    if version < PACK_VERSION_MIN || version > PACK_VERSION_MAX {
+        return Err(VgerError::InvalidFormat(format!(
+            "unsupported pack version {version} (supported: {PACK_VERSION_MIN}..={PACK_VERSION_MAX})"
+        )));
     }
 
     let mut pos = PACK_HEADER_SIZE;
@@ -846,7 +852,7 @@ mod tests {
         // Valid pack with one 2-byte blob, then 3 trailing garbage bytes
         let mut data = Vec::new();
         data.extend_from_slice(PACK_MAGIC);
-        data.push(PACK_VERSION);
+        data.push(PACK_VERSION_CURRENT);
         data.extend_from_slice(&2u32.to_le_bytes()); // blob len = 2
         data.extend_from_slice(&[0xDE, 0xAD]); // blob data
         data.extend_from_slice(&[0xFF, 0xFF, 0xFF]); // trailing garbage (incomplete frame)
