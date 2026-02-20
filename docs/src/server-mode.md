@@ -96,6 +96,40 @@ sudo systemctl enable --now vger-server.service
 sudo systemctl status vger-server.service
 ```
 
+## Reverse proxy
+
+`vger-server` listens on HTTP and expects a reverse proxy to handle TLS. Pack uploads can be up to 512 MiB, so the proxy must allow large request bodies.
+
+### Nginx
+
+```nginx
+server {
+    listen 443 ssl http2;
+    server_name backup.example.com;
+
+    ssl_certificate     /etc/letsencrypt/live/backup.example.com/fullchain.pem;
+    ssl_certificate_key /etc/letsencrypt/live/backup.example.com/privkey.pem;
+
+    client_max_body_size    600m;              # vger-server allows up to 512 MiB
+    proxy_request_buffering off;               # stream uploads directly to backend
+
+    location / {
+        proxy_pass http://127.0.0.1:8585;
+    }
+}
+```
+
+### Caddy
+
+```caddyfile
+backup.example.com {
+    request_body {
+        max_size 600MB
+    }
+    reverse_proxy 127.0.0.1:8585
+}
+```
+
 ## Client configuration (REST backend)
 
 ```yaml
