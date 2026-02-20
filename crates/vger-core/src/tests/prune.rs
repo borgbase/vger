@@ -1,6 +1,7 @@
 use chrono::{Duration, Utc};
 
 use crate::config::RetentionConfig;
+use crate::crypto::snapshot_id::SnapshotId;
 use crate::prune::{apply_policy, parse_duration, PruneDecision};
 use crate::repo::manifest::SnapshotEntry;
 
@@ -41,7 +42,7 @@ fn make_snapshots(count: usize) -> Vec<SnapshotEntry> {
     (0..count)
         .map(|i| SnapshotEntry {
             name: format!("backup-{i}"),
-            id: vec![i as u8; 32],
+            id: SnapshotId([i as u8; 32]),
             time: now - Duration::hours(i as i64),
             source_label: String::new(),
             label: String::new(),

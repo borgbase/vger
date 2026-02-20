@@ -45,16 +45,15 @@ pub fn load_snapshot_meta(repo: &Repository, snapshot_name: &str) -> Result<Snap
         .find_snapshot(snapshot_name)
         .ok_or_else(|| VgerError::SnapshotNotFound(snapshot_name.into()))?;
 
-    let snapshot_id_hex = hex::encode(&entry.id);
     let meta_data = repo
         .storage
-        .get(&format!("snapshots/{snapshot_id_hex}"))?
+        .get(&entry.id.storage_key())?
         .ok_or_else(|| VgerError::SnapshotNotFound(snapshot_name.into()))?;
 
     let meta_bytes = unpack_object_expect_with_context(
         &meta_data,
         ObjectType::SnapshotMeta,
-        &entry.id,
+        entry.id.as_bytes(),
         repo.crypto.as_ref(),
     )?;
     Ok(rmp_serde::from_slice(&meta_bytes)?)

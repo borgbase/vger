@@ -1,6 +1,7 @@
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
+use crate::crypto::snapshot_id::SnapshotId;
 use crate::error::{Result, VgerError};
 
 /// The manifest — list of all snapshots in the repository.
@@ -21,7 +22,7 @@ pub struct Manifest {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SnapshotEntry {
     pub name: String,
-    pub id: Vec<u8>, // 32 bytes, stored as vec for serde compat
+    pub id: SnapshotId,
     pub time: DateTime<Utc>,
     /// Label of the source that produced this snapshot.
     #[serde(default)]

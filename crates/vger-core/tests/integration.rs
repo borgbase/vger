@@ -5,6 +5,7 @@ use vger_core::config::{
     ChunkerConfig, CompressionConfig, EncryptionConfig, EncryptionModeConfig, RepositoryConfig,
     ResourceLimitsConfig, RetentionConfig, RetryConfig, ScheduleConfig, VgerConfig, XattrsConfig,
 };
+use vger_core::crypto::snapshot_id::SnapshotId;
 use vger_core::repo::manifest::SnapshotEntry;
 use vger_core::repo::pack::PackType;
 use vger_core::repo::{EncryptionMode, Repository};
@@ -142,7 +143,7 @@ fn manifest_survives_reopen() {
         let mut repo = init_local_repo(dir);
         repo.manifest_mut().snapshots.push(SnapshotEntry {
             name: "test-snapshot".to_string(),
-            id: vec![0x42; 32],
+            id: SnapshotId([0x42; 32]),
             time: Utc::now(),
             source_label: String::new(),
             label: String::new(),

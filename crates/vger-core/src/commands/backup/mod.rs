@@ -9,13 +9,13 @@ mod walk;
 pub(crate) use chunk_process::WorkerChunk;
 
 use chrono::Utc;
-use rand::RngCore;
 use tracing::{info, warn};
 
 use super::util::with_repo_lock;
 use crate::compress::Compression;
 use crate::config::{ChunkerConfig, CommandDump, VgerConfig};
 use crate::crypto::chunk_id::ChunkId;
+use crate::crypto::snapshot_id::SnapshotId;
 use crate::error::{Result, VgerError};
 use crate::limits::{self, ByteRateLimiter};
 use crate::platform::fs;
@@ -350,19 +350,16 @@ pub fn run_with_progress(
         };
 
         // Generate snapshot ID and store
-        let mut snapshot_id = vec![0u8; 32];
-        rand::thread_rng().fill_bytes(&mut snapshot_id);
+        let snapshot_id = SnapshotId::generate();
 
-        let snapshot_id_hex = hex::encode(&snapshot_id);
         let meta_bytes = rmp_serde::to_vec(&snapshot_meta)?;
         let meta_packed = pack_object_with_context(
             ObjectType::SnapshotMeta,
-            &snapshot_id,
+            snapshot_id.as_bytes(),
             &meta_bytes,
             repo.crypto.as_ref(),
         )?;
-        repo.storage
-            .put(&format!("snapshots/{snapshot_id_hex}"), &meta_packed)?;
+        repo.storage.put(&snapshot_id.storage_key(), &meta_packed)?;
 
         // Update manifest
         repo.manifest_mut().timestamp = Utc::now();

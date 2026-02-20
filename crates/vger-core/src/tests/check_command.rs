@@ -128,7 +128,7 @@ fn check_reports_snapshot_metadata_load_failures() {
 
     let repo = open_local_repo(&repo_dir);
     let entry = repo.manifest().find_snapshot("snap-check-meta").unwrap();
-    let snapshot_path = repo_dir.join("snapshots").join(hex::encode(&entry.id));
+    let snapshot_path = repo_dir.join("snapshots").join(entry.id.to_hex());
     assert!(snapshot_path.exists());
     std::fs::remove_file(snapshot_path).unwrap();
 

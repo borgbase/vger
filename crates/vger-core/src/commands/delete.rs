@@ -24,7 +24,7 @@ pub fn run(
             .manifest()
             .find_snapshot(snapshot_name)
             .ok_or_else(|| crate::error::VgerError::SnapshotNotFound(snapshot_name.into()))?;
-        let snapshot_id_hex = hex::encode(&entry.id);
+        let snapshot_key = entry.id.storage_key();
 
         // Load snapshot metadata and item stream to find all chunk refs.
         let snapshot_meta = load_snapshot_meta(repo, snapshot_name)?;
@@ -53,7 +53,6 @@ pub fn run(
         // Best-effort cleanup of snapshot metadata object.
         // If this fails after state is persisted, the repo remains consistent and
         // only leaves an orphaned metadata object.
-        let snapshot_key = format!("snapshots/{snapshot_id_hex}");
         if let Err(err) = repo.storage.delete(&snapshot_key) {
             warn!(
                 snapshot = %snapshot_name,

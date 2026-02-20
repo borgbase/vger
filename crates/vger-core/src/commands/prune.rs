@@ -131,12 +131,11 @@ pub fn run(
 
         for snapshot_name in &to_prune {
             // Get snapshot ID before we modify manifest
-            let snapshot_id_hex = repo
+            let snapshot_key = repo
                 .manifest()
                 .find_snapshot(snapshot_name)
-                .map(|e| hex::encode(&e.id))
+                .map(|e| e.id.storage_key())
                 .ok_or_else(|| VgerError::SnapshotNotFound(snapshot_name.clone()))?;
-            let snapshot_key = format!("snapshots/{snapshot_id_hex}");
 
             let snapshot_meta = load_snapshot_meta(repo, snapshot_name)?;
             let items_stream = load_snapshot_item_stream(repo, snapshot_name)?;

@@ -4,6 +4,7 @@ pub mod chunk_id;
 pub mod key;
 pub mod pack_id;
 pub mod select;
+pub mod snapshot_id;
 
 use crate::error::Result;
 
