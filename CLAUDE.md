@@ -54,7 +54,7 @@ crates/
         init.rs                         # vger init
         backup.rs                       # vger backup (walk + chunk + dedup + compress + encrypt)
         list.rs                         # vger list (snapshots or snapshot contents)
-        extract.rs                      # vger extract (restore files)
+        restore.rs                      # vger restore (restore files)
         delete.rs                       # vger delete (remove snapshot, decrement refcounts)
         prune.rs                        # vger prune (retention policy)
         check.rs                        # vger check (integrity verification)

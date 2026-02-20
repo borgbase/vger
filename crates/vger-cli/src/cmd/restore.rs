@@ -4,7 +4,7 @@ use vger_core::config::VgerConfig;
 use crate::format::format_bytes;
 use crate::passphrase::with_repo_passphrase;
 
-pub(crate) fn run_extract(
+pub(crate) fn run_restore(
     config: &VgerConfig,
     label: Option<&str>,
     snapshot_name: String,
@@ -12,7 +12,7 @@ pub(crate) fn run_extract(
     pattern: Option<String>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let stats = with_repo_passphrase(config, label, |passphrase| {
-        commands::extract::run(
+        commands::restore::run(
             config,
             passphrase,
             &snapshot_name,

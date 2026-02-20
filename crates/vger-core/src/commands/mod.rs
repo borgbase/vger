@@ -3,7 +3,6 @@ pub mod check;
 pub mod compact;
 pub mod delete;
 pub mod delete_repo;
-pub mod extract;
 pub mod find;
 pub mod info;
 pub mod init;
@@ -11,5 +10,6 @@ pub mod list;
 #[cfg(feature = "mount")]
 pub mod mount;
 pub mod prune;
+pub mod restore;
 pub(crate) mod snapshot_ops;
 pub mod util;

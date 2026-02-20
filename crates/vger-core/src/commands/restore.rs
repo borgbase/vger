@@ -87,7 +87,7 @@ struct PlannedFile {
 // Public entry points
 // ---------------------------------------------------------------------------
 
-/// Run `vger extract`.
+/// Run `vger restore`.
 pub fn run(
     config: &VgerConfig,
     passphrase: Option<&str>,
@@ -95,7 +95,7 @@ pub fn run(
     dest: &str,
     pattern: Option<&str>,
     xattrs_enabled: bool,
-) -> Result<ExtractStats> {
+) -> Result<RestoreStats> {
     let filter = pattern
         .map(|p| {
             globset::GlobBuilder::new(p)
@@ -106,7 +106,7 @@ pub fn run(
         .transpose()
         .map_err(|e| VgerError::Config(format!("invalid pattern: {e}")))?;
 
-    extract_with_filter(
+    restore_with_filter(
         config,
         passphrase,
         snapshot_name,
@@ -121,7 +121,7 @@ pub fn run(
     )
 }
 
-/// Run `vger extract` for a selected set of paths.
+/// Run `vger restore` for a selected set of paths.
 ///
 /// An item is included if its path exactly matches an entry in `selected_paths`,
 /// or if any prefix of its path matches (i.e. a parent directory was selected).
@@ -132,8 +132,8 @@ pub fn run_selected(
     dest: &str,
     selected_paths: &HashSet<String>,
     xattrs_enabled: bool,
-) -> Result<ExtractStats> {
-    extract_with_filter(
+) -> Result<RestoreStats> {
+    restore_with_filter(
         config,
         passphrase,
         snapshot_name,
@@ -144,17 +144,17 @@ pub fn run_selected(
 }
 
 // ---------------------------------------------------------------------------
-// Core extract logic — phased approach
+// Core restore logic — phased approach
 // ---------------------------------------------------------------------------
 
-fn extract_with_filter<F>(
+fn restore_with_filter<F>(
     config: &VgerConfig,
     passphrase: Option<&str>,
     snapshot_name: &str,
     dest: &str,
     xattrs_enabled: bool,
     mut include_path: F,
-) -> Result<ExtractStats>
+) -> Result<RestoreStats>
 where
     F: FnMut(&str) -> bool,
 {
@@ -163,7 +163,7 @@ where
     // directly via storage.get_range(), so the cache only serves the small
     // item-stream tree-pack chunks. 2 MiB is plenty.
     repo.set_blob_cache_max_bytes(2 * 1024 * 1024);
-    repo.restore_file_cache(FileCache::new()); // not needed during extract
+    repo.restore_file_cache(FileCache::new()); // not needed during restore
     let xattrs_enabled = if xattrs_enabled && !fs::xattrs_supported() {
         tracing::warn!(
             "xattrs requested but not supported on this platform; continuing without xattrs"
@@ -309,7 +309,7 @@ where
     }
 
     info!(
-        "Extracted {} files, {} dirs, {} symlinks ({} bytes)",
+        "Restored {} files, {} dirs, {} symlinks ({} bytes)",
         stats.files, stats.dirs, stats.symlinks, stats.total_bytes
     );
 
@@ -329,7 +329,7 @@ where
 ///
 /// Because directories are created during decoding (pass 1), a malformed item
 /// stream that fails to decode partway through may leave partial directories on
-/// disk.  This is acceptable — directory creation is idempotent and extraction
+/// disk.  This is acceptable — directory creation is idempotent and restore
 /// is not transactional.
 fn stream_and_plan<F>(
     items_stream: &[u8],
@@ -339,12 +339,12 @@ fn stream_and_plan<F>(
 ) -> Result<(
     Vec<PlannedFile>,
     HashMap<ChunkId, ChunkTargets>,
-    ExtractStats,
+    RestoreStats,
 )>
 where
     F: FnMut(&str) -> bool,
 {
-    let mut stats = ExtractStats::default();
+    let mut stats = RestoreStats::default();
 
     // Pass 1: Create all matching directories.
     super::list::for_each_decoded_item(items_stream, |item| {
@@ -769,7 +769,7 @@ fn apply_item_xattrs(target: &Path, xattrs: Option<&HashMap<String, Vec<u8>>>) {
 }
 
 #[derive(Debug, Default)]
-pub struct ExtractStats {
+pub struct RestoreStats {
     pub files: u64,
     pub dirs: u64,
     pub symlinks: u64,
@@ -780,7 +780,7 @@ fn sanitize_item_path(raw: &str) -> Result<PathBuf> {
     let path = Path::new(raw);
     if path.is_absolute() {
         return Err(VgerError::InvalidFormat(format!(
-            "refusing to extract absolute path: {raw}"
+            "refusing to restore absolute path: {raw}"
         )));
     }
     let mut out = PathBuf::new();
@@ -790,14 +790,14 @@ fn sanitize_item_path(raw: &str) -> Result<PathBuf> {
             Component::CurDir => {}
             Component::ParentDir | Component::RootDir | Component::Prefix(_) => {
                 return Err(VgerError::InvalidFormat(format!(
-                    "refusing to extract unsafe path: {raw}"
+                    "refusing to restore unsafe path: {raw}"
                 )));
             }
         }
     }
     if out.as_os_str().is_empty() {
         return Err(VgerError::InvalidFormat(format!(
-            "refusing to extract empty path: {raw}"
+            "refusing to restore empty path: {raw}"
         )));
     }
     Ok(out)
@@ -821,7 +821,7 @@ fn ensure_path_within_root(path: &Path, root: &Path) -> Result<()> {
                 .map_err(|e| VgerError::Other(format!("path check failed: {e}")))?;
             if !canonical.starts_with(root) {
                 return Err(VgerError::InvalidFormat(format!(
-                    "refusing to extract outside destination: {}",
+                    "refusing to restore outside destination: {}",
                     path.display()
                 )));
             }
@@ -830,7 +830,7 @@ fn ensure_path_within_root(path: &Path, root: &Path) -> Result<()> {
         cursor = candidate.parent();
     }
     Err(VgerError::InvalidFormat(format!(
-        "invalid extraction target path: {}",
+        "invalid restore target path: {}",
         path.display()
     )))
 }

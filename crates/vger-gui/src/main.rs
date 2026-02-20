@@ -931,7 +931,7 @@ enum AppCommand {
         repo_name: String,
         snapshot_name: String,
     },
-    ExtractSelected {
+    RestoreSelected {
         repo_name: String,
         snapshot: String,
         dest: String,
@@ -1802,13 +1802,13 @@ fn run_worker(
 
                 let _ = ui_tx.send(UiEvent::Status("Idle".to_string()));
             }
-            AppCommand::ExtractSelected {
+            AppCommand::RestoreSelected {
                 repo_name,
                 snapshot,
                 dest,
                 paths,
             } => {
-                let _ = ui_tx.send(UiEvent::Status("Extracting selected items...".to_string()));
+                let _ = ui_tx.send(UiEvent::Status("Restoring selected items...".to_string()));
 
                 match find_repo_for_snapshot(
                     &runtime.repos,
@@ -1819,7 +1819,7 @@ fn run_worker(
                     Ok((repo, passphrase)) => {
                         let path_set: std::collections::HashSet<String> =
                             paths.into_iter().collect();
-                        match operations::extract_selected(
+                        match operations::restore_selected(
                             &repo.config,
                             passphrase.as_deref().map(|s| s.as_str()),
                             &snapshot,
@@ -1830,7 +1830,7 @@ fn run_worker(
                                 send_log(
                                     &ui_tx,
                                     format!(
-                                        "Extracted selected items from {} -> {} (files={}, dirs={}, symlinks={}, bytes={})",
+                                        "Restored selected items from {} -> {} (files={}, dirs={}, symlinks={}, bytes={})",
                                         snapshot,
                                         dest,
                                         stats.files,
@@ -1843,7 +1843,7 @@ fn run_worker(
                                     .send(UiEvent::RestoreStatus("Restore complete.".to_string()));
                             }
                             Err(e) => {
-                                send_log(&ui_tx, format!("Extract failed: {e}"));
+                                send_log(&ui_tx, format!("Restore failed: {e}"));
                                 let _ = ui_tx
                                     .send(UiEvent::RestoreStatus("Restore failed.".to_string()));
                             }
@@ -2727,7 +2727,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             };
 
             rw.set_status_text("Restoring...".into());
-            let _ = tx.send(AppCommand::ExtractSelected {
+            let _ = tx.send(AppCommand::RestoreSelected {
                 repo_name: rw.get_repo_name().to_string(),
                 snapshot: rw.get_snapshot_name().to_string(),
                 dest,

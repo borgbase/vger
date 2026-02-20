@@ -100,7 +100,7 @@ sources:
         command: redis-cli --rdb -
 ```
 
-Each command runs via `sh -c` and the captured output is stored as a virtual file under `.vger-dumps/` in the snapshot. On extract, these appear as regular files:
+Each command runs via `sh -c` and the captured output is stored as a virtual file under `.vger-dumps/` in the snapshot. On restore, these appear as regular files:
 
 ```text
 .vger-dumps/postgres.sql

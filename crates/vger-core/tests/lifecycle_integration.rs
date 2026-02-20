@@ -164,7 +164,7 @@ fn lifecycle_delete_compact_check_and_restore() {
     );
 
     let restore_dir = tmp.path().join("restore");
-    let extract_stats = commands::extract::run(
+    let extract_stats = commands::restore::run(
         &config,
         None,
         "snap-v2",
@@ -251,7 +251,7 @@ fn prune_compact_check_and_restore_kept_snapshots() {
     assert!(names.contains(&"snap-b1"));
 
     let restore_a = tmp.path().join("restore-a");
-    commands::extract::run(
+    commands::restore::run(
         &config,
         None,
         "snap-a2",
@@ -266,7 +266,7 @@ fn prune_compact_check_and_restore_kept_snapshots() {
     );
 
     let restore_b = tmp.path().join("restore-b");
-    commands::extract::run(
+    commands::restore::run(
         &config,
         None,
         "snap-b1",
@@ -313,7 +313,7 @@ fn run_encrypted_lifecycle(mode: EncryptionModeConfig, expected_mode: Encryption
     assert!(check.errors.is_empty());
 
     let restore_dir = tmp.path().join("restore");
-    commands::extract::run(
+    commands::restore::run(
         &config,
         Some(passphrase),
         "snap-secret",
@@ -331,7 +331,7 @@ fn run_encrypted_lifecycle(mode: EncryptionModeConfig, expected_mode: Encryption
     let wrong_open = Repository::open(storage, Some(wrong_passphrase), None);
     assert!(matches!(wrong_open, Err(VgerError::DecryptionFailed)));
 
-    let wrong_extract = commands::extract::run(
+    let wrong_extract = commands::restore::run(
         &config,
         Some(wrong_passphrase),
         "snap-secret",
@@ -454,11 +454,11 @@ fn backup_fails_when_repository_lock_is_held_by_another_process() {
 }
 
 // ---------------------------------------------------------------------------
-// Index-free extract via restore cache
+// Index-free restore via restore cache
 // ---------------------------------------------------------------------------
 
 #[test]
-fn extract_loads_items_via_restore_cache_without_index() {
+fn restore_loads_items_via_restore_cache_without_index() {
     let tmp = tempfile::tempdir().unwrap();
     let repo_dir = tmp.path().join("repo");
     let source_dir = tmp.path().join("source");
@@ -495,7 +495,7 @@ fn extract_loads_items_via_restore_cache_without_index() {
 }
 
 #[test]
-fn extract_falls_back_to_index_on_cache_miss() {
+fn restore_falls_back_to_index_on_cache_miss() {
     let tmp = tempfile::tempdir().unwrap();
     let repo_dir = tmp.path().join("repo");
     let source_dir = tmp.path().join("source");
@@ -515,7 +515,7 @@ fn extract_falls_back_to_index_on_cache_miss() {
 
     // Overwrite restore cache: valid generation, but 0 entries.
     // open_restore_cache() will succeed, but every lookup() returns None,
-    // triggering the ChunkNotInIndex fallback in extract.rs.
+    // triggering the ChunkNotInIndex fallback in restore.rs.
     let cache_path =
         vger_core::index::dedup_cache::restore_cache_path(&repo_id, None).expect("cache path");
     let empty_index = vger_core::index::ChunkIndex::new();
@@ -526,9 +526,9 @@ fn extract_falls_back_to_index_on_cache_miss() {
     )
     .unwrap();
 
-    // Run full extract — must succeed via the fallback branch
+    // Run full restore — must succeed via the fallback branch
     let restore_dir = tmp.path().join("restore");
-    let stats = commands::extract::run(
+    let stats = commands::restore::run(
         &config,
         None,
         "snap1",
@@ -546,7 +546,7 @@ fn extract_falls_back_to_index_on_cache_miss() {
 }
 
 #[test]
-fn extract_works_without_restore_cache() {
+fn restore_works_without_restore_cache() {
     let tmp = tempfile::tempdir().unwrap();
     let repo_dir = tmp.path().join("repo");
     let source_dir = tmp.path().join("source");
@@ -566,9 +566,9 @@ fn extract_works_without_restore_cache() {
         vger_core::index::dedup_cache::restore_cache_path(&repo_id, None).expect("cache path");
     let _ = std::fs::remove_file(&cache_path);
 
-    // Full extract should still work via the no-cache path
+    // Full restore should still work via the no-cache path
     let restore_dir = tmp.path().join("restore");
-    let stats = commands::extract::run(
+    let stats = commands::restore::run(
         &config,
         None,
         "snap1",

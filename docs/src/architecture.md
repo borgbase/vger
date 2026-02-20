@@ -346,7 +346,7 @@ vger uses advisory locking to prevent concurrent mutating operations on the same
 - **Oldest-key-wins**: after writing its lock, a client lists all locks — if its key isn't lexicographically first, it deletes its own lock and returns an error
 - **Stale cleanup**: locks older than 6 hours are automatically removed before each acquisition attempt
 - **Commands that lock**: `backup`, `delete`, `prune`, `compact`
-- **Read-only commands** (no lock): `list`, `extract`, `check`, `info`
+- **Read-only commands** (no lock): `list`, `restore`, `check`, `info`
 - **Recovery**: `vger break-lock` forcibly removes stale backend/object locks when interrupted processes leave lock conflicts
 
 When using a vger server, server-managed locks with TTL replace client-side advisory locks (see [Server Architecture](#server-architecture)).
@@ -434,7 +434,7 @@ Deduplicating backup tools are often dominated by index memory and restore-plann
 
 - Tiered dedup lookups (session map + xor filter + mmap cache) instead of always materializing a full in-memory index during backup
 - mmap-backed data-pack assembly, so pack bytes are OS-paged instead of always heap-resident
-- Index-light restore planning (restore-cache-first, filtered-index fallback) for lower peak memory on extract
+- Index-light restore planning (restore-cache-first, filtered-index fallback) for lower peak memory on restore
 - Explicitly bounded backup pipeline memory (`pipeline_buffer_mib`) and bounded in-flight uploads
 - Incremental index update paths that avoid rebuilding/uploading from a full in-memory index on every save
 
@@ -619,7 +619,7 @@ repositories:
 | **REST server** | axum-based backup server with auth, append-only, quotas, freshness tracking, lock TTL, server-side compaction |
 | **REST backend** | `StorageBackend` over HTTP with range-read support (behind `backend-rest` feature) |
 | **Tiered dedup index** | Backup dedup via session map + xor filter + mmap dedup cache, with safe fallback to HashMap dedup mode |
-| **Restore mmap cache** | Index-light extract planning via local restore cache; fallback to filtered full-index loading when needed |
+| **Restore mmap cache** | Index-light restore planning via local restore cache; fallback to filtered full-index loading when needed |
 | **Incremental index update** | `save_state()` fast path merges `IndexDelta` into local full-index cache and serializes index from cache |
 | **Bounded parallel pipeline** | Byte-budgeted pipeline (`pipeline_buffer_mib`) with bounded worker/upload concurrency |
 | **mmap-backed pack assembly** | Data-pack assembly uses mmap-backed temp files (with fallback chain) to reduce heap residency under memory pressure |

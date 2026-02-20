@@ -28,7 +28,7 @@ pub struct RepoBackupRunReport {
 }
 
 #[derive(Debug, Clone)]
-pub struct ExtractRequest {
+pub struct RestoreRequest {
     pub snapshot_name: String,
     pub destination: String,
     pub pattern: Option<String>,
@@ -115,12 +115,12 @@ pub fn list_snapshot_items(
     commands::list::list_snapshot_items(config, passphrase, snapshot_name)
 }
 
-pub fn extract_snapshot(
+pub fn restore_snapshot(
     config: &VgerConfig,
     passphrase: Option<&str>,
-    req: &ExtractRequest,
-) -> Result<commands::extract::ExtractStats> {
-    commands::extract::run(
+    req: &RestoreRequest,
+) -> Result<commands::restore::RestoreStats> {
+    commands::restore::run(
         config,
         passphrase,
         &req.snapshot_name,
@@ -130,14 +130,14 @@ pub fn extract_snapshot(
     )
 }
 
-pub fn extract_selected(
+pub fn restore_selected(
     config: &VgerConfig,
     passphrase: Option<&str>,
     snapshot_name: &str,
     destination: &str,
     selected_paths: &std::collections::HashSet<String>,
-) -> Result<commands::extract::ExtractStats> {
-    commands::extract::run_selected(
+) -> Result<commands::restore::RestoreStats> {
+    commands::restore::run_selected(
         config,
         passphrase,
         snapshot_name,

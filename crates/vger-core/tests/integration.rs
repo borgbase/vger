@@ -342,7 +342,7 @@ fn backup_deduplicates_identical_files_and_extracts_correctly() {
     }
 
     let restore_dir = tmp.path().join("restore");
-    let extract_stats = commands::extract::run(
+    let extract_stats = commands::restore::run(
         &config,
         None,
         "snap-dedup",
@@ -488,7 +488,7 @@ fn backup_and_restore_preserves_file_xattrs_when_enabled() {
     assert_eq!(stored, Some(attr_value.clone()));
 
     let restore_dir = tmp.path().join("restore");
-    commands::extract::run(
+    commands::restore::run(
         &config,
         None,
         "snap-xattrs",
@@ -852,7 +852,7 @@ fn info_reports_repository_statistics() {
 }
 
 #[test]
-fn command_dump_backup_and_extract() {
+fn command_dump_backup_and_restore() {
     let repo_dir = tempfile::tempdir().unwrap();
     init_local_repo(repo_dir.path());
     let config = make_test_config(repo_dir.path());
@@ -906,7 +906,7 @@ fn command_dump_backup_and_extract() {
 
     // Extract and verify file contents
     let extract_dir = tempfile::tempdir().unwrap();
-    commands::extract::run(
+    commands::restore::run(
         &config,
         None,
         "snap-dumps",
@@ -917,7 +917,7 @@ fn command_dump_backup_and_extract() {
     .unwrap();
 
     let dump_file = extract_dir.path().join(".vger-dumps/hello.txt");
-    assert!(dump_file.exists(), "dump file should exist after extract");
+    assert!(dump_file.exists(), "dump file should exist after restore");
     let contents = std::fs::read_to_string(&dump_file).unwrap();
     assert_eq!(contents, "hello world\n");
 }
@@ -1011,7 +1011,7 @@ fn command_dump_mixed_with_files() {
 
     // Extract and verify both files
     let extract_dir = tempfile::tempdir().unwrap();
-    commands::extract::run(
+    commands::restore::run(
         &config,
         None,
         "snap-mixed",
@@ -1097,7 +1097,7 @@ fn backup_many_small_files_plus_large_file_roundtrip() {
 
     // Extract and verify all file contents.
     let restore_dir = tmp.path().join("restore1");
-    commands::extract::run(
+    commands::restore::run(
         &config,
         None,
         "snap-small-1",
@@ -1160,7 +1160,7 @@ fn backup_many_small_files_plus_large_file_roundtrip() {
 
     // Extract and verify second snapshot too.
     let restore_dir2 = tmp.path().join("restore2");
-    commands::extract::run(
+    commands::restore::run(
         &config,
         None,
         "snap-small-2",
@@ -1236,7 +1236,7 @@ fn backup_pipeline_threshold_splitting_roundtrip() {
 
     // Extract and verify contents match.
     let restore_dir = tmp.path().join("restore");
-    commands::extract::run(
+    commands::restore::run(
         &config,
         None,
         "snap-threshold",
@@ -1394,7 +1394,7 @@ fn backup_pipeline_mixed_cache_hit_processed_and_large_roundtrip() {
     assert!(stats2.original_size > 0);
 
     let restore_dir = tmp.path().join("restore-mixed");
-    commands::extract::run(
+    commands::restore::run(
         &config,
         None,
         "snap-mixed-2",

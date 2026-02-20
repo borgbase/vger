@@ -326,7 +326,7 @@ impl Repository {
     }
 
     /// Open a repository without loading the chunk index.
-    /// Suitable for read-only operations (extract, list) that either don't need
+    /// Suitable for read-only operations (restore, list) that either don't need
     /// the index or will load it lazily via `load_chunk_index()`.
     pub fn open_without_index(
         storage: Box<dyn StorageBackend>,
@@ -523,7 +523,7 @@ impl Repository {
     }
 
     /// Replace the chunk index with an empty one (frees memory).
-    /// Does not mark dirty — intended for memory optimization (e.g. extract).
+    /// Does not mark dirty — intended for memory optimization (e.g. restore).
     pub fn clear_chunk_index(&mut self) {
         self.chunk_index = ChunkIndex::new();
     }
