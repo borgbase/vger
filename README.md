@@ -19,6 +19,7 @@ Inspired by [BorgBackup](https://github.com/borgbackup/borg/), [Borgmatic](https
 - **Compression** with LZ4 or Zstandard
 - **Built-in WebDAV and desktop GUI** to browse and restore snapshots
 - **REST server** with append-only enforcement, quotas, and server-side compaction
+- **Built-in scheduling** via `vger daemon` — runs backup cycles on a configurable interval (no cron needed)
 - **Rate limiting** for CPU, disk I/O, and network bandwidth
 
 

@@ -351,6 +351,24 @@ vger uses advisory locking to prevent concurrent mutating operations on the same
 
 When using a vger server, server-managed locks with TTL replace client-side advisory locks (see [Server Architecture](#server-architecture)).
 
+### Daemon Mode
+
+`vger daemon` runs scheduled backup cycles as a foreground process (no cron dependency).
+
+- **Scheduling**: sleep-loop with configurable interval (`schedule.every` human-duration string, e.g. `"6h"`). Optional random jitter (`jitter_seconds`) spreads load across hosts.
+- **Cycle**: `backup → prune → compact → check` per repo, sequential. Shutdown flag checked between steps.
+- **Signal handling**: two-stage — first SIGTERM/SIGINT sets a shutdown flag (finishes current step, skips remaining); second signal kills immediately.
+- **Passphrase**: daemon validates at startup that all encrypted repos have a non-interactive passphrase source (`passcommand`, `passphrase`, or `VGER_PASSPHRASE` env). Cannot prompt interactively.
+
+Configuration:
+```yaml
+schedule:
+  enabled: true
+  every: "6h"
+  on_startup: false
+  jitter_seconds: 0
+```
+
 ### Refcount Lifecycle
 
 Chunk refcounts track how many snapshots reference each chunk, driving the dedup → delete → compact lifecycle:
@@ -368,20 +386,22 @@ After `delete` or `prune`, chunk refcounts are decremented and entries with refc
 
 #### Algorithm
 
-**Phase 1 — Analysis (read-only):**
+**Phase 1 — Analysis (read-only, no pack downloads):**
 1. Enumerate all pack files across 256 shard dirs (`packs/00/` through `packs/ff/`)
-2. Forward-scan each pack's length-prefixed blob stream to enumerate `(offset, length)` entries
-3. Classify each blob as live (exists in `ChunkIndex` at matching pack+offset) or dead
-4. Compute `unused_ratio = dead_bytes / total_bytes` per pack
-5. Track pack health counters (`packs_corrupt`, `packs_orphan`) in addition to live/dead bytes
-6. Filter packs where `unused_ratio >= threshold` (default 10%)
+2. Query each pack's size via metadata-only calls (`HEAD`/stat), parallelized (16 threads remote, 4 local)
+3. Compute live bytes per pack from the `ChunkIndex`: `live_bytes = Σ(4 + stored_size)` for each indexed blob in that pack
+4. Derive `dead_bytes = (pack_size - PACK_HEADER_SIZE) - live_bytes`; packs where `live_bytes > pack_payload` are marked corrupt
+5. Compute `unused_ratio = dead_bytes / pack_size` per pack
+6. Track pack health counters (`packs_corrupt`, `packs_orphan`) in addition to live/dead bytes
+7. Filter packs where `unused_ratio >= threshold` (default 10%)
 
 **Phase 2 — Repack:**
 For each candidate pack (most wasteful first, respecting `--max-repack-size` cap):
 1. If backend supports `server_repack`, send a repack plan and apply returned pack remaps
 2. Otherwise run client-side repack:
    - If all blobs are dead → delete the pack file directly
-   - Else read live blobs as encrypted passthrough (no decrypt/re-encrypt cycle), write a new pack, update index mappings
+   - Else validate pack header (magic + version) via `get_range(0..9)` and cross-check each on-disk blob length prefix against the index's `stored_size`
+   - Read live blobs as encrypted passthrough (no decrypt/re-encrypt cycle), write a new pack, update index mappings
 3. Persist index/manifest updates before old pack deletion (`save_state()`)
 4. Delete old pack(s)
 
@@ -458,6 +478,7 @@ vger CLI (client)        reverse proxy (TLS)     vger-server
 | Component | Location | Purpose |
 |-----------|----------|---------|
 | **vger-server** | `crates/vger-server/` | axum HTTP server with all server-side features |
+| **vger-protocol** | `crates/vger-protocol/` | Shared wire-format types and pack/protocol version constants (no I/O or crypto deps) |
 | **RestBackend** | `crates/vger-core/src/storage/rest_backend.rs` | `StorageBackend` impl over HTTP (behind `backend-rest` feature) |
 
 ### REST API
@@ -468,7 +489,7 @@ Storage endpoints map 1:1 to the `StorageBackend` trait:
 |--------|------|---------|-------|
 | `GET` | `/{repo}/{*path}` | `get(key)` | `200` + body or `404`. With `Range` header → `get_range` (returns `206`). |
 | `HEAD` | `/{repo}/{*path}` | `exists(key)` | `200` (with Content-Length) or `404` |
-| `PUT` | `/{repo}/{*path}` | `put(key, data)` | Raw bytes body. `201`/`204`. Rejected if over quota. |
+| `PUT` | `/{repo}/{*path}` | `put(key, data)` | Raw bytes body. `201`/`204`. Rejected if over quota. Pack uploads require `X-Content-BLAKE2b` header (BLAKE2b-256 hex); server verifies during streaming write. Non-pack objects: header optional. |
 | `DELETE` | `/{repo}/{*path}` | `delete(key)` | `204` or `404`. Rejected with `403` in append-only mode. |
 | `GET` | `/{repo}/{*path}?list` | `list(prefix)` | JSON array of key strings |
 | `POST` | `/{repo}/{*path}?mkdir` | `create_dir(key)` | `201` |
@@ -481,6 +502,7 @@ Admin endpoints:
 | `POST` | `/{repo}?batch-delete` | Body: JSON array of keys to delete |
 | `POST` | `/{repo}?repack` | Server-side compaction (see below) |
 | `GET` | `/{repo}?stats` | Size, object count, last backup timestamp, quota usage |
+| `POST` | `/{repo}?verify-packs` | Server-side pack integrity verification (BLAKE2b hash, header magic/version, blob boundaries) |
 | `GET` | `/{repo}?verify-structure` | Structural integrity check (pack magic, shard naming) |
 | `GET` | `/` | List all repos |
 | `GET` | `/health` | Uptime, disk space, version (unauthenticated) |
@@ -584,14 +606,14 @@ All settings are passed as CLI flags. The authentication token is read from the 
 
 ```bash
 export VGER_TOKEN="some-secret-token"
-vger-server --listen 127.0.0.1:8585 --data-dir /var/lib/vger --append-only --log-format json --quota 10G
+vger-server --listen 127.0.0.1:8585 --data-dir /var/lib/vger --append-only --log-format json --quota 10G --max-blocking-threads 6
 ```
 
 See `vger-server --help` for the full list of flags and defaults.
 
 ### RestBackend (Client Side)
 
-`crates/vger-core/src/storage/rest_backend.rs` implements `StorageBackend` using `ureq` (sync HTTP client, behind `backend-rest` feature flag). Connection-pooled. Maps each trait method to the corresponding HTTP verb. `get_range` sends a `Range: bytes=<start>-<end>` header and expects `206 Partial Content`. Also exposes extra methods beyond the trait: `batch_delete()`, `repack()`, `acquire_lock()`, `release_lock()`, `stats()`.
+`crates/vger-core/src/storage/rest_backend.rs` implements `StorageBackend` using `ureq` (sync HTTP client, behind `backend-rest` feature flag). Connection-pooled. Maps each trait method to the corresponding HTTP verb. `get_range` sends a `Range: bytes=<start>-<end>` header and expects `206 Partial Content`. Also exposes extra methods beyond the trait: `batch_delete()`, `repack()`, `verify_packs()`, `acquire_lock()`, `release_lock()`, `stats()`.
 
 Client config:
 ```yaml
@@ -627,7 +649,11 @@ repositories:
 | **Parallel transforms** | rayon-backed compression/encryption within the bounded pipeline |
 | **break-lock command** | Forced stale-lock cleanup for backend/object lock recovery |
 | **Compact pack health accounting** | Compact analysis reports/tracks corrupt and orphan packs in addition to reclaimable dead bytes |
-| **File-level cache** | inode/mtime/ctime skip for unchanged files — avoids read, chunk, compress, encrypt. Stored locally under the per-repo cache root (default platform cache dir + `vger`, or `cache_dir` override). |
+| **File-level cache** | inode/mtime/ctime skip for unchanged files — avoids read, chunk, compress, encrypt. Keys are 16-byte BLAKE2b path hashes (with transparent legacy migration). Stored locally under the per-repo cache root (default platform cache dir + `vger`, or `cache_dir` override). |
+| **Daemon mode** | `vger daemon` runs scheduled backup→prune→compact→check cycles with two-stage signal handling |
+| **Server-side pack verification** | `vger check` delegates pack integrity checks to vger-server when available; `--distrust-server` opts out |
+| **Upload integrity** | REST `PUT` includes `X-Content-BLAKE2b` header; server verifies during streaming write |
+| **vger-protocol crate** | Shared wire-format types and pack/protocol version constants between client and server |
 
 ### Planned / Not Yet Implemented
 
