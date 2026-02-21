@@ -23,6 +23,8 @@ use crate::snapshot::item::Item;
 use crate::snapshot::item::ItemType;
 use crate::storage::StorageBackend;
 
+use crate::repo::Repository;
+
 use super::util::open_repo_without_index_or_cache;
 
 // ---------------------------------------------------------------------------
@@ -228,42 +230,12 @@ where
                 if all_in_cache {
                     build_read_groups(chunk_targets, |id| cache.lookup(id))?
                 } else {
-                    info!("restore cache lookup failed, falling back to filtered index");
-                    if repo.chunk_index().is_empty() {
-                        repo.load_chunk_index()?;
-                    }
-                    let needed_chunks: HashSet<ChunkId> = chunk_targets.keys().copied().collect();
-                    repo.retain_chunk_index(&needed_chunks);
-                    drop(needed_chunks);
-                    info!(
-                        "loaded filtered chunk index ({} entries)",
-                        repo.chunk_index().len()
-                    );
-                    let index = repo.chunk_index();
-                    build_read_groups(chunk_targets, |id| {
-                        index
-                            .get(id)
-                            .map(|e| (e.pack_id, e.pack_offset, e.stored_size))
-                    })?
+                    info!("restore cache incomplete, falling back to chunk index");
+                    build_read_groups_via_index(&mut repo, chunk_targets)?
                 }
             } else {
-                info!("restore cache unavailable, using filtered index");
-                if repo.chunk_index().is_empty() {
-                    repo.load_chunk_index()?;
-                }
-                let needed_chunks: HashSet<ChunkId> = chunk_targets.keys().copied().collect();
-                repo.retain_chunk_index(&needed_chunks);
-                drop(needed_chunks);
-                info!(
-                    "loaded filtered chunk index ({} entries)",
-                    repo.chunk_index().len()
-                );
-                let index = repo.chunk_index();
-                build_read_groups(chunk_targets, |id| {
-                    index
-                        .get(id)
-                        .map(|e| (e.pack_id, e.pack_offset, e.stored_size))
-                })?
+                info!("restore cache unavailable, using chunk index");
+                build_read_groups_via_index(&mut repo, chunk_targets)?
             }
         } else {
             Vec::new()
@@ -288,9 +260,9 @@ where
         );
 
         // Phase 3: Pre-create files with the correct size.
-        // Safety: parents verified in pass 1 are trusted — this is a
-        // single-process operation so no concurrent destination tampering
-        // can occur between passes. Unverified parents still get the full
+        // Safety: parents verified during directory creation are trusted —
+        // this is a single-process operation so no concurrent destination
+        // tampering can occur. Unverified parents still get the full
         // canonicalize check.
         for pf in &planned_files {
             if pf
@@ -333,20 +305,23 @@ where
 }
 
 // ---------------------------------------------------------------------------
-// Streaming item processing — two-pass over raw msgpack bytes
+// Streaming item processing — single-pass over raw msgpack bytes
 // ---------------------------------------------------------------------------
 
 /// Stream items from raw bytes: create dirs/symlinks immediately, build file
-/// plan + chunk targets.  Two passes ensure directories exist before
-/// symlinks/files are processed.
+/// plan + chunk targets.  All item types are handled in a single pass over the
+/// msgpack stream, avoiding redundant deserialization.
 ///
-/// Note: `include_path` may be called more than once per path (once per pass).
-/// Callers must not rely on single-invocation semantics for stateful filters.
+/// Directories in the snapshot stream typically precede their children (natural
+/// `walkdir` order), so `verified_dirs` is populated before files/symlinks that
+/// need it.  When a file or symlink appears before its parent directory item,
+/// `ensure_parent_exists_within_root` handles it (the later directory item's
+/// `create_dir_all` is a no-op, but mode/xattrs are still applied).
 ///
-/// Because directories are created during decoding (pass 1), a malformed item
-/// stream that fails to decode partway through may leave partial directories on
-/// disk.  This is acceptable — directory creation is idempotent and restore
-/// is not transactional.
+/// Because directories are created during decoding, a malformed item stream
+/// that fails to decode partway through may leave partial directories on disk.
+/// This is acceptable — directory creation is idempotent and restore is not
+/// transactional.
 #[allow(clippy::type_complexity)]
 fn stream_and_plan<F>(
     items_stream: &[u8],
@@ -365,27 +340,6 @@ where
     let mut stats = RestoreStats::default();
     let mut verified_dirs: HashSet<PathBuf> = HashSet::new();
     verified_dirs.insert(dest_root.to_path_buf());
-
-    // Pass 1: Create all matching directories.
-    super::list::for_each_decoded_item(items_stream, |item| {
-        if item.entry_type != ItemType::Directory || !include_path(&item.path) {
-            return Ok(());
-        }
-        let rel = sanitize_item_path(&item.path)?;
-        let target = dest_root.join(&rel);
-        ensure_path_within_root(&target, dest_root)?;
-        std::fs::create_dir_all(&target)?;
-        ensure_path_within_root(&target, dest_root)?;
-        let _ = fs::apply_mode(&target, item.mode);
-        if xattrs_enabled {
-            apply_item_xattrs(&target, item.xattrs.as_ref());
-        }
-        verified_dirs.insert(target);
-        stats.dirs += 1;
-        Ok(())
-    })?;
-
-    // Pass 2: Process symlinks (create immediately) and files (build plan).
     let mut planned_files = Vec::new();
     let mut chunk_targets: HashMap<ChunkId, ChunkTargets> = HashMap::new();
 
@@ -394,12 +348,23 @@ where
             return Ok(());
         }
         match item.entry_type {
+            ItemType::Directory => {
+                let rel = sanitize_item_path(&item.path)?;
+                let target = dest_root.join(&rel);
+                ensure_path_within_root(&target, dest_root)?;
+                std::fs::create_dir_all(&target)?;
+                ensure_path_within_root(&target, dest_root)?;
+                let _ = fs::apply_mode(&target, item.mode);
+                if xattrs_enabled {
+                    apply_item_xattrs(&target, item.xattrs.as_ref());
+                }
+                verified_dirs.insert(target);
+                stats.dirs += 1;
+            }
             ItemType::Symlink => {
                 if let Some(ref link_target) = item.link_target {
                     let rel = sanitize_item_path(&item.path)?;
                     let target = dest_root.join(&rel);
-                    // Safety: see Phase 3 comment — single-process, no
-                    // concurrent tampering between pass 1 and pass 2.
                     if target.parent().is_none_or(|p| !verified_dirs.contains(p)) {
                         ensure_parent_exists_within_root(&target, dest_root)?;
                     }
@@ -440,10 +405,9 @@ where
                     total_size: file_offset,
                     mode: item.mode,
                     mtime: item.mtime,
-                    xattrs: item.xattrs.clone(),
+                    xattrs: item.xattrs,
                 });
             }
-            ItemType::Directory => {} // handled in pass 1
         }
         Ok(())
     })?;
@@ -573,6 +537,31 @@ where
     }
 
     Ok(groups)
+}
+
+/// Load the chunk index (if not already loaded), filter it to only the needed
+/// chunks, and build read groups.  Shared by the "cache incomplete" and
+/// "no cache" code paths.
+fn build_read_groups_via_index(
+    repo: &mut Repository,
+    chunk_targets: HashMap<ChunkId, ChunkTargets>,
+) -> Result<Vec<ReadGroup>> {
+    if repo.chunk_index().is_empty() {
+        repo.load_chunk_index()?;
+    }
+    let needed: HashSet<ChunkId> = chunk_targets.keys().copied().collect();
+    repo.retain_chunk_index(&needed);
+    drop(needed);
+    info!(
+        "loaded filtered chunk index ({} entries)",
+        repo.chunk_index().len()
+    );
+    let index = repo.chunk_index();
+    build_read_groups(chunk_targets, |id| {
+        index
+            .get(id)
+            .map(|e| (e.pack_id, e.pack_offset, e.stored_size))
+    })
 }
 
 // ---------------------------------------------------------------------------
@@ -1331,5 +1320,92 @@ mod tests {
         assert!(result.is_err());
         // The directory from before the corrupt bytes was still created.
         assert!(dest.join("aaa").is_dir());
+    }
+
+    #[test]
+    fn stream_and_plan_symlink_before_parent_dir() {
+        // Symlink appears before its parent directory in the stream.
+        // Single-pass should handle this via ensure_parent_exists_within_root
+        // and then apply the correct mode when the directory item arrives.
+        let temp = tempdir().unwrap();
+        let dest = &temp.path().canonicalize().unwrap();
+
+        let items = vec![
+            make_symlink_item("mydir/link", "target"),
+            make_dir_item("mydir", 0o750),
+        ];
+        let stream = serialize_items(&items);
+
+        let (_planned_files, _chunk_targets, stats, verified_dirs) =
+            stream_and_plan(&stream, dest, &mut |_| true, false).unwrap();
+
+        // Directory exists and is in verified_dirs.
+        assert!(dest.join("mydir").is_dir());
+        assert!(verified_dirs.contains(&dest.join("mydir")));
+
+        // Symlink was created and points to the right target.
+        let link_path = dest.join("mydir/link");
+        assert!(link_path
+            .symlink_metadata()
+            .unwrap()
+            .file_type()
+            .is_symlink());
+        assert_eq!(
+            std::fs::read_link(&link_path).unwrap().to_str().unwrap(),
+            "target"
+        );
+
+        // Directory has the correct mode from the directory item (not default).
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = std::fs::metadata(dest.join("mydir"))
+                .unwrap()
+                .permissions()
+                .mode()
+                & 0o777;
+            assert_eq!(mode, 0o750);
+        }
+
+        assert_eq!(stats.dirs, 1);
+        assert_eq!(stats.symlinks, 1);
+    }
+
+    #[test]
+    fn stream_and_plan_file_before_parent_dir() {
+        // File item appears before its parent directory in the stream.
+        // The directory should still get its mode applied when the dir item
+        // is processed later.
+        let temp = tempdir().unwrap();
+        let dest = &temp.path().canonicalize().unwrap();
+
+        let items = vec![
+            make_file_item("mydir/a.txt", vec![(0xAA, 100)]),
+            make_dir_item("mydir", 0o750),
+        ];
+        let stream = serialize_items(&items);
+
+        let (planned_files, chunk_targets, stats, verified_dirs) =
+            stream_and_plan(&stream, dest, &mut |_| true, false).unwrap();
+
+        // Directory exists with correct mode.
+        assert!(dest.join("mydir").is_dir());
+        assert!(verified_dirs.contains(&dest.join("mydir")));
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = std::fs::metadata(dest.join("mydir"))
+                .unwrap()
+                .permissions()
+                .mode()
+                & 0o777;
+            assert_eq!(mode, 0o750);
+        }
+
+        // File is in planned_files.
+        assert_eq!(planned_files.len(), 1);
+        assert!(planned_files[0].target_path.ends_with("mydir/a.txt"));
+        assert_eq!(chunk_targets.len(), 1);
+        assert_eq!(stats.dirs, 1);
     }
 }
