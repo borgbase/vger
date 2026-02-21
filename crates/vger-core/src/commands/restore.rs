@@ -1,4 +1,3 @@
-use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
 #[cfg(not(unix))]
 use std::io::{Seek, Write as IoWrite};
@@ -44,16 +43,6 @@ const MAX_READER_THREADS: usize = 6;
 /// Maximum number of simultaneously open output files per restore worker.
 /// Caps fd usage while still avoiding per-chunk open/close churn.
 const MAX_OPEN_FILES_PER_GROUP: usize = 16;
-
-// Per-worker reusable buffers for the restore pipeline.
-// Tuple is (decrypt_buf, decompress_buf).
-// Persists at high-water capacity for the rayon thread lifetime.
-// With 6 workers × (~1 MiB decrypt + ~8 MiB decompress),
-// that's ~54 MiB pinned worst case.
-thread_local! {
-    static WORKER_BUFS: RefCell<(Vec<u8>, Vec<u8>)> =
-        const { RefCell::new((Vec::new(), Vec::new())) };
-}
 
 // ---------------------------------------------------------------------------
 // Data structures for the coalesced parallel restore
@@ -649,8 +638,9 @@ fn execute_parallel_restore(
 /// Process a single coalesced read group: download the range, decrypt and
 /// decompress each blob, then write the plaintext data to target files.
 ///
-/// Uses thread-local buffers (`WORKER_BUFS`) to reuse allocations across
-/// groups and blobs within the same rayon worker thread.
+/// Buffers are local to this function — reused across blobs within the group,
+/// freed when the group finishes. This avoids TLS high-water persistence
+/// while still amortizing allocations across the ~149 blobs per group.
 fn process_read_group(
     group: &ReadGroup,
     files: &[PlannedFile],
@@ -670,101 +660,99 @@ fn process_read_group(
         .get_range(&pack_key, group.read_start, read_len)?
         .ok_or_else(|| VgerError::Other(format!("pack not found: {}", group.pack_id)))?;
 
-    WORKER_BUFS.with(|cell| {
-        let mut bufs = cell.borrow_mut();
-        let (ref mut decrypt_buf, ref mut decompress_buf) = *bufs;
+    // Local buffers — reused across blobs within this group, freed on return.
+    let mut decrypt_buf = Vec::new();
+    let mut decompress_buf = Vec::new();
+    let mut file_handles: HashMap<usize, std::fs::File> = HashMap::new();
 
-        let mut file_handles: HashMap<usize, std::fs::File> = HashMap::new();
-
-        for blob in &group.blobs {
-            if cancelled.load(Ordering::Acquire) {
-                return Ok(());
-            }
-
-            let local_offset = (blob.pack_offset - group.read_start) as usize;
-            let local_end = local_offset + blob.stored_size as usize;
-
-            if local_end > data.len() {
-                return Err(VgerError::Other(format!(
-                    "blob extends beyond downloaded range in pack {}",
-                    group.pack_id
-                )));
-            }
-
-            let raw = &data[local_offset..local_end];
-            unpack_object_expect_with_context_into(
-                raw,
-                ObjectType::ChunkData,
-                &blob.chunk_id.0,
-                crypto,
-                decrypt_buf,
-            )
-            .map_err(|e| {
-                VgerError::Other(format!(
-                    "chunk {} in pack {} (offset {}, size {}): {e}",
-                    blob.chunk_id, group.pack_id, blob.pack_offset, blob.stored_size
-                ))
-            })?;
-            compress::decompress_into_with_hint(
-                decrypt_buf,
-                Some(blob.expected_size as usize),
-                decompress_buf,
-            )
-            .map_err(|e| {
-                VgerError::Other(format!(
-                    "chunk {} in pack {} (offset {}, size {}): {e}",
-                    blob.chunk_id, group.pack_id, blob.pack_offset, blob.stored_size
-                ))
-            })?;
-
-            if decompress_buf.len() != blob.expected_size as usize {
-                return Err(VgerError::InvalidFormat(format!(
-                    "chunk {} in pack {} (offset {}, size {}) size mismatch after restore decode: \
-                     expected {} bytes, got {} bytes",
-                    blob.chunk_id,
-                    group.pack_id,
-                    blob.pack_offset,
-                    blob.stored_size,
-                    blob.expected_size,
-                    decompress_buf.len()
-                )));
-            }
-
-            for target in &blob.targets {
-                if !file_handles.contains_key(&target.file_idx) {
-                    let pf = &files[target.file_idx];
-                    if file_handles.len() >= MAX_OPEN_FILES_PER_GROUP {
-                        if let Some(evict_idx) = file_handles.keys().next().copied() {
-                            file_handles.remove(&evict_idx);
-                        }
-                    }
-                    let handle = std::fs::OpenOptions::new()
-                        .write(true)
-                        .open(&pf.target_path)
-                        .map_err(|e| {
-                            VgerError::Other(format!(
-                                "failed to open {} for writing: {e}",
-                                pf.target_path.display()
-                            ))
-                        })?;
-                    file_handles.insert(target.file_idx, handle);
-                }
-                let fh = file_handles.get_mut(&target.file_idx).ok_or_else(|| {
-                    VgerError::Other("missing file handle in restore worker".into())
-                })?;
-                #[cfg(unix)]
-                fh.write_all_at(decompress_buf, target.file_offset)?;
-                #[cfg(not(unix))]
-                {
-                    fh.seek(std::io::SeekFrom::Start(target.file_offset))?;
-                    fh.write_all(decompress_buf)?;
-                }
-                bytes_written.fetch_add(decompress_buf.len() as u64, Ordering::Relaxed);
-            }
+    for blob in &group.blobs {
+        if cancelled.load(Ordering::Acquire) {
+            return Ok(());
         }
 
-        Ok(())
-    })
+        let local_offset = (blob.pack_offset - group.read_start) as usize;
+        let local_end = local_offset + blob.stored_size as usize;
+
+        if local_end > data.len() {
+            return Err(VgerError::Other(format!(
+                "blob extends beyond downloaded range in pack {}",
+                group.pack_id
+            )));
+        }
+
+        let raw = &data[local_offset..local_end];
+        unpack_object_expect_with_context_into(
+            raw,
+            ObjectType::ChunkData,
+            &blob.chunk_id.0,
+            crypto,
+            &mut decrypt_buf,
+        )
+        .map_err(|e| {
+            VgerError::Other(format!(
+                "chunk {} in pack {} (offset {}, size {}): {e}",
+                blob.chunk_id, group.pack_id, blob.pack_offset, blob.stored_size
+            ))
+        })?;
+        compress::decompress_into_with_hint(
+            &decrypt_buf,
+            Some(blob.expected_size as usize),
+            &mut decompress_buf,
+        )
+        .map_err(|e| {
+            VgerError::Other(format!(
+                "chunk {} in pack {} (offset {}, size {}): {e}",
+                blob.chunk_id, group.pack_id, blob.pack_offset, blob.stored_size
+            ))
+        })?;
+
+        if decompress_buf.len() != blob.expected_size as usize {
+            return Err(VgerError::InvalidFormat(format!(
+                "chunk {} in pack {} (offset {}, size {}) size mismatch after restore decode: \
+                 expected {} bytes, got {} bytes",
+                blob.chunk_id,
+                group.pack_id,
+                blob.pack_offset,
+                blob.stored_size,
+                blob.expected_size,
+                decompress_buf.len()
+            )));
+        }
+
+        for target in &blob.targets {
+            if !file_handles.contains_key(&target.file_idx) {
+                let pf = &files[target.file_idx];
+                if file_handles.len() >= MAX_OPEN_FILES_PER_GROUP {
+                    if let Some(evict_idx) = file_handles.keys().next().copied() {
+                        file_handles.remove(&evict_idx);
+                    }
+                }
+                let handle = std::fs::OpenOptions::new()
+                    .write(true)
+                    .open(&pf.target_path)
+                    .map_err(|e| {
+                        VgerError::Other(format!(
+                            "failed to open {} for writing: {e}",
+                            pf.target_path.display()
+                        ))
+                    })?;
+                file_handles.insert(target.file_idx, handle);
+            }
+            let fh = file_handles
+                .get_mut(&target.file_idx)
+                .ok_or_else(|| VgerError::Other("missing file handle in restore worker".into()))?;
+            #[cfg(unix)]
+            fh.write_all_at(&decompress_buf, target.file_offset)?;
+            #[cfg(not(unix))]
+            {
+                fh.seek(std::io::SeekFrom::Start(target.file_offset))?;
+                fh.write_all(&decompress_buf)?;
+            }
+            bytes_written.fetch_add(decompress_buf.len() as u64, Ordering::Relaxed);
+        }
+    }
+
+    Ok(())
 }
 
 // ---------------------------------------------------------------------------
