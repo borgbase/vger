@@ -46,13 +46,13 @@ const MAX_READER_THREADS: usize = 6;
 const MAX_OPEN_FILES_PER_GROUP: usize = 16;
 
 // Per-worker reusable buffers for the restore pipeline.
-// Tuple is (read_buf, decrypt_buf, decompress_buf).
+// Tuple is (decrypt_buf, decompress_buf).
 // Persists at high-water capacity for the rayon thread lifetime.
-// With 6 workers × (16 MiB read + ~1 MiB decrypt + ~8 MiB decompress),
-// that's ~150 MiB pinned worst case.
+// With 6 workers × (~1 MiB decrypt + ~8 MiB decompress),
+// that's ~54 MiB pinned worst case.
 thread_local! {
-    static WORKER_BUFS: RefCell<(Vec<u8>, Vec<u8>, Vec<u8>)> =
-        const { RefCell::new((Vec::new(), Vec::new(), Vec::new())) };
+    static WORKER_BUFS: RefCell<(Vec<u8>, Vec<u8>)> =
+        const { RefCell::new((Vec::new(), Vec::new())) };
 }
 
 // ---------------------------------------------------------------------------
@@ -663,19 +663,16 @@ fn process_read_group(
         return Ok(());
     }
 
+    let pack_key = group.pack_id.storage_key();
+    let read_len = group.read_end - group.read_start;
+
+    let data = storage
+        .get_range(&pack_key, group.read_start, read_len)?
+        .ok_or_else(|| VgerError::Other(format!("pack not found: {}", group.pack_id)))?;
+
     WORKER_BUFS.with(|cell| {
         let mut bufs = cell.borrow_mut();
-        let (ref mut read_buf, ref mut decrypt_buf, ref mut decompress_buf) = *bufs;
-
-        let pack_key = group.pack_id.storage_key();
-        let read_len = group.read_end - group.read_start;
-
-        if !storage.get_range_into(&pack_key, group.read_start, read_len, read_buf)? {
-            return Err(VgerError::Other(format!(
-                "pack not found: {}",
-                group.pack_id
-            )));
-        }
+        let (ref mut decrypt_buf, ref mut decompress_buf) = *bufs;
 
         let mut file_handles: HashMap<usize, std::fs::File> = HashMap::new();
 
@@ -687,14 +684,14 @@ fn process_read_group(
             let local_offset = (blob.pack_offset - group.read_start) as usize;
             let local_end = local_offset + blob.stored_size as usize;
 
-            if local_end > read_buf.len() {
+            if local_end > data.len() {
                 return Err(VgerError::Other(format!(
                     "blob extends beyond downloaded range in pack {}",
                     group.pack_id
                 )));
             }
 
-            let raw = &read_buf[local_offset..local_end];
+            let raw = &data[local_offset..local_end];
             unpack_object_expect_with_context_into(
                 raw,
                 ObjectType::ChunkData,
