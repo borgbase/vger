@@ -5,7 +5,7 @@ use std::io::{Seek, Write as IoWrite};
 use std::os::unix::fs::FileExt;
 use std::path::{Component, Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 
 use smallvec::SmallVec;
 use tracing::{debug, info};
@@ -688,8 +688,100 @@ impl PendingWrite {
 }
 
 // ---------------------------------------------------------------------------
+// LRU file handle cache
+// ---------------------------------------------------------------------------
+
+/// A small LRU cache for open file handles.  Capacity is capped at
+/// `MAX_OPEN_FILES_PER_GROUP` (16).  Linear scan is negligible compared
+/// to the syscall cost of opening/closing files, and the small size keeps
+/// the bookkeeping trivial.
+struct LruHandles {
+    /// Entries ordered from least-recently-used (front) to most-recently-used (back).
+    entries: Vec<(usize, std::fs::File)>,
+}
+
+impl LruHandles {
+    fn new() -> Self {
+        Self {
+            entries: Vec::with_capacity(MAX_OPEN_FILES_PER_GROUP),
+        }
+    }
+
+    /// Return a mutable reference to the file handle for `file_idx`,
+    /// promoting it to most-recently-used.  Returns `None` if not cached.
+    fn get(&mut self, file_idx: usize) -> Option<&mut std::fs::File> {
+        if let Some(pos) = self.entries.iter().position(|(idx, _)| *idx == file_idx) {
+            // Move to back (MRU position).
+            let entry = self.entries.remove(pos);
+            self.entries.push(entry);
+            Some(&mut self.entries.last_mut().unwrap().1)
+        } else {
+            None
+        }
+    }
+
+    /// Insert a handle for `file_idx`.  If the cache is full, evicts the
+    /// least-recently-used entry (front of the vec).
+    fn insert(&mut self, file_idx: usize, file: std::fs::File) {
+        if self.entries.len() >= MAX_OPEN_FILES_PER_GROUP {
+            self.entries.remove(0); // evict LRU
+        }
+        self.entries.push((file_idx, file));
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Parallel restore execution
 // ---------------------------------------------------------------------------
+
+/// Partition `groups` (already sorted by pack_id, offset) into `num_threads`
+/// buckets with pack-affinity: groups sharing a pack_id are assigned to the
+/// same bucket when possible, falling back to the lightest bucket when the
+/// affinity bucket would become a straggler.
+fn partition_groups(groups: Vec<ReadGroup>, num_threads: usize) -> Vec<Vec<ReadGroup>> {
+    let total_bytes: u64 = groups.iter().map(|g| g.read_end - g.read_start).sum();
+    let cap = total_bytes / num_threads as u64 * 13 / 10; // 1.3x fair share
+
+    let mut buckets: Vec<Vec<ReadGroup>> = (0..num_threads).map(|_| Vec::new()).collect();
+    let mut bucket_bytes: Vec<u64> = vec![0; num_threads];
+
+    // Track which bucket last saw each pack_id.
+    let mut pack_affinity: HashMap<PackId, usize> = HashMap::new();
+
+    for group in groups {
+        let group_bytes = group.read_end - group.read_start;
+
+        // Try affinity bucket first.
+        let dest = if let Some(&aff) = pack_affinity.get(&group.pack_id) {
+            if bucket_bytes[aff] + group_bytes <= cap {
+                aff
+            } else {
+                // Affinity bucket would exceed cap — assign to lightest.
+                lightest_bucket(&bucket_bytes)
+            }
+        } else {
+            lightest_bucket(&bucket_bytes)
+        };
+
+        pack_affinity.insert(group.pack_id, dest);
+        bucket_bytes[dest] += group_bytes;
+        buckets[dest].push(group);
+    }
+
+    // Drop empty buckets.
+    buckets.retain(|b| !b.is_empty());
+    buckets
+}
+
+/// Return the index of the bucket with the fewest total bytes.
+fn lightest_bucket(bucket_bytes: &[u64]) -> usize {
+    bucket_bytes
+        .iter()
+        .enumerate()
+        .min_by_key(|(_, &b)| b)
+        .map(|(i, _)| i)
+        .unwrap_or(0)
+}
 
 fn execute_parallel_restore(
     files: &[PlannedFile],
@@ -701,50 +793,59 @@ fn execute_parallel_restore(
         return Ok(0);
     }
 
+    let num_threads = MAX_READER_THREADS.min(groups.len());
+    let buckets = partition_groups(groups, num_threads);
+
     let bytes_written = AtomicU64::new(0);
     let cancelled = AtomicBool::new(false);
-    let first_error = Mutex::new(None::<VgerError>);
 
-    let pool = rayon::ThreadPoolBuilder::new()
-        .num_threads(MAX_READER_THREADS)
-        .build()
-        .map_err(|e| VgerError::Other(format!("failed to build thread pool: {e}")))?;
+    std::thread::scope(|s| {
+        let mut handles = Vec::with_capacity(buckets.len());
 
-    pool.in_place_scope(|s| {
-        for group in &groups {
+        for bucket in &buckets {
             let bytes_written = &bytes_written;
             let cancelled = &cancelled;
-            let first_error = &first_error;
 
-            s.spawn(move |_| {
-                if cancelled.load(Ordering::Acquire) {
-                    return;
-                }
-                if let Err(e) =
-                    process_read_group(group, files, storage, crypto, bytes_written, cancelled)
-                {
-                    cancelled.store(true, Ordering::Release);
-                    if let Ok(mut slot) = first_error.lock() {
-                        if slot.is_none() {
-                            *slot = Some(e);
-                        }
+            handles.push(s.spawn(move || -> Result<()> {
+                for group in bucket {
+                    if cancelled.load(Ordering::Acquire) {
+                        return Ok(());
+                    }
+                    if let Err(e) =
+                        process_read_group(group, files, storage, crypto, bytes_written, cancelled)
+                    {
+                        cancelled.store(true, Ordering::Release);
+                        return Err(e);
                     }
                 }
-            });
+                Ok(())
+            }));
         }
-    });
 
-    if let Ok(mut slot) = first_error.lock() {
-        if let Some(err) = slot.take() {
-            return Err(err);
+        let mut first_error: Option<VgerError> = None;
+        for handle in handles {
+            match handle.join() {
+                Ok(Ok(())) => {}
+                Ok(Err(e)) => {
+                    cancelled.store(true, Ordering::Release);
+                    if first_error.is_none() {
+                        first_error = Some(e);
+                    }
+                }
+                Err(_panic) => {
+                    cancelled.store(true, Ordering::Release);
+                    if first_error.is_none() {
+                        first_error = Some(VgerError::Other("restore worker panicked".into()));
+                    }
+                }
+            }
         }
-    } else if cancelled.load(Ordering::Acquire) {
-        return Err(VgerError::Other(
-            "parallel restore cancelled after worker error".into(),
-        ));
-    }
 
-    Ok(bytes_written.load(Ordering::Relaxed))
+        match first_error {
+            Some(e) => Err(e),
+            None => Ok(bytes_written.load(Ordering::Relaxed)),
+        }
+    })
 }
 
 /// Process a single coalesced read group: download the range, decrypt and
@@ -775,7 +876,7 @@ fn process_read_group(
     // Local buffers — reused across blobs within this group, freed on return.
     let mut decrypt_buf = Vec::new();
     let mut decompress_buf = Vec::new();
-    let mut file_handles: HashMap<usize, std::fs::File> = HashMap::new();
+    let mut file_handles = LruHandles::new();
 
     // Write accumulator — batches consecutive same-file writes into one syscall.
     // Pre-allocated to MAX_WRITE_BATCH; reused across sequences within this group.
@@ -895,17 +996,12 @@ fn write_buf(
     buf: &[u8],
     file_idx: usize,
     offset: u64,
-    file_handles: &mut HashMap<usize, std::fs::File>,
+    file_handles: &mut LruHandles,
     files: &[PlannedFile],
     bytes_written: &AtomicU64,
 ) -> Result<()> {
-    if !file_handles.contains_key(&file_idx) {
+    if file_handles.get(file_idx).is_none() {
         let pf = &files[file_idx];
-        if file_handles.len() >= MAX_OPEN_FILES_PER_GROUP {
-            if let Some(evict_idx) = file_handles.keys().next().copied() {
-                file_handles.remove(&evict_idx);
-            }
-        }
         // Create-on-first-write: truncate(false) prevents one worker from
         // destroying another worker's writes to the same file.
         let handle = std::fs::OpenOptions::new()
@@ -926,7 +1022,7 @@ fn write_buf(
         file_handles.insert(file_idx, handle);
     }
     let fh = file_handles
-        .get_mut(&file_idx)
+        .get(file_idx)
         .ok_or_else(|| VgerError::Other("missing file handle in restore worker".into()))?;
     #[cfg(unix)]
     fh.write_all_at(buf, offset)?;
@@ -942,7 +1038,7 @@ fn write_buf(
 /// Flush the write accumulator to disk if it contains data, then reset it.
 fn flush_pending(
     pw: &mut PendingWrite,
-    file_handles: &mut HashMap<usize, std::fs::File>,
+    file_handles: &mut LruHandles,
     files: &[PlannedFile],
     bytes_written: &AtomicU64,
 ) -> Result<()> {
