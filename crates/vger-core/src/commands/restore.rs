@@ -46,6 +46,11 @@ const MAX_READER_THREADS: usize = 6;
 /// Caps fd usage while still avoiding per-chunk open/close churn.
 const MAX_OPEN_FILES_PER_GROUP: usize = 16;
 
+/// Maximum size (in bytes) of the write accumulator before flushing.
+/// Batching consecutive same-file writes into a single `pwrite64` reduces
+/// syscall count and inode rwsem contention.
+const MAX_WRITE_BATCH: usize = 1024 * 1024; // 1 MiB
+
 // ---------------------------------------------------------------------------
 // Data structures for the coalesced parallel restore
 // ---------------------------------------------------------------------------
@@ -654,6 +659,11 @@ fn process_read_group(
     let mut decompress_buf = Vec::new();
     let mut file_handles: HashMap<usize, std::fs::File> = HashMap::new();
 
+    // Write accumulator — batches consecutive same-file writes into one syscall.
+    let mut pending_buf: Vec<u8> = Vec::new();
+    let mut pending_file_idx: usize = usize::MAX; // sentinel: no pending write
+    let mut pending_start: u64 = 0;
+
     for blob in &group.blobs {
         if cancelled.load(Ordering::Acquire) {
             return Ok(());
@@ -709,38 +719,99 @@ fn process_read_group(
         }
 
         for target in &blob.targets {
-            if !file_handles.contains_key(&target.file_idx) {
-                let pf = &files[target.file_idx];
-                if file_handles.len() >= MAX_OPEN_FILES_PER_GROUP {
-                    if let Some(evict_idx) = file_handles.keys().next().copied() {
-                        file_handles.remove(&evict_idx);
-                    }
+            // Check if this target extends the current pending write (same file,
+            // contiguous offset).  If so, append to the accumulator; otherwise
+            // flush any pending write and start a new one.
+            let contiguous = pending_file_idx == target.file_idx
+                && target.file_offset == pending_start + pending_buf.len() as u64;
+
+            if contiguous {
+                pending_buf.extend_from_slice(&decompress_buf);
+                if pending_buf.len() >= MAX_WRITE_BATCH {
+                    flush_pending(
+                        &mut pending_buf,
+                        &mut pending_file_idx,
+                        pending_start,
+                        &mut file_handles,
+                        files,
+                        bytes_written,
+                    )?;
                 }
-                let handle = std::fs::OpenOptions::new()
-                    .write(true)
-                    .open(&pf.target_path)
-                    .map_err(|e| {
-                        VgerError::Other(format!(
-                            "failed to open {} for writing: {e}",
-                            pf.target_path.display()
-                        ))
-                    })?;
-                file_handles.insert(target.file_idx, handle);
+            } else {
+                // Flush previous pending write (if any) before starting a new one.
+                flush_pending(
+                    &mut pending_buf,
+                    &mut pending_file_idx,
+                    pending_start,
+                    &mut file_handles,
+                    files,
+                    bytes_written,
+                )?;
+                pending_file_idx = target.file_idx;
+                pending_start = target.file_offset;
+                pending_buf.extend_from_slice(&decompress_buf);
             }
-            let fh = file_handles
-                .get_mut(&target.file_idx)
-                .ok_or_else(|| VgerError::Other("missing file handle in restore worker".into()))?;
-            #[cfg(unix)]
-            fh.write_all_at(&decompress_buf, target.file_offset)?;
-            #[cfg(not(unix))]
-            {
-                fh.seek(std::io::SeekFrom::Start(target.file_offset))?;
-                fh.write_all(&decompress_buf)?;
-            }
-            bytes_written.fetch_add(decompress_buf.len() as u64, Ordering::Relaxed);
         }
     }
 
+    // Flush any remaining pending write.
+    flush_pending(
+        &mut pending_buf,
+        &mut pending_file_idx,
+        pending_start,
+        &mut file_handles,
+        files,
+        bytes_written,
+    )?;
+
+    Ok(())
+}
+
+/// Flush the write accumulator to disk if it contains data.  Clears the buffer
+/// (keeping the allocation) and resets the file index sentinel.
+fn flush_pending(
+    buf: &mut Vec<u8>,
+    file_idx: &mut usize,
+    start_offset: u64,
+    file_handles: &mut HashMap<usize, std::fs::File>,
+    files: &[PlannedFile],
+    bytes_written: &AtomicU64,
+) -> Result<()> {
+    if buf.is_empty() {
+        return Ok(());
+    }
+    let idx = *file_idx;
+    if !file_handles.contains_key(&idx) {
+        let pf = &files[idx];
+        if file_handles.len() >= MAX_OPEN_FILES_PER_GROUP {
+            if let Some(evict_idx) = file_handles.keys().next().copied() {
+                file_handles.remove(&evict_idx);
+            }
+        }
+        let handle = std::fs::OpenOptions::new()
+            .write(true)
+            .open(&pf.target_path)
+            .map_err(|e| {
+                VgerError::Other(format!(
+                    "failed to open {} for writing: {e}",
+                    pf.target_path.display()
+                ))
+            })?;
+        file_handles.insert(idx, handle);
+    }
+    let fh = file_handles
+        .get_mut(&idx)
+        .ok_or_else(|| VgerError::Other("missing file handle in restore worker".into()))?;
+    #[cfg(unix)]
+    fh.write_all_at(buf, start_offset)?;
+    #[cfg(not(unix))]
+    {
+        fh.seek(std::io::SeekFrom::Start(start_offset))?;
+        fh.write_all(buf)?;
+    }
+    bytes_written.fetch_add(buf.len() as u64, Ordering::Relaxed);
+    buf.clear();
+    *file_idx = usize::MAX;
     Ok(())
 }
 
