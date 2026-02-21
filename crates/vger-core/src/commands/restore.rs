@@ -87,6 +87,10 @@ struct PlannedFile {
     mode: u32,
     mtime: i64,
     xattrs: Option<HashMap<String, Vec<u8>>>,
+    /// CAS flag: the first worker to open this file calls `set_len`.
+    /// Prevents repeated `ftruncate` syscalls when multiple workers open
+    /// the same large file across different read groups.
+    created: AtomicBool,
 }
 
 // ---------------------------------------------------------------------------
@@ -264,7 +268,9 @@ where
             planned_files.len(),
         );
 
-        // Phase 3: Pre-create files with the correct size.
+        // Phase 3: Ensure parent directories exist + create empty files.
+        // Non-empty files are created on first write in Phase 4 (avoids
+        // the double-open: create + set_len here, then reopen for writing).
         // Safety: parents verified during directory creation are trusted —
         // this is a single-process operation so no concurrent destination
         // tampering can occur. Unverified parents still get the full
@@ -277,9 +283,8 @@ where
             {
                 ensure_parent_exists_within_root(&pf.target_path, &dest_root)?;
             }
-            let file = std::fs::File::create(&pf.target_path)?;
-            if pf.total_size > 0 {
-                file.set_len(pf.total_size)?;
+            if pf.total_size == 0 {
+                std::fs::File::create(&pf.target_path)?;
             }
         }
 
@@ -420,6 +425,7 @@ where
                     mode: item.mode,
                     mtime: item.mtime,
                     xattrs: item.xattrs,
+                    created: AtomicBool::new(false),
                 });
             }
         }
@@ -481,6 +487,7 @@ where
             mode: item.mode,
             mtime: item.mtime,
             xattrs: item.xattrs.clone(),
+            created: AtomicBool::new(false),
         });
     }
 
@@ -797,8 +804,12 @@ fn flush_pending(
                 file_handles.remove(&evict_idx);
             }
         }
+        // Create-on-first-write: truncate(false) prevents one worker from
+        // destroying another worker's writes to the same file.
         let handle = std::fs::OpenOptions::new()
             .write(true)
+            .create(true)
+            .truncate(false)
             .open(&pf.target_path)
             .map_err(|e| {
                 VgerError::Other(format!(
@@ -806,6 +817,10 @@ fn flush_pending(
                     pf.target_path.display()
                 ))
             })?;
+        // CAS: only the first opener calls set_len (ftruncate).
+        if !pf.created.swap(true, Ordering::AcqRel) {
+            handle.set_len(pf.total_size)?;
+        }
         file_handles.insert(idx, handle);
     }
     let fh = file_handles
@@ -1197,6 +1212,7 @@ mod tests {
             mode: 0o644,
             mtime: 0,
             xattrs: None,
+            created: AtomicBool::new(true), // pre-created in test
         }];
 
         let payload = b"abc";
