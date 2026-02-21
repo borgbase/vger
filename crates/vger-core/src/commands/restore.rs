@@ -215,15 +215,27 @@ where
         super::list::load_snapshot_item_stream(&mut repo, &resolved_name)?
     };
 
-    let dest_path = Path::new(dest);
-    std::fs::create_dir_all(dest_path)?;
-    let dest_root = dest_path
-        .canonicalize()
-        .map_err(|e| VgerError::Other(format!("invalid destination '{}': {e}", dest)))?;
+    let dest_root = validate_and_prepare_dest(dest)?;
+
+    // Create a hidden temp directory inside dest so all writes happen there.
+    // On success we rename top-level entries into dest; on failure we
+    // remove_dir_all the temp root so no partial files are left at dest.
+    let temp_dir_name = format!(
+        ".vger-restore-{:016x}",
+        rand::Rng::gen::<u64>(&mut rand::thread_rng())
+    );
+    let temp_root = dest_root.join(&temp_dir_name);
+    std::fs::create_dir_all(&temp_root)?;
+
+    let cleanup = |e: VgerError| -> VgerError {
+        let _ = std::fs::remove_dir_all(&temp_root);
+        e
+    };
 
     // Stream items: create dirs/symlinks immediately, build file plan + chunk targets.
-    let (planned_files, chunk_targets, mut stats, verified_dirs) =
-        stream_and_plan(&items_stream, &dest_root, &mut include_path, xattrs_enabled)?;
+    let (mut planned_files, chunk_targets, mut stats, verified_dirs) =
+        stream_and_plan(&items_stream, &temp_root, &mut include_path, xattrs_enabled)
+            .map_err(&cleanup)?;
     drop(items_stream); // free raw bytes before read group building
 
     if !planned_files.is_empty() {
@@ -237,14 +249,14 @@ where
                 let all_in_cache = chunk_targets.keys().all(|id| cache.lookup(id).is_some());
 
                 if all_in_cache {
-                    build_read_groups(chunk_targets, |id| cache.lookup(id))?
+                    build_read_groups(chunk_targets, |id| cache.lookup(id)).map_err(&cleanup)?
                 } else {
                     info!("restore cache incomplete, falling back to chunk index");
-                    build_read_groups_via_index(&mut repo, chunk_targets)?
+                    build_read_groups_via_index(&mut repo, chunk_targets).map_err(&cleanup)?
                 }
             } else {
                 info!("restore cache unavailable, using chunk index");
-                build_read_groups_via_index(&mut repo, chunk_targets)?
+                build_read_groups_via_index(&mut repo, chunk_targets).map_err(&cleanup)?
             }
         } else {
             Vec::new()
@@ -275,24 +287,53 @@ where
         // this is a single-process operation so no concurrent destination
         // tampering can occur. Unverified parents still get the full
         // canonicalize check.
-        for pf in &planned_files {
-            if pf
-                .target_path
-                .parent()
-                .is_none_or(|p| !verified_dirs.contains(p))
-            {
-                ensure_parent_exists_within_root(&pf.target_path, &dest_root)?;
+        let phase3_result: Result<()> = (|| {
+            for pf in &planned_files {
+                if pf
+                    .target_path
+                    .parent()
+                    .is_none_or(|p| !verified_dirs.contains(p))
+                {
+                    ensure_parent_exists_within_root(&pf.target_path, &temp_root)?;
+                }
+                if pf.total_size == 0 {
+                    std::fs::File::create(&pf.target_path)?;
+                }
             }
-            if pf.total_size == 0 {
-                std::fs::File::create(&pf.target_path)?;
-            }
-        }
+            Ok(())
+        })();
+        phase3_result.map_err(&cleanup)?;
 
         // Phase 4: Parallel restore — download ranges, decrypt, decompress, write.
         let bytes_written =
-            execute_parallel_restore(&planned_files, groups, &repo.storage, repo.crypto.as_ref())?;
+            execute_parallel_restore(&planned_files, groups, &repo.storage, repo.crypto.as_ref())
+                .map_err(&cleanup)?;
 
-        // Phase 5: Apply file metadata (mode, mtime, xattrs).
+        // Phase 5a: Move all top-level entries from temp root to dest root.
+        let move_result: Result<()> = (|| {
+            for entry in std::fs::read_dir(&temp_root)? {
+                let entry = entry?;
+                let final_path = dest_root.join(entry.file_name());
+                std::fs::rename(entry.path(), &final_path)?;
+            }
+            std::fs::remove_dir(&temp_root)?; // now empty
+            Ok(())
+        })();
+        move_result.map_err(&cleanup)?;
+
+        // Phase 5b: Fix up planned_file paths (temp_root → dest_root) for metadata.
+        for pf in &mut planned_files {
+            let rel = pf.target_path.strip_prefix(&temp_root).map_err(|_| {
+                VgerError::Other(format!(
+                    "internal error: planned file path {} is not under temp root {}",
+                    pf.target_path.display(),
+                    temp_root.display()
+                ))
+            })?;
+            pf.target_path = dest_root.join(rel);
+        }
+
+        // Phase 5c: Apply file metadata (mode, mtime, xattrs).
         // Use fd-based fchmod/futimens when possible to avoid redundant path
         // lookups (replaces 2 path syscalls per file with 1 open).  Falls back
         // to path-based calls on open failure (e.g. mode 0o000 or 0o200).
@@ -323,6 +364,18 @@ where
 
         stats.files = planned_files.len() as u64;
         stats.total_bytes = bytes_written;
+    } else {
+        // No files to restore — just move dirs/symlinks from temp root to dest.
+        let move_result: Result<()> = (|| {
+            for entry in std::fs::read_dir(&temp_root)? {
+                let entry = entry?;
+                let final_path = dest_root.join(entry.file_name());
+                std::fs::rename(entry.path(), &final_path)?;
+            }
+            std::fs::remove_dir(&temp_root)?;
+            Ok(())
+        })();
+        move_result.map_err(&cleanup)?;
     }
 
     info!(
@@ -730,12 +783,9 @@ fn process_read_group(
 
     for blob in &group.blobs {
         if cancelled.load(Ordering::Acquire) {
-            // Note: dropping `pw` loses any buffered data, but this is
-            // consistent with the broader cancellation model — other read
-            // groups targeting the same files are also being cancelled,
-            // so the files would be incomplete regardless.  A future
-            // write-to-temp + atomic-rename approach would eliminate
-            // partial files entirely.
+            // Dropping `pw` loses buffered data, but the caller will
+            // clean up the temp restore root on error/cancellation so
+            // no partial files reach the final destination.
             return Ok(());
         }
 
@@ -995,6 +1045,30 @@ fn sanitize_item_path(raw: &str) -> Result<PathBuf> {
         )));
     }
     Ok(out)
+}
+
+/// Validate the restore destination: must be non-existing or empty.
+/// Creates the directory if it doesn't exist. Returns the canonicalized path.
+fn validate_and_prepare_dest(dest: &str) -> Result<PathBuf> {
+    let dest_path = Path::new(dest);
+    if dest_path.exists() {
+        let is_empty = dest_path
+            .read_dir()
+            .map_err(|e| VgerError::Other(format!("cannot read destination '{}': {e}", dest)))?
+            .next()
+            .is_none();
+        if !is_empty {
+            return Err(VgerError::Config(format!(
+                "restore destination '{}' is not empty; use an empty or non-existing directory",
+                dest
+            )));
+        }
+    } else {
+        std::fs::create_dir_all(dest_path)?;
+    }
+    dest_path
+        .canonicalize()
+        .map_err(|e| VgerError::Other(format!("invalid destination '{}': {e}", dest)))
 }
 
 fn ensure_parent_exists_within_root(target: &Path, root: &Path) -> Result<()> {
@@ -1912,5 +1986,48 @@ mod tests {
         assert!(planned_files[0].target_path.ends_with("mydir/a.txt"));
         assert_eq!(chunk_targets.len(), 1);
         assert_eq!(stats.dirs, 1);
+    }
+
+    // -----------------------------------------------------------------------
+    // validate_and_prepare_dest tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn validate_dest_rejects_non_empty_directory() {
+        let temp = tempdir().unwrap();
+        // Create a file inside so it's non-empty.
+        std::fs::write(temp.path().join("existing.txt"), b"data").unwrap();
+        let err = validate_and_prepare_dest(temp.path().to_str().unwrap())
+            .unwrap_err()
+            .to_string();
+        assert!(
+            err.contains("not empty"),
+            "expected 'not empty' error, got: {err}"
+        );
+    }
+
+    #[test]
+    fn validate_dest_accepts_empty_directory() {
+        let temp = tempdir().unwrap();
+        let dest = validate_and_prepare_dest(temp.path().to_str().unwrap()).unwrap();
+        assert!(dest.is_dir());
+    }
+
+    #[test]
+    fn validate_dest_creates_non_existing_directory() {
+        let temp = tempdir().unwrap();
+        let new_dir = temp.path().join("brand-new");
+        assert!(!new_dir.exists());
+        let dest = validate_and_prepare_dest(new_dir.to_str().unwrap()).unwrap();
+        assert!(dest.is_dir());
+    }
+
+    #[test]
+    fn validate_dest_creates_nested_non_existing_directory() {
+        let temp = tempdir().unwrap();
+        let new_dir = temp.path().join("a/b/c");
+        assert!(!new_dir.exists());
+        let dest = validate_and_prepare_dest(new_dir.to_str().unwrap()).unwrap();
+        assert!(dest.is_dir());
     }
 }
