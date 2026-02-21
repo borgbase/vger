@@ -12,7 +12,7 @@
 | **Type-safe PackId** | Newtype for pack file identifiers with `storage_key()` |
 | **compact command** | Rewrite packs to reclaim space from orphaned blobs after delete/prune |
 | **REST server** | axum-based backup server with auth, append-only, quotas, freshness tracking, lock TTL, server-side compaction |
-| **REST backend** | `StorageBackend` over HTTP with range-read support (behind `backend-rest` feature) |
+| **REST backend** | `StorageBackend` over HTTP with range-read support |
 | **Tiered dedup index** | Backup dedup via session map + xor filter + mmap dedup cache, with safe fallback to HashMap dedup mode |
 | **Restore mmap cache** | Index-light restore planning via local restore cache; fallback to filtered full-index loading when needed |
 | **Incremental index update** | `save_state()` fast path merges `IndexDelta` into local full-index cache and serializes index from cache |

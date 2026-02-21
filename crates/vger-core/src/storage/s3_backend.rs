@@ -25,28 +25,17 @@ impl S3Backend {
         bucket_name: &str,
         region: &str,
         root: &str,
-        endpoint: Option<&str>,
+        endpoint: &str,
         access_key_id: &str,
         secret_access_key: &str,
         retry: RetryConfig,
     ) -> Result<Self> {
-        let base_url = match endpoint {
-            Some(ep) => ep
-                .parse()
-                .map_err(|e| VgerError::Config(format!("invalid S3 endpoint URL '{ep}': {e}")))?,
-            None => format!("https://s3.{region}.amazonaws.com")
-                .parse()
-                .map_err(|e| {
-                    VgerError::Config(format!("invalid S3 region URL for region '{region}': {e}"))
-                })?,
-        };
+        let base_url = endpoint
+            .parse()
+            .map_err(|e| VgerError::Config(format!("invalid S3 endpoint URL '{endpoint}': {e}")))?;
 
-        // Use path style for custom endpoints (MinIO, self-hosted), virtual-host for AWS.
-        let url_style = if endpoint.is_some() {
-            UrlStyle::Path
-        } else {
-            UrlStyle::VirtualHost
-        };
+        // Endpoint is always explicit in repository URL; use path-style addressing.
+        let url_style = UrlStyle::Path;
 
         let bucket = Bucket::new(
             base_url,

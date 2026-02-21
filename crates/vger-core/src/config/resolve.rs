@@ -18,7 +18,7 @@ use super::util::expand_tilde;
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct RepositoryEntry {
-    /// Repository URL: bare path, `file://`, `s3://`, `sftp://`, or `http(s)://`.
+    /// Repository URL: bare path, `file://`, `s3://`, `s3+http://`, `sftp://`, or `http(s)://`.
     #[serde(deserialize_with = "deserialize_strict_string")]
     pub url: String,
     #[serde(default, deserialize_with = "deserialize_optional_strict_string")]
@@ -27,8 +27,6 @@ pub struct RepositoryEntry {
     pub access_key_id: Option<String>,
     #[serde(default, deserialize_with = "deserialize_optional_strict_string")]
     pub secret_access_key: Option<String>,
-    #[serde(default, deserialize_with = "deserialize_optional_strict_string")]
-    pub endpoint: Option<String>,
     #[serde(default, deserialize_with = "deserialize_optional_strict_string")]
     pub sftp_key: Option<String>,
     #[serde(default, deserialize_with = "deserialize_optional_strict_string")]
@@ -69,7 +67,6 @@ impl RepositoryEntry {
             region: self.region.clone(),
             access_key_id: self.access_key_id.clone(),
             secret_access_key: self.secret_access_key.clone(),
-            endpoint: self.endpoint.clone(),
             sftp_key: self.sftp_key.clone(),
             sftp_known_hosts: self.sftp_known_hosts.clone(),
             sftp_max_connections: self.sftp_max_connections,
@@ -1169,7 +1166,6 @@ repositories:
                     region: None,
                     access_key_id: None,
                     secret_access_key: None,
-                    endpoint: None,
                     sftp_key: None,
                     sftp_known_hosts: None,
                     sftp_max_connections: None,

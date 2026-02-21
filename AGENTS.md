@@ -2,7 +2,7 @@
 
 ## What this project is
 
-A fast, encrypted, deduplicated backup tool written in Rust. YAML config inspired by Borgmatic. Storage abstracted via Apache OpenDAL. Uses its own on-disk format.
+A fast, encrypted, deduplicated backup tool written in Rust. YAML config inspired by Borgmatic. Uses pluggable storage backends (local/S3/SFTP/REST) and its own on-disk format.
 
 ## Build & test
 
@@ -29,7 +29,8 @@ crates/
       storage/
         mod.rs                          # StorageBackend trait (get/put/delete/exists/list/get_range/create_dir)
         local_backend.rs                # Native std::fs local filesystem backend
-        opendal_backend.rs              # OpenDAL adapter (S3 only)
+        s3_backend.rs                   # rusty-s3 + ureq S3 backend
+        runtime.rs                      # Shared tokio runtime for async-backed adapters (SFTP)
       crypto/
         mod.rs                          # CryptoEngine trait + PlaintextEngine
         aes_gcm.rs                      # AES-256-GCM implementation
@@ -113,7 +114,6 @@ The type tag byte is used as AAD (authenticated additional data) in AES-GCM.
 ## Important conventions
 
 - All serialization uses `rmp_serde` (msgpack). Structs serialize as positional arrays — do **not** use `#[serde(skip_serializing_if)]` on Item fields (breaks positional deserialization).
-- OpenDAL builder methods consume `self` — must chain calls, not use `mut` + separate method calls.
 - `blake2::Blake2bMac<U32>` has ambiguous trait methods — use `Mac::update(&mut hasher, data)` and `<KeyedBlake2b256 as KeyInit>::new_from_slice()` if needed.
 - The `PlaintextEngine` still needs a `chunk_id_key` for deterministic dedup. For unencrypted repos, it's derived as `BLAKE2b(repo_id)`.
 - `store_chunk()` requires a `PackType` argument — use `PackType::Data` for file content and `PackType::Tree` for item-stream metadata.
@@ -128,7 +128,7 @@ The type tag byte is used as AAD (authenticated additional data) in AES-GCM.
 | KDF | `argon2` 0.5 |
 | Compression | `lz4_flex` 0.11, `zstd` 0.13 |
 | Chunking | `fastcdc` 3 |
-| Storage | `opendal` 0.51 (services-s3), `std::fs` for local |
+| Storage | `rusty-s3` 0.8 + `ureq` 2 for S3/REST, `std::fs` for local |
 | Serialization | `rmp-serde` 1, `serde_json` 1 |
 | CLI | `clap` 4 (derive), `serde_yaml` 0.9 |
 | Filesystem | `walkdir` 2, `globset` 0.4, `xattr` 1 |
@@ -145,5 +145,5 @@ gh run download --name linux-x86_64-unknown-linux-gnu    # download Linux binary
 
 - `mount` command
 - Async I/O
-- SSH RPC protocol (use OpenDAL SFTP instead)
+- SSH RPC protocol (use the built-in SFTP backend instead)
 - Hardlinks, block/char devices, FIFOs

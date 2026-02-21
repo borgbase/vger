@@ -95,9 +95,10 @@ compression:
 
 # URL formats:
 #   Local: /backups/repo  or  file:///backups/repo
-#   S3:    s3://bucket/prefix  or  s3://endpoint:port/bucket/prefix
+#   S3:    s3://endpoint:port/bucket/prefix
+#          s3+http://endpoint:port/bucket/prefix  (requires allow_insecure_http: true)
 #   SFTP:  sftp://user@host/path               (compile with feature 'backend-sftp')
-#   REST:  https://backup.example.com/repo     (compile with feature 'backend-rest')
+#   REST:  https://backup.example.com/repo
 
 # Simple repository form:
 #
@@ -108,12 +109,11 @@ compression:
 # Rich repository form (backend options + per-repo overrides):
 #
 # repositories:
-#   - url: s3://my-bucket/vger
+#   - url: s3://s3.us-east-1.amazonaws.com/my-bucket/vger
 #     label: offsite
 #     region: us-east-1
 #     access_key_id: AWS_ACCESS_KEY_ID
 #     secret_access_key: AWS_SECRET_ACCESS_KEY
-#     # endpoint: https://s3.us-east-1.amazonaws.com
 #     # sftp_key: ~/.ssh/id_ed25519
 #     # sftp_known_hosts: ~/.ssh/known_hosts
 #     # sftp_max_connections: 4

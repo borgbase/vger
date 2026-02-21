@@ -117,7 +117,7 @@ impl ScheduleConfig {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RepositoryConfig {
-    /// Repository URL: bare path, `file://`, `s3://`, `sftp://`, or `http(s)://`.
+    /// Repository URL: bare path, `file://`, `s3://`, `s3+http://`, `sftp://`, or `http(s)://`.
     pub url: String,
     /// S3 region (default: us-east-1).
     pub region: Option<String>,
@@ -125,8 +125,6 @@ pub struct RepositoryConfig {
     pub access_key_id: Option<String>,
     /// S3 secret access key.
     pub secret_access_key: Option<String>,
-    /// S3 endpoint override (for S3-compatible stores when the URL heuristic is insufficient).
-    pub endpoint: Option<String>,
     /// Path to SSH private key for SFTP backend.
     pub sftp_key: Option<String>,
     /// Path to OpenSSH known_hosts file for SFTP host key verification.
@@ -135,7 +133,7 @@ pub struct RepositoryConfig {
     pub sftp_max_connections: Option<usize>,
     /// Bearer token for REST backend authentication.
     pub rest_token: Option<String>,
-    /// Allow plaintext HTTP for REST/S3 endpoints (unsafe; defaults to false).
+    /// Allow plaintext HTTP transport for remote endpoints (unsafe; defaults to false).
     #[serde(default = "default_allow_insecure_http")]
     pub allow_insecure_http: bool,
     #[serde(default = "default_min_pack_size")]

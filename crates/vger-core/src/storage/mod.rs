@@ -193,8 +193,8 @@ pub enum ParsedUrl {
     S3 {
         bucket: String,
         root: String,
-        /// Custom endpoint (present when the URL host contains a `.` or port).
-        endpoint: Option<String>,
+        /// Explicit endpoint URL derived from the repository URL.
+        endpoint: String,
     },
     /// SFTP remote storage.
     Sftp {
@@ -212,8 +212,8 @@ pub enum ParsedUrl {
 /// Supported formats:
 /// - Bare path (`/backups/repo`, `./relative`, `relative`) -> `Local`
 /// - `file:///backups/repo` -> `Local`
-/// - `s3://bucket/prefix` -> `S3` (host is bucket, AWS default endpoint)
-/// - `s3://endpoint:port/bucket/prefix` -> `S3` (host with `.` or port = custom endpoint)
+/// - `s3://endpoint[:port]/bucket/prefix` -> `S3` over HTTPS
+/// - `s3+http://endpoint[:port]/bucket/prefix` -> `S3` over HTTP (unsafe; blocked by default)
 /// - `sftp://[user@]host[:port]/path` -> `Sftp`
 /// - `http(s)://...` -> `Rest`
 pub fn parse_repo_url(raw: &str) -> Result<ParsedUrl> {
@@ -253,7 +253,8 @@ pub fn parse_repo_url(raw: &str) -> Result<ParsedUrl> {
             }
             Ok(ParsedUrl::Local { path })
         }
-        "s3" => parse_s3_url(&url),
+        "s3" | "s3+https" => parse_s3_url(&url, "https"),
+        "s3+http" => parse_s3_url(&url, "http"),
         "sftp" => parse_sftp_url(&url),
         "http" | "https" => Ok(ParsedUrl::Rest {
             url: trimmed.to_string(),
@@ -264,48 +265,31 @@ pub fn parse_repo_url(raw: &str) -> Result<ParsedUrl> {
     }
 }
 
-/// Parse an `s3://` URL.
+/// Parse an S3 URL (`s3://` or `s3+http://`).
 ///
-/// Heuristic: if the host contains a `.` or has a port, it's treated as a
-/// custom endpoint and the first path segment is the bucket. Otherwise
-/// the host IS the bucket (AWS default endpoint).
-///
-/// Custom endpoints default to HTTPS; plaintext HTTP requires explicit
-/// `repository.allow_insecure_http: true` plus an `endpoint: http://...` override.
-fn parse_s3_url(url: &Url) -> Result<ParsedUrl> {
+/// S3 URLs must always include an endpoint host and bucket path:
+/// `s3://endpoint[:port]/bucket[/prefix]`.
+fn parse_s3_url(url: &Url, endpoint_scheme: &str) -> Result<ParsedUrl> {
     let host = url
         .host_str()
-        .ok_or_else(|| VgerError::Config("s3:// URL is missing a host/bucket".into()))?;
+        .ok_or_else(|| VgerError::Config("s3 URL is missing an endpoint host".into()))?;
 
-    let has_port = url.port().is_some();
-    let has_dot = host.contains('.');
+    let port_suffix = url.port().map(|p| format!(":{p}")).unwrap_or_default();
+    let endpoint = format!("{endpoint_scheme}://{host}{port_suffix}");
 
-    if has_dot || has_port {
-        // Custom endpoint — first path segment is bucket
-        let port_suffix = url.port().map(|p| format!(":{p}")).unwrap_or_default();
-        let endpoint = format!("https://{host}{port_suffix}");
-
-        let path = url.path().trim_start_matches('/');
-        let (bucket, root) = path.split_once('/').unwrap_or((path, ""));
-        if bucket.is_empty() {
-            return Err(VgerError::Config(
-                "s3:// URL with custom endpoint is missing a bucket in the path".into(),
-            ));
-        }
-        Ok(ParsedUrl::S3 {
-            bucket: bucket.to_string(),
-            root: root.to_string(),
-            endpoint: Some(endpoint),
-        })
-    } else {
-        // Host is the bucket, AWS default endpoint
-        let root = url.path().trim_start_matches('/').to_string();
-        Ok(ParsedUrl::S3 {
-            bucket: host.to_string(),
-            root,
-            endpoint: None,
-        })
+    let path = url.path().trim_start_matches('/');
+    let (bucket, root) = path.split_once('/').unwrap_or((path, ""));
+    if bucket.is_empty() {
+        return Err(VgerError::Config(
+            "s3 URL must include a bucket in the path (expected s3://endpoint/bucket[/prefix])"
+                .into(),
+        ));
     }
+    Ok(ParsedUrl::S3 {
+        bucket: bucket.to_string(),
+        root: root.to_string(),
+        endpoint,
+    })
 }
 
 /// Parse an `sftp://` URL.
@@ -355,15 +339,8 @@ pub fn backend_from_config(cfg: &RepositoryConfig) -> Result<Box<dyn StorageBack
         enforce_secure_http(url, cfg.allow_insecure_http, "repository.url")?;
     }
 
-    if let ParsedUrl::S3 {
-        endpoint: url_endpoint,
-        ..
-    } = &parsed
-    {
-        let endpoint = cfg.endpoint.as_deref().or(url_endpoint.as_deref());
-        if let Some(endpoint) = endpoint {
-            enforce_secure_http(endpoint, cfg.allow_insecure_http, "repository.endpoint")?;
-        }
+    if let ParsedUrl::S3 { endpoint, .. } = &parsed {
+        enforce_secure_http(endpoint, cfg.allow_insecure_http, "repository.url")?;
     }
 
     match parsed {
@@ -371,14 +348,8 @@ pub fn backend_from_config(cfg: &RepositoryConfig) -> Result<Box<dyn StorageBack
         ParsedUrl::S3 {
             bucket,
             root,
-            endpoint: url_endpoint,
+            endpoint,
         } => {
-            // Config `endpoint` field overrides URL-derived endpoint
-            let endpoint = cfg
-                .endpoint
-                .as_deref()
-                .map(|s| s.to_string())
-                .or(url_endpoint);
             let region = cfg.region.as_deref().unwrap_or("us-east-1");
 
             let access_key_id = cfg.access_key_id.as_deref().ok_or_else(|| {
@@ -392,7 +363,7 @@ pub fn backend_from_config(cfg: &RepositoryConfig) -> Result<Box<dyn StorageBack
                 &bucket,
                 region,
                 &root,
-                endpoint.as_deref(),
+                &endpoint,
                 access_key_id,
                 secret_access_key,
                 cfg.retry.clone(),
@@ -480,39 +451,33 @@ mod tests {
 
     #[test]
     fn test_s3_bucket_only() {
-        let parsed = parse_repo_url("s3://my-bucket").unwrap();
-        assert_eq!(
-            parsed,
-            ParsedUrl::S3 {
-                bucket: "my-bucket".into(),
-                root: "".into(),
-                endpoint: None,
-            }
-        );
+        let err = parse_repo_url("s3://my-bucket").unwrap_err();
+        assert!(err.to_string().contains("must include a bucket"));
     }
 
     #[test]
     fn test_s3_bucket_with_prefix() {
-        let parsed = parse_repo_url("s3://my-bucket/vger").unwrap();
+        let parsed = parse_repo_url("s3://s3.us-east-1.amazonaws.com/my-bucket/vger").unwrap();
         assert_eq!(
             parsed,
             ParsedUrl::S3 {
                 bucket: "my-bucket".into(),
                 root: "vger".into(),
-                endpoint: None,
+                endpoint: "https://s3.us-east-1.amazonaws.com".into(),
             }
         );
     }
 
     #[test]
     fn test_s3_bucket_with_nested_prefix() {
-        let parsed = parse_repo_url("s3://my-bucket/backups/vger").unwrap();
+        let parsed =
+            parse_repo_url("s3://s3.us-east-1.amazonaws.com/my-bucket/backups/vger").unwrap();
         assert_eq!(
             parsed,
             ParsedUrl::S3 {
                 bucket: "my-bucket".into(),
                 root: "backups/vger".into(),
-                endpoint: None,
+                endpoint: "https://s3.us-east-1.amazonaws.com".into(),
             }
         );
     }
@@ -525,7 +490,7 @@ mod tests {
             ParsedUrl::S3 {
                 bucket: "my-bucket".into(),
                 root: "vger".into(),
-                endpoint: Some("https://minio.local:9000".into()),
+                endpoint: "https://minio.local:9000".into(),
             }
         );
     }
@@ -538,7 +503,7 @@ mod tests {
             ParsedUrl::S3 {
                 bucket: "my-bucket".into(),
                 root: "vger".into(),
-                endpoint: Some("https://s3.example.com".into()),
+                endpoint: "https://s3.example.com".into(),
             }
         );
     }
@@ -546,7 +511,20 @@ mod tests {
     #[test]
     fn test_s3_custom_endpoint_missing_bucket() {
         let err = parse_repo_url("s3://minio.local:9000").unwrap_err();
-        assert!(err.to_string().contains("missing a bucket"));
+        assert!(err.to_string().contains("must include a bucket"));
+    }
+
+    #[test]
+    fn test_s3_http_endpoint_scheme() {
+        let parsed = parse_repo_url("s3+http://minio.local:9000/my-bucket/vger").unwrap();
+        assert_eq!(
+            parsed,
+            ParsedUrl::S3 {
+                bucket: "my-bucket".into(),
+                root: "vger".into(),
+                endpoint: "http://minio.local:9000".into(),
+            }
+        );
     }
 
     #[test]
@@ -637,7 +615,6 @@ mod tests {
             region: None,
             access_key_id: None,
             secret_access_key: None,
-            endpoint: None,
             sftp_key: None,
             sftp_known_hosts: None,
             sftp_max_connections: None,
@@ -663,14 +640,15 @@ mod tests {
 
     #[test]
     fn test_backend_rejects_http_s3_endpoint_by_default() {
-        let mut cfg = test_config("s3://my-bucket/vger");
-        cfg.endpoint = Some("http://minio.local:9000".into());
+        let mut cfg = test_config("s3+http://minio.local:9000/my-bucket/vger");
+        cfg.access_key_id = Some("test-key".into());
+        cfg.secret_access_key = Some("test-secret".into());
         let err = match backend_from_config(&cfg) {
             Ok(_) => panic!("expected HTTP S3 endpoint to be rejected"),
             Err(err) => err,
         };
         let msg = err.to_string();
-        assert!(msg.contains("repository.endpoint"));
+        assert!(msg.contains("repository.url"));
         assert!(msg.contains("repository.allow_insecure_http: true"));
     }
 
@@ -687,8 +665,7 @@ mod tests {
 
     #[test]
     fn test_backend_allows_http_s3_endpoint_when_opted_in() {
-        let mut cfg = test_config("s3://my-bucket/vger");
-        cfg.endpoint = Some("http://minio.local:9000".into());
+        let mut cfg = test_config("s3+http://minio.local:9000/my-bucket/vger");
         cfg.allow_insecure_http = true;
         cfg.access_key_id = Some("test-key".into());
         cfg.secret_access_key = Some("test-secret".into());

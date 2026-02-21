@@ -101,7 +101,7 @@ impl SealedData {
 
     /// Upload pack data, choosing the zero-copy path when possible.
     ///
-    /// - `Memory(Vec<u8>)`: passes owned Vec via `put_owned` (zero-copy for OpenDAL/REST).
+    /// - `Memory(Vec<u8>)`: passes owned Vec via `put_owned` (zero-copy for backends that support owned buffers).
     /// - `Mmap`: borrows the mapped region via `put` (no materialization to Vec).
     pub fn put_to(self, storage: &dyn StorageBackend, key: &str) -> Result<()> {
         match self {

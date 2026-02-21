@@ -12,7 +12,7 @@ Technical reference for vger-server's internal architecture: crate layout, REST 
 |-----------|----------|---------|
 | **vger-server** | `crates/vger-server/` | axum HTTP server with all server-side features |
 | **vger-protocol** | `crates/vger-protocol/` | Shared wire-format types and pack/protocol version constants (no I/O or crypto deps) |
-| **RestBackend** | `crates/vger-core/src/storage/rest_backend.rs` | `StorageBackend` impl over HTTP (behind `backend-rest` feature) |
+| **RestBackend** | `crates/vger-core/src/storage/rest_backend.rs` | `StorageBackend` impl over HTTP |
 
 ## REST API
 
@@ -149,7 +149,7 @@ See `vger-server --help` for the full list of flags and defaults.
 
 ## RestBackend (Client Side)
 
-`crates/vger-core/src/storage/rest_backend.rs` implements `StorageBackend` using `ureq` (sync HTTP client, behind `backend-rest` feature flag). Connection-pooled. Maps each trait method to the corresponding HTTP verb. `get_range` sends a `Range: bytes=<start>-<end>` header and expects `206 Partial Content`. Also exposes extra methods beyond the trait: `batch_delete()`, `repack()`, `verify_packs()`, `acquire_lock()`, `release_lock()`, `stats()`.
+`crates/vger-core/src/storage/rest_backend.rs` implements `StorageBackend` using `ureq` (sync HTTP client). Connection-pooled. Maps each trait method to the corresponding HTTP verb. `get_range` sends a `Range: bytes=<start>-<end>` header and expects `206 Partial Content`. Also exposes extra methods beyond the trait: `batch_delete()`, `repack()`, `verify_packs()`, `acquire_lock()`, `release_lock()`, `stats()`.
 
 Client config:
 ```yaml

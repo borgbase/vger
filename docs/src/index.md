@@ -45,7 +45,7 @@ V'Ger leads in both speed and CPU efficiency, while maintaining competitive memo
 | Encryption | AES-CTR+HMAC / AES-OCB / ChaCha20 | AES-256-CTR + Poly1305-AES | AES-256-CTR + Poly1305-AES | AES-256-GCM / ChaCha20-Poly1305 (auto-select at init) |
 | Key derivation | PBKDF2 or Argon2id | scrypt | scrypt | Argon2id |
 | Serialization | msgpack | JSON + Protocol Buffers | JSON + Protocol Buffers | msgpack |
-| Storage | borgstore + SSH RPC | Local, S3, SFTP, REST, rclone | OpenDAL (local, S3, many more) | OpenDAL (local, S3, SFTP) + vger-server |
+| Storage | borgstore + SSH RPC | Local, S3, SFTP, REST, rclone | Local, S3, SFTP, REST | Local, S3, SFTP, REST + vger-server |
 | Repo compatibility | Borg v1/v2/v3 | Restic format | Restic-compatible | Own format |
 
 
@@ -53,7 +53,7 @@ V'Ger leads in both speed and CPU efficiency, while maintaining competitive memo
 
 - [BorgBackup](https://github.com/borgbackup/borg/): architecture, chunking strategy, repository concept, and overall backup pipeline.
 - [Borgmatic](https://torsion.org/borgmatic/): YAML configuration approach, pipe-based database dumps.
-- [Rustic](https://github.com/rustic-rs/rustic): storage backend abstraction via Apache OpenDAL, pack file design, and architectural references from a mature Rust backup tool.
+- [Rustic](https://github.com/rustic-rs/rustic): pack file design and architectural references from a mature Rust backup tool.
 - [V'Ger](https://memory-alpha.fandom.com/wiki/V%27Ger) from *Star Trek: The Motion Picture* — a probe that assimilated everything it encountered and returned as something far more powerful.
 
 

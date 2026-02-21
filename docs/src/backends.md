@@ -1,11 +1,12 @@
 # Storage Backends
 
-The repository URL in your config determines which backend is used. S3 storage is implemented via [Apache OpenDAL](https://opendal.apache.org/), while SFTP uses a native [russh](https://github.com/Eugeny/russh) implementation. OpenDAL could be used to add more backends in the future.
+The repository URL in your config determines which backend is used.
 
 | Backend | URL example |
 |---------|-------------|
 | Local filesystem | `/backups/repo` |
-| S3 / S3-compatible | `s3://bucket/prefix` |
+| S3 / S3-compatible (HTTPS) | `s3://endpoint[:port]/bucket/prefix` |
+| S3 / S3-compatible (HTTP, unsafe) | `s3+http://endpoint[:port]/bucket/prefix` |
 | SFTP | `sftp://host/path` |
 | REST (vger-server) | `https://host/repo` |
 
@@ -14,11 +15,11 @@ The repository URL in your config determines which backend is used. S3 storage i
 HTTP transport is blocked by default for remote backends.
 
 - `https://...` is accepted by default.
-- `http://...` requires explicit opt-in with `allow_insecure_http: true`.
+- `http://...` (or `s3+http://...`) requires explicit opt-in with `allow_insecure_http: true`.
 
 ```yaml
 repositories:
-  - url: "http://localhost:8484/myrepo"  # or endpoint: "http://minio.local:9000"
+  - url: "http://localhost:8484/myrepo"
     label: "dev-only"
     allow_insecure_http: true
 ```
@@ -40,21 +41,22 @@ Accepted URL formats: absolute paths (`/backups/repo`), relative paths (`./repo`
 ## S3 / S3-compatible
 
 Store backups in Amazon S3 or any S3-compatible service (MinIO, Wasabi, Backblaze B2, etc.).
+S3 URLs must include an explicit endpoint and bucket path.
 
 **AWS S3:**
 
 ```yaml
 repositories:
-  - url: "s3://my-bucket/vger"
+  - url: "s3://s3.us-east-1.amazonaws.com/my-bucket/vger"
     label: "s3"
     region: "us-east-1"                    # Default if omitted
-    # access_key_id: "AKIA..."            # Optional; uses AWS SDK defaults if omitted
-    # secret_access_key: "..."
+    access_key_id: "AKIA..."
+    secret_access_key: "..."
 ```
 
 **S3-compatible (custom endpoint):**
 
-When the URL host contains a dot or a port, it's treated as a custom endpoint and the first path segment is the bucket:
+The endpoint is always the URL host, and the first path segment is the bucket:
 
 ```yaml
 repositories:
@@ -65,15 +67,26 @@ repositories:
     secret_access_key: "minioadmin"
 ```
 
+**S3-compatible over plaintext HTTP (unsafe):**
+
+```yaml
+repositories:
+  - url: "s3+http://minio.local:9000/my-bucket/vger"
+    label: "minio-dev"
+    region: "us-east-1"
+    access_key_id: "minioadmin"
+    secret_access_key: "minioadmin"
+    allow_insecure_http: true
+```
+
 ### S3 configuration options
 
 | Field | Description |
 |-------|-------------|
 | `region` | AWS region (default: `us-east-1`) |
-| `access_key_id` | AWS access key (falls back to AWS SDK defaults) |
-| `secret_access_key` | AWS secret key |
-| `endpoint` | Override the endpoint derived from the URL |
-| `allow_insecure_http` | Permit `http://` repository URL or endpoint (unsafe; default: `false`) |
+| `access_key_id` | Access key ID (required) |
+| `secret_access_key` | Secret access key (required) |
+| `allow_insecure_http` | Permit `s3+http://` URLs (unsafe; default: `false`) |
 
 ## SFTP
 
@@ -120,4 +133,4 @@ repositories:
 
 See [Server Setup](server-setup.md) for how to set up and configure the server.
 
-All backends are included in the default build and in pre-built binaries from the [releases page](https://github.com/borgbase/vger/releases).
+All backends are included in pre-built binaries from the [releases page](https://github.com/borgbase/vger/releases).

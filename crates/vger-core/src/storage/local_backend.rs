@@ -219,7 +219,7 @@ impl LocalBackend {
                 self.list_recursive(&entry.path(), keys)?;
             } else if file_type.is_file() {
                 if let Ok(rel) = entry.path().strip_prefix(&self.root) {
-                    // Convert to `/`-separated key, matching OpenDAL convention.
+                    // Convert to `/`-separated key to match repository storage keys.
                     let key = rel
                         .components()
                         .map(|c| c.as_os_str().to_string_lossy())

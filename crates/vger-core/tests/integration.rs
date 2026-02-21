@@ -56,7 +56,6 @@ fn make_test_config(repo_dir: &std::path::Path) -> VgerConfig {
             region: None,
             access_key_id: None,
             secret_access_key: None,
-            endpoint: None,
             sftp_key: None,
             sftp_known_hosts: None,
             sftp_max_connections: None,

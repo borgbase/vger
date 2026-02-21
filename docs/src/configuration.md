@@ -48,9 +48,11 @@ repositories:
 
 ```yaml
 repositories:
-  - url: "s3://my-bucket/vger"
+  - url: "s3://s3.us-east-1.amazonaws.com/my-bucket/vger"
     label: "s3"
     region: "us-east-1"
+    access_key_id: "AKIA..."
+    secret_access_key: "..."
 ```
 
 Each entry accepts an optional `label` for CLI targeting (`vger list --repo local`) and optional pack size tuning (`min_pack_size`, `max_pack_size`). Defaults are `min_pack_size = 32 MiB` and `max_pack_size = 128 MiB`; `max_pack_size` has a hard ceiling of `512 MiB`. See [Storage Backends](backends.md) for all backend-specific options.
@@ -63,7 +65,7 @@ repositories:
     allow_insecure_http: true
 ```
 
-`allow_insecure_http` also controls `repository.endpoint` for S3-compatible backends.
+For S3-compatible HTTP endpoints, use `s3+http://...` URLs with `allow_insecure_http: true`.
 
 ## Sources
 
@@ -369,9 +371,11 @@ repositories:
   - url: "/backups/local"
     label: "local"
 
-  - url: "s3://bucket/remote"
+  - url: "s3://s3.us-east-1.amazonaws.com/bucket/remote"
     label: "remote"
     region: "us-east-1"
+    access_key_id: "AKIA..."
+    secret_access_key: "..."
     encryption:
       passcommand: "pass show vger-remote"
     compression:
