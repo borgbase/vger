@@ -82,7 +82,7 @@ struct ReadGroup {
 
 /// Output file metadata for post-restore attribute application.
 struct PlannedFile {
-    target_path: PathBuf,
+    rel_path: PathBuf,
     total_size: u64,
     mode: u32,
     mtime: i64,
@@ -237,6 +237,7 @@ where
         stream_and_plan(&items_stream, &temp_root, &mut include_path, xattrs_enabled)
             .map_err(&cleanup)?;
     drop(items_stream); // free raw bytes before read group building
+    planned_files.shrink_to_fit(); // reclaim amortized-doubling slack (~2x → 1x)
 
     if !planned_files.is_empty() {
         // Build read groups from chunk targets.
@@ -289,15 +290,15 @@ where
         // canonicalize check.
         let phase3_result: Result<()> = (|| {
             for pf in &planned_files {
-                if pf
-                    .target_path
+                let full_path = temp_root.join(&pf.rel_path);
+                if full_path
                     .parent()
                     .is_none_or(|p| !verified_dirs.contains(p))
                 {
-                    ensure_parent_exists_within_root(&pf.target_path, &temp_root)?;
+                    ensure_parent_exists_within_root(&full_path, &temp_root)?;
                 }
                 if pf.total_size == 0 {
-                    std::fs::File::create(&pf.target_path)?;
+                    std::fs::File::create(&full_path)?;
                 }
             }
             Ok(())
@@ -305,9 +306,14 @@ where
         phase3_result.map_err(&cleanup)?;
 
         // Phase 4: Parallel restore — download ranges, decrypt, decompress, write.
-        let bytes_written =
-            execute_parallel_restore(&planned_files, groups, &repo.storage, repo.crypto.as_ref())
-                .map_err(&cleanup)?;
+        let bytes_written = execute_parallel_restore(
+            &planned_files,
+            groups,
+            &repo.storage,
+            repo.crypto.as_ref(),
+            &temp_root,
+        )
+        .map_err(&cleanup)?;
 
         // Phase 5a: Move all top-level entries from temp root to dest root.
         let move_result: Result<()> = (|| {
@@ -321,44 +327,33 @@ where
         })();
         move_result.map_err(&cleanup)?;
 
-        // Phase 5b: Fix up planned_file paths (temp_root → dest_root) for metadata.
-        for pf in &mut planned_files {
-            let rel = pf.target_path.strip_prefix(&temp_root).map_err(|_| {
-                VgerError::Other(format!(
-                    "internal error: planned file path {} is not under temp root {}",
-                    pf.target_path.display(),
-                    temp_root.display()
-                ))
-            })?;
-            pf.target_path = dest_root.join(rel);
-        }
-
-        // Phase 5c: Apply file metadata (mode, mtime, xattrs).
+        // Phase 5b: Apply file metadata (mode, mtime, xattrs).
         // Use fd-based fchmod/futimens when possible to avoid redundant path
         // lookups (replaces 2 path syscalls per file with 1 open).  Falls back
         // to path-based calls on open failure (e.g. mode 0o000 or 0o200).
         for pf in &planned_files {
+            let target_path = dest_root.join(&pf.rel_path);
             // xattrs remain path-based (no fd-based xattr API in std).
             if xattrs_enabled {
-                apply_item_xattrs(&pf.target_path, pf.xattrs.as_ref());
+                apply_item_xattrs(&target_path, pf.xattrs.as_ref());
             }
             let (mtime_secs, mtime_nanos) = split_unix_nanos(pf.mtime);
             // fd-based fchmod/futimens are Unix-only; on other platforms
             // fall through to the path-based calls to avoid silent no-ops.
             #[cfg(unix)]
             {
-                if let Ok(file) = std::fs::File::open(&pf.target_path) {
+                if let Ok(file) = std::fs::File::open(&target_path) {
                     let _ = fs::apply_mode_fd(&file, pf.mode);
                     let _ = fs::set_file_mtime_fd(&file, mtime_secs, mtime_nanos);
                 } else {
-                    let _ = fs::apply_mode(&pf.target_path, pf.mode);
-                    let _ = fs::set_file_mtime(&pf.target_path, mtime_secs, mtime_nanos);
+                    let _ = fs::apply_mode(&target_path, pf.mode);
+                    let _ = fs::set_file_mtime(&target_path, mtime_secs, mtime_nanos);
                 }
             }
             #[cfg(not(unix))]
             {
-                let _ = fs::apply_mode(&pf.target_path, pf.mode);
-                let _ = fs::set_file_mtime(&pf.target_path, mtime_secs, mtime_nanos);
+                let _ = fs::apply_mode(&target_path, pf.mode);
+                let _ = fs::set_file_mtime(&target_path, mtime_secs, mtime_nanos);
             }
         }
 
@@ -424,6 +419,7 @@ where
     verified_dirs.insert(dest_root.to_path_buf());
     let mut planned_files = Vec::new();
     let mut chunk_targets: HashMap<ChunkId, ChunkTargets> = HashMap::new();
+    let mut rel_scratch = PathBuf::new();
 
     super::list::for_each_decoded_item(items_stream, |item| {
         if !include_path(&item.path) {
@@ -431,8 +427,8 @@ where
         }
         match item.entry_type {
             ItemType::Directory => {
-                let rel = sanitize_item_path(&item.path)?;
-                let target = dest_root.join(&rel);
+                sanitize_item_path_into(&item.path, &mut rel_scratch)?;
+                let target = dest_root.join(&rel_scratch);
                 ensure_path_within_root(&target, dest_root)?;
                 std::fs::create_dir_all(&target)?;
                 ensure_path_within_root(&target, dest_root)?;
@@ -445,8 +441,8 @@ where
             }
             ItemType::Symlink => {
                 if let Some(ref link_target) = item.link_target {
-                    let rel = sanitize_item_path(&item.path)?;
-                    let target = dest_root.join(&rel);
+                    sanitize_item_path_into(&item.path, &mut rel_scratch)?;
+                    let target = dest_root.join(&rel_scratch);
                     if target.parent().is_none_or(|p| !verified_dirs.contains(p)) {
                         ensure_parent_exists_within_root(&target, dest_root)?;
                     }
@@ -459,8 +455,7 @@ where
                 }
             }
             ItemType::RegularFile => {
-                let rel = sanitize_item_path(&item.path)?;
-                let target = dest_root.join(&rel);
+                sanitize_item_path_into(&item.path, &mut rel_scratch)?;
                 let file_idx = planned_files.len();
                 let mut file_offset: u64 = 0;
                 for chunk_ref in &item.chunks {
@@ -483,7 +478,7 @@ where
                     file_offset += chunk_ref.size as u64;
                 }
                 planned_files.push(PlannedFile {
-                    target_path: target,
+                    rel_path: rel_scratch.clone(),
                     total_size: file_offset,
                     mode: item.mode,
                     mtime: item.mtime,
@@ -545,7 +540,7 @@ where
             file_offset += chunk_ref.size as u64;
         }
         files.push(PlannedFile {
-            target_path: target_path.clone(),
+            rel_path: target_path.clone(),
             total_size: file_offset,
             mode: item.mode,
             mtime: item.mtime,
@@ -788,6 +783,7 @@ fn execute_parallel_restore(
     groups: Vec<ReadGroup>,
     storage: &Arc<dyn StorageBackend>,
     crypto: &dyn CryptoEngine,
+    root: &Path,
 ) -> Result<u64> {
     if groups.is_empty() {
         return Ok(0);
@@ -807,15 +803,38 @@ fn execute_parallel_restore(
             let cancelled = &cancelled;
 
             handles.push(s.spawn(move || -> Result<()> {
+                let mut data_buf = Vec::new();
+                let mut decrypt_buf = Vec::new();
+                let mut decompress_buf = Vec::new();
+
                 for group in bucket {
                     if cancelled.load(Ordering::Acquire) {
                         return Ok(());
                     }
-                    if let Err(e) =
-                        process_read_group(group, files, storage, crypto, bytes_written, cancelled)
-                    {
+                    if let Err(e) = process_read_group(
+                        group,
+                        files,
+                        storage,
+                        crypto,
+                        bytes_written,
+                        cancelled,
+                        &mut data_buf,
+                        &mut decrypt_buf,
+                        &mut decompress_buf,
+                        root,
+                    ) {
                         cancelled.store(true, Ordering::Release);
                         return Err(e);
+                    }
+
+                    // Cap retained buffer capacity to avoid permanent high-water
+                    // marks from outlier-large groups/blobs (~50 MiB RSS savings).
+                    const BUF_KEEP_CAP: usize = 2 * 1024 * 1024;
+                    for buf in [&mut data_buf, &mut decrypt_buf, &mut decompress_buf] {
+                        buf.clear();
+                        if buf.capacity() > BUF_KEEP_CAP {
+                            buf.shrink_to(BUF_KEEP_CAP);
+                        }
                     }
                 }
                 Ok(())
@@ -851,9 +870,10 @@ fn execute_parallel_restore(
 /// Process a single coalesced read group: download the range, decrypt and
 /// decompress each blob, then write the plaintext data to target files.
 ///
-/// Buffers are local to this function — reused across blobs within the group,
-/// freed when the group finishes. This avoids TLS high-water persistence
-/// while still amortizing allocations across the ~149 blobs per group.
+/// `data_buf`, `decrypt_buf`, and `decompress_buf` are caller-owned scratch
+/// buffers reused across groups within the same thread, reducing per-group
+/// allocation churn. The caller caps retained capacity at 2 MiB between groups.
+#[allow(clippy::too_many_arguments)]
 fn process_read_group(
     group: &ReadGroup,
     files: &[PlannedFile],
@@ -861,6 +881,10 @@ fn process_read_group(
     crypto: &dyn CryptoEngine,
     bytes_written: &AtomicU64,
     cancelled: &AtomicBool,
+    data_buf: &mut Vec<u8>,
+    decrypt_buf: &mut Vec<u8>,
+    decompress_buf: &mut Vec<u8>,
+    root: &Path,
 ) -> Result<()> {
     if cancelled.load(Ordering::Acquire) {
         return Ok(());
@@ -869,13 +893,14 @@ fn process_read_group(
     let pack_key = group.pack_id.storage_key();
     let read_len = group.read_end - group.read_start;
 
-    let data = storage
-        .get_range(&pack_key, group.read_start, read_len)?
-        .ok_or_else(|| VgerError::Other(format!("pack not found: {}", group.pack_id)))?;
+    if !storage.get_range_into(&pack_key, group.read_start, read_len, data_buf)? {
+        return Err(VgerError::Other(format!(
+            "pack not found: {}",
+            group.pack_id
+        )));
+    }
+    let data = &data_buf[..];
 
-    // Local buffers — reused across blobs within this group, freed on return.
-    let mut decrypt_buf = Vec::new();
-    let mut decompress_buf = Vec::new();
     let mut file_handles = LruHandles::new();
 
     // Write accumulator — batches consecutive same-file writes into one syscall.
@@ -906,7 +931,7 @@ fn process_read_group(
             ObjectType::ChunkData,
             &blob.chunk_id.0,
             crypto,
-            &mut decrypt_buf,
+            decrypt_buf,
         )
         .map_err(|e| {
             VgerError::Other(format!(
@@ -915,9 +940,9 @@ fn process_read_group(
             ))
         })?;
         compress::decompress_into_with_hint(
-            &decrypt_buf,
+            decrypt_buf,
             Some(blob.expected_size as usize),
-            &mut decompress_buf,
+            decompress_buf,
         )
         .map_err(|e| {
             VgerError::Other(format!(
@@ -946,7 +971,7 @@ fn process_read_group(
             let can_append = contiguous && pw.buf.len() + decompress_buf.len() <= MAX_WRITE_BATCH;
 
             if can_append {
-                pw.buf.extend_from_slice(&decompress_buf);
+                pw.buf.extend_from_slice(decompress_buf);
                 // Eager flush when batch is full.
                 if pw.buf.len() >= MAX_WRITE_BATCH {
                     write_buf(
@@ -956,36 +981,38 @@ fn process_read_group(
                         &mut file_handles,
                         files,
                         bytes_written,
+                        root,
                     )?;
                     pw.reset();
                 }
             } else {
                 // Flush any active pending write first.
-                flush_pending(&mut pw, &mut file_handles, files, bytes_written)?;
+                flush_pending(&mut pw, &mut file_handles, files, bytes_written, root)?;
 
                 if contiguous || decompress_buf.len() >= MAX_WRITE_BATCH {
                     // Contiguous overflow or standalone large chunk — write
                     // directly from decompress_buf so no data lingers in the
                     // accumulator (same cancellation safety as the old code).
                     write_buf(
-                        &decompress_buf,
+                        decompress_buf,
                         target.file_idx,
                         target.file_offset,
                         &mut file_handles,
                         files,
                         bytes_written,
+                        root,
                     )?;
                 } else {
                     // Start new accumulation sequence (reuses existing allocation).
                     pw.rebind(target.file_idx, target.file_offset);
-                    pw.buf.extend_from_slice(&decompress_buf);
+                    pw.buf.extend_from_slice(decompress_buf);
                 }
             }
         }
     }
 
     // Flush any remaining pending write.
-    flush_pending(&mut pw, &mut file_handles, files, bytes_written)?;
+    flush_pending(&mut pw, &mut file_handles, files, bytes_written, root)?;
 
     Ok(())
 }
@@ -999,20 +1026,22 @@ fn write_buf(
     file_handles: &mut LruHandles,
     files: &[PlannedFile],
     bytes_written: &AtomicU64,
+    root: &Path,
 ) -> Result<()> {
     if file_handles.get(file_idx).is_none() {
         let pf = &files[file_idx];
+        let full_path = root.join(&pf.rel_path);
         // Create-on-first-write: truncate(false) prevents one worker from
         // destroying another worker's writes to the same file.
         let handle = std::fs::OpenOptions::new()
             .write(true)
             .create(true)
             .truncate(false)
-            .open(&pf.target_path)
+            .open(&full_path)
             .map_err(|e| {
                 VgerError::Other(format!(
                     "failed to open {} for writing: {e}",
-                    pf.target_path.display()
+                    full_path.display()
                 ))
             })?;
         // CAS: only the first opener calls set_len (ftruncate).
@@ -1041,6 +1070,7 @@ fn flush_pending(
     file_handles: &mut LruHandles,
     files: &[PlannedFile],
     bytes_written: &AtomicU64,
+    root: &Path,
 ) -> Result<()> {
     if pw.is_active() && !pw.buf.is_empty() {
         write_buf(
@@ -1050,6 +1080,7 @@ fn flush_pending(
             file_handles,
             files,
             bytes_written,
+            root,
         )?;
     }
     pw.reset();
@@ -1116,6 +1147,37 @@ pub struct RestoreStats {
     pub total_bytes: u64,
 }
 
+/// Sanitize and write a snapshot item path into a caller-provided scratch buffer.
+/// Reuses the PathBuf allocation across calls (~387K items), avoiding per-item
+/// intermediate PathBuf allocations.
+fn sanitize_item_path_into(raw: &str, out: &mut PathBuf) -> Result<()> {
+    let path = Path::new(raw);
+    if path.is_absolute() {
+        return Err(VgerError::InvalidFormat(format!(
+            "refusing to restore absolute path: {raw}"
+        )));
+    }
+    out.clear();
+    for component in path.components() {
+        match component {
+            Component::Normal(part) => out.push(part),
+            Component::CurDir => {}
+            Component::ParentDir | Component::RootDir | Component::Prefix(_) => {
+                return Err(VgerError::InvalidFormat(format!(
+                    "refusing to restore unsafe path: {raw}"
+                )));
+            }
+        }
+    }
+    if out.as_os_str().is_empty() {
+        return Err(VgerError::InvalidFormat(format!(
+            "refusing to restore empty path: {raw}"
+        )));
+    }
+    Ok(())
+}
+
+#[cfg(test)]
 fn sanitize_item_path(raw: &str) -> Result<PathBuf> {
     let path = Path::new(raw);
     if path.is_absolute() {
@@ -1448,7 +1510,7 @@ mod tests {
         file.set_len(5).unwrap();
 
         let files = vec![PlannedFile {
-            target_path: out.clone(),
+            rel_path: PathBuf::from("out.bin"),
             total_size: 5,
             mode: 0o644,
             mtime: 0,
@@ -1490,6 +1552,9 @@ mod tests {
 
         let bytes_written = AtomicU64::new(0);
         let cancelled = AtomicBool::new(false);
+        let mut data_buf = Vec::new();
+        let mut decrypt_buf = Vec::new();
+        let mut decompress_buf = Vec::new();
         let err = process_read_group(
             &group,
             &files,
@@ -1497,6 +1562,10 @@ mod tests {
             &crypto,
             &bytes_written,
             &cancelled,
+            &mut data_buf,
+            &mut decrypt_buf,
+            &mut decompress_buf,
+            temp.path(),
         )
         .unwrap_err()
         .to_string();
@@ -1581,7 +1650,7 @@ mod tests {
         let packed = pack_blob(cid, &big_data, &crypto);
 
         let files = vec![PlannedFile {
-            target_path: out.clone(),
+            rel_path: PathBuf::from("big.bin"),
             total_size: big_data.len() as u64,
             mode: 0o644,
             mtime: 0,
@@ -1607,6 +1676,9 @@ mod tests {
 
         let bytes_written = AtomicU64::new(0);
         let cancelled = AtomicBool::new(false);
+        let mut data_buf = Vec::new();
+        let mut decrypt_buf = Vec::new();
+        let mut decompress_buf = Vec::new();
         process_read_group(
             &group,
             &files,
@@ -1614,6 +1686,10 @@ mod tests {
             &crypto,
             &bytes_written,
             &cancelled,
+            &mut data_buf,
+            &mut decrypt_buf,
+            &mut decompress_buf,
+            temp.path(),
         )
         .unwrap();
 
@@ -1641,7 +1717,7 @@ mod tests {
 
         let total_size = (chunk_a.len() + chunk_b.len()) as u64;
         let files = vec![PlannedFile {
-            target_path: out.clone(),
+            rel_path: PathBuf::from("exact.bin"),
             total_size,
             mode: 0o644,
             mtime: 0,
@@ -1680,6 +1756,9 @@ mod tests {
 
         let bytes_written = AtomicU64::new(0);
         let cancelled = AtomicBool::new(false);
+        let mut data_buf = Vec::new();
+        let mut decrypt_buf = Vec::new();
+        let mut decompress_buf = Vec::new();
         process_read_group(
             &group,
             &files,
@@ -1687,6 +1766,10 @@ mod tests {
             &crypto,
             &bytes_written,
             &cancelled,
+            &mut data_buf,
+            &mut decrypt_buf,
+            &mut decompress_buf,
+            temp.path(),
         )
         .unwrap();
 
@@ -1716,7 +1799,7 @@ mod tests {
 
         let files = vec![
             PlannedFile {
-                target_path: out_a.clone(),
+                rel_path: PathBuf::from("a.bin"),
                 total_size: data_a.len() as u64,
                 mode: 0o644,
                 mtime: 0,
@@ -1724,7 +1807,7 @@ mod tests {
                 created: AtomicBool::new(false),
             },
             PlannedFile {
-                target_path: out_b.clone(),
+                rel_path: PathBuf::from("b.bin"),
                 total_size: data_b.len() as u64,
                 mode: 0o644,
                 mtime: 0,
@@ -1764,6 +1847,9 @@ mod tests {
 
         let bytes_written = AtomicU64::new(0);
         let cancelled = AtomicBool::new(false);
+        let mut data_buf = Vec::new();
+        let mut decrypt_buf = Vec::new();
+        let mut decompress_buf = Vec::new();
         process_read_group(
             &group,
             &files,
@@ -1771,6 +1857,10 @@ mod tests {
             &crypto,
             &bytes_written,
             &cancelled,
+            &mut data_buf,
+            &mut decrypt_buf,
+            &mut decompress_buf,
+            temp.path(),
         )
         .unwrap();
 
@@ -1810,7 +1900,7 @@ mod tests {
         }
 
         let files = vec![PlannedFile {
-            target_path: out.clone(),
+            rel_path: PathBuf::from("batched.bin"),
             total_size: expected_data.len() as u64,
             mode: 0o644,
             mtime: 0,
@@ -1827,6 +1917,9 @@ mod tests {
 
         let bytes_written = AtomicU64::new(0);
         let cancelled = AtomicBool::new(false);
+        let mut data_buf = Vec::new();
+        let mut decrypt_buf = Vec::new();
+        let mut decompress_buf = Vec::new();
         process_read_group(
             &group,
             &files,
@@ -1834,6 +1927,10 @@ mod tests {
             &crypto,
             &bytes_written,
             &cancelled,
+            &mut data_buf,
+            &mut decrypt_buf,
+            &mut decompress_buf,
+            temp.path(),
         )
         .unwrap();
 
@@ -1915,7 +2012,7 @@ mod tests {
 
         // File is in planned_files.
         assert_eq!(planned_files.len(), 1);
-        assert!(planned_files[0].target_path.ends_with("mydir/a.txt"));
+        assert_eq!(planned_files[0].rel_path, Path::new("mydir/a.txt"));
         assert_eq!(chunk_targets.len(), 1);
     }
 
@@ -1947,7 +2044,7 @@ mod tests {
 
         // Only the included file is planned.
         assert_eq!(planned_files.len(), 1);
-        assert!(planned_files[0].target_path.ends_with("included/a.txt"));
+        assert_eq!(planned_files[0].rel_path, Path::new("included/a.txt"));
     }
 
     #[test]
@@ -2079,7 +2176,7 @@ mod tests {
 
         // File is in planned_files.
         assert_eq!(planned_files.len(), 1);
-        assert!(planned_files[0].target_path.ends_with("mydir/a.txt"));
+        assert_eq!(planned_files[0].rel_path, Path::new("mydir/a.txt"));
         assert_eq!(chunk_targets.len(), 1);
         assert_eq!(stats.dirs, 1);
     }
