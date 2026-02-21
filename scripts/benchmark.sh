@@ -11,8 +11,8 @@ Usage: $(basename "$0") [options]
 
 Reproducible benchmark harness for vger vs restic vs rustic vs borg vs kopia.
 
-Per measured run: drop caches, reset repo, init, untimed seed backup of snapshot-1,
-then timed benchmark of full dataset backup or restore.
+Per measured run: reset repo, init, untimed seed backup of snapshot-1, storage settle
+(sync + fstrim + nvme flush + cooldown), drop caches, then timed benchmark.
 
 Options:
   --dataset PATH   Dataset directory (default: \$CORPUS_REMOTE)
@@ -114,8 +114,6 @@ export BORG_REPO="$BORG_REPO"
 export BORG_PASSPHRASE="$PASSPHRASE"
 export KOPIA_PASSWORD="$PASSPHRASE"
 
-DROP_CACHES_CMD="sync; if sudo -n true 2>/dev/null; then echo 3 | sudo -n tee /proc/sys/vm/drop_caches >/dev/null 2>&1 || true; fi"
-
 # --- Restore dirs ---
 
 RESTORE_VGER="$OUT_ROOT/restore-vger"
@@ -149,6 +147,120 @@ fi
 
 tool_from_op()  { echo "${1%%_*}"; }
 phase_from_op() { echo "${1##*_}"; }
+
+# Per-run resolved values used by measured commands.
+RUN_VGER_RESTORE_SNAPSHOT=""
+RUN_BORG_BACKUP_ARCHIVE=""
+RUN_BORG_RESTORE_ARCHIVE=""
+declare -a STORAGE_TRIM_MOUNTS=()
+declare -a STORAGE_NVME_DEVICES=()
+
+run_with_op_env() {
+  local op="$1"
+  shift
+  case "$op" in
+    vger_restore) VGER_RESTORE_SNAPSHOT="$RUN_VGER_RESTORE_SNAPSHOT" "$@" ;;
+    borg_backup)  BORG_BACKUP_ARCHIVE="$RUN_BORG_BACKUP_ARCHIVE" "$@" ;;
+    borg_restore) BORG_RESTORE_ARCHIVE="$RUN_BORG_RESTORE_ARCHIVE" "$@" ;;
+    *)            "$@" ;;
+  esac
+}
+
+append_unique_item() {
+  local item="$1"
+  shift
+  local -n arr_ref="$1"
+  local existing
+  for existing in "${arr_ref[@]}"; do
+    [[ "$existing" == "$item" ]] && return 0
+  done
+  arr_ref+=("$item")
+}
+
+mount_target_for_path() {
+  local path="$1"
+  if command -v findmnt >/dev/null 2>&1; then
+    findmnt -n -o TARGET --target "$path" 2>/dev/null | head -n1
+  else
+    df -P "$path" 2>/dev/null | awk 'NR==2 { print $6 }'
+  fi
+}
+
+mount_source_for_path() {
+  local path="$1"
+  if command -v findmnt >/dev/null 2>&1; then
+    findmnt -n -o SOURCE --target "$path" 2>/dev/null | head -n1
+  else
+    df -P "$path" 2>/dev/null | awk 'NR==2 { print $1 }'
+  fi
+}
+
+nvme_namespace_for_source() {
+  local source="$1"
+  case "$source" in
+    /dev/nvme*n*p[0-9]*)
+      printf '%s\n' "${source%p[0-9]*}"
+      ;;
+    /dev/nvme*n[0-9]*)
+      printf '%s\n' "$source"
+      ;;
+    *)
+      return 1
+      ;;
+  esac
+}
+
+build_storage_settle_targets() {
+  local path mount source nvme_dev
+  local -a paths=("$REPO_ROOT" "$OUT_ROOT")
+
+  for path in "${paths[@]}"; do
+    [[ -n "$path" ]] || continue
+    mount="$(mount_target_for_path "$path")"
+    [[ -n "$mount" ]] && append_unique_item "$mount" STORAGE_TRIM_MOUNTS
+    source="$(mount_source_for_path "$path")"
+    if nvme_dev="$(nvme_namespace_for_source "$source" 2>/dev/null)"; then
+      append_unique_item "$nvme_dev" STORAGE_NVME_DEVICES
+    fi
+  done
+}
+
+run_storage_settle() {
+  local prep_log="$1"
+  local mount dev
+
+  echo "[measure-prepare] sync storage" >>"$prep_log"
+  sync >>"$prep_log" 2>&1 || true
+
+  if [[ "${#STORAGE_TRIM_MOUNTS[@]}" -gt 0 ]]; then
+    for mount in "${STORAGE_TRIM_MOUNTS[@]}"; do
+      if ! sudo -n fstrim -v "$mount" >>"$prep_log" 2>&1; then
+        echo "[measure-prepare] fstrim skipped/failed mount=$mount" >>"$prep_log"
+      fi
+    done
+  else
+    echo "[measure-prepare] fstrim skipped (no mount targets resolved)" >>"$prep_log"
+  fi
+
+  if command -v nvme >/dev/null 2>&1; then
+    if [[ "${#STORAGE_NVME_DEVICES[@]}" -gt 0 ]]; then
+      for dev in "${STORAGE_NVME_DEVICES[@]}"; do
+        if ! sudo -n nvme flush "$dev" >>"$prep_log" 2>&1; then
+          echo "[measure-prepare] nvme flush skipped/failed device=$dev" >>"$prep_log"
+        fi
+      done
+    else
+      echo "[measure-prepare] nvme flush skipped (no nvme devices resolved)" >>"$prep_log"
+    fi
+  else
+    echo "[measure-prepare] nvme cli missing; skipping nvme flush" >>"$prep_log"
+  fi
+
+  echo "[measure-prepare] cooldown sleep 20s" >>"$prep_log"
+  sleep 20
+}
+
+build_storage_settle_targets
 
 repo_dir_for_tool() {
   case "$1" in
@@ -226,16 +338,16 @@ backup_adhoc_for_tool() {
 
 measured_cmd_for_op() {
   case "$1" in
-    vger_backup)    echo "$DROP_CACHES_CMD; vger backup -R bench -l bench '$DATASET_BENCHMARK'" ;;
-    vger_restore)   echo "$DROP_CACHES_CMD; rm -rf '$RESTORE_VGER'/*; SNAP=\$(vger list -R bench --last 1 | awk 'NR==2{print \$1}'); vger restore -R bench \"\$SNAP\" '$RESTORE_VGER'" ;;
-    restic_backup)  echo "$DROP_CACHES_CMD; restic backup '$DATASET_BENCHMARK'" ;;
-    restic_restore) echo "$DROP_CACHES_CMD; rm -rf '$RESTORE_RESTIC'/*; restic restore latest --target '$RESTORE_RESTIC'" ;;
-    rustic_backup)  echo "$DROP_CACHES_CMD; rustic backup '$DATASET_BENCHMARK'" ;;
-    rustic_restore) echo "$DROP_CACHES_CMD; rm -rf '$RESTORE_RUSTIC'/*; rustic restore latest '$RESTORE_RUSTIC'" ;;
-    borg_backup)    echo "$DROP_CACHES_CMD; ARCH=bench-\$(date -u +%Y%m%dT%H%M%S)-\$RANDOM; borg create --compression zstd,3 --stats \"::\$ARCH\" '$DATASET_BENCHMARK'" ;;
-    borg_restore)   echo "$DROP_CACHES_CMD; rm -rf '$RESTORE_BORG'/*; ARCH=\$(borg list --short | tail -n1); (cd '$RESTORE_BORG' && borg extract \"::\$ARCH\")" ;;
-    kopia_backup)   echo "$DROP_CACHES_CMD; kopia --config-file '$KOPIA_CONFIG' snapshot create '$DATASET_BENCHMARK'" ;;
-    kopia_restore)  echo "$DROP_CACHES_CMD; rm -rf '$RESTORE_KOPIA'/*; kopia --config-file '$KOPIA_CONFIG' snapshot restore '$DATASET_BENCHMARK' '$RESTORE_KOPIA' --snapshot-time latest" ;;
+    vger_backup)    echo "vger backup -R bench -l bench '$DATASET_BENCHMARK'" ;;
+    vger_restore)   echo "vger restore -R bench \"\$VGER_RESTORE_SNAPSHOT\" '$RESTORE_VGER'" ;;
+    restic_backup)  echo "restic backup '$DATASET_BENCHMARK'" ;;
+    restic_restore) echo "restic restore latest --target '$RESTORE_RESTIC'" ;;
+    rustic_backup)  echo "rustic backup '$DATASET_BENCHMARK'" ;;
+    rustic_restore) echo "rustic restore latest '$RESTORE_RUSTIC'" ;;
+    borg_backup)    echo "borg create --compression zstd,3 --stats \"::\$BORG_BACKUP_ARCHIVE\" '$DATASET_BENCHMARK'" ;;
+    borg_restore)   echo "(cd '$RESTORE_BORG' && borg extract \"::\$BORG_RESTORE_ARCHIVE\")" ;;
+    kopia_backup)   echo "kopia --config-file '$KOPIA_CONFIG' snapshot create '$DATASET_BENCHMARK'" ;;
+    kopia_restore)  echo "kopia --config-file '$KOPIA_CONFIG' snapshot restore '$DATASET_BENCHMARK' '$RESTORE_KOPIA' --snapshot-time latest" ;;
     *) die "unknown operation: $1" ;;
   esac
 }
@@ -249,14 +361,75 @@ prepare_op_run() {
   local tool
   tool=$(tool_from_op "$op")
 
-  { echo "[prepare] op=$op"; echo "[prepare] drop caches"; } >>"$prep_log"
-  drop_caches >>"$prep_log" 2>&1
+  echo "[prepare] op=$op" >>"$prep_log"
   echo "[prepare] reset repo" >>"$prep_log"
   reset_repo_for_tool "$tool" >>"$prep_log" 2>&1
   echo "[prepare] init repo" >>"$prep_log"
   init_repo_for_tool "$tool" >>"$prep_log" 2>&1
   echo "[prepare] seed backup snapshot-1 (untimed)" >>"$prep_log"
   backup_adhoc_for_tool "$tool" "$DATASET_SNAPSHOT1" >>"$prep_log" 2>&1
+}
+
+prepare_measurement_for_op() {
+  local op="$1" prep_log="$2"
+
+  RUN_VGER_RESTORE_SNAPSHOT=""
+  RUN_BORG_BACKUP_ARCHIVE=""
+  RUN_BORG_RESTORE_ARCHIVE=""
+
+  echo "[measure-prepare] op=$op" >>"$prep_log"
+
+  case "$op" in
+    vger_restore)
+      echo "[measure-prepare] clean restore dir: $RESTORE_VGER" >>"$prep_log"
+      rm -rf "$RESTORE_VGER"/* >>"$prep_log" 2>&1
+      if ! RUN_VGER_RESTORE_SNAPSHOT="$(
+        vger list -R bench --last 1 | awk 'NR==2{print $1}'
+      )"; then
+        echo "[measure-prepare] failed to resolve latest vger snapshot" >>"$prep_log"
+        return 1
+      fi
+      [[ -n "$RUN_VGER_RESTORE_SNAPSHOT" ]] || {
+        echo "[measure-prepare] empty latest vger snapshot id" >>"$prep_log"
+        return 1
+      }
+      echo "[measure-prepare] vger snapshot=$RUN_VGER_RESTORE_SNAPSHOT" >>"$prep_log"
+      ;;
+    restic_restore)
+      echo "[measure-prepare] clean restore dir: $RESTORE_RESTIC" >>"$prep_log"
+      rm -rf "$RESTORE_RESTIC"/* >>"$prep_log" 2>&1
+      ;;
+    rustic_restore)
+      echo "[measure-prepare] clean restore dir: $RESTORE_RUSTIC" >>"$prep_log"
+      rm -rf "$RESTORE_RUSTIC"/* >>"$prep_log" 2>&1
+      ;;
+    borg_backup)
+      RUN_BORG_BACKUP_ARCHIVE="bench-$(date -u +%Y%m%dT%H%M%S)-$RANDOM"
+      echo "[measure-prepare] borg archive=$RUN_BORG_BACKUP_ARCHIVE" >>"$prep_log"
+      ;;
+    borg_restore)
+      echo "[measure-prepare] clean restore dir: $RESTORE_BORG" >>"$prep_log"
+      rm -rf "$RESTORE_BORG"/* >>"$prep_log" 2>&1
+      if ! RUN_BORG_RESTORE_ARCHIVE="$(borg list --short | tail -n1)"; then
+        echo "[measure-prepare] failed to resolve latest borg archive" >>"$prep_log"
+        return 1
+      fi
+      [[ -n "$RUN_BORG_RESTORE_ARCHIVE" ]] || {
+        echo "[measure-prepare] empty latest borg archive" >>"$prep_log"
+        return 1
+      }
+      echo "[measure-prepare] borg archive=$RUN_BORG_RESTORE_ARCHIVE" >>"$prep_log"
+      ;;
+    kopia_restore)
+      echo "[measure-prepare] clean restore dir: $RESTORE_KOPIA" >>"$prep_log"
+      rm -rf "$RESTORE_KOPIA"/* >>"$prep_log" 2>&1
+      ;;
+  esac
+
+  run_storage_settle "$prep_log"
+
+  echo "[measure-prepare] drop caches" >>"$prep_log"
+  drop_caches >>"$prep_log" 2>&1
 }
 
 # --- Backfill helper ---
@@ -310,8 +483,9 @@ run_one() {
 
   # Warmup
   for ((i = 1; i <= WARMUP_RUNS; i++)); do
-    local run_label
+    local run_label warmup_measure_prep_log
     run_label=$(printf "%03d" "$i")
+    warmup_measure_prep_log="$out/warmup-$run_label.measure-prep.log"
     echo "[warmup] $op $i/$WARMUP_RUNS"
     if should_prepare_op_run "$op"; then
       if ! prepare_op_run "$op" "$out/warmup-$run_label.prep.log"; then
@@ -319,19 +493,24 @@ run_one() {
         continue
       fi
     fi
-    if ! bash -lc "$cmd" >"$out/warmup-$run_label.stdout.txt" 2>"$out/warmup-$run_label.stderr.txt"; then
+    if ! prepare_measurement_for_op "$op" "$warmup_measure_prep_log"; then
+      failed_warmups=$((failed_warmups + 1))
+      continue
+    fi
+    if ! run_with_op_env "$op" bash -lc "$cmd" >"$out/warmup-$run_label.stdout.txt" 2>"$out/warmup-$run_label.stderr.txt"; then
       failed_warmups=$((failed_warmups + 1))
     fi
   done
 
   # Timed runs
   for ((i = 1; i <= RUNS; i++)); do
-    local run_label run_stdout run_timev run_rc_file run_repo_size_file
+    local run_label run_stdout run_timev run_rc_file run_repo_size_file run_measure_prep_log
     run_label=$(printf "%03d" "$i")
     run_stdout="$runs_dir/run-$run_label.stdout.txt"
     run_timev="$runs_dir/run-$run_label.timev.txt"
     run_rc_file="$runs_dir/run-$run_label.rc"
     run_repo_size_file="$runs_dir/run-$run_label.repo-size-bytes.txt"
+    run_measure_prep_log="$runs_dir/run-$run_label.measure-prep.log"
 
     if [[ "$phase" == "restore" ]]; then
       echo "[run] $op $i/$RUNS (no prep; uses preceding timed backup state)"
@@ -349,7 +528,15 @@ run_one() {
       fi
     fi
 
-    if /usr/bin/time -v bash -lc "$cmd" >"$run_stdout" 2>"$run_timev"; then
+    if ! prepare_measurement_for_op "$op" "$run_measure_prep_log"; then
+      rc=1; failed_runs=$((failed_runs + 1))
+      : >"$run_timev"
+      echo "$rc" >"$run_rc_file"
+      write_repo_size_bytes_for_tool "$tool" "$run_repo_size_file"
+      continue
+    fi
+
+    if run_with_op_env "$op" /usr/bin/time -v bash -lc "$cmd" >"$run_stdout" 2>"$run_timev"; then
       rc=0
     else
       rc=$?; failed_runs=$((failed_runs + 1))
@@ -366,21 +553,27 @@ run_one() {
 
   # Optional perf stat
   if [[ "$PROFILE_PERF" == "1" && "$HAVE_PERF" == "1" ]]; then
+    local perf_ready=1
     if should_prepare_op_run "$op"; then
-      prepare_op_run "$op" "$out/perf.prep.log" && \
-        perf stat -d -r 1 -- bash -lc "$cmd" >"$out/perf.stdout.txt" 2>"$out/perf.stat.txt" || true
-    else
-      perf stat -d -r 1 -- bash -lc "$cmd" >"$out/perf.stdout.txt" 2>"$out/perf.stat.txt" || true
+      if ! prepare_op_run "$op" "$out/perf.prep.log"; then
+        perf_ready=0
+      fi
+    fi
+    if [[ "$perf_ready" == "1" ]] && prepare_measurement_for_op "$op" "$out/perf.measure-prep.log"; then
+      run_with_op_env "$op" perf stat -d -r 1 -- bash -lc "$cmd" >"$out/perf.stdout.txt" 2>"$out/perf.stat.txt" || true
     fi
   fi
 
   # Optional strace
   if [[ "$PROFILE_STRACE" == "1" && "$HAVE_STRACE" == "1" ]]; then
+    local strace_ready=1
     if should_prepare_op_run "$op"; then
-      prepare_op_run "$op" "$out/strace.prep.log" && \
-        strace -c -f -qq -o "$out/strace.summary.txt" bash -lc "$cmd" >/dev/null 2>&1 || true
-    else
-      strace -c -f -qq -o "$out/strace.summary.txt" bash -lc "$cmd" >/dev/null 2>&1 || true
+      if ! prepare_op_run "$op" "$out/strace.prep.log"; then
+        strace_ready=0
+      fi
+    fi
+    if [[ "$strace_ready" == "1" ]] && prepare_measurement_for_op "$op" "$out/strace.measure-prep.log"; then
+      run_with_op_env "$op" strace -c -f -qq -o "$out/strace.summary.txt" bash -lc "$cmd" >/dev/null 2>&1 || true
     fi
   fi
 }
@@ -391,7 +584,7 @@ cd "$OUT_ROOT"
 
 # Write commands manifest
 {
-  echo "workflow: per warmup/run => drop caches + reset repo + init + untimed backup snapshot-1"
+  echo "workflow: per warmup/run => reset repo + init + untimed backup snapshot-1 + storage settle(sync/fstrim/nvme flush + 20s) + drop caches"
   echo "restore workflow: no repo prep; restore uses state from preceding timed <tool>_backup op"
   for op in "${OPS[@]}"; do
     echo "$op: $(measured_cmd_for_op "$op")"
