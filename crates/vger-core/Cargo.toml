@@ -35,7 +35,7 @@ zstd = "0.13"
 fastcdc = "3"
 
 # Storage
-opendal = { version = "0.51", features = ["services-s3", "layers-blocking", "layers-throttle"] }
+rusty-s3 = "0.8"
 url = "2"
 
 # Filesystem
@@ -63,11 +63,11 @@ tracing.workspace = true
 rayon = "1"
 crossbeam-channel.workspace = true
 
-# Async runtime
-tokio = { workspace = true, features = ["rt-multi-thread"] }
+# Async runtime (SFTP + mount only)
+tokio = { workspace = true, features = ["rt-multi-thread"], optional = true }
 
-# HTTP client (REST backend)
-ureq = { version = "2", features = ["json"], optional = true }
+# HTTP client (S3 + REST backends)
+ureq = { version = "2", features = ["json"] }
 
 # SSH/SFTP (direct russh implementation)
 russh = { version = "0.54", default-features = false, features = ["aws-lc-rs"], optional = true }
@@ -82,9 +82,8 @@ bytes = { version = "1", optional = true }
 futures-util = { version = "0.3", optional = true }
 
 [features]
-default = ["backend-rest"]
-backend-rest = ["ureq"]
-backend-sftp = ["russh", "russh-sftp"]
+default = ["backend-sftp"]
+backend-sftp = ["russh", "russh-sftp", "tokio"]
 mount = ["dav-server", "tokio/rt-multi-thread", "tokio/macros", "tokio/signal", "tokio/net", "hyper", "hyper-util", "lru", "bytes", "futures-util"]
 
 [dev-dependencies]

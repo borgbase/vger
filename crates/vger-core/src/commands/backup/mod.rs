@@ -191,8 +191,7 @@ pub fn run_with_progress(
         sequential::build_transform_pool(config.limits.cpu.max_threads)?
     };
 
-    let throttle_bps = limits::network_write_throttle_bps(&config.limits);
-    let backend = storage::backend_from_config(&config.repository, throttle_bps)?;
+    let backend = storage::backend_from_config(&config.repository)?;
     let backend =
         limits::wrap_backup_storage_backend(backend, &config.repository.url, &config.limits)?;
     let mut repo = Repository::open(

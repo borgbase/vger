@@ -1,9 +1,9 @@
 use std::io::IsTerminal;
 
+use crate::hooks::{self, HookContext};
 use vger_core::commands;
 use vger_core::compress::Compression;
 use vger_core::config::{self, SourceEntry, VgerConfig};
-use vger_core::hooks::{self, HookContext};
 
 use crate::format::{format_bytes, generate_snapshot_name};
 use crate::passphrase::with_repo_passphrase;

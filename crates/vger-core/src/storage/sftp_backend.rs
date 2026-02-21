@@ -15,7 +15,7 @@ use crate::error::{Result, VgerError};
 use crate::platform::paths;
 use crate::storage::StorageBackend;
 
-use super::opendal_backend::ASYNC_RUNTIME;
+use super::runtime::ASYNC_RUNTIME;
 
 /// Connection timeout for SSH handshake.
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(30);

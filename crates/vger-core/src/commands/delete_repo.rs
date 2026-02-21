@@ -22,7 +22,7 @@ pub struct DeleteRepoStats {
 }
 
 pub fn run(config: &VgerConfig) -> Result<DeleteRepoStats> {
-    let backend = backend_from_config(&config.repository, None)?;
+    let backend = backend_from_config(&config.repository)?;
 
     // Verify this is actually a vger repository
     if !backend.exists("config")? {

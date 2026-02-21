@@ -143,34 +143,12 @@ fn storage_rate_limits_for_backup(
     ))
 }
 
-/// Compute the network write bandwidth in bytes/sec suitable for OpenDAL's
-/// `ThrottleLayer`. Returns `None` when unlimited (0 MiB/s configured).
-pub fn network_write_throttle_bps(limits: &ResourceLimitsConfig) -> Option<u32> {
-    let mib = limits.network.write_mib_per_sec;
-    if mib == 0 {
-        None
-    } else {
-        Some((mib.saturating_mul(BYTES_PER_MIB)).min(u32::MAX as u64) as u32)
-    }
-}
-
 /// Wrap a storage backend with rate limiting for backup.
-///
-/// For S3 backends the OpenDAL `ThrottleLayer` handles bandwidth limiting, so
-/// this function returns the backend unchanged. For local, SFTP, and REST
-/// backends a `ThrottledStorageBackend` wrapper is applied.
 pub fn wrap_backup_storage_backend(
     inner: Box<dyn StorageBackend>,
     repo_url: &str,
     limits: &ResourceLimitsConfig,
 ) -> Result<Box<dyn StorageBackend>> {
-    let parsed = parse_repo_url(repo_url)?;
-
-    // S3: throttle handled at the OpenDAL operator level via ThrottleLayer.
-    if matches!(parsed, ParsedUrl::S3 { .. }) {
-        return Ok(inner);
-    }
-
     let (read_bps, write_bps) = storage_rate_limits_for_backup(repo_url, limits)?;
     if read_bps == 0 && write_bps == 0 {
         return Ok(inner);

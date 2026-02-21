@@ -42,7 +42,7 @@ pub(crate) fn run_delete_repo(
     yes_delete_this_repo: bool,
 ) -> Result<(), Box<dyn std::error::Error>> {
     // Verify the repo exists before prompting
-    let backend = vger_core::storage::backend_from_config(&config.repository, None)
+    let backend = vger_core::storage::backend_from_config(&config.repository)
         .map_err(|e| -> Box<dyn std::error::Error> { Box::new(e) })?;
     if !backend
         .exists("config")

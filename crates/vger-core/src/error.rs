@@ -5,7 +5,7 @@ pub type Result<T> = std::result::Result<T, VgerError>;
 #[derive(Debug, Error)]
 pub enum VgerError {
     #[error("storage I/O error: {0}")]
-    Storage(#[source] Box<opendal::Error>),
+    Storage(#[source] Box<dyn std::error::Error + Send + Sync>),
 
     #[error("repository not found at '{0}'")]
     RepoNotFound(String),
@@ -66,10 +66,4 @@ pub enum VgerError {
 
     #[error("{0}")]
     Other(String),
-}
-
-impl From<opendal::Error> for VgerError {
-    fn from(value: opendal::Error) -> Self {
-        VgerError::Storage(Box::new(value))
-    }
 }

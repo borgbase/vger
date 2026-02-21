@@ -1,29 +1,19 @@
 pub mod local_backend;
-pub mod opendal_backend;
-#[cfg(feature = "backend-rest")]
 pub mod rest_backend;
+pub mod s3_backend;
 #[cfg(feature = "backend-sftp")]
 pub mod sftp_backend;
 
-use std::sync::Arc;
-use std::time::Duration;
+#[cfg(feature = "backend-sftp")]
+pub(crate) mod runtime;
 
-use opendal::layers::{ConcurrentLimitLayer, RetryLayer, ThrottleLayer};
-use opendal::Operator;
+use std::sync::Arc;
+
 use serde::{Deserialize, Serialize};
 use url::Url;
 
-use crate::config::{RepositoryConfig, RetryConfig};
+use crate::config::RepositoryConfig;
 use crate::error::{Result, VgerError};
-
-/// Default concurrent request limit for S3 backends.
-/// Allows for multiple in-flight pack uploads (each with multipart concurrency)
-/// plus reads and metadata operations.
-const DEFAULT_S3_CONCURRENT_REQUESTS: usize = 64;
-
-/// Burst size for ThrottleLayer (256 MiB).
-/// Must be larger than any single write operation (multipart chunks are 32 MiB).
-const THROTTLE_BURST_BYTES: u32 = 256 * 1024 * 1024;
 
 /// Metadata sent to backends that support native advisory lock APIs.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -357,37 +347,8 @@ Use HTTPS, or set repository.allow_insecure_http: true to permit plaintext HTTP 
     Ok(())
 }
 
-/// Apply OpenDAL's `RetryLayer` to an operator if retries are enabled.
-fn apply_retry(op: Operator, retry: &RetryConfig) -> Operator {
-    if retry.max_retries == 0 {
-        return op;
-    }
-    op.layer(
-        RetryLayer::new()
-            .with_max_times(retry.max_retries)
-            .with_min_delay(Duration::from_millis(retry.retry_delay_ms))
-            .with_max_delay(Duration::from_millis(retry.retry_max_delay_ms))
-            .with_jitter(),
-    )
-}
-
-/// Apply OpenDAL's `ThrottleLayer` to an operator if a bandwidth limit is set.
-fn apply_throttle(op: Operator, throttle_bytes_per_sec: Option<u32>) -> Operator {
-    match throttle_bytes_per_sec {
-        Some(bps) if bps > 0 => op.layer(ThrottleLayer::new(bps, THROTTLE_BURST_BYTES)),
-        _ => op,
-    }
-}
-
 /// Build a storage backend from the repository configuration.
-///
-/// `throttle_bytes_per_sec` applies OpenDAL's `ThrottleLayer` for S3.
-/// For local, SFTP, and REST backends this parameter is ignored (use
-/// `limits::wrap_backup_storage_backend` for per-operation throttling).
-pub fn backend_from_config(
-    cfg: &RepositoryConfig,
-    throttle_bytes_per_sec: Option<u32>,
-) -> Result<Box<dyn StorageBackend>> {
+pub fn backend_from_config(cfg: &RepositoryConfig) -> Result<Box<dyn StorageBackend>> {
     let parsed = parse_repo_url(&cfg.url)?;
 
     if let ParsedUrl::Rest { url } = &parsed {
@@ -419,21 +380,23 @@ pub fn backend_from_config(
                 .map(|s| s.to_string())
                 .or(url_endpoint);
             let region = cfg.region.as_deref().unwrap_or("us-east-1");
-            let op = opendal_backend::OpendalBackend::s3_operator(
+
+            let access_key_id = cfg.access_key_id.as_deref().ok_or_else(|| {
+                VgerError::Config("S3 requires access_key_id in repository config".into())
+            })?;
+            let secret_access_key = cfg.secret_access_key.as_deref().ok_or_else(|| {
+                VgerError::Config("S3 requires secret_access_key in repository config".into())
+            })?;
+
+            Ok(Box::new(s3_backend::S3Backend::new(
                 &bucket,
                 region,
                 &root,
                 endpoint.as_deref(),
-                cfg.access_key_id.as_deref(),
-                cfg.secret_access_key.as_deref(),
-            )?;
-            // Layer order (inner → outer): S3 → ConcurrentLimit → Retry → Throttle → Blocking
-            let op = op.layer(ConcurrentLimitLayer::new(DEFAULT_S3_CONCURRENT_REQUESTS));
-            let op = apply_retry(op, &cfg.retry);
-            let op = apply_throttle(op, throttle_bytes_per_sec);
-            Ok(Box::new(
-                opendal_backend::OpendalBackend::from_async_operator(op)?,
-            ))
+                access_key_id,
+                secret_access_key,
+                cfg.retry.clone(),
+            )?))
         }
         #[cfg(feature = "backend-sftp")]
         ParsedUrl::Sftp {
@@ -455,7 +418,6 @@ pub fn backend_from_config(
         ParsedUrl::Sftp { .. } => Err(VgerError::UnsupportedBackend(
             "sftp (compile with feature 'backend-sftp')".into(),
         )),
-        #[cfg(feature = "backend-rest")]
         ParsedUrl::Rest { url } => {
             let token = cfg.rest_token.as_deref();
             Ok(Box::new(rest_backend::RestBackend::new(
@@ -464,16 +426,13 @@ pub fn backend_from_config(
                 cfg.retry.clone(),
             )?))
         }
-        #[cfg(not(feature = "backend-rest"))]
-        ParsedUrl::Rest { .. } => Err(VgerError::UnsupportedBackend(
-            "rest (compile with feature 'backend-rest')".into(),
-        )),
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::config::RetryConfig;
 
     #[test]
     fn test_bare_absolute_path() {
@@ -693,7 +652,7 @@ mod tests {
     #[test]
     fn test_backend_rejects_http_rest_by_default() {
         let cfg = test_config("http://localhost:8080/repo");
-        let err = match backend_from_config(&cfg, None) {
+        let err = match backend_from_config(&cfg) {
             Ok(_) => panic!("expected HTTP REST URL to be rejected"),
             Err(err) => err,
         };
@@ -706,7 +665,7 @@ mod tests {
     fn test_backend_rejects_http_s3_endpoint_by_default() {
         let mut cfg = test_config("s3://my-bucket/vger");
         cfg.endpoint = Some("http://minio.local:9000".into());
-        let err = match backend_from_config(&cfg, None) {
+        let err = match backend_from_config(&cfg) {
             Ok(_) => panic!("expected HTTP S3 endpoint to be rejected"),
             Err(err) => err,
         };
@@ -719,7 +678,7 @@ mod tests {
     fn test_backend_allows_http_rest_when_opted_in() {
         let mut cfg = test_config("http://localhost:8080/repo");
         cfg.allow_insecure_http = true;
-        let backend = backend_from_config(&cfg, None);
+        let backend = backend_from_config(&cfg);
         assert!(
             backend.is_ok(),
             "expected HTTP REST URL to be allowed when opted in"
@@ -731,7 +690,9 @@ mod tests {
         let mut cfg = test_config("s3://my-bucket/vger");
         cfg.endpoint = Some("http://minio.local:9000".into());
         cfg.allow_insecure_http = true;
-        let backend = backend_from_config(&cfg, None);
+        cfg.access_key_id = Some("test-key".into());
+        cfg.secret_access_key = Some("test-secret".into());
+        let backend = backend_from_config(&cfg);
         assert!(
             backend.is_ok(),
             "expected HTTP S3 endpoint to be allowed when opted in"

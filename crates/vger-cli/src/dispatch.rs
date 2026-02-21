@@ -1,7 +1,7 @@
 use std::sync::atomic::{AtomicBool, Ordering};
 
+use crate::hooks::{self, HookContext};
 use vger_core::config::{EncryptionModeConfig, HooksConfig, SourceEntry, VgerConfig};
-use vger_core::hooks::{self, HookContext};
 use vger_core::storage::{parse_repo_url, ParsedUrl};
 
 use crate::cli::Commands;

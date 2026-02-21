@@ -3,6 +3,7 @@ mod cmd;
 mod config_gen;
 mod dispatch;
 mod format;
+mod hooks;
 mod passphrase;
 mod progress;
 mod prompt;
@@ -11,7 +12,8 @@ mod table;
 use clap::Parser;
 
 use vger_core::config::{self, ResolvedRepo};
-use vger_core::hooks::{self, HookContext};
+
+use crate::hooks::HookContext;
 
 use cli::{Cli, Commands};
 use config_gen::run_config_generate;

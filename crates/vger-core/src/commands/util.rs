@@ -13,7 +13,7 @@ pub(crate) fn cache_dir_from_config(config: &VgerConfig) -> Option<PathBuf> {
 
 /// Open a repository from config using the standard backend resolver.
 pub fn open_repo(config: &VgerConfig, passphrase: Option<&str>) -> Result<Repository> {
-    let backend = storage::backend_from_config(&config.repository, None)?;
+    let backend = storage::backend_from_config(&config.repository)?;
     Repository::open(backend, passphrase, cache_dir_from_config(config))
 }
 
@@ -23,7 +23,7 @@ pub fn open_repo_without_index(
     config: &VgerConfig,
     passphrase: Option<&str>,
 ) -> Result<Repository> {
-    let backend = storage::backend_from_config(&config.repository, None)?;
+    let backend = storage::backend_from_config(&config.repository)?;
     Repository::open_without_index(backend, passphrase, cache_dir_from_config(config))
 }
 
@@ -33,7 +33,7 @@ pub fn open_repo_without_index_or_cache(
     config: &VgerConfig,
     passphrase: Option<&str>,
 ) -> Result<Repository> {
-    let backend = storage::backend_from_config(&config.repository, None)?;
+    let backend = storage::backend_from_config(&config.repository)?;
     Repository::open_without_index_or_cache(backend, passphrase, cache_dir_from_config(config))
 }
 

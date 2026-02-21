@@ -8,7 +8,7 @@ mod types;
 mod util;
 
 // Re-export config schema types
-pub(crate) use self::hooks::HOOK_COMMANDS;
+pub use self::hooks::HOOK_COMMANDS;
 pub use self::hooks::{HooksConfig, SourceHooksConfig};
 pub use self::limits::{
     CpuLimitsConfig, IoLimitsConfig, NetworkLimitsConfig, ResourceLimitsConfig,

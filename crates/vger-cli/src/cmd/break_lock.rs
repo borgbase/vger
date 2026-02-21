@@ -4,7 +4,7 @@ pub(crate) fn run_break_lock(
     config: &VgerConfig,
     _label: Option<&str>,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let storage = vger_core::storage::backend_from_config(&config.repository, None)
+    let storage = vger_core::storage::backend_from_config(&config.repository)
         .map_err(|e| -> Box<dyn std::error::Error> { Box::new(e) })?;
     let removed = vger_core::repo::lock::break_lock(storage.as_ref())
         .map_err(|e| -> Box<dyn std::error::Error> { Box::new(e) })?;
