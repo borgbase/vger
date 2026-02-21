@@ -302,10 +302,20 @@ where
                 apply_item_xattrs(&pf.target_path, pf.xattrs.as_ref());
             }
             let (mtime_secs, mtime_nanos) = split_unix_nanos(pf.mtime);
-            if let Ok(file) = std::fs::File::open(&pf.target_path) {
-                let _ = fs::apply_mode_fd(&file, pf.mode);
-                let _ = fs::set_file_mtime_fd(&file, mtime_secs, mtime_nanos);
-            } else {
+            // fd-based fchmod/futimens are Unix-only; on other platforms
+            // fall through to the path-based calls to avoid silent no-ops.
+            #[cfg(unix)]
+            {
+                if let Ok(file) = std::fs::File::open(&pf.target_path) {
+                    let _ = fs::apply_mode_fd(&file, pf.mode);
+                    let _ = fs::set_file_mtime_fd(&file, mtime_secs, mtime_nanos);
+                } else {
+                    let _ = fs::apply_mode(&pf.target_path, pf.mode);
+                    let _ = fs::set_file_mtime(&pf.target_path, mtime_secs, mtime_nanos);
+                }
+            }
+            #[cfg(not(unix))]
+            {
                 let _ = fs::apply_mode(&pf.target_path, pf.mode);
                 let _ = fs::set_file_mtime(&pf.target_path, mtime_secs, mtime_nanos);
             }
