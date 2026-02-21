@@ -97,6 +97,56 @@ pub fn apply_mode(path: &Path, mode: u32) -> std::io::Result<()> {
     }
 }
 
+/// Apply file permissions via an open file descriptor (avoids path lookup).
+pub fn apply_mode_fd(file: &std::fs::File, mode: u32) -> std::io::Result<()> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::io::AsRawFd;
+        let ret = unsafe { libc::fchmod(file.as_raw_fd(), mode as libc::mode_t) };
+        if ret == 0 {
+            Ok(())
+        } else {
+            Err(std::io::Error::last_os_error())
+        }
+    }
+
+    #[cfg(not(unix))]
+    {
+        let _ = (file, mode);
+        Ok(())
+    }
+}
+
+/// Set file mtime via an open file descriptor (avoids path lookup).
+pub fn set_file_mtime_fd(file: &std::fs::File, secs: i64, nanos: u32) -> std::io::Result<()> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::io::AsRawFd;
+        let times = [
+            libc::timespec {
+                tv_sec: 0,
+                tv_nsec: libc::UTIME_OMIT,
+            },
+            libc::timespec {
+                tv_sec: secs as _,
+                tv_nsec: nanos as _,
+            },
+        ];
+        let ret = unsafe { libc::futimens(file.as_raw_fd(), times.as_ptr()) };
+        if ret == 0 {
+            Ok(())
+        } else {
+            Err(std::io::Error::last_os_error())
+        }
+    }
+
+    #[cfg(not(unix))]
+    {
+        let _ = (file, secs, nanos);
+        Ok(())
+    }
+}
+
 pub fn create_symlink(link_target: &Path, target: &Path) -> std::io::Result<()> {
     #[cfg(unix)]
     {
@@ -225,6 +275,64 @@ mod tests {
         // Both Unix (utimensat is path-based) and Windows (FILE_WRITE_ATTRIBUTES)
         // should succeed on read-only files.
         set_file_mtime(&path, target_secs, 0).unwrap();
+
+        let meta = std::fs::metadata(&path).unwrap();
+        let mtime = meta.modified().unwrap();
+        let since_epoch = mtime.duration_since(SystemTime::UNIX_EPOCH).unwrap();
+        let diff = (since_epoch.as_secs() as i64 - target_secs).unsigned_abs();
+        assert!(diff <= 1, "mtime off by {diff} seconds");
+    }
+
+    #[test]
+    fn apply_mode_fd_roundtrips() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("mode_fd.txt");
+        std::fs::write(&path, b"data").unwrap();
+
+        let file = std::fs::File::open(&path).unwrap();
+        apply_mode_fd(&file, 0o755).unwrap();
+        drop(file);
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = std::fs::metadata(&path).unwrap().permissions().mode() & 0o777;
+            assert_eq!(mode, 0o755);
+        }
+    }
+
+    #[test]
+    fn apply_mode_fd_readonly_transition() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("ro_fd.txt");
+        std::fs::write(&path, b"data").unwrap();
+
+        // Set read-only via path-based first
+        apply_mode(&path, 0o444).unwrap();
+
+        // Now use fd-based to set it back to read-write
+        let file = std::fs::File::open(&path).unwrap();
+        apply_mode_fd(&file, 0o644).unwrap();
+        drop(file);
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = std::fs::metadata(&path).unwrap().permissions().mode() & 0o777;
+            assert_eq!(mode, 0o644);
+        }
+    }
+
+    #[test]
+    fn set_file_mtime_fd_roundtrips() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("mtime_fd.txt");
+        std::fs::write(&path, b"data").unwrap();
+
+        let file = std::fs::File::open(&path).unwrap();
+        let target_secs: i64 = 1_700_000_000;
+        set_file_mtime_fd(&file, target_secs, 0).unwrap();
+        drop(file);
 
         let meta = std::fs::metadata(&path).unwrap();
         let mtime = meta.modified().unwrap();

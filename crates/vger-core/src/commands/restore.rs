@@ -288,13 +288,22 @@ where
             execute_parallel_restore(&planned_files, groups, &repo.storage, repo.crypto.as_ref())?;
 
         // Phase 5: Apply file metadata (mode, mtime, xattrs).
+        // Use fd-based fchmod/futimens when possible to avoid redundant path
+        // lookups (replaces 2 path syscalls per file with 1 open).  Falls back
+        // to path-based calls on open failure (e.g. mode 0o000 or 0o200).
         for pf in &planned_files {
-            let _ = fs::apply_mode(&pf.target_path, pf.mode);
+            // xattrs remain path-based (no fd-based xattr API in std).
             if xattrs_enabled {
                 apply_item_xattrs(&pf.target_path, pf.xattrs.as_ref());
             }
             let (mtime_secs, mtime_nanos) = split_unix_nanos(pf.mtime);
-            let _ = fs::set_file_mtime(&pf.target_path, mtime_secs, mtime_nanos);
+            if let Ok(file) = std::fs::File::open(&pf.target_path) {
+                let _ = fs::apply_mode_fd(&file, pf.mode);
+                let _ = fs::set_file_mtime_fd(&file, mtime_secs, mtime_nanos);
+            } else {
+                let _ = fs::apply_mode(&pf.target_path, pf.mode);
+                let _ = fs::set_file_mtime(&pf.target_path, mtime_secs, mtime_nanos);
+            }
         }
 
         stats.files = planned_files.len() as u64;
