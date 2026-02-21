@@ -596,6 +596,45 @@ fn build_read_groups_via_index(
 }
 
 // ---------------------------------------------------------------------------
+// Write accumulator
+// ---------------------------------------------------------------------------
+
+/// Groups the write accumulator state (buffer, target file, start offset)
+/// into a single struct.  One instance is created per `process_read_group`
+/// call; its allocation is reused across all sequences within that group.
+struct PendingWrite {
+    file_idx: usize, // usize::MAX = no active sequence
+    start: u64,
+    buf: Vec<u8>,
+}
+
+impl PendingWrite {
+    fn new() -> Self {
+        Self {
+            file_idx: usize::MAX,
+            start: 0,
+            buf: Vec::with_capacity(MAX_WRITE_BATCH),
+        }
+    }
+
+    fn is_active(&self) -> bool {
+        self.file_idx != usize::MAX
+    }
+
+    fn reset(&mut self) {
+        self.buf.clear();
+        self.file_idx = usize::MAX;
+    }
+
+    /// Start a new accumulation sequence, reusing the existing allocation.
+    fn rebind(&mut self, file_idx: usize, start: u64) {
+        self.buf.clear();
+        self.file_idx = file_idx;
+        self.start = start;
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Parallel restore execution
 // ---------------------------------------------------------------------------
 
@@ -686,12 +725,17 @@ fn process_read_group(
     let mut file_handles: HashMap<usize, std::fs::File> = HashMap::new();
 
     // Write accumulator — batches consecutive same-file writes into one syscall.
-    let mut pending_buf: Vec<u8> = Vec::new();
-    let mut pending_file_idx: usize = usize::MAX; // sentinel: no pending write
-    let mut pending_start: u64 = 0;
+    // Pre-allocated to MAX_WRITE_BATCH; reused across sequences within this group.
+    let mut pw = PendingWrite::new();
 
     for blob in &group.blobs {
         if cancelled.load(Ordering::Acquire) {
+            // Note: dropping `pw` loses any buffered data, but this is
+            // consistent with the broader cancellation model — other read
+            // groups targeting the same files are also being cancelled,
+            // so the files would be incomplete regardless.  A future
+            // write-to-temp + atomic-rename approach would eliminate
+            // partial files entirely.
             return Ok(());
         }
 
@@ -745,70 +789,68 @@ fn process_read_group(
         }
 
         for target in &blob.targets {
-            // Check if this target extends the current pending write (same file,
-            // contiguous offset).  If so, append to the accumulator; otherwise
-            // flush any pending write and start a new one.
-            let contiguous = pending_file_idx == target.file_idx
-                && target.file_offset == pending_start + pending_buf.len() as u64;
+            let contiguous = pw.is_active()
+                && pw.file_idx == target.file_idx
+                && target.file_offset == pw.start + pw.buf.len() as u64;
+            let can_append = contiguous && pw.buf.len() + decompress_buf.len() <= MAX_WRITE_BATCH;
 
-            if contiguous {
-                pending_buf.extend_from_slice(&decompress_buf);
-                if pending_buf.len() >= MAX_WRITE_BATCH {
-                    flush_pending(
-                        &mut pending_buf,
-                        &mut pending_file_idx,
-                        pending_start,
+            if can_append {
+                pw.buf.extend_from_slice(&decompress_buf);
+                // Eager flush when batch is full.
+                if pw.buf.len() >= MAX_WRITE_BATCH {
+                    write_buf(
+                        &pw.buf,
+                        pw.file_idx,
+                        pw.start,
                         &mut file_handles,
                         files,
                         bytes_written,
                     )?;
+                    pw.reset();
                 }
             } else {
-                // Flush previous pending write (if any) before starting a new one.
-                flush_pending(
-                    &mut pending_buf,
-                    &mut pending_file_idx,
-                    pending_start,
-                    &mut file_handles,
-                    files,
-                    bytes_written,
-                )?;
-                pending_file_idx = target.file_idx;
-                pending_start = target.file_offset;
-                pending_buf.extend_from_slice(&decompress_buf);
+                // Flush any active pending write first.
+                flush_pending(&mut pw, &mut file_handles, files, bytes_written)?;
+
+                if contiguous || decompress_buf.len() >= MAX_WRITE_BATCH {
+                    // Contiguous overflow or standalone large chunk — write
+                    // directly from decompress_buf so no data lingers in the
+                    // accumulator (same cancellation safety as the old code).
+                    write_buf(
+                        &decompress_buf,
+                        target.file_idx,
+                        target.file_offset,
+                        &mut file_handles,
+                        files,
+                        bytes_written,
+                    )?;
+                } else {
+                    // Start new accumulation sequence (reuses existing allocation).
+                    pw.rebind(target.file_idx, target.file_offset);
+                    pw.buf.extend_from_slice(&decompress_buf);
+                }
             }
         }
     }
 
     // Flush any remaining pending write.
-    flush_pending(
-        &mut pending_buf,
-        &mut pending_file_idx,
-        pending_start,
-        &mut file_handles,
-        files,
-        bytes_written,
-    )?;
+    flush_pending(&mut pw, &mut file_handles, files, bytes_written)?;
 
     Ok(())
 }
 
-/// Flush the write accumulator to disk if it contains data.  Clears the buffer
-/// (keeping the allocation) and resets the file index sentinel.
-fn flush_pending(
-    buf: &mut Vec<u8>,
-    file_idx: &mut usize,
-    start_offset: u64,
+/// Write `buf` to the target file at `offset`.  Opens/creates the file handle
+/// on first access and calls CAS `set_len`.  Increments `bytes_written`.
+fn write_buf(
+    buf: &[u8],
+    file_idx: usize,
+    offset: u64,
     file_handles: &mut HashMap<usize, std::fs::File>,
     files: &[PlannedFile],
     bytes_written: &AtomicU64,
 ) -> Result<()> {
-    if buf.is_empty() {
-        return Ok(());
-    }
-    let idx = *file_idx;
-    if !file_handles.contains_key(&idx) {
-        let pf = &files[idx];
+    if !file_handles.contains_key(&file_idx) {
+        let pf = &files[file_idx];
         if file_handles.len() >= MAX_OPEN_FILES_PER_GROUP {
             if let Some(evict_idx) = file_handles.keys().next().copied() {
                 file_handles.remove(&evict_idx);
@@ -831,21 +873,40 @@ fn flush_pending(
         if !pf.created.swap(true, Ordering::AcqRel) {
             handle.set_len(pf.total_size)?;
         }
-        file_handles.insert(idx, handle);
+        file_handles.insert(file_idx, handle);
     }
     let fh = file_handles
-        .get_mut(&idx)
+        .get_mut(&file_idx)
         .ok_or_else(|| VgerError::Other("missing file handle in restore worker".into()))?;
     #[cfg(unix)]
-    fh.write_all_at(buf, start_offset)?;
+    fh.write_all_at(buf, offset)?;
     #[cfg(not(unix))]
     {
-        fh.seek(std::io::SeekFrom::Start(start_offset))?;
+        fh.seek(std::io::SeekFrom::Start(offset))?;
         fh.write_all(buf)?;
     }
     bytes_written.fetch_add(buf.len() as u64, Ordering::Relaxed);
-    buf.clear();
-    *file_idx = usize::MAX;
+    Ok(())
+}
+
+/// Flush the write accumulator to disk if it contains data, then reset it.
+fn flush_pending(
+    pw: &mut PendingWrite,
+    file_handles: &mut HashMap<usize, std::fs::File>,
+    files: &[PlannedFile],
+    bytes_written: &AtomicU64,
+) -> Result<()> {
+    if pw.is_active() && !pw.buf.is_empty() {
+        write_buf(
+            &pw.buf,
+            pw.file_idx,
+            pw.start,
+            file_handles,
+            files,
+            bytes_written,
+        )?;
+    }
+    pw.reset();
     Ok(())
 }
 
@@ -1273,6 +1334,344 @@ mod tests {
             err.contains("size mismatch after restore decode"),
             "expected size mismatch error, got: {err}"
         );
+    }
+
+    // -----------------------------------------------------------------------
+    // process_read_group write-loop tests
+    // -----------------------------------------------------------------------
+
+    /// Helper: compress + encrypt + pack a raw payload into a RepoObj blob.
+    fn pack_blob(chunk_id: ChunkId, data: &[u8], crypto: &dyn CryptoEngine) -> Vec<u8> {
+        let compressed = crate::compress::compress(Compression::None, data).unwrap();
+        pack_object_with_context(ObjectType::ChunkData, &chunk_id.0, &compressed, crypto).unwrap()
+    }
+
+    /// Build a single-blob ReadGroup from the given packed bytes.
+    fn single_blob_group(
+        pack_id: PackId,
+        chunk_id: ChunkId,
+        packed: &[u8],
+        expected_size: u32,
+        targets: SmallVec<[WriteTarget; 1]>,
+    ) -> ReadGroup {
+        ReadGroup {
+            pack_id,
+            read_start: 0,
+            read_end: packed.len() as u64,
+            blobs: vec![PlannedBlob {
+                chunk_id,
+                pack_offset: 0,
+                stored_size: packed.len() as u32,
+                expected_size,
+                targets,
+            }],
+        }
+    }
+
+    /// Concatenate multiple packed blobs into one pack buffer and build a
+    /// ReadGroup with one PlannedBlob per entry.
+    #[allow(clippy::type_complexity)]
+    fn multi_blob_group(
+        pack_id: PackId,
+        entries: Vec<(ChunkId, Vec<u8>, u32, SmallVec<[WriteTarget; 1]>)>,
+    ) -> (Vec<u8>, ReadGroup) {
+        let mut pack_data = Vec::new();
+        let mut blobs = Vec::new();
+        for (chunk_id, packed, expected_size, targets) in entries {
+            let offset = pack_data.len() as u64;
+            let stored_size = packed.len() as u32;
+            pack_data.extend_from_slice(&packed);
+            blobs.push(PlannedBlob {
+                chunk_id,
+                pack_offset: offset,
+                stored_size,
+                expected_size,
+                targets,
+            });
+        }
+        let group = ReadGroup {
+            pack_id,
+            read_start: 0,
+            read_end: pack_data.len() as u64,
+            blobs,
+        };
+        (pack_data, group)
+    }
+
+    #[test]
+    fn process_read_group_large_chunk_direct_write() {
+        // A single blob with expected_size >= MAX_WRITE_BATCH should be
+        // written directly from decompress_buf, bypassing the accumulator.
+        let temp = tempdir().unwrap();
+        let out = temp.path().join("big.bin");
+
+        let big_data = vec![0xABu8; MAX_WRITE_BATCH + 1024];
+        let crypto = PlaintextEngine::new(&test_chunk_id_key());
+        let cid = dummy_chunk_id(0x01);
+        let packed = pack_blob(cid, &big_data, &crypto);
+
+        let files = vec![PlannedFile {
+            target_path: out.clone(),
+            total_size: big_data.len() as u64,
+            mode: 0o644,
+            mtime: 0,
+            xattrs: None,
+            created: AtomicBool::new(false),
+        }];
+
+        let pack_id = dummy_pack_id(1);
+        let backend = Arc::new(MemoryBackend::new());
+        backend.put(&pack_id.storage_key(), &packed).unwrap();
+        let storage: Arc<dyn StorageBackend> = backend;
+
+        let group = single_blob_group(
+            pack_id,
+            cid,
+            &packed,
+            big_data.len() as u32,
+            smallvec::smallvec![WriteTarget {
+                file_idx: 0,
+                file_offset: 0,
+            }],
+        );
+
+        let bytes_written = AtomicU64::new(0);
+        let cancelled = AtomicBool::new(false);
+        process_read_group(
+            &group,
+            &files,
+            &storage,
+            &crypto,
+            &bytes_written,
+            &cancelled,
+        )
+        .unwrap();
+
+        assert_eq!(bytes_written.load(Ordering::Relaxed), big_data.len() as u64);
+        let contents = std::fs::read(&out).unwrap();
+        assert_eq!(contents, big_data);
+    }
+
+    #[test]
+    fn process_read_group_exact_batch_boundary() {
+        // Two consecutive contiguous blobs whose cumulative size hits exactly
+        // MAX_WRITE_BATCH.  Verifies the eager flush fires at the boundary.
+        let temp = tempdir().unwrap();
+        let out = temp.path().join("exact.bin");
+
+        let half = MAX_WRITE_BATCH / 2;
+        let chunk_a = vec![0xAAu8; half];
+        let chunk_b = vec![0xBBu8; MAX_WRITE_BATCH - half];
+
+        let crypto = PlaintextEngine::new(&test_chunk_id_key());
+        let cid_a = dummy_chunk_id(0x0A);
+        let cid_b = dummy_chunk_id(0x0B);
+        let packed_a = pack_blob(cid_a, &chunk_a, &crypto);
+        let packed_b = pack_blob(cid_b, &chunk_b, &crypto);
+
+        let total_size = (chunk_a.len() + chunk_b.len()) as u64;
+        let files = vec![PlannedFile {
+            target_path: out.clone(),
+            total_size,
+            mode: 0o644,
+            mtime: 0,
+            xattrs: None,
+            created: AtomicBool::new(false),
+        }];
+
+        let pack_id = dummy_pack_id(2);
+        let (pack_data, group) = multi_blob_group(
+            pack_id,
+            vec![
+                (
+                    cid_a,
+                    packed_a,
+                    chunk_a.len() as u32,
+                    smallvec::smallvec![WriteTarget {
+                        file_idx: 0,
+                        file_offset: 0,
+                    }],
+                ),
+                (
+                    cid_b,
+                    packed_b,
+                    chunk_b.len() as u32,
+                    smallvec::smallvec![WriteTarget {
+                        file_idx: 0,
+                        file_offset: chunk_a.len() as u64,
+                    }],
+                ),
+            ],
+        );
+
+        let backend = Arc::new(MemoryBackend::new());
+        backend.put(&pack_id.storage_key(), &pack_data).unwrap();
+        let storage: Arc<dyn StorageBackend> = backend;
+
+        let bytes_written = AtomicU64::new(0);
+        let cancelled = AtomicBool::new(false);
+        process_read_group(
+            &group,
+            &files,
+            &storage,
+            &crypto,
+            &bytes_written,
+            &cancelled,
+        )
+        .unwrap();
+
+        assert_eq!(bytes_written.load(Ordering::Relaxed), total_size);
+        let contents = std::fs::read(&out).unwrap();
+        let mut expected = chunk_a;
+        expected.extend_from_slice(&chunk_b);
+        assert_eq!(contents, expected);
+    }
+
+    #[test]
+    fn process_read_group_cross_file_switch() {
+        // Two blobs targeting different files in the same read group.
+        // Verifies flush occurs on file switch and both files get correct content.
+        let temp = tempdir().unwrap();
+        let out_a = temp.path().join("a.bin");
+        let out_b = temp.path().join("b.bin");
+
+        let data_a = vec![0xAAu8; 4096];
+        let data_b = vec![0xBBu8; 8192];
+
+        let crypto = PlaintextEngine::new(&test_chunk_id_key());
+        let cid_a = dummy_chunk_id(0x0A);
+        let cid_b = dummy_chunk_id(0x0B);
+        let packed_a = pack_blob(cid_a, &data_a, &crypto);
+        let packed_b = pack_blob(cid_b, &data_b, &crypto);
+
+        let files = vec![
+            PlannedFile {
+                target_path: out_a.clone(),
+                total_size: data_a.len() as u64,
+                mode: 0o644,
+                mtime: 0,
+                xattrs: None,
+                created: AtomicBool::new(false),
+            },
+            PlannedFile {
+                target_path: out_b.clone(),
+                total_size: data_b.len() as u64,
+                mode: 0o644,
+                mtime: 0,
+                xattrs: None,
+                created: AtomicBool::new(false),
+            },
+        ];
+
+        let pack_id = dummy_pack_id(3);
+        let (pack_data, group) = multi_blob_group(
+            pack_id,
+            vec![
+                (
+                    cid_a,
+                    packed_a,
+                    data_a.len() as u32,
+                    smallvec::smallvec![WriteTarget {
+                        file_idx: 0,
+                        file_offset: 0,
+                    }],
+                ),
+                (
+                    cid_b,
+                    packed_b,
+                    data_b.len() as u32,
+                    smallvec::smallvec![WriteTarget {
+                        file_idx: 1,
+                        file_offset: 0,
+                    }],
+                ),
+            ],
+        );
+
+        let backend = Arc::new(MemoryBackend::new());
+        backend.put(&pack_id.storage_key(), &pack_data).unwrap();
+        let storage: Arc<dyn StorageBackend> = backend;
+
+        let bytes_written = AtomicU64::new(0);
+        let cancelled = AtomicBool::new(false);
+        process_read_group(
+            &group,
+            &files,
+            &storage,
+            &crypto,
+            &bytes_written,
+            &cancelled,
+        )
+        .unwrap();
+
+        let total = (data_a.len() + data_b.len()) as u64;
+        assert_eq!(bytes_written.load(Ordering::Relaxed), total);
+        assert_eq!(std::fs::read(&out_a).unwrap(), data_a);
+        assert_eq!(std::fs::read(&out_b).unwrap(), data_b);
+    }
+
+    #[test]
+    fn process_read_group_contiguous_batching() {
+        // Multiple small contiguous blobs to the same file should be batched
+        // into fewer writes.  We verify correct content at the end.
+        let temp = tempdir().unwrap();
+        let out = temp.path().join("batched.bin");
+
+        let num_chunks = 8u8;
+        let chunk_size = 1024usize; // well under MAX_WRITE_BATCH
+        let crypto = PlaintextEngine::new(&test_chunk_id_key());
+
+        let mut entries = Vec::new();
+        let mut expected_data = Vec::new();
+        for i in 0u8..num_chunks {
+            let data = vec![0x10 + i; chunk_size];
+            expected_data.extend_from_slice(&data);
+            let cid = dummy_chunk_id(0x10 + i);
+            let packed = pack_blob(cid, &data, &crypto);
+            entries.push((
+                cid,
+                packed,
+                chunk_size as u32,
+                smallvec::smallvec![WriteTarget {
+                    file_idx: 0,
+                    file_offset: (i as u64) * (chunk_size as u64),
+                }],
+            ));
+        }
+
+        let files = vec![PlannedFile {
+            target_path: out.clone(),
+            total_size: expected_data.len() as u64,
+            mode: 0o644,
+            mtime: 0,
+            xattrs: None,
+            created: AtomicBool::new(false),
+        }];
+
+        let pack_id = dummy_pack_id(4);
+        let (pack_data, group) = multi_blob_group(pack_id, entries);
+
+        let backend = Arc::new(MemoryBackend::new());
+        backend.put(&pack_id.storage_key(), &pack_data).unwrap();
+        let storage: Arc<dyn StorageBackend> = backend;
+
+        let bytes_written = AtomicU64::new(0);
+        let cancelled = AtomicBool::new(false);
+        process_read_group(
+            &group,
+            &files,
+            &storage,
+            &crypto,
+            &bytes_written,
+            &cancelled,
+        )
+        .unwrap();
+
+        assert_eq!(
+            bytes_written.load(Ordering::Relaxed),
+            expected_data.len() as u64
+        );
+        assert_eq!(std::fs::read(&out).unwrap(), expected_data);
     }
 
     // -----------------------------------------------------------------------
