@@ -1100,11 +1100,20 @@ fn schedule_description(schedule: &ScheduleConfig, paused: bool) -> String {
 
 // ── Tray icon ──
 
-fn build_tray_icon(
-) -> Result<(tray_icon::TrayIcon, MenuId, MenuId, MenuId, Submenu, MenuItem), String> {
+fn build_tray_icon() -> Result<
+    (
+        tray_icon::TrayIcon,
+        MenuId,
+        MenuId,
+        MenuId,
+        Submenu,
+        MenuItem,
+    ),
+    String,
+> {
     let menu = Menu::new();
 
-    let open_item = MenuItem::new(&format!("Open {APP_TITLE}"), true, None);
+    let open_item = MenuItem::new(format!("Open {APP_TITLE}"), true, None);
     let run_now_item = MenuItem::new("Run All Backups", true, None);
     let source_submenu = Submenu::new("Backup Source", true);
     let cancel_item = MenuItem::new("Cancel Backup", false, None);
@@ -1147,7 +1156,6 @@ fn build_tray_icon(
         cancel_item,
     ))
 }
-
 
 // ── Scheduler thread ──
 
@@ -1480,8 +1488,8 @@ fn apply_config(
                 state.next_run = Some(Instant::now() + interval);
             }
 
-            let canonical = std::fs::canonicalize(&config_path)
-                .unwrap_or_else(|_| config_path.clone());
+            let canonical =
+                std::fs::canonicalize(&config_path).unwrap_or_else(|_| config_path.clone());
             *config_display_path = canonical.clone();
 
             let _ = ui_tx.send(UiEvent::ConfigInfo {
@@ -2494,9 +2502,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let runtime = resolve_or_create_config(gui_state.config_path.as_deref())?;
 
     // Track the active config path so we can persist it on quit.
-    let active_config_path = Arc::new(Mutex::new(
-        runtime.source.path().display().to_string(),
-    ));
+    let active_config_path = Arc::new(Mutex::new(runtime.source.path().display().to_string()));
     // Last captured GUI state — updated on every window hide so we have a valid
     // snapshot even if the window is already destroyed when the process exits.
     let last_gui_state: Arc<Mutex<Option<state::GuiState>>> = Arc::new(Mutex::new(None));
@@ -2530,8 +2536,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let ui = MainWindow::new()?;
     if let (Some(w), Some(h)) = (gui_state.window_width, gui_state.window_height) {
-        ui.window()
-            .set_size(slint::LogicalSize::new(w, h));
+        ui.window().set_size(slint::LogicalSize::new(w, h));
     }
     ui.set_config_path("(loading...)".into());
     ui.set_schedule_text("(loading...)".into());
@@ -3137,32 +3142,36 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let backup_running = backup_running.clone();
         let timer = slint::Timer::default();
         let mut was_running = false;
-        timer.start(slint::TimerMode::Repeated, Duration::from_millis(200), move || {
-            // Drain all pending submenu updates, keeping only the latest
-            let mut latest = None;
-            while let Ok(labels) = submenu_labels_rx.try_recv() {
-                latest = Some(labels);
-            }
-            if let Some(labels) = latest {
-                while source_submenu.remove_at(0).is_some() {}
-                let mut new_items = Vec::new();
-                for label in &labels {
-                    let mi = MenuItem::new(label, true, None);
-                    new_items.push((mi.id().clone(), label.clone()));
-                    let _ = source_submenu.append(&mi);
+        timer.start(
+            slint::TimerMode::Repeated,
+            Duration::from_millis(200),
+            move || {
+                // Drain all pending submenu updates, keeping only the latest
+                let mut latest = None;
+                while let Ok(labels) = submenu_labels_rx.try_recv() {
+                    latest = Some(labels);
                 }
-                if let Ok(mut tsi) = tray_source_items.lock() {
-                    *tsi = new_items;
+                if let Some(labels) = latest {
+                    while source_submenu.remove_at(0).is_some() {}
+                    let mut new_items = Vec::new();
+                    for label in &labels {
+                        let mi = MenuItem::new(label, true, None);
+                        new_items.push((mi.id().clone(), label.clone()));
+                        let _ = source_submenu.append(&mi);
+                    }
+                    if let Ok(mut tsi) = tray_source_items.lock() {
+                        *tsi = new_items;
+                    }
                 }
-            }
 
-            // Sync cancel item enabled state
-            let running = backup_running.load(Ordering::SeqCst);
-            if running != was_running {
-                cancel_item.set_enabled(running);
-                was_running = running;
-            }
-        });
+                // Sync cancel item enabled state
+                let running = backup_running.load(Ordering::SeqCst);
+                if running != was_running {
+                    cancel_item.set_enabled(running);
+                    was_running = running;
+                }
+            },
+        );
         timer
     };
 

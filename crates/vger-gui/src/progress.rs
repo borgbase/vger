@@ -36,7 +36,7 @@ pub fn format_count(n: u64) -> String {
     let s = n.to_string();
     let mut result = String::with_capacity(s.len() + s.len() / 3);
     for (i, c) in s.chars().enumerate() {
-        if i > 0 && (s.len() - i) % 3 == 0 {
+        if i > 0 && (s.len() - i).is_multiple_of(3) {
             result.push(',');
         }
         result.push(c);
@@ -63,7 +63,10 @@ impl BackupStatusTracker {
         match event {
             BackupProgressEvent::SourceStarted { source_path } => {
                 self.last_update = Instant::now();
-                Some(format!("[{}] backing up {}...", self.repo_name, source_path))
+                Some(format!(
+                    "[{}] backing up {}...",
+                    self.repo_name, source_path
+                ))
             }
             BackupProgressEvent::StatsUpdated {
                 nfiles,
