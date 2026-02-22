@@ -10,11 +10,11 @@ use vger_types::chunk_id::ChunkId;
 use vger_types::error::{Result, VgerError};
 use vger_types::pack_id::PackId;
 
-use super::util::open_repo;
+use super::util::{open_repo, open_repo_without_index};
 
 /// List all snapshots in the repository.
 pub fn list_snapshots(config: &VgerConfig, passphrase: Option<&str>) -> Result<Vec<SnapshotEntry>> {
-    let repo = open_repo(config, passphrase)?;
+    let repo = open_repo_without_index(config, passphrase)?;
     Ok(repo.manifest().snapshots.clone())
 }
 
@@ -33,7 +33,7 @@ pub fn list_snapshots_with_stats(
     config: &VgerConfig,
     passphrase: Option<&str>,
 ) -> Result<Vec<(SnapshotEntry, crate::snapshot::SnapshotStats)>> {
-    let repo = open_repo(config, passphrase)?;
+    let repo = open_repo_without_index(config, passphrase)?;
     let entries = repo.manifest().snapshots.clone();
     let mut result = Vec::with_capacity(entries.len());
     for entry in entries {
@@ -52,7 +52,7 @@ pub fn get_snapshot_meta(
     passphrase: Option<&str>,
     snapshot_name: &str,
 ) -> Result<SnapshotMeta> {
-    let repo = open_repo(config, passphrase)?;
+    let repo = open_repo_without_index(config, passphrase)?;
     load_snapshot_meta(&repo, snapshot_name)
 }
 

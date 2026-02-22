@@ -62,6 +62,15 @@ impl RestBackend {
         crate::retry::retry_http(&self.retry, op_name, "REST", f)
     }
 
+    /// Retry a closure that performs both HTTP request and body read.
+    fn retry_call_body<T>(
+        &self,
+        op_name: &str,
+        f: impl Fn() -> std::result::Result<T, crate::retry::HttpRetryError>,
+    ) -> std::result::Result<T, crate::retry::HttpRetryError> {
+        crate::retry::retry_http_body(&self.retry, op_name, "REST", f)
+    }
+
     /// Batch delete multiple keys in a single request.
     pub fn batch_delete(&self, keys: &[String]) -> Result<()> {
         let url = format!("{}?batch-delete", self.base_url);
@@ -84,14 +93,18 @@ impl RestBackend {
     /// Get repository statistics from the server.
     pub fn stats(&self) -> Result<serde_json::Value> {
         let url = format!("{}?stats", self.base_url);
-        let resp = self
-            .retry_call("stats", || {
+        let body = self
+            .retry_call_body("stats", || {
                 let req = self.apply_auth(self.agent.get(&url));
-                req.call()
+                let resp = req.call().map_err(crate::retry::HttpRetryError::http)?;
+                let mut buf = Vec::new();
+                resp.into_reader()
+                    .read_to_end(&mut buf)
+                    .map_err(crate::retry::HttpRetryError::BodyIo)?;
+                Ok(buf)
             })
             .map_err(|e| VgerError::Other(format!("REST stats: {e}")))?;
-        let val: serde_json::Value = resp
-            .into_json()
+        let val: serde_json::Value = serde_json::from_slice(&body)
             .map_err(|e| VgerError::Other(format!("REST stats parse: {e}")))?;
         Ok(val)
     }
@@ -264,21 +277,23 @@ impl RestBackend {
 
 impl StorageBackend for RestBackend {
     fn get(&self, key: &str) -> Result<Option<Vec<u8>>> {
+        use crate::retry::HttpRetryError;
         let url = self.url(key);
-        match self.retry_call(&format!("GET {key}"), || {
+        self.retry_call_body(&format!("GET {key}"), || {
             let req = self.apply_auth(self.agent.get(&url));
-            req.call()
-        }) {
-            Ok(resp) => {
-                let mut buf = Vec::new();
-                resp.into_reader()
-                    .read_to_end(&mut buf)
-                    .map_err(VgerError::Io)?;
-                Ok(Some(buf))
+            match req.call() {
+                Ok(resp) => {
+                    let mut buf = Vec::new();
+                    resp.into_reader()
+                        .read_to_end(&mut buf)
+                        .map_err(HttpRetryError::BodyIo)?;
+                    Ok(Some(buf))
+                }
+                Err(ureq::Error::Status(404, _)) => Ok(None),
+                Err(e) => Err(HttpRetryError::http(e)),
             }
-            Err(ureq::Error::Status(404, _)) => Ok(None),
-            Err(e) => Err(VgerError::Other(format!("REST GET {key}: {e}"))),
-        }
+        })
+        .map_err(|e| VgerError::Other(format!("REST GET {key}: {e}")))
     }
 
     fn put(&self, key: &str, data: &[u8]) -> Result<()> {
@@ -330,25 +345,31 @@ impl StorageBackend for RestBackend {
     }
 
     fn list(&self, prefix: &str) -> Result<Vec<String>> {
+        use crate::retry::HttpRetryError;
         let prefix = prefix.trim_start_matches('/');
         let url = if prefix.is_empty() {
             format!("{}?list", self.base_url)
         } else {
             format!("{}?list", self.url(prefix))
         };
-        let resp = self
-            .retry_call(&format!("LIST {prefix}"), || {
+        let body = self
+            .retry_call_body(&format!("LIST {prefix}"), || {
                 let req = self.apply_auth(self.agent.get(&url));
-                req.call()
+                let resp = req.call().map_err(HttpRetryError::http)?;
+                let mut buf = Vec::new();
+                resp.into_reader()
+                    .read_to_end(&mut buf)
+                    .map_err(HttpRetryError::BodyIo)?;
+                Ok(buf)
             })
             .map_err(|e| VgerError::Other(format!("REST LIST {prefix}: {e}")))?;
-        let keys: Vec<String> = resp
-            .into_json()
+        let keys: Vec<String> = serde_json::from_slice(&body)
             .map_err(|e| VgerError::Other(format!("REST LIST parse: {e}")))?;
         Ok(keys)
     }
 
     fn get_range(&self, key: &str, offset: u64, length: u64) -> Result<Option<Vec<u8>>> {
+        use crate::retry::HttpRetryError;
         if length == 0 {
             return Err(VgerError::Other(format!(
                 "REST GET_RANGE {key}: zero-length read requested"
@@ -364,57 +385,66 @@ impl StorageBackend for RestBackend {
                 ))
             })?;
         let range_header = format!("bytes={offset}-{end}");
-        match self.retry_call(&format!("GET_RANGE {key}"), || {
+        self.retry_call_body(&format!("GET_RANGE {key}"), || {
             let req = self
                 .apply_auth(self.agent.get(&url))
                 .set("Range", &range_header);
-            req.call()
-        }) {
-            Ok(resp) => {
-                let status = resp.status();
-                if status == 200 {
-                    return Err(VgerError::Other(format!(
-                        "REST GET_RANGE {key}: server returned 200 instead of 206 (Range header ignored)"
-                    )));
-                }
-                if status != 206 {
-                    return Err(VgerError::Other(format!(
-                        "REST GET_RANGE {key}: unexpected status {status}"
-                    )));
-                }
+            match req.call() {
+                Ok(resp) => {
+                    let status = resp.status();
+                    if status == 200 {
+                        return Err(HttpRetryError::Permanent(format!(
+                            "REST GET_RANGE {key}: server returned 200 instead of 206 (Range header ignored)"
+                        )));
+                    }
+                    if status != 206 {
+                        return Err(HttpRetryError::Permanent(format!(
+                            "REST GET_RANGE {key}: unexpected status {status}"
+                        )));
+                    }
 
-                // Validate Content-Range header
-                let content_range = resp
-                    .header("Content-Range")
-                    .ok_or_else(|| {
-                        VgerError::Other(format!(
-                            "REST GET_RANGE {key}: server returned 206 without Content-Range header"
-                        ))
-                    })?
-                    .to_string();
-                Self::validate_content_range(&content_range, offset, length, key)?;
+                    // Validate Content-Range header
+                    let content_range = match resp.header("Content-Range") {
+                        Some(h) => h.to_string(),
+                        None => {
+                            return Err(HttpRetryError::Permanent(format!(
+                                "REST GET_RANGE {key}: server returned 206 without Content-Range header"
+                            )));
+                        }
+                    };
+                    if let Err(e) = Self::validate_content_range(&content_range, offset, length, key) {
+                        return Err(HttpRetryError::Permanent(e.to_string()));
+                    }
 
-                let cap = usize::try_from(length).map_err(|_| {
-                    VgerError::Other(format!(
-                        "REST GET_RANGE {key}: length {length} exceeds platform usize"
-                    ))
-                })?;
-                let mut buf = Vec::with_capacity(cap);
-                resp.into_reader()
-                    .take(length)
-                    .read_to_end(&mut buf)
-                    .map_err(VgerError::Io)?;
-                if buf.len() != cap {
-                    return Err(VgerError::Other(format!(
-                        "short read on {key} at offset {offset}: expected {length} bytes, got {}",
-                        buf.len()
-                    )));
+                    let cap = match usize::try_from(length) {
+                        Ok(c) => c,
+                        Err(_) => {
+                            return Err(HttpRetryError::Permanent(format!(
+                                "REST GET_RANGE {key}: length {length} exceeds platform usize"
+                            )));
+                        }
+                    };
+                    let mut buf = Vec::with_capacity(cap);
+                    resp.into_reader()
+                        .take(length)
+                        .read_to_end(&mut buf)
+                        .map_err(HttpRetryError::BodyIo)?;
+                    if buf.len() != cap {
+                        return Err(HttpRetryError::BodyIo(std::io::Error::new(
+                            std::io::ErrorKind::UnexpectedEof,
+                            format!(
+                                "short read on {key} at offset {offset}: expected {length} bytes, got {}",
+                                buf.len()
+                            ),
+                        )));
+                    }
+                    Ok(Some(buf))
                 }
-                Ok(Some(buf))
+                Err(ureq::Error::Status(404, _)) => Ok(None),
+                Err(e) => Err(HttpRetryError::http(e)),
             }
-            Err(ureq::Error::Status(404, _)) => Ok(None),
-            Err(e) => Err(VgerError::Other(format!("REST GET_RANGE {key}: {e}"))),
-        }
+        })
+        .map_err(|e| VgerError::Other(format!("REST GET_RANGE {key}: {e}")))
     }
 
     fn create_dir(&self, key: &str) -> Result<()> {
@@ -538,10 +568,45 @@ mod tests {
         (url, handle)
     }
 
+    /// Spin up a TCP listener that serves multiple sequential requests.
+    /// Each entry in `responses` is served to one request in order.
+    fn mock_server_multi(responses: Vec<String>) -> (String, std::thread::JoinHandle<()>) {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let url = format!("http://127.0.0.1:{port}");
+        let handle = std::thread::spawn(move || {
+            for response in &responses {
+                let (mut stream, _) = listener.accept().unwrap();
+                let mut reader = BufReader::new(stream.try_clone().unwrap());
+                let mut line = String::new();
+                loop {
+                    line.clear();
+                    reader.read_line(&mut line).unwrap();
+                    if line.trim().is_empty() {
+                        break;
+                    }
+                }
+                stream.write_all(response.as_bytes()).unwrap();
+                stream.flush().unwrap();
+                // Drop stream to close connection (important for truncation tests)
+                drop(stream);
+            }
+        });
+        (url, handle)
+    }
+
     fn no_retry() -> RetryConfig {
         RetryConfig {
             max_retries: 0,
             ..Default::default()
+        }
+    }
+
+    fn fast_retry() -> RetryConfig {
+        RetryConfig {
+            max_retries: 2,
+            retry_delay_ms: 1,
+            retry_max_delay_ms: 1,
         }
     }
 
@@ -636,6 +701,107 @@ mod tests {
         assert!(
             err.contains("Content-Range mismatch"),
             "expected Content-Range mismatch error, got: {err}"
+        );
+        handle.join().unwrap();
+    }
+
+    #[test]
+    fn get_retries_on_truncated_body() {
+        let full_body = b"hello world, this is the full response body";
+        // First response: declare Content-Length but send truncated data, then close
+        let truncated_resp = format!(
+            "HTTP/1.1 200 OK\r\nContent-Length: {}\r\n\r\ntruncated",
+            full_body.len()
+        );
+        // Second response: complete
+        let complete_resp = format!(
+            "HTTP/1.1 200 OK\r\nContent-Length: {len}\r\n\r\n{body}",
+            len = full_body.len(),
+            body = std::str::from_utf8(full_body).unwrap(),
+        );
+
+        let (url, handle) = mock_server_multi(vec![truncated_resp, complete_resp]);
+        let backend = RestBackend::new(&url, None, fast_retry()).unwrap();
+
+        let result = backend.get("testkey").unwrap().unwrap();
+        assert_eq!(result, full_body);
+        handle.join().unwrap();
+    }
+
+    #[test]
+    fn get_range_retries_on_truncated_body() {
+        // Use a custom mock that sends raw bytes for binary body
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let url = format!("http://127.0.0.1:{port}");
+        let handle = std::thread::spawn(move || {
+            // Request 1: truncated body (declare 50 bytes, send 5, close)
+            {
+                let (mut stream, _) = listener.accept().unwrap();
+                let mut reader = BufReader::new(stream.try_clone().unwrap());
+                let mut line = String::new();
+                loop {
+                    line.clear();
+                    reader.read_line(&mut line).unwrap();
+                    if line.trim().is_empty() {
+                        break;
+                    }
+                }
+                let headers = "HTTP/1.1 206 Partial Content\r\n\
+                     Content-Range: bytes 10-59/1000\r\n\
+                     Content-Length: 50\r\n\r\n";
+                stream.write_all(headers.as_bytes()).unwrap();
+                stream.write_all(&[0xABu8; 5]).unwrap(); // only 5 of 50 bytes
+                stream.flush().unwrap();
+                drop(stream); // close → triggers I/O error on client
+            }
+            // Request 2: complete
+            {
+                let (mut stream, _) = listener.accept().unwrap();
+                let mut reader = BufReader::new(stream.try_clone().unwrap());
+                let mut line = String::new();
+                loop {
+                    line.clear();
+                    reader.read_line(&mut line).unwrap();
+                    if line.trim().is_empty() {
+                        break;
+                    }
+                }
+                let headers = "HTTP/1.1 206 Partial Content\r\n\
+                     Content-Range: bytes 10-59/1000\r\n\
+                     Content-Length: 50\r\n\r\n";
+                stream.write_all(headers.as_bytes()).unwrap();
+                stream.write_all(&[0xABu8; 50]).unwrap(); // full 50 bytes
+                stream.flush().unwrap();
+            }
+        });
+
+        let backend = RestBackend::new(&url, None, fast_retry()).unwrap();
+        let result = backend.get_range("testkey", 10, 50).unwrap().unwrap();
+        assert_eq!(result.len(), 50);
+        assert!(result.iter().all(|&b| b == 0xAB));
+        handle.join().unwrap();
+    }
+
+    #[test]
+    fn get_range_permanent_errors_not_retried() {
+        // 200-instead-of-206 is permanent — should fail immediately even with retries enabled
+        let body = "full object content";
+        let resp = format!(
+            "HTTP/1.1 200 OK\r\nContent-Length: {}\r\n\r\n{body}",
+            body.len()
+        );
+        // Only provide one response — if it retries it will hang/fail
+        let (url, handle) = mock_server(&resp);
+        let backend = RestBackend::new(&url, None, fast_retry()).unwrap();
+
+        let err = backend
+            .get_range("testkey", 10, 50)
+            .unwrap_err()
+            .to_string();
+        assert!(
+            err.contains("200 instead of 206"),
+            "expected permanent error, got: {err}"
         );
         handle.join().unwrap();
     }

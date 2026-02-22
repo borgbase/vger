@@ -84,29 +84,40 @@ impl S3Backend {
     ) -> std::result::Result<T, ureq::Error> {
         crate::retry::retry_http(&self.retry, op_name, "S3", f)
     }
+
+    /// Retry a closure that performs both HTTP request and body read.
+    fn retry_call_body<T>(
+        &self,
+        op_name: &str,
+        f: impl Fn() -> std::result::Result<T, crate::retry::HttpRetryError>,
+    ) -> std::result::Result<T, crate::retry::HttpRetryError> {
+        crate::retry::retry_http_body(&self.retry, op_name, "S3", f)
+    }
 }
 
 impl StorageBackend for S3Backend {
     fn get(&self, key: &str) -> Result<Option<Vec<u8>>> {
+        use crate::retry::HttpRetryError;
         let full_key = self.full_key(key);
         let url = self
             .bucket
             .get_object(Some(&self.credentials), &full_key)
             .sign(PRESIGN_DURATION);
 
-        match self.retry_call(&format!("GET {key}"), || {
-            self.agent.get(url.as_str()).call()
-        }) {
-            Ok(resp) => {
-                let mut buf = Vec::new();
-                resp.into_reader()
-                    .read_to_end(&mut buf)
-                    .map_err(VgerError::Io)?;
-                Ok(Some(buf))
+        self.retry_call_body(&format!("GET {key}"), || {
+            match self.agent.get(url.as_str()).call() {
+                Ok(resp) => {
+                    let mut buf = Vec::new();
+                    resp.into_reader()
+                        .read_to_end(&mut buf)
+                        .map_err(HttpRetryError::BodyIo)?;
+                    Ok(Some(buf))
+                }
+                Err(ureq::Error::Status(404, _)) => Ok(None),
+                Err(e) => Err(HttpRetryError::http(e)),
             }
-            Err(ureq::Error::Status(404, _)) => Ok(None),
-            Err(e) => Err(VgerError::Other(format!("S3 GET {key}: {e}"))),
-        }
+        })
+        .map_err(|e| VgerError::Other(format!("S3 GET {key}: {e}")))
     }
 
     fn put(&self, key: &str, data: &[u8]) -> Result<()> {
@@ -168,6 +179,7 @@ impl StorageBackend for S3Backend {
     }
 
     fn list(&self, prefix: &str) -> Result<Vec<String>> {
+        use crate::retry::HttpRetryError;
         let full_prefix = self.full_key(prefix);
         let root_prefix_len = if self.root.is_empty() {
             0
@@ -186,20 +198,24 @@ impl StorageBackend for S3Backend {
             }
             let url = action.sign(PRESIGN_DURATION);
 
-            let resp = self
-                .retry_call(&format!("LIST {prefix}"), || {
-                    self.agent.get(url.as_str()).call()
+            let parsed = self
+                .retry_call_body(&format!("LIST {prefix}"), || {
+                    let resp = self
+                        .agent
+                        .get(url.as_str())
+                        .call()
+                        .map_err(HttpRetryError::http)?;
+                    let mut body = Vec::new();
+                    resp.into_reader()
+                        .read_to_end(&mut body)
+                        .map_err(HttpRetryError::BodyIo)?;
+                    ListObjectsV2::parse_response(&body).map_err(|e| {
+                        HttpRetryError::Permanent(format!(
+                            "S3 LIST {prefix}: failed to parse response: {e}"
+                        ))
+                    })
                 })
                 .map_err(|e| VgerError::Other(format!("S3 LIST {prefix}: {e}")))?;
-
-            let mut body = Vec::new();
-            resp.into_reader()
-                .read_to_end(&mut body)
-                .map_err(VgerError::Io)?;
-
-            let parsed = ListObjectsV2::parse_response(&body).map_err(|e| {
-                VgerError::Other(format!("S3 LIST {prefix}: failed to parse response: {e}"))
-            })?;
 
             for obj in &parsed.contents {
                 let key = &obj.key;
@@ -225,6 +241,7 @@ impl StorageBackend for S3Backend {
     }
 
     fn get_range(&self, key: &str, offset: u64, length: u64) -> Result<Option<Vec<u8>>> {
+        use crate::retry::HttpRetryError;
         if length == 0 {
             return Err(VgerError::Other(format!(
                 "S3 GET_RANGE {key}: zero-length read requested"
@@ -245,45 +262,54 @@ impl StorageBackend for S3Backend {
         action.headers_mut().insert("Range", &range_header);
         let url = action.sign(PRESIGN_DURATION);
 
-        match self.retry_call(&format!("GET_RANGE {key}"), || {
-            self.agent
+        self.retry_call_body(&format!("GET_RANGE {key}"), || {
+            match self
+                .agent
                 .get(url.as_str())
                 .set("Range", &range_header)
                 .call()
-        }) {
-            Ok(resp) => {
-                let status = resp.status();
-                if status == 200 {
-                    return Err(VgerError::Other(format!(
-                        "S3 GET_RANGE {key}: server returned 200 instead of 206 (Range header ignored)"
-                    )));
+            {
+                Ok(resp) => {
+                    let status = resp.status();
+                    if status == 200 {
+                        return Err(HttpRetryError::Permanent(format!(
+                            "S3 GET_RANGE {key}: server returned 200 instead of 206 (Range header ignored)"
+                        )));
+                    }
+                    if status != 206 {
+                        return Err(HttpRetryError::Permanent(format!(
+                            "S3 GET_RANGE {key}: unexpected status {status}"
+                        )));
+                    }
+                    let cap = match usize::try_from(length) {
+                        Ok(c) => c,
+                        Err(_) => {
+                            return Err(HttpRetryError::Permanent(format!(
+                                "S3 GET_RANGE {key}: length {length} exceeds platform usize"
+                            )));
+                        }
+                    };
+                    let mut buf = Vec::with_capacity(cap);
+                    resp.into_reader()
+                        .take(length)
+                        .read_to_end(&mut buf)
+                        .map_err(HttpRetryError::BodyIo)?;
+                    if buf.len() != cap {
+                        return Err(HttpRetryError::BodyIo(std::io::Error::new(
+                            std::io::ErrorKind::UnexpectedEof,
+                            format!(
+                                "short read on {key} at offset {offset}: expected {length} bytes, got {}",
+                                buf.len()
+                            ),
+                        )));
+                    }
+                    Ok(Some(buf))
                 }
-                if status != 206 {
-                    return Err(VgerError::Other(format!(
-                        "S3 GET_RANGE {key}: unexpected status {status}"
-                    )));
-                }
-                let cap = usize::try_from(length).map_err(|_| {
-                    VgerError::Other(format!(
-                        "S3 GET_RANGE {key}: length {length} exceeds platform usize"
-                    ))
-                })?;
-                let mut buf = Vec::with_capacity(cap);
-                resp.into_reader()
-                    .take(length)
-                    .read_to_end(&mut buf)
-                    .map_err(VgerError::Io)?;
-                if buf.len() != cap {
-                    return Err(VgerError::Other(format!(
-                        "short read on {key} at offset {offset}: expected {length} bytes, got {}",
-                        buf.len()
-                    )));
-                }
-                Ok(Some(buf))
+                Err(ureq::Error::Status(404, _)) => Ok(None),
+                Err(e) => Err(HttpRetryError::http(e)),
             }
-            Err(ureq::Error::Status(404, _)) => Ok(None),
-            Err(e) => Err(VgerError::Other(format!("S3 GET_RANGE {key}: {e}"))),
-        }
+        })
+        .map_err(|e| VgerError::Other(format!("S3 GET_RANGE {key}: {e}")))
     }
 
     fn create_dir(&self, key: &str) -> Result<()> {
