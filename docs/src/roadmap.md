@@ -34,6 +34,7 @@
 | Feature | Description | Priority |
 |---------|-------------|----------|
 | **GUI Config Editing** | Allow editing the YAML config in the GUI | High |
+| **GUI Packaging** | Packing app per-OS | High |
 | **Snapshot filtering** | By host, tag, path, date ranges | Medium |
 | **Async I/O** | Non-blocking storage operations | Medium |
 | **Metrics** | Prometheus/OpenTelemetry | Low |

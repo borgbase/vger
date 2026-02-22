@@ -9,7 +9,6 @@ use std::time::{Duration, Instant};
 
 use chrono::{DateTime, Local};
 use crossbeam_channel::{Receiver, Sender};
-use notify::{Config as NotifyConfig, RecommendedWatcher, RecursiveMode, Watcher};
 use slint::{Model, ModelRc, SharedString, StandardListViewItem, VecModel};
 use tray_icon::menu::{Menu, MenuEvent, MenuId, MenuItem};
 use tray_icon::{Icon, TrayIconBuilder};
@@ -374,7 +373,7 @@ impl FileTree {
 }
 
 slint::slint! {
-    import { VerticalBox, HorizontalBox, Button, LineEdit, ScrollView, TabWidget, ComboBox, StandardTableView, ListView, CheckBox, Palette } from "std-widgets.slint";
+    import { VerticalBox, HorizontalBox, Button, LineEdit, ScrollView, TabWidget, ComboBox, StandardTableView, ListView, CheckBox, Palette, GroupBox } from "std-widgets.slint";
 
     struct RepoInfo {
         name: string,
@@ -724,6 +723,7 @@ slint::slint! {
                     }
                     Button {
                         text: "Backup All";
+                        primary: true;
                         clicked => { root.backup_all_clicked(); }
                     }
                 }
@@ -733,11 +733,13 @@ slint::slint! {
                     Text { text: root.schedule_text; vertical-alignment: center; }
                 }
             }
-            Rectangle { height: 1px; background: #d5d5d5; }
 
             // ── Tabs ──
-            TabWidget {
+            HorizontalLayout {
                 vertical-stretch: 1;
+                padding-left: 8px;
+                padding-right: 8px;
+            TabWidget {
 
                 Tab {
                     title: "Repositories";
@@ -753,20 +755,21 @@ slint::slint! {
                         }
                         if !root.repo_loading: ListView {
                             vertical-stretch: 1;
-                            for repo[idx] in root.repo_model: Rectangle {
-                                height: 56px;
+                            for repo[idx] in root.repo_model: GroupBox {
                                 HorizontalLayout {
                                     padding: 8px;
                                     spacing: 16px;
                                     VerticalLayout {
                                         horizontal-stretch: 1;
                                         min-width: 350px;
+                                        spacing: 4px;
                                         Text { text: repo.name; font-weight: 700; }
                                         Text { text: repo.url; color: #888888; font-size: 11px; }
                                     }
                                     VerticalLayout {
                                         horizontal-stretch: 0;
                                         min-width: 250px;
+                                        spacing: 4px;
                                         Text { text: "Snapshots: " + repo.snapshots; }
                                         Text { text: "Latest: " + repo.last_snapshot; font-size: 11px; color: #888888; }
                                     }
@@ -774,13 +777,12 @@ slint::slint! {
                                         alignment: center;
                                         HorizontalLayout {
                                             spacing: 8px;
-                                            Button { text: "Backup"; clicked => { root.backup_repo_clicked(idx); } }
+                                            Button { text: "Backup"; primary: true; clicked => { root.backup_repo_clicked(idx); } }
                                             Button { text: "Check"; clicked => { root.check_repo_clicked(idx); } }
                                             Button { text: "Compact"; clicked => { root.compact_repo_clicked(idx); } }
                                         }
                                     }
                                 }
-                                Rectangle { y: parent.height - 1px; height: 1px; background: #d5d5d5; width: 100%; }
                             }
                         }
                     }
@@ -793,29 +795,29 @@ slint::slint! {
                         padding: 8px;
                         ListView {
                             vertical-stretch: 1;
-                            for source[idx] in root.source_model: Rectangle {
-                                height: 56px;
+                            for source[idx] in root.source_model: GroupBox {
                                 HorizontalLayout {
                                     padding: 8px;
                                     spacing: 16px;
                                     VerticalLayout {
                                         horizontal-stretch: 1;
                                         min-width: 350px;
+                                        spacing: 4px;
                                         Text { text: source.label; font-weight: 700; }
                                         Text { text: source.paths; color: #888888; font-size: 11px; overflow: elide; }
                                     }
                                     VerticalLayout {
                                         horizontal-stretch: 0;
                                         min-width: 250px;
+                                        spacing: 4px;
                                         Text { text: "Excludes: " + source.excludes; font-size: 11px; overflow: elide; }
                                         Text { text: "Repos: " + source.target_repos; font-size: 11px; color: #888888; }
                                     }
                                     VerticalLayout {
                                         alignment: center;
-                                        Button { text: "Backup"; clicked => { root.backup_source_clicked(idx); } }
+                                        Button { text: "Backup"; primary: true; clicked => { root.backup_source_clicked(idx); } }
                                     }
                                 }
-                                Rectangle { y: parent.height - 1px; height: 1px; background: #d5d5d5; width: 100%; }
                             }
                         }
                     }
@@ -888,6 +890,7 @@ slint::slint! {
                         }
                     }
                 }
+            }
             }
 
             // ── Footer ──
@@ -1102,37 +1105,6 @@ fn build_tray_icon() -> Result<(tray_icon::TrayIcon, MenuId, MenuId, MenuId, Men
     ))
 }
 
-// ── Config watcher ──
-
-fn spawn_config_watcher(path: PathBuf, app_tx: Sender<AppCommand>) {
-    thread::spawn(move || {
-        let (notify_tx, notify_rx) = std::sync::mpsc::channel();
-        let mut watcher = match RecommendedWatcher::new(
-            move |res| {
-                let _ = notify_tx.send(res);
-            },
-            NotifyConfig::default(),
-        ) {
-            Ok(w) => w,
-            Err(_) => return,
-        };
-
-        if watcher.watch(&path, RecursiveMode::NonRecursive).is_err() {
-            return;
-        }
-
-        let mut last_sent = Instant::now() - Duration::from_secs(10);
-
-        while let Ok(event) = notify_rx.recv() {
-            if event.is_ok() && last_sent.elapsed() >= Duration::from_millis(500) {
-                if app_tx.send(AppCommand::ReloadConfig).is_err() {
-                    break;
-                }
-                last_sent = Instant::now();
-            }
-        }
-    });
-}
 
 // ── Scheduler thread ──
 
@@ -2239,10 +2211,81 @@ fn refresh_tree_view(rw: &RestoreWindow) {
     });
 }
 
+fn resolve_or_create_config() -> Result<app::RuntimeConfig, Box<dyn std::error::Error>> {
+    use vger_core::config::ConfigSource;
+
+    // 1. Check standard search paths (env var, project, user, system)
+    if let Some(source) = config::resolve_config_path(None) {
+        let repos = config::load_and_resolve(source.path())?;
+        return Ok(app::RuntimeConfig { source, repos });
+    }
+
+    // 2. No config found — ask the user what to do
+    let user_config_path = config::default_config_search_paths()
+        .into_iter()
+        .find(|(_, level)| *level == "user")
+        .map(|(p, _)| p);
+
+    let message = match &user_config_path {
+        Some(p) => format!(
+            "No vger configuration file was found.\n\n\
+             Create a starter config at\n{}?\n\n\
+             Select No to open an existing file instead.",
+            p.display()
+        ),
+        None => "No vger configuration file was found.\n\n\
+                 Select Yes to pick an existing config file."
+            .to_string(),
+    };
+
+    let choice = tinyfiledialogs::message_box_yes_no(
+        "No configuration found",
+        &message,
+        tinyfiledialogs::MessageBoxIcon::Question,
+        tinyfiledialogs::YesNo::Yes,
+    );
+
+    let config_path = if choice == tinyfiledialogs::YesNo::Yes {
+        if let Some(path) = user_config_path {
+            if let Some(parent) = path.parent() {
+                std::fs::create_dir_all(parent)?;
+            }
+            std::fs::write(&path, config::minimal_config_template())?;
+            path
+        } else {
+            // No user-level path available, fall through to file picker
+            let picked = tinyfiledialogs::open_file_dialog(
+                "Open vger config",
+                "",
+                Some((&["*.yaml", "*.yml"], "YAML files")),
+            );
+            match picked {
+                Some(p) => PathBuf::from(p),
+                None => std::process::exit(0),
+            }
+        }
+    } else {
+        let picked = tinyfiledialogs::open_file_dialog(
+            "Open vger config",
+            "",
+            Some((&["*.yaml", "*.yml"], "YAML files")),
+        );
+        match picked {
+            Some(p) => PathBuf::from(p),
+            None => std::process::exit(0),
+        }
+    };
+
+    let repos = config::load_and_resolve(&config_path)?;
+    let source = ConfigSource::SearchOrder {
+        path: config_path,
+        level: "user",
+    };
+    Ok(app::RuntimeConfig { source, repos })
+}
+
 fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let runtime = app::load_runtime_config(None)?;
-    let config_path = std::fs::canonicalize(runtime.source.path())
-        .unwrap_or_else(|_| runtime.source.path().to_path_buf());
+    let runtime = resolve_or_create_config()?;
 
     let (app_tx, app_rx) = crossbeam_channel::unbounded::<AppCommand>();
     let (ui_tx, ui_rx) = crossbeam_channel::unbounded::<UiEvent>();
@@ -2250,7 +2293,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let scheduler = Arc::new(Mutex::new(SchedulerState::default()));
     let backup_running = Arc::new(AtomicBool::new(false));
 
-    spawn_config_watcher(config_path, app_tx.clone());
     spawn_scheduler(app_tx.clone(), scheduler.clone(), backup_running.clone());
 
     thread::spawn({
