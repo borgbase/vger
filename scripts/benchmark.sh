@@ -16,7 +16,7 @@ Per measured run: reset repo, init, untimed seed backup of snapshot-1, storage s
 
 Options:
   --dataset PATH   Dataset directory (default: \$CORPUS_REMOTE)
-  --tool NAME      Single tool: vger|restic|rustic|borg|kopia (default: all)
+  --tool NAMES     Comma-separated tools: vger,restic,rustic,borg,kopia (default: all)
   --runs N         Timed runs per operation (default: 3)
   --warmups N      Warmup runs per operation (default: 0)
   --perf           Run perf stat summary after timed runs
@@ -31,6 +31,7 @@ USAGE
 
 DATASET_DIR="$CORPUS_REMOTE"
 TOOL=""
+SELECTED_TOOL_LABEL="all"
 RUNS=3
 WARMUP_RUNS=0
 PROFILE_PERF=0
@@ -63,14 +64,36 @@ need /usr/bin/time
 command -v perf >/dev/null 2>&1 && HAVE_PERF=1 || HAVE_PERF=0
 command -v strace >/dev/null 2>&1 && HAVE_STRACE=1 || HAVE_STRACE=0
 
-case "$TOOL" in
-  "")
-    need vger; need restic; need rustic; need borg; need kopia ;;
-  vger|restic|rustic|borg|kopia)
-    need "$TOOL" ;;
-  *)
-    die "TOOL must be one of: vger, restic, rustic, borg, kopia (or empty for all); got: $TOOL" ;;
-esac
+ALL_TOOLS=(vger restic rustic borg kopia)
+SELECTED_TOOLS=()
+
+if [[ -z "$TOOL" ]]; then
+  SELECTED_TOOLS=("${ALL_TOOLS[@]}")
+else
+  declare -A SEEN_TOOLS=()
+  IFS=',' read -r -a tool_items <<<"$TOOL"
+  for raw_tool in "${tool_items[@]}"; do
+    tool_item="${raw_tool//[[:space:]]/}"
+    [[ -n "$tool_item" ]] || die "--tool contains an empty item: '$TOOL'"
+    case "$tool_item" in
+      vger|restic|rustic|borg|kopia) ;;
+      *) die "--tool item must be one of: vger, restic, rustic, borg, kopia; got: $tool_item" ;;
+    esac
+    if [[ -z "${SEEN_TOOLS[$tool_item]:-}" ]]; then
+      SELECTED_TOOLS+=("$tool_item")
+      SEEN_TOOLS["$tool_item"]=1
+    fi
+  done
+fi
+
+[[ "${#SELECTED_TOOLS[@]}" -gt 0 ]] || die "no tools selected"
+for t in "${SELECTED_TOOLS[@]}"; do
+  need "$t"
+done
+
+if [[ -n "$TOOL" ]]; then
+  SELECTED_TOOL_LABEL="$(IFS=,; echo "${SELECTED_TOOLS[*]}")"
+fi
 
 # --- Output layout ---
 
@@ -131,17 +154,10 @@ trap cleanup_restore_dirs EXIT
 
 # --- Operation list ---
 
-if [[ -n "$TOOL" ]]; then
-  OPS=("${TOOL}_backup" "${TOOL}_restore")
-else
-  OPS=(
-    vger_backup vger_restore
-    restic_backup restic_restore
-    rustic_backup rustic_restore
-    borg_backup borg_restore
-    kopia_backup kopia_restore
-  )
-fi
+OPS=()
+for selected_tool in "${SELECTED_TOOLS[@]}"; do
+  OPS+=("${selected_tool}_backup" "${selected_tool}_restore")
+done
 
 # --- Tool helpers ---
 
@@ -273,6 +289,23 @@ repo_dir_for_tool() {
   esac
 }
 
+restore_dir_for_tool() {
+  case "$1" in
+    vger)   echo "$RESTORE_VGER" ;;
+    restic) echo "$RESTORE_RESTIC" ;;
+    rustic) echo "$RESTORE_RUSTIC" ;;
+    borg)   echo "$RESTORE_BORG" ;;
+    kopia)  echo "$RESTORE_KOPIA" ;;
+    *) die "unknown tool: $1" ;;
+  esac
+}
+
+clear_dir_contents() {
+  local dir="$1" log_file="${2:-/dev/null}"
+  mkdir -p "$dir"
+  find "$dir" -mindepth 1 -maxdepth 1 -exec rm -rf -- {} + >>"$log_file" 2>&1
+}
+
 write_repo_size_bytes_for_tool() {
   local tool="$1" out_file="$2"
   local repo bytes
@@ -305,6 +338,13 @@ cleanup_repo_for_tool() {
   sudo -n rm -rf "$repo"
   sudo -n mkdir -p "$repo"
   sudo -n chown -R "$USER:$USER" "$repo"
+}
+
+cleanup_restore_for_tool() {
+  local tool="$1" restore_dir=""
+  restore_dir="$(restore_dir_for_tool "$tool")"
+  rm -rf "$restore_dir"
+  mkdir -p "$restore_dir"
 }
 
 init_repo_for_tool() {
@@ -382,7 +422,10 @@ prepare_measurement_for_op() {
   case "$op" in
     vger_restore)
       echo "[measure-prepare] clean restore dir: $RESTORE_VGER" >>"$prep_log"
-      rm -rf "$RESTORE_VGER"/* >>"$prep_log" 2>&1
+      if ! clear_dir_contents "$RESTORE_VGER" "$prep_log"; then
+        echo "[measure-prepare] failed to clean restore dir: $RESTORE_VGER" >>"$prep_log"
+        return 1
+      fi
       if ! RUN_VGER_RESTORE_SNAPSHOT="$(
         vger list -R bench --last 1 | awk 'NR==2{print $1}'
       )"; then
@@ -397,11 +440,17 @@ prepare_measurement_for_op() {
       ;;
     restic_restore)
       echo "[measure-prepare] clean restore dir: $RESTORE_RESTIC" >>"$prep_log"
-      rm -rf "$RESTORE_RESTIC"/* >>"$prep_log" 2>&1
+      if ! clear_dir_contents "$RESTORE_RESTIC" "$prep_log"; then
+        echo "[measure-prepare] failed to clean restore dir: $RESTORE_RESTIC" >>"$prep_log"
+        return 1
+      fi
       ;;
     rustic_restore)
       echo "[measure-prepare] clean restore dir: $RESTORE_RUSTIC" >>"$prep_log"
-      rm -rf "$RESTORE_RUSTIC"/* >>"$prep_log" 2>&1
+      if ! clear_dir_contents "$RESTORE_RUSTIC" "$prep_log"; then
+        echo "[measure-prepare] failed to clean restore dir: $RESTORE_RUSTIC" >>"$prep_log"
+        return 1
+      fi
       ;;
     borg_backup)
       RUN_BORG_BACKUP_ARCHIVE="bench-$(date -u +%Y%m%dT%H%M%S)-$RANDOM"
@@ -409,7 +458,10 @@ prepare_measurement_for_op() {
       ;;
     borg_restore)
       echo "[measure-prepare] clean restore dir: $RESTORE_BORG" >>"$prep_log"
-      rm -rf "$RESTORE_BORG"/* >>"$prep_log" 2>&1
+      if ! clear_dir_contents "$RESTORE_BORG" "$prep_log"; then
+        echo "[measure-prepare] failed to clean restore dir: $RESTORE_BORG" >>"$prep_log"
+        return 1
+      fi
       if ! RUN_BORG_RESTORE_ARCHIVE="$(borg list --short | tail -n1)"; then
         echo "[measure-prepare] failed to resolve latest borg archive" >>"$prep_log"
         return 1
@@ -422,7 +474,10 @@ prepare_measurement_for_op() {
       ;;
     kopia_restore)
       echo "[measure-prepare] clean restore dir: $RESTORE_KOPIA" >>"$prep_log"
-      rm -rf "$RESTORE_KOPIA"/* >>"$prep_log" 2>&1
+      if ! clear_dir_contents "$RESTORE_KOPIA" "$prep_log"; then
+        echo "[measure-prepare] failed to clean restore dir: $RESTORE_KOPIA" >>"$prep_log"
+        return 1
+      fi
       ;;
   esac
 
@@ -591,7 +646,7 @@ cd "$OUT_ROOT"
   done
 } >"$OUT_ROOT/commands.txt"
 
-echo "[config] dataset=$DATASET_DIR runs=$RUNS tool=${TOOL:-all}"
+echo "[config] dataset=$DATASET_DIR runs=$RUNS tool=$SELECTED_TOOL_LABEL"
 echo "[dataset] seed=$DATASET_SNAPSHOT1"
 echo "[dataset] benchmark=$DATASET_BENCHMARK"
 
@@ -599,6 +654,7 @@ for op in "${OPS[@]}"; do
   run_one "$op"
   if [[ "$(phase_from_op "$op")" == "restore" ]]; then
     cleanup_repo_for_tool "$(tool_from_op "$op")"
+    cleanup_restore_for_tool "$(tool_from_op "$op")"
   fi
 done
 
@@ -618,12 +674,13 @@ Dataset root: $DATASET_DIR
 Seed snapshot (untimed): $DATASET_SNAPSHOT1
 Benchmark dataset (timed): $DATASET_BENCHMARK
 Runs per benchmark: $RUNS
-Selected tool: ${TOOL:-all}
+Selected tool: $SELECTED_TOOL_LABEL
 
 Workflow per run:
-1) drop cache + reset/init tool repo
+1) reset/init tool repo
 2) untimed backup of snapshot-1
-3) timed benchmark step:
+3) storage settle (sync + fstrim + nvme flush + cooldown) + drop caches
+4) timed benchmark step:
    - backup ops: backup top-level dataset (snapshot-1 + snapshot-2)
    - restore ops: timed restore of latest from preceding timed backup op state
 
@@ -645,7 +702,11 @@ if [[ -n "$TOOL" ]]; then
       echo "  - $prev"
       REPORT_ARGS+=(--backfill-root "$prev")
     done
-    REPORT_ARGS+=(--backfill-mode nonselected --selected-tool "$TOOL")
+    if [[ "${#SELECTED_TOOLS[@]}" -eq 1 ]]; then
+      REPORT_ARGS+=(--backfill-mode nonselected --selected-tool "${SELECTED_TOOLS[0]}")
+    else
+      REPORT_ARGS+=(--backfill-mode missing)
+    fi
   else
     echo "[report] no previous run found for backfill"
   fi

@@ -164,7 +164,7 @@ if [[ -z "${VGER_CONFIG:-}" ]]; then
       register_cleanup_dir "$PROFILE_REPO_DIR"
       ;;
     rest)
-      REPO_URL="$REST_URL/$REPO_LABEL"
+      REPO_URL="$REST_URL"
       ;;
     s3)
       REPO_URL="s3://127.0.0.1:9000/vger-profile/$REPO_LABEL"

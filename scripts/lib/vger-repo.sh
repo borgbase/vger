@@ -15,14 +15,24 @@ vger_repo_delete() {
     return 0
   fi
 
-  # Fallback: wipe REST repo dir on localhost
-  if [[ -n "$repo_url" && "$repo_url" == http://127.0.0.1:*/* || "$repo_url" == http://localhost:*/* ]]; then
+  # Fallback: wipe REST repo filesystem on localhost.
+  # Supports both legacy URL-with-repo-path and new single-repo root URLs.
+  if [[ -n "$repo_url" && ( "$repo_url" == http://127.0.0.1:* || "$repo_url" == http://localhost:* ) ]]; then
     local without_scheme="${repo_url#*://}"
-    local path="${without_scheme#*/}"
+    local host_port="${without_scheme%%/*}"
+    local path=""
+    [[ "$without_scheme" != "$host_port" ]] && path="${without_scheme#*/}"
     local repo_name="${path%%/*}"
+
     if [[ -n "$repo_name" && -d "$REST_DATA_DIR/$repo_name" ]]; then
       rm -rf "$REST_DATA_DIR/$repo_name"
       log "Force-reset REST repo via filesystem: $REST_DATA_DIR/$repo_name"
+      return 0
+    fi
+
+    if [[ -d "$REST_DATA_DIR" ]]; then
+      find "$REST_DATA_DIR" -mindepth 1 -maxdepth 1 -exec rm -rf -- {} +
+      log "Force-reset REST repo via filesystem: $REST_DATA_DIR"
       return 0
     fi
   fi
