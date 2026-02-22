@@ -89,6 +89,15 @@ jobs:
           cache-on-failure: true
       - name: Build
         run: cargo build --release --target aarch64-apple-darwin -p vger-cli -p vger-server -p vger-gui
+      - name: Create app bundle
+        run: |
+          RELEASE_DIR="target/aarch64-apple-darwin/release"
+          APP_BUNDLE="${RELEASE_DIR}/Vger Backup.app"
+          mkdir -p "${APP_BUNDLE}/Contents/MacOS" "${APP_BUNDLE}/Contents/Resources"
+          cp crates/vger-gui/macos/Info.plist "${APP_BUNDLE}/Contents/"
+          cp "${RELEASE_DIR}/vger-gui" "${APP_BUNDLE}/Contents/MacOS/"
+          brew install librsvg
+          crates/vger-gui/macos/create-icns.sh docs/src/images/logo-colored-gradient.svg "${APP_BUNDLE}/Contents/Resources/AppIcon.icns"
       - name: Package
         run: |
           if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
@@ -96,8 +105,9 @@ jobs:
           else
             VERSION="${GITHUB_REF_NAME}"
           fi
+          RELEASE_DIR="target/aarch64-apple-darwin/release"
           ARCHIVE="vger-${VERSION}-aarch64-apple-darwin.tar.gz"
-          tar -czf "${ARCHIVE}" -C "target/aarch64-apple-darwin/release" vger vger-server vger-gui
+          tar -czf "${ARCHIVE}" -C "${RELEASE_DIR}" vger vger-server "Vger Backup.app"
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
