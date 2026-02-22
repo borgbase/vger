@@ -13,6 +13,11 @@ const TAG_ZSTD: u8 = 0x02;
 /// Prevents decompression bombs from consuming unbounded memory.
 const MAX_DECOMPRESS_SIZE: u64 = 32 * 1024 * 1024;
 
+/// Maximum decompressed output size for metadata objects (4 GiB).
+/// The chunk index scales ~80 bytes/chunk, so 10M chunks ≈ 800 MB.
+/// This limit accommodates very large repos while still bounding memory.
+const MAX_METADATA_DECOMPRESS_SIZE: u64 = 4 * 1024 * 1024 * 1024;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub enum Compression {
     None,
@@ -224,6 +229,68 @@ pub fn decompress_with_hint(data: &[u8], expected_size: Option<usize>) -> Result
         }
         _ => Err(VgerError::UnknownCompressionTag(tag)),
     }
+}
+
+/// Decompress metadata objects (e.g. chunk index) with a higher size limit.
+///
+/// Same dispatch logic as `decompress()` but allows up to 4 GiB of output,
+/// sized for metadata objects that scale with the number of chunks in the repo.
+pub fn decompress_metadata(data: &[u8]) -> Result<Vec<u8>> {
+    if data.is_empty() {
+        return Err(VgerError::Decompression("empty data".into()));
+    }
+    let tag = data[0];
+    let payload = &data[1..];
+    match tag {
+        TAG_NONE => Ok(payload.to_vec()),
+        TAG_LZ4 => {
+            if payload.len() < 4 {
+                return Err(VgerError::Decompression("lz4: payload too short".into()));
+            }
+            let uncompressed_size = u32::from_le_bytes(payload[..4].try_into().unwrap()) as u64;
+            if uncompressed_size > MAX_METADATA_DECOMPRESS_SIZE {
+                return Err(VgerError::Decompression(format!(
+                    "lz4: decompressed size ({uncompressed_size}) exceeds metadata limit of {MAX_METADATA_DECOMPRESS_SIZE} bytes"
+                )));
+            }
+            lz4_flex::decompress_size_prepended(payload)
+                .map_err(|e| VgerError::Decompression(format!("lz4: {e}")))
+        }
+        TAG_ZSTD => {
+            let mut decoder = zstd::stream::Decoder::new(std::io::Cursor::new(payload))
+                .map_err(|e| VgerError::Decompression(format!("zstd init: {e}")))?;
+            let mut output = Vec::new();
+            decoder
+                .by_ref()
+                .take(MAX_METADATA_DECOMPRESS_SIZE + 1)
+                .read_to_end(&mut output)
+                .map_err(|e| VgerError::Decompression(format!("zstd: {e}")))?;
+            if output.len() as u64 > MAX_METADATA_DECOMPRESS_SIZE {
+                return Err(VgerError::Decompression(format!(
+                    "zstd: decompressed size exceeds metadata limit of {} bytes",
+                    MAX_METADATA_DECOMPRESS_SIZE
+                )));
+            }
+            Ok(output)
+        }
+        _ => Err(VgerError::UnknownCompressionTag(tag)),
+    }
+}
+
+/// Stream-compress data into `buf` using ZSTD. Prepends the codec tag byte.
+/// The `write_data` callback should write uncompressed data into the encoder.
+pub fn compress_stream_zstd<F>(buf: &mut Vec<u8>, level: i32, write_data: F) -> Result<()>
+where
+    F: FnOnce(&mut zstd::stream::write::Encoder<&mut Vec<u8>>) -> Result<()>,
+{
+    buf.push(TAG_ZSTD);
+    let mut encoder = zstd::stream::write::Encoder::new(&mut *buf, level)
+        .map_err(|e| VgerError::Other(format!("zstd init: {e}")))?;
+    write_data(&mut encoder)?;
+    encoder
+        .finish()
+        .map_err(|e| VgerError::Other(format!("zstd finish: {e}")))?;
+    Ok(())
 }
 
 /// Decompress data into a caller-provided buffer, reusing its allocation.
@@ -467,5 +534,85 @@ mod tests {
             "excess capacity {excess} is too large relative to len {}",
             compressed.len(),
         );
+    }
+
+    #[test]
+    fn decompress_metadata_roundtrip_all_codecs() {
+        let payload = b"metadata payload for roundtrip test".to_vec();
+        let codecs = [
+            Compression::None,
+            Compression::Lz4,
+            Compression::Zstd { level: 3 },
+        ];
+        for codec in codecs {
+            let compressed = compress(codec, &payload).unwrap();
+            let decompressed = decompress_metadata(&compressed).unwrap();
+            assert_eq!(decompressed, payload, "roundtrip failed for {codec:?}");
+        }
+    }
+
+    #[test]
+    fn decompress_metadata_succeeds_above_chunk_limit() {
+        // Data >32 MiB should fail with decompress() but succeed with decompress_metadata()
+        let size = (MAX_DECOMPRESS_SIZE as usize) + 1024;
+        let payload = vec![0x42; size];
+        let compressed = compress(Compression::Zstd { level: 1 }, &payload).unwrap();
+
+        // decompress() should fail (exceeds 32 MiB limit)
+        assert!(decompress(&compressed).is_err());
+
+        // decompress_metadata() should succeed (4 GiB limit)
+        let decompressed = decompress_metadata(&compressed).unwrap();
+        assert_eq!(decompressed, payload);
+    }
+
+    #[test]
+    fn decompress_metadata_rejects_empty_input() {
+        assert!(decompress_metadata(&[]).is_err());
+    }
+
+    #[test]
+    fn decompress_metadata_rejects_unknown_tag() {
+        assert!(decompress_metadata(&[0xFF]).is_err());
+    }
+
+    #[test]
+    fn compress_stream_zstd_roundtrip() {
+        let payload = b"hello world, this is a stream compression test payload";
+        let mut buf = Vec::new();
+        compress_stream_zstd(&mut buf, 3, |encoder| {
+            use std::io::Write;
+            encoder
+                .write_all(payload)
+                .map_err(|e| VgerError::Other(format!("write: {e}")))?;
+            Ok(())
+        })
+        .unwrap();
+
+        // First byte should be the ZSTD tag
+        assert_eq!(buf[0], TAG_ZSTD);
+
+        // Should decompress to the original payload
+        let decompressed = decompress(&buf).unwrap();
+        assert_eq!(decompressed, payload);
+    }
+
+    #[test]
+    fn compress_stream_zstd_into_prefilled_buffer() {
+        let prefix = b"existing-data";
+        let payload = b"stream compressed payload";
+        let mut buf = prefix.to_vec();
+        compress_stream_zstd(&mut buf, 3, |encoder| {
+            use std::io::Write;
+            encoder
+                .write_all(payload)
+                .map_err(|e| VgerError::Other(format!("write: {e}")))?;
+            Ok(())
+        })
+        .unwrap();
+
+        assert_eq!(&buf[..prefix.len()], prefix);
+        let decompressed = decompress(&buf[prefix.len()..]).unwrap();
+        assert_eq!(decompressed, payload);
     }
 }

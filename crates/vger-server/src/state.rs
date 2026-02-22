@@ -172,11 +172,12 @@ impl AppState {
     /// Update quota usage after a delete.
     pub fn sub_quota_usage(&self, bytes: u64) {
         // Use fetch_update for saturating subtraction
-        let _ = self.inner.quota_usage.fetch_update(
-            Ordering::Relaxed,
-            Ordering::Relaxed,
-            |current| Some(current.saturating_sub(bytes)),
-        );
+        let _ =
+            self.inner
+                .quota_usage
+                .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |current| {
+                    Some(current.saturating_sub(bytes))
+                });
     }
 
     /// Record that a manifest was written (backup completed).

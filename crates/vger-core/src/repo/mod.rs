@@ -264,14 +264,19 @@ impl Repository {
         )?;
         storage.put("manifest", &manifest_packed)?;
 
-        // Store empty chunk index
+        // Store empty chunk index (compressed with ZSTD)
         let chunk_index = ChunkIndex::new();
-        let index_bytes = rmp_serde::to_vec(&chunk_index)?;
-        let index_packed = pack_object_with_context(
+        let index_packed = pack_object_streaming_with_context(
             ObjectType::ChunkIndex,
             INDEX_OBJECT_CONTEXT,
-            &index_bytes,
+            64, // empty index is tiny
             crypto.as_ref(),
+            |buf| {
+                compress::compress_stream_zstd(buf, 3, |encoder| {
+                    rmp_serde::encode::write(encoder, &chunk_index)?;
+                    Ok(())
+                })
+            },
         )?;
         storage.put("index", &index_packed)?;
 
@@ -818,13 +823,19 @@ impl Repository {
         }
 
         if self.index_dirty {
-            let estimated = self.chunk_index.len().saturating_mul(80);
+            let estimated_msgpack = self.chunk_index.len().saturating_mul(80);
+            let estimated = 1 + zstd::zstd_safe::compress_bound(estimated_msgpack);
             let index_packed = pack_object_streaming_with_context(
                 ObjectType::ChunkIndex,
                 INDEX_OBJECT_CONTEXT,
                 estimated,
                 self.crypto.as_ref(),
-                |buf| Ok(rmp_serde::encode::write(buf, &self.chunk_index)?),
+                |buf| {
+                    compress::compress_stream_zstd(buf, 3, |encoder| {
+                        rmp_serde::encode::write(encoder, &self.chunk_index)?;
+                        Ok(())
+                    })
+                },
             )?;
             self.storage.put("index", &index_packed)?;
             self.index_dirty = false;
@@ -981,12 +992,13 @@ impl Repository {
     /// Reload the full chunk index from storage.
     fn reload_full_index(&self) -> Result<ChunkIndex> {
         if let Some(index_data) = self.storage.get("index")? {
-            let index_bytes = unpack_object_expect_with_context(
+            let compressed = unpack_object_expect_with_context(
                 &index_data,
                 ObjectType::ChunkIndex,
                 INDEX_OBJECT_CONTEXT,
                 self.crypto.as_ref(),
             )?;
+            let index_bytes = compress::decompress_metadata(&compressed)?;
             Ok(rmp_serde::from_slice(&index_bytes)?)
         } else {
             Ok(ChunkIndex::new())

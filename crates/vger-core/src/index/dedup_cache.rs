@@ -982,8 +982,9 @@ pub fn serialize_full_cache_to_packed_object(
     cache: &MmapFullIndexCache,
     crypto: &dyn vger_crypto::CryptoEngine,
 ) -> Result<Vec<u8>> {
-    // Estimate: ~86 bytes/entry for msgpack (ChunkId newtype + struct fields)
-    let estimated = cache.entry_count() as usize * 86;
+    // Estimate: ~86 bytes/entry for msgpack, then zstd compress bound
+    let estimated_msgpack = cache.entry_count() as usize * 86;
+    let estimated = 1 + zstd::zstd_safe::compress_bound(estimated_msgpack);
     let serializable = FullCacheSerializable { cache };
 
     crate::repo::format::pack_object_streaming_with_context(
@@ -992,9 +993,11 @@ pub fn serialize_full_cache_to_packed_object(
         estimated,
         crypto,
         |buf| {
-            rmp_serde::encode::write(buf, &serializable)
-                .map_err(vger_types::error::VgerError::Serialization)?;
-            Ok(())
+            crate::compress::compress_stream_zstd(buf, 3, |encoder| {
+                rmp_serde::encode::write(encoder, &serializable)
+                    .map_err(vger_types::error::VgerError::Serialization)?;
+                Ok(())
+            })
         },
     )
 }
@@ -1436,14 +1439,15 @@ mod tests {
         let engine = vger_crypto::PlaintextEngine::new(&[0xAA; 32]);
         let packed = serialize_full_cache_to_packed_object(&cache, &engine).unwrap();
 
-        // Decrypt (plaintext) and deserialize
-        let plaintext = crate::repo::format::unpack_object_expect_with_context(
+        // Decrypt (plaintext), decompress, and deserialize
+        let compressed = crate::repo::format::unpack_object_expect_with_context(
             &packed,
             crate::repo::format::ObjectType::ChunkIndex,
             b"index",
             &engine,
         )
         .unwrap();
+        let plaintext = crate::compress::decompress_metadata(&compressed).unwrap();
         let deserialized: ChunkIndex = rmp_serde::from_slice(&plaintext).unwrap();
 
         // Verify all entries match

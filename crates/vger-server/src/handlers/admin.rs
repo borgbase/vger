@@ -93,7 +93,7 @@ async fn repo_stats(state: AppState) -> Result<Response, ServerError> {
             .await
             .map_err(|e| ServerError::Internal(e.to_string()))?;
 
-    let last_backup = read_unpoisoned(&state.inner.last_backup_at, "last_backup_at").clone();
+    let last_backup = *read_unpoisoned(&state.inner.last_backup_at, "last_backup_at");
 
     let quota_bytes = state.inner.config.quota_bytes;
     let quota_used = state.quota_used();
@@ -206,20 +206,16 @@ async fn repack(state: AppState, body: axum::body::Bytes) -> Result<Response, Se
     Ok(axum::Json(results).into_response())
 }
 
-async fn verify_packs(
-    state: AppState,
-    body: axum::body::Bytes,
-) -> Result<Response, ServerError> {
+async fn verify_packs(state: AppState, body: axum::body::Bytes) -> Result<Response, ServerError> {
     let plan: VerifyPacksPlanRequest = serde_json::from_slice(&body)
         .map_err(|e| ServerError::BadRequest(format!("invalid verify-packs plan: {e}")))?;
     validate_verify_packs_plan(&plan)?;
 
     let state_clone = state.clone();
 
-    let results =
-        tokio::task::spawn_blocking(move || execute_verify_packs(&state_clone, &plan))
-            .await
-            .map_err(|e| ServerError::Internal(e.to_string()))?;
+    let results = tokio::task::spawn_blocking(move || execute_verify_packs(&state_clone, &plan))
+        .await
+        .map_err(|e| ServerError::Internal(e.to_string()))?;
 
     Ok(axum::Json(results).into_response())
 }
