@@ -12,7 +12,7 @@ Inspired by [BorgBackup](https://github.com/borgbackup/borg/), [Borgmatic](https
 
 ## Features
 
-- **Storage backends** — local filesystem, S3-compatible storage, SFTP
+- **Storage backends** — local filesystem, S3 (any compatible provider), SFTP, dedicated REST server
 - **Encryption** with AES-256-GCM or ChaCha20-Poly1305 (auto-selected) and Argon2id key derivation
 - **YAML-based configuration** with multiple repositories, hooks, and command dumps for monitoring and database backups
 - **Deduplication** via FastCDC content-defined chunking with a memory-optimized engine (tiered dedup index + mmap-backed pack assembly)
@@ -21,6 +21,7 @@ Inspired by [BorgBackup](https://github.com/borgbackup/borg/), [Borgmatic](https
 - **REST server** with append-only enforcement, quotas, and server-side compaction
 - **Built-in scheduling** via `vger daemon` — runs backup cycles on a configurable interval (no cron needed)
 - **Rate limiting** for CPU, disk I/O, and network bandwidth
+- **Cross-platform** — Linux, macOS, and Windows
 
 
 ## Benchmarks

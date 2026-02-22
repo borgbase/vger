@@ -8,7 +8,7 @@ V'Ger is a fast, encrypted, deduplicated backup tool written in Rust. It's cente
 
 ## Features
 
-- **Storage backends** — local filesystem, S3-compatible storage, SFTP
+- **Storage backends** — local filesystem, S3 (any compatible provider), SFTP, dedicated REST server
 - **Encryption** with AES-256-GCM or ChaCha20-Poly1305 (auto-selected) and Argon2id key derivation
 - **YAML-based configuration** with multiple repositories, hooks, and command dumps for monitoring and database backups
 - **Deduplication** via FastCDC content-defined chunking with a memory-optimized engine (tiered dedup index + mmap-backed pack assembly)
@@ -17,15 +17,16 @@ V'Ger is a fast, encrypted, deduplicated backup tool written in Rust. It's cente
 - **REST server** with append-only enforcement, quotas, and server-side compaction
 - **Built-in scheduling** via `vger daemon` — runs backup cycles on a configurable interval (no cron needed)
 - **Rate limiting** for CPU, disk I/O, and network bandwidth
+- **Cross-platform** — Linux, macOS, and Windows
 
 
 ## Benchmarks
 
-V'Ger leads in both speed and CPU efficiency, while maintaining competitive memory usage.
+V'Ger is the fastest tool for both backup and restore, with the lowest CPU cost, while maintaining competitive memory usage.
 
-![Backup Tool Benchmark](images/benchmark.summary.png)
+[![Backup Tool Benchmark](images/benchmark.summary.png)](images/benchmark.summary.png)
 
-<small>All benchmarks were run on the same idle Intel i7-6700 CPU @ 3.40GHz machine with 2x Samsung PM981 NVMe drives. Compression settings were chosen to keep resulting repository sizes comparable. The sample corpus is a mix of small and large files with varying compressibility. See our [benchmark script](https://github.com/borgbase/vger/tree/main/scripts) for full details.</small>
+<small>All benchmarks were run 5x on the same idle Intel i7-6700 CPU @ 3.40GHz machine with 2x Samsung PM981 NVMe drives, with results averaged across all runs. Compression settings were chosen to keep resulting repository sizes comparable. The sample corpus is a mix of small and large files with varying compressibility. See [detailed results](images/summary.json) or our [benchmark script](https://github.com/borgbase/vger/tree/main/scripts) for full details.</small>
 
 
 ## Comparison
