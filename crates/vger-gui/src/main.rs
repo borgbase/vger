@@ -10,7 +10,7 @@ use std::time::{Duration, Instant};
 use chrono::{DateTime, Local};
 use crossbeam_channel::{Receiver, Sender};
 use slint::{Model, ModelRc, SharedString, StandardListViewItem, VecModel};
-use tray_icon::menu::{Menu, MenuEvent, MenuId, MenuItem};
+use tray_icon::menu::{Menu, MenuEvent, MenuId, MenuItem, Submenu};
 use tray_icon::{Icon, TrayIconBuilder};
 use vger_core::app::{self, operations, passphrase};
 use vger_core::commands::find::{FileStatus, FindFilter, FindScope};
@@ -19,7 +19,10 @@ use vger_core::snapshot::item::{Item, ItemType};
 use vger_types::error::VgerError;
 
 mod progress;
+mod state;
 use progress::{format_bytes, format_check_status, format_count, BackupStatusTracker};
+
+const APP_TITLE: &str = "V'ger Backup";
 
 // ── Tree view data structures ──
 
@@ -681,6 +684,7 @@ slint::slint! {
         in-out property <[[StandardListViewItem]]> snapshot_rows: [];
 
         callback open_config_clicked();
+        callback switch_config_clicked();
         callback backup_all_clicked();
         callback find_files_clicked();
         callback reload_config_clicked();
@@ -696,7 +700,7 @@ slint::slint! {
         callback snapshot_sort_descending(/* column */ int);
         callback cancel_clicked();
 
-        title: "V'Ger";
+        title: "V'ger Backup";
         preferred-width: 1100px;
         preferred-height: 760px;
 
@@ -719,6 +723,11 @@ slint::slint! {
                         mouse-cursor: pointer;
                         clicked => { root.open_config_clicked(); }
                         Text { text: root.config_path; color: #4a90d9; vertical-alignment: center; }
+                    }
+                    TouchArea {
+                        mouse-cursor: pointer;
+                        clicked => { root.switch_config_clicked(); }
+                        Text { text: "(Change)"; color: #4a90d9; vertical-alignment: center; font-size: 12px; }
                     }
                     Rectangle { horizontal-stretch: 1; }
                     Button {
@@ -977,7 +986,7 @@ enum AppCommand {
     },
     OpenConfigFile,
     ReloadConfig,
-    ToggleSchedulePause,
+    SwitchConfig,
     CancelOperation,
     ShowWindow,
     Quit,
@@ -1091,19 +1100,23 @@ fn schedule_description(schedule: &ScheduleConfig, paused: bool) -> String {
 
 // ── Tray icon ──
 
-fn build_tray_icon() -> Result<(tray_icon::TrayIcon, MenuId, MenuId, MenuId, MenuId), String> {
+fn build_tray_icon(
+) -> Result<(tray_icon::TrayIcon, MenuId, MenuId, MenuId, Submenu, MenuItem), String> {
     let menu = Menu::new();
 
-    let open_item = MenuItem::new("Open V'Ger", true, None);
-    let run_now_item = MenuItem::new("Run Backup Now", true, None);
-    let pause_item = MenuItem::new("Pause/Resume Scheduled Backups", true, None);
+    let open_item = MenuItem::new(&format!("Open {APP_TITLE}"), true, None);
+    let run_now_item = MenuItem::new("Run All Backups", true, None);
+    let source_submenu = Submenu::new("Backup Source", true);
+    let cancel_item = MenuItem::new("Cancel Backup", false, None);
     let quit_item = MenuItem::new("Quit", true, None);
 
     menu.append(&open_item)
         .map_err(|e| format!("tray menu append failed: {e}"))?;
     menu.append(&run_now_item)
         .map_err(|e| format!("tray menu append failed: {e}"))?;
-    menu.append(&pause_item)
+    menu.append(&source_submenu)
+        .map_err(|e| format!("tray menu append failed: {e}"))?;
+    menu.append(&cancel_item)
         .map_err(|e| format!("tray menu append failed: {e}"))?;
     menu.append(&quit_item)
         .map_err(|e| format!("tray menu append failed: {e}"))?;
@@ -1119,7 +1132,7 @@ fn build_tray_icon() -> Result<(tray_icon::TrayIcon, MenuId, MenuId, MenuId, Men
 
     let tray = TrayIconBuilder::new()
         .with_menu(Box::new(menu))
-        .with_tooltip("V'Ger")
+        .with_tooltip(APP_TITLE)
         .with_icon(icon)
         .with_icon_as_template(true)
         .build()
@@ -1129,8 +1142,9 @@ fn build_tray_icon() -> Result<(tray_icon::TrayIcon, MenuId, MenuId, MenuId, Men
         tray,
         open_item.id().clone(),
         run_now_item.id().clone(),
-        pause_item.id().clone(),
         quit_item.id().clone(),
+        source_submenu,
+        cancel_item,
     ))
 }
 
@@ -1304,7 +1318,7 @@ fn resolve_passphrase_for_repo(
 ) -> Result<Option<zeroize::Zeroizing<String>>, VgerError> {
     let repo_name = format_repo_name(repo);
     let pass = passphrase::resolve_passphrase(&repo.config, repo.label.as_deref(), |prompt| {
-        let title = format!("V'Ger Passphrase ({repo_name})");
+        let title = format!("{APP_TITLE} — Passphrase ({repo_name})");
         let message = format!(
             "Enter passphrase for {}\nRepository: {}",
             prompt
@@ -1413,6 +1427,80 @@ fn log_backup_report(
     }
 }
 
+/// Apply a (possibly new) config file: load, validate, update runtime state, and notify the UI.
+/// When `update_source` is true the runtime source path is switched to `config_path`.
+#[allow(clippy::too_many_arguments)]
+fn apply_config(
+    config_path: PathBuf,
+    update_source: bool,
+    runtime: &mut app::RuntimeConfig,
+    config_display_path: &mut PathBuf,
+    passphrases: &mut HashMap<String, zeroize::Zeroizing<String>>,
+    scheduler: &Arc<Mutex<SchedulerState>>,
+    schedule_paused: bool,
+    ui_tx: &Sender<UiEvent>,
+    app_tx: &Sender<AppCommand>,
+) {
+    match app::load_runtime_config_from_path(&config_path) {
+        Ok(repos) => {
+            if repos.is_empty() {
+                send_log(ui_tx, "Loaded config is empty; keeping previous state.");
+                return;
+            }
+
+            let schedule = repos[0].config.schedule.clone();
+            let interval = match vger_core::app::scheduler::schedule_interval(&schedule) {
+                Ok(v) => v,
+                Err(e) => {
+                    send_log(
+                        ui_tx,
+                        format!(
+                            "Config rejected due to invalid schedule.every: {e}. Keeping previous config."
+                        ),
+                    );
+                    return;
+                }
+            };
+
+            if update_source {
+                use vger_core::config::ConfigSource;
+                runtime.source = ConfigSource::SearchOrder {
+                    path: config_path.clone(),
+                    level: "user",
+                };
+            }
+            runtime.repos = repos;
+            passphrases.clear();
+
+            if let Ok(mut state) = scheduler.lock() {
+                state.enabled = schedule.enabled;
+                state.paused = schedule_paused;
+                state.every = interval;
+                state.jitter_seconds = schedule.jitter_seconds;
+                state.next_run = Some(Instant::now() + interval);
+            }
+
+            let canonical = std::fs::canonicalize(&config_path)
+                .unwrap_or_else(|_| config_path.clone());
+            *config_display_path = canonical.clone();
+
+            let _ = ui_tx.send(UiEvent::ConfigInfo {
+                path: canonical.display().to_string(),
+                schedule: schedule_description(&schedule, schedule_paused),
+            });
+            send_structured_data(ui_tx, &runtime.repos);
+            let _ = app_tx.send(AppCommand::FetchAllRepoInfo);
+            send_log(ui_tx, "Configuration reloaded.");
+        }
+        Err(e) => {
+            send_log(
+                ui_tx,
+                format!("Configuration load failed; keeping previous config: {e}"),
+            );
+        }
+    }
+}
+
 // ── Worker thread ──
 
 fn run_worker(
@@ -1426,11 +1514,11 @@ fn run_worker(
 ) {
     let mut passphrases: HashMap<String, zeroize::Zeroizing<String>> = HashMap::new();
 
-    let config_display_path = std::fs::canonicalize(runtime.source.path())
+    let mut config_display_path = std::fs::canonicalize(runtime.source.path())
         .unwrap_or_else(|_| runtime.source.path().to_path_buf());
 
     let schedule = runtime.schedule();
-    let mut schedule_paused = false;
+    let schedule_paused = false;
     let schedule_interval = vger_core::app::scheduler::schedule_interval(&schedule)
         .unwrap_or_else(|_| Duration::from_secs(24 * 60 * 60));
 
@@ -2027,7 +2115,7 @@ fn run_worker(
                 let confirmed = tinyfiledialogs::message_box_yes_no(
                     "Delete Snapshot",
                     &format!(
-                        "Are you sure you want to delete snapshot '{snapshot_name}' from [{repo_name}]?"
+                        "Are you sure you want to delete snapshot {snapshot_name} from {repo_name}?"
                     ),
                     tinyfiledialogs::MessageBoxIcon::Question,
                     tinyfiledialogs::YesNo::No,
@@ -2192,78 +2280,43 @@ fn run_worker(
             AppCommand::ReloadConfig => {
                 let config_path = std::fs::canonicalize(runtime.source.path())
                     .unwrap_or_else(|_| runtime.source.path().to_path_buf());
-                match app::load_runtime_config_from_path(&config_path) {
-                    Ok(repos) => {
-                        if repos.is_empty() {
-                            send_log(&ui_tx, "Reloaded config is empty; keeping previous state.");
-                            continue;
-                        }
-
-                        let schedule = repos[0].config.schedule.clone();
-                        let interval = match vger_core::app::scheduler::schedule_interval(&schedule)
-                        {
-                            Ok(v) => v,
-                            Err(e) => {
-                                send_log(
-                                    &ui_tx,
-                                    format!(
-                                        "Config reload rejected due to invalid schedule.every: {e}. Keeping previous config."
-                                    ),
-                                );
-                                continue;
-                            }
-                        };
-
-                        runtime.repos = repos;
-                        passphrases.clear();
-
-                        if let Ok(mut state) = scheduler.lock() {
-                            state.enabled = schedule.enabled;
-                            state.paused = schedule_paused;
-                            state.every = interval;
-                            state.jitter_seconds = schedule.jitter_seconds;
-                            state.next_run = Some(Instant::now() + interval);
-                        }
-
-                        let _ = ui_tx.send(UiEvent::ConfigInfo {
-                            path: config_path.display().to_string(),
-                            schedule: schedule_description(&schedule, schedule_paused),
-                        });
-                        send_structured_data(&ui_tx, &runtime.repos);
-                        let _ = app_tx.send(AppCommand::FetchAllRepoInfo);
-                        send_log(&ui_tx, "Configuration reloaded.");
-                    }
-                    Err(e) => {
-                        send_log(
-                            &ui_tx,
-                            format!("Configuration reload failed; keeping previous config: {e}"),
-                        );
-                    }
+                apply_config(
+                    config_path,
+                    false,
+                    &mut runtime,
+                    &mut config_display_path,
+                    &mut passphrases,
+                    &scheduler,
+                    schedule_paused,
+                    &ui_tx,
+                    &app_tx,
+                );
+            }
+            AppCommand::SwitchConfig => {
+                let picked = tinyfiledialogs::open_file_dialog(
+                    "Open vger config",
+                    "",
+                    Some((&["*.yaml", "*.yml"], "YAML files")),
+                );
+                if let Some(path_str) = picked {
+                    apply_config(
+                        PathBuf::from(path_str),
+                        true,
+                        &mut runtime,
+                        &mut config_display_path,
+                        &mut passphrases,
+                        &scheduler,
+                        schedule_paused,
+                        &ui_tx,
+                        &app_tx,
+                    );
                 }
             }
             AppCommand::CancelOperation => {
+                cancel_requested.store(true, Ordering::SeqCst);
                 send_log(
                     &ui_tx,
                     "Cancel requested; will stop after current step completes.".to_string(),
-                );
-            }
-            AppCommand::ToggleSchedulePause => {
-                schedule_paused = !schedule_paused;
-                if let Ok(mut state) = scheduler.lock() {
-                    state.paused = schedule_paused;
-                }
-                let schedule = runtime.schedule();
-                let _ = ui_tx.send(UiEvent::ConfigInfo {
-                    path: config_display_path.display().to_string(),
-                    schedule: schedule_description(&schedule, schedule_paused),
-                });
-                send_log(
-                    &ui_tx,
-                    if schedule_paused {
-                        "Scheduled backups paused.".to_string()
-                    } else {
-                        "Scheduled backups resumed.".to_string()
-                    },
                 );
             }
             AppCommand::ShowWindow => {
@@ -2330,8 +2383,24 @@ fn refresh_tree_view(rw: &RestoreWindow) {
     });
 }
 
-fn resolve_or_create_config() -> Result<app::RuntimeConfig, Box<dyn std::error::Error>> {
+fn resolve_or_create_config(
+    saved_config_path: Option<&str>,
+) -> Result<app::RuntimeConfig, Box<dyn std::error::Error>> {
     use vger_core::config::ConfigSource;
+
+    // 0. Try saved config path from GUI state (if file still exists)
+    if let Some(saved) = saved_config_path {
+        let path = PathBuf::from(saved);
+        if path.is_file() {
+            if let Ok(repos) = config::load_and_resolve(&path) {
+                let source = ConfigSource::SearchOrder {
+                    path,
+                    level: "user",
+                };
+                return Ok(app::RuntimeConfig { source, repos });
+            }
+        }
+    }
 
     // 1. Check standard search paths (env var, project, user, system)
     if let Some(source) = config::resolve_config_path(None) {
@@ -2403,8 +2472,34 @@ fn resolve_or_create_config() -> Result<app::RuntimeConfig, Box<dyn std::error::
     Ok(app::RuntimeConfig { source, repos })
 }
 
+fn capture_gui_state(
+    ui: &MainWindow,
+    active_config_path: &Arc<Mutex<String>>,
+) -> Option<state::GuiState> {
+    let win_size = ui.window().size();
+    let scale = ui.window().scale_factor();
+    if win_size.width == 0 || win_size.height == 0 {
+        return None;
+    }
+    let config_path = active_config_path.lock().ok().map(|cp| cp.clone());
+    Some(state::GuiState {
+        config_path,
+        window_width: Some(win_size.width as f32 / scale),
+        window_height: Some(win_size.height as f32 / scale),
+    })
+}
+
 fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let runtime = resolve_or_create_config()?;
+    let gui_state = state::load();
+    let runtime = resolve_or_create_config(gui_state.config_path.as_deref())?;
+
+    // Track the active config path so we can persist it on quit.
+    let active_config_path = Arc::new(Mutex::new(
+        runtime.source.path().display().to_string(),
+    ));
+    // Last captured GUI state — updated on every window hide so we have a valid
+    // snapshot even if the window is already destroyed when the process exits.
+    let last_gui_state: Arc<Mutex<Option<state::GuiState>>> = Arc::new(Mutex::new(None));
 
     let (app_tx, app_rx) = crossbeam_channel::unbounded::<AppCommand>();
     let (ui_tx, ui_rx) = crossbeam_channel::unbounded::<UiEvent>();
@@ -2434,6 +2529,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     });
 
     let ui = MainWindow::new()?;
+    if let (Some(w), Some(h)) = (gui_state.window_width, gui_state.window_height) {
+        ui.window()
+            .set_size(slint::LogicalSize::new(w, h));
+    }
     ui.set_config_path("(loading...)".into());
     ui.set_schedule_text("(loading...)".into());
     ui.set_status_text("Idle".into());
@@ -2460,6 +2559,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let snapshot_repo_names_for_events = snapshot_repo_names.clone();
     let snapshot_data_for_events = snapshot_data.clone();
     let app_tx_for_events = app_tx.clone();
+    let active_config_path_for_events = active_config_path.clone();
+    let last_gui_state_for_events = last_gui_state.clone();
+    let tray_source_items: Arc<Mutex<Vec<(MenuId, String)>>> = Arc::new(Mutex::new(Vec::new()));
+    let (submenu_labels_tx, submenu_labels_rx) = crossbeam_channel::unbounded::<Vec<String>>();
 
     thread::spawn(move || {
         while let Ok(event) = ui_rx.recv() {
@@ -2472,6 +2575,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             let snapshot_repo_names = snapshot_repo_names_for_events.clone();
             let snapshot_data = snapshot_data_for_events.clone();
             let app_tx = app_tx_for_events.clone();
+            let active_config_path = active_config_path_for_events.clone();
+            let last_gui_state = last_gui_state_for_events.clone();
+            let submenu_labels_tx = submenu_labels_tx.clone();
 
             let _ = slint::invoke_from_event_loop(move || {
                 let Some(ui) = ui_weak.upgrade() else {
@@ -2484,6 +2590,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         append_log_row(&ui, &timestamp, &message);
                     }
                     UiEvent::ConfigInfo { path, schedule } => {
+                        if let Ok(mut cp) = active_config_path.lock() {
+                            *cp = path.clone();
+                        }
                         ui.set_config_path(path.into());
                         ui.set_schedule_text(schedule.into());
                     }
@@ -2516,6 +2625,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         ui.set_repo_model(ModelRc::new(VecModel::from(model)));
                     }
                     UiEvent::SourceModelData { items, labels } => {
+                        // Signal the main thread to rebuild the tray submenu
+                        let _ = submenu_labels_tx.send(labels.clone());
+
                         if let Ok(mut sl) = source_labels.lock() {
                             *sl = labels;
                         }
@@ -2591,6 +2703,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         ui.set_operation_busy(false);
                     }
                     UiEvent::Quit => {
+                        if let Some(s) = capture_gui_state(&ui, &active_config_path) {
+                            if let Ok(mut last) = last_gui_state.lock() {
+                                *last = Some(s);
+                            }
+                        }
                         let _ = slint::quit_event_loop();
                     }
                     UiEvent::ShowWindow => {
@@ -2609,18 +2726,19 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     });
 
     let tx = app_tx.clone();
+    ui.on_switch_config_clicked(move || {
+        let _ = tx.send(AppCommand::SwitchConfig);
+    });
+
+    let tx = app_tx.clone();
     ui.on_backup_all_clicked(move || {
         let _ = tx.send(AppCommand::RunBackupAll { scheduled: false });
     });
 
-    {
-        let cancel_flag = cancel_requested.clone();
-        let tx = app_tx.clone();
-        ui.on_cancel_clicked(move || {
-            cancel_flag.store(true, Ordering::SeqCst);
-            let _ = tx.send(AppCommand::CancelOperation);
-        });
-    }
+    let tx = app_tx.clone();
+    ui.on_cancel_clicked(move || {
+        let _ = tx.send(AppCommand::CancelOperation);
+    });
 
     // Find Files button — sync repo names and show FindWindow
     {
@@ -2988,8 +3106,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     ui.window().on_close_requested({
         let ui_weak = ui.as_weak();
+        let active_config_path = active_config_path.clone();
+        let last_gui_state = last_gui_state.clone();
         move || {
             if let Some(ui) = ui_weak.upgrade() {
+                if let Some(s) = capture_gui_state(&ui, &active_config_path) {
+                    if let Ok(mut last) = last_gui_state.lock() {
+                        *last = Some(s);
+                    }
+                }
                 let _ = ui.hide();
             }
             slint::CloseRequestResponse::HideWindow
@@ -2998,11 +3123,52 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // ── Tray icon ──
 
-    let (_tray_icon, open_item_id, run_now_item_id, pause_item_id, quit_item_id) =
+    let (_tray_icon, open_item_id, run_now_item_id, quit_item_id, source_submenu, cancel_item) =
         build_tray_icon().map_err(|e| format!("failed to initialize tray icon: {e}"))?;
+
+    let cancel_item_id = cancel_item.id().clone();
+
+    // Timer to keep tray menu state in sync with the app.
+    // Submenu/MenuItem are !Send, so they must stay on the main thread; the event
+    // consumer sends updated labels via a channel and this timer picks them up.
+    // The timer also syncs the cancel item's enabled state with backup_running.
+    let _tray_sync_timer = {
+        let tray_source_items = tray_source_items.clone();
+        let backup_running = backup_running.clone();
+        let timer = slint::Timer::default();
+        let mut was_running = false;
+        timer.start(slint::TimerMode::Repeated, Duration::from_millis(200), move || {
+            // Drain all pending submenu updates, keeping only the latest
+            let mut latest = None;
+            while let Ok(labels) = submenu_labels_rx.try_recv() {
+                latest = Some(labels);
+            }
+            if let Some(labels) = latest {
+                while source_submenu.remove_at(0).is_some() {}
+                let mut new_items = Vec::new();
+                for label in &labels {
+                    let mi = MenuItem::new(label, true, None);
+                    new_items.push((mi.id().clone(), label.clone()));
+                    let _ = source_submenu.append(&mi);
+                }
+                if let Ok(mut tsi) = tray_source_items.lock() {
+                    *tsi = new_items;
+                }
+            }
+
+            // Sync cancel item enabled state
+            let running = backup_running.load(Ordering::SeqCst);
+            if running != was_running {
+                cancel_item.set_enabled(running);
+                was_running = running;
+            }
+        });
+        timer
+    };
 
     {
         let tx = app_tx.clone();
+        let tray_source_items = tray_source_items.clone();
         thread::spawn(move || {
             let menu_rx = MenuEvent::receiver();
             while let Ok(event) = menu_rx.recv() {
@@ -3010,16 +3176,30 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     let _ = tx.send(AppCommand::ShowWindow);
                 } else if event.id == run_now_item_id {
                     let _ = tx.send(AppCommand::RunBackupAll { scheduled: false });
-                } else if event.id == pause_item_id {
-                    let _ = tx.send(AppCommand::ToggleSchedulePause);
+                } else if event.id == cancel_item_id {
+                    let _ = tx.send(AppCommand::CancelOperation);
                 } else if event.id == quit_item_id {
                     let _ = tx.send(AppCommand::Quit);
                     break;
+                } else if let Ok(items) = tray_source_items.lock() {
+                    if let Some((_, label)) = items.iter().find(|(id, _)| *id == event.id) {
+                        let _ = tx.send(AppCommand::RunBackupSource {
+                            source_label: label.clone(),
+                        });
+                    }
                 }
             }
         });
     }
 
     ui.run()?;
+
+    // Save the last captured GUI state. This covers both explicit tray-Quit
+    // (captured in UiEvent::Quit) and Cmd-Q / SIGTERM (captured in the most
+    // recent on_close_requested, i.e. the last time the window was hidden).
+    if let Some(s) = last_gui_state.lock().ok().and_then(|g| g.clone()) {
+        state::save(&s);
+    }
+
     Ok(())
 }

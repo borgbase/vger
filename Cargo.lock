@@ -7029,6 +7029,8 @@ dependencies = [
  "crossbeam-channel",
  "image",
  "notify",
+ "serde",
+ "serde_json",
  "slint",
  "tinyfiledialogs",
  "tray-icon",
