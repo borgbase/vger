@@ -21,20 +21,20 @@ pub struct ObjectQuery {
     pub mkdir: Option<String>,
 }
 
-/// GET /{repo}/{*path} — if ?list present, list keys; otherwise read object.
+/// GET /{*path} — if ?list present, list keys; otherwise read object.
 /// Supports Range header for partial reads.
 pub async fn get_or_list(
     State(state): State<AppState>,
-    Path((repo, key)): Path<(String, String)>,
+    Path(key): Path<String>,
     Query(query): Query<ObjectQuery>,
     headers: HeaderMap,
 ) -> Result<Response, ServerError> {
     if query.list.is_some() {
-        return list_keys(state, &repo, &key).await;
+        return list_keys(state, &key).await;
     }
 
     let file_path = state
-        .file_path(&repo, &key)
+        .file_path(&key)
         .ok_or_else(|| ServerError::BadRequest("invalid path".into()))?;
 
     // Check for Range header
@@ -45,13 +45,13 @@ pub async fn get_or_list(
     stream_full_read(&file_path, &key).await
 }
 
-/// HEAD /{repo}/{*path} — check existence, return Content-Length.
+/// HEAD /{*path} — check existence, return Content-Length.
 pub async fn head_object(
     State(state): State<AppState>,
-    Path((repo, key)): Path<(String, String)>,
+    Path(key): Path<String>,
 ) -> Result<Response, ServerError> {
     let file_path = state
-        .file_path(&repo, &key)
+        .file_path(&key)
         .ok_or_else(|| ServerError::BadRequest("invalid path".into()))?;
 
     let meta = match tokio::fs::metadata(&file_path).await {
@@ -70,18 +70,18 @@ pub async fn head_object(
         .into_response())
 }
 
-/// PUT /{repo}/{*path} — write object. Enforces append-only and quota.
+/// PUT /{*path} — write object. Enforces append-only and quota.
 ///
 /// Streams the request body to a temp file to avoid buffering large uploads
 /// in memory. Atomic rename on completion.
 pub async fn put_object(
     State(state): State<AppState>,
-    Path((repo, key)): Path<(String, String)>,
+    Path(key): Path<String>,
     headers: HeaderMap,
     body: axum::body::Body,
 ) -> Result<Response, ServerError> {
     let file_path = state
-        .file_path(&repo, &key)
+        .file_path(&key)
         .ok_or_else(|| ServerError::BadRequest("invalid path".into()))?;
 
     let existing_meta = match tokio::fs::metadata(&file_path).await {
@@ -108,7 +108,7 @@ pub async fn put_object(
             .and_then(|v| v.to_str().ok())
             .and_then(|v| v.parse::<u64>().ok())
         {
-            let used = state.quota_used(&repo);
+            let used = state.quota_used();
             if used.saturating_sub(old_size) + content_length > quota {
                 return Err(ServerError::PayloadTooLarge(format!(
                     "quota exceeded: used {used}, limit {quota}, request {content_length}",
@@ -180,7 +180,7 @@ pub async fn put_object(
 
                 // Per-chunk quota enforcement
                 if quota > 0 {
-                    let used = state.quota_used(&repo);
+                    let used = state.quota_used();
                     if used.saturating_sub(old_size) + data_len > quota {
                         return Err(ServerError::PayloadTooLarge(format!(
                             "quota exceeded during upload: used {used}, limit {quota}, written {data_len}",
@@ -247,14 +247,14 @@ pub async fn put_object(
 
     // Update quota
     if data_len > old_size {
-        state.add_quota_usage(&repo, data_len - old_size);
+        state.add_quota_usage(data_len - old_size);
     } else {
-        state.sub_quota_usage(&repo, old_size - data_len);
+        state.sub_quota_usage(old_size - data_len);
     }
 
     // Detect manifest write → record backup timestamp
     if key == "manifest" {
-        state.record_backup(&repo);
+        state.record_backup();
     }
 
     let status = if old_size > 0 {
@@ -265,10 +265,10 @@ pub async fn put_object(
     Ok(status.into_response())
 }
 
-/// DELETE /{repo}/{*path} — delete object. Rejected in append-only mode.
+/// DELETE /{*path} — delete object. Rejected in append-only mode.
 pub async fn delete_object(
     State(state): State<AppState>,
-    Path((repo, key)): Path<(String, String)>,
+    Path(key): Path<String>,
 ) -> Result<Response, ServerError> {
     if state.inner.config.append_only {
         return Err(ServerError::Forbidden(
@@ -277,7 +277,7 @@ pub async fn delete_object(
     }
 
     let file_path = state
-        .file_path(&repo, &key)
+        .file_path(&key)
         .ok_or_else(|| ServerError::BadRequest("invalid path".into()))?;
 
     let old_size = match tokio::fs::metadata(&file_path).await {
@@ -290,7 +290,7 @@ pub async fn delete_object(
 
     match tokio::fs::remove_file(&file_path).await {
         Ok(()) => {
-            state.sub_quota_usage(&repo, old_size);
+            state.sub_quota_usage(old_size);
             Ok(StatusCode::NO_CONTENT.into_response())
         }
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
@@ -319,15 +319,15 @@ async fn stream_full_read(file_path: &std::path::Path, key: &str) -> Result<Resp
         .into_response())
 }
 
-/// POST /{repo}/{*path}?mkdir — create directory.
+/// POST /{*path}?mkdir — create directory.
 pub async fn post_object(
     State(state): State<AppState>,
-    Path((repo, key)): Path<(String, String)>,
+    Path(key): Path<String>,
     Query(query): Query<ObjectQuery>,
 ) -> Result<Response, ServerError> {
     if query.mkdir.is_some() {
         let dir_path = state
-            .file_path(&repo, &key)
+            .file_path(&key)
             .ok_or_else(|| ServerError::BadRequest("invalid path".into()))?;
         tokio::fs::create_dir_all(&dir_path)
             .await
@@ -338,9 +338,9 @@ pub async fn post_object(
     Ok(StatusCode::BAD_REQUEST.into_response())
 }
 
-async fn list_keys(state: AppState, repo: &str, prefix: &str) -> Result<Response, ServerError> {
+async fn list_keys(state: AppState, prefix: &str) -> Result<Response, ServerError> {
     let dir_path = state
-        .file_path(repo, prefix)
+        .file_path(prefix)
         .ok_or_else(|| ServerError::BadRequest("invalid path".into()))?;
 
     let prefix_owned = prefix.to_string();
@@ -468,7 +468,7 @@ mod tests {
 
     use super::super::test_helpers::*;
 
-    const CONFIG_PATH: &str = "/test-repo/config";
+    const CONFIG_PATH: &str = "/config";
 
     #[tokio::test]
     async fn put_then_get_round_trip() {
@@ -520,7 +520,7 @@ mod tests {
         assert_status(&resp, StatusCode::NO_CONTENT);
 
         // Upload another 6 KiB to a different key — total would be 10 KiB, should succeed
-        let resp = authed_put(router.clone(), "/test-repo/index", vec![0xCC; 6 * 1024]).await;
+        let resp = authed_put(router.clone(), "/index", vec![0xCC; 6 * 1024]).await;
         assert_status(&resp, StatusCode::CREATED);
 
         // Verify first file has new content
@@ -704,7 +704,7 @@ mod tests {
         let (router, _state, _tmp) = setup_app(0);
         let data = vec![0xDE; 512];
         let checksum = blake2b_hex(&data);
-        let pack_path = format!("/test-repo/packs/{}/{}", &checksum[..2], checksum);
+        let pack_path = format!("/packs/{}/{}", &checksum[..2], checksum);
 
         let resp = authed_put_with_blake2b(router, &pack_path, data, &checksum).await;
         assert_status(&resp, StatusCode::CREATED);
@@ -716,7 +716,7 @@ mod tests {
         let data = vec![0xDE; 512];
         let wrong_checksum = "a".repeat(64);
         let real_checksum = blake2b_hex(&data);
-        let pack_path = format!("/test-repo/packs/{}/{}", &real_checksum[..2], real_checksum);
+        let pack_path = format!("/packs/{}/{}", &real_checksum[..2], real_checksum);
 
         let resp = authed_put_with_blake2b(router.clone(), &pack_path, data, &wrong_checksum).await;
         assert_status(&resp, StatusCode::CONFLICT);
@@ -740,7 +740,7 @@ mod tests {
         let (router, _state, _tmp) = setup_app(0);
         let data = vec![0xDE; 512];
         let hex = blake2b_hex(&data);
-        let pack_path = format!("/test-repo/packs/{}/{}", &hex[..2], hex);
+        let pack_path = format!("/packs/{}/{}", &hex[..2], hex);
 
         // Use regular authed_put (no X-Content-BLAKE2b header)
         let resp = authed_put(router, &pack_path, data).await;

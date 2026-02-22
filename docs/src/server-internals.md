@@ -16,37 +16,36 @@ Technical reference for vger-server's internal architecture: crate layout, REST 
 
 ## REST API
 
-Storage endpoints map 1:1 to the `StorageBackend` trait:
+Storage endpoints map 1:1 to the `StorageBackend` trait. The `data_dir` is the repository — there is no repo name in the URL.
 
 | Method | Path | Maps to | Notes |
 |--------|------|---------|-------|
-| `GET` | `/{repo}/{*path}` | `get(key)` | `200` + body or `404`. With `Range` header → `get_range` (returns `206`). |
-| `HEAD` | `/{repo}/{*path}` | `exists(key)` | `200` (with Content-Length) or `404` |
-| `PUT` | `/{repo}/{*path}` | `put(key, data)` | Raw bytes body. `201`/`204`. Rejected if over quota. Pack uploads require `X-Content-BLAKE2b` header (BLAKE2b-256 hex); server verifies during streaming write. Non-pack objects: header optional. |
-| `DELETE` | `/{repo}/{*path}` | `delete(key)` | `204` or `404`. Rejected with `403` in append-only mode. |
-| `GET` | `/{repo}/{*path}?list` | `list(prefix)` | JSON array of key strings |
-| `POST` | `/{repo}/{*path}?mkdir` | `create_dir(key)` | `201` |
+| `GET` | `/{*path}` | `get(key)` | `200` + body or `404`. With `Range` header → `get_range` (returns `206`). |
+| `HEAD` | `/{*path}` | `exists(key)` | `200` (with Content-Length) or `404` |
+| `PUT` | `/{*path}` | `put(key, data)` | Raw bytes body. `201`/`204`. Rejected if over quota. Pack uploads require `X-Content-BLAKE2b` header (BLAKE2b-256 hex); server verifies during streaming write. Non-pack objects: header optional. |
+| `DELETE` | `/{*path}` | `delete(key)` | `204` or `404`. Rejected with `403` in append-only mode. |
+| `GET` | `/{*path}?list` | `list(prefix)` | JSON array of key strings |
+| `POST` | `/{*path}?mkdir` | `create_dir(key)` | `201` |
 
 Admin endpoints:
 
 | Method | Path | Description |
 |--------|------|-------------|
-| `POST` | `/{repo}?init` | Create repo directory scaffolding (256 shard dirs, etc.) |
-| `POST` | `/{repo}?batch-delete` | Body: JSON array of keys to delete |
-| `POST` | `/{repo}?repack` | Server-side compaction (see below) |
-| `GET` | `/{repo}?stats` | Size, object count, last backup timestamp, quota usage |
-| `POST` | `/{repo}?verify-packs` | Server-side pack integrity verification (BLAKE2b hash, header magic/version, blob boundaries) |
-| `GET` | `/{repo}?verify-structure` | Structural integrity check (pack magic, shard naming) |
-| `GET` | `/` | List all repos |
+| `POST` | `/?init` | Create repo directory scaffolding (256 shard dirs, etc.) |
+| `POST` | `/?batch-delete` | Body: JSON array of keys to delete |
+| `POST` | `/?repack` | Server-side compaction (see below) |
+| `GET` | `/?stats` | Size, object count, last backup timestamp, quota usage |
+| `POST` | `/?verify-packs` | Server-side pack integrity verification (BLAKE2b hash, header magic/version, blob boundaries) |
+| `GET` | `/?verify-structure` | Structural integrity check (pack magic, shard naming) |
 | `GET` | `/health` | Uptime, disk space, version (unauthenticated) |
 
 Lock endpoints:
 
 | Method | Path | Description |
 |--------|------|-------------|
-| `POST` | `/{repo}/locks/{id}` | Acquire lock (body: `{"hostname": "...", "pid": 123}`) |
-| `DELETE` | `/{repo}/locks/{id}` | Release lock |
-| `GET` | `/{repo}/locks` | List active locks |
+| `POST` | `/locks/{id}` | Acquire lock (body: `{"hostname": "...", "pid": 123}`) |
+| `DELETE` | `/locks/{id}` | Release lock |
+| `GET` | `/locks` | List active locks |
 
 ## Authentication
 
@@ -67,11 +66,11 @@ This prevents a compromised client from destroying backup history.
 
 ## Quota Enforcement
 
-Per-repo storage quota (`quota_bytes` in config). Server tracks total bytes per repo (initialized by scanning `data_dir` on startup, updated on PUT/DELETE). When a PUT would exceed the limit → `413 Payload Too Large`.
+Storage quota (`quota_bytes` in config). Server tracks total bytes used (initialized by scanning `data_dir` on startup, updated on PUT/DELETE). When a PUT would exceed the limit → `413 Payload Too Large`.
 
 ## Backup Freshness Monitoring
 
-The server detects completed backups by observing `PUT /{repo}/manifest` (always the last write in a backup). Updates `last_backup_at` timestamp, exposed via the stats endpoint:
+The server detects completed backups by observing `PUT /manifest` (always the last write in a backup). Updates `last_backup_at` timestamp, exposed via the stats endpoint:
 
 ```json
 {
@@ -101,7 +100,7 @@ Pack files contain encrypted blobs. Compaction does **encrypted passthrough** �
 
 1. Client opens repo, downloads and decrypts the index (small)
 2. Client analyzes pack headers to identify live vs dead blobs (via range reads)
-3. Client sends `POST /{repo}?repack` with a plan:
+3. Client sends `POST /?repack` with a plan:
    ```json
    {
      "operations": [
@@ -124,7 +123,7 @@ For packs with `keep_blobs: []`, the server simply deletes the pack.
 
 ## Structural Integrity Check
 
-`GET /{repo}?verify-structure` checks (no encryption key needed):
+`GET /?verify-structure` checks (no encryption key needed):
 - Required files exist (`config`, `manifest`, `index`, `keys/repokey`)
 - Pack files follow `<2-char-hex>/<64-char-hex>` shard pattern
 - No zero-byte packs (minimum valid = magic 8 bytes + version 1 byte = 9 bytes)
@@ -142,7 +141,7 @@ All settings are passed as CLI flags. The authentication token is read from the 
 
 ```bash
 export VGER_TOKEN="some-secret-token"
-vger-server --listen 127.0.0.1:8585 --data-dir /var/lib/vger --append-only --log-format json --quota 10G --max-blocking-threads 6
+vger-server --data-dir /var/lib/vger --append-only --log-format json --quota 10G --max-blocking-threads 6
 ```
 
 See `vger-server --help` for the full list of flags and defaults.
@@ -154,7 +153,7 @@ See `vger-server --help` for the full list of flags and defaults.
 Client config:
 ```yaml
 repositories:
-  - url: https://backup.example.com/myrepo
+  - url: https://backup.example.com
     label: server
     rest_token: "secret-token-here"
 ```

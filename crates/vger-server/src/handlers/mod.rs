@@ -16,9 +16,9 @@ use tower_http::trace::TraceLayer;
 
 use crate::state::AppState;
 
-/// Body limit for pack uploads (PUT /{repo}/{*path}).
+/// Body limit for pack uploads (PUT /{*path}).
 const MAX_OBJECT_BODY_BYTES: usize = 512 * 1024 * 1024; // 512 MiB
-/// Body limit for admin JSON requests (POST /{repo}?repack, verify-packs, etc.).
+/// Body limit for admin JSON requests (POST /?repack, verify-packs, etc.).
 /// Sized so the verify-packs byte-volume cap (MAX_VERIFY_BYTES) is always the
 /// binding constraint, even with very small chunk sizes (~4 KiB → ~24 MiB JSON).
 const MAX_ADMIN_BODY_BYTES: usize = 64 * 1024 * 1024; // 64 MiB
@@ -27,21 +27,20 @@ pub fn router(state: AppState) -> Router {
     // Admin + lock routes — small body limit for JSON payloads.
     let admin_routes = Router::new()
         .route(
-            "/{repo}/locks/{id}",
+            "/locks/{id}",
             axum::routing::post(locks::acquire_lock).delete(locks::release_lock),
         )
-        .route("/{repo}/locks", axum::routing::get(locks::list_locks))
+        .route("/locks", axum::routing::get(locks::list_locks))
         .route(
-            "/{repo}",
+            "/",
             axum::routing::get(admin::repo_dispatch).post(admin::repo_action_dispatch),
         )
-        .route("/", axum::routing::get(admin::list_repos))
         .layer(DefaultBodyLimit::max(MAX_ADMIN_BODY_BYTES));
 
     // Storage object routes — large body limit for pack uploads.
     let object_routes = Router::new()
         .route(
-            "/{repo}/{*path}",
+            "/{*path}",
             axum::routing::get(objects::get_or_list)
                 .head(objects::head_object)
                 .put(objects::put_object)

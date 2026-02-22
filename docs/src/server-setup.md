@@ -10,7 +10,7 @@ Dumb storage backends (S3, WebDAV, SFTP) work well for basic backups, but they c
 |------------|-------------------|-------------|
 | Append-only mode | Not enforceable; a compromised client with S3 credentials can delete anything | Rejects delete and pack overwrite operations |
 | Server-side compaction | Client must download and re-upload all live blobs | Server repacks locally on disk from a compact plan |
-| Quota enforcement | Requires external bucket policy/IAM setup | Built-in per-repo byte quota checks on writes |
+| Quota enforcement | Requires external bucket policy/IAM setup | Built-in byte quota checks on writes |
 | Backup freshness monitoring | Requires external polling and parsing | Tracks `last_backup_at` on manifest writes |
 | Lock auto-expiry | Advisory locks can remain after crashes | TTL-based lock cleanup in the server |
 | Upload integrity | Relies on S3 Content-MD5 | Uses existing BLAKE2b checksum |
@@ -30,11 +30,11 @@ All settings are passed as CLI flags. The authentication token is read from the 
 
 | Flag | Default | Description |
 |------|---------|-------------|
-| `-l, --listen` | `127.0.0.1:8585` | Address to listen on |
-| `-d, --data-dir` | `/var/lib/vger` | Root directory where repositories are stored |
+| `-l, --listen` | `localhost:8585` | Address to listen on |
+| `-d, --data-dir` | `/var/lib/vger` | Root directory for the repository |
 | `--append-only` | `false` | Reject DELETE and overwrite operations on pack files |
 | `--log-format` | `pretty` | Log output format: `json` or `pretty` |
-| `--quota` | `0` | Per-repo storage quota (`500M`, `10G`, plain bytes). 0 = unlimited |
+| `--quota` | `0` | Storage quota (`500M`, `10G`, plain bytes). 0 = unlimited |
 | `--lock-ttl-seconds` | `3600` | Auto-expire locks after this many seconds |
 | `--max-blocking-threads` | `6` | Maximum number of blocking threads for file I/O |
 
@@ -48,7 +48,7 @@ All settings are passed as CLI flags. The authentication token is read from the 
 
 ```bash
 export VGER_TOKEN="some-secret-token"
-vger-server --listen 127.0.0.1:8585 --data-dir /var/lib/vger
+vger-server --data-dir /var/lib/vger
 ```
 
 ## Run as a systemd service
@@ -75,7 +75,7 @@ Type=simple
 User=vger
 Group=vger
 EnvironmentFile=/etc/vger/vger-server.env
-ExecStart=/usr/local/bin/vger-server --listen 127.0.0.1:8585 --data-dir /var/lib/vger
+ExecStart=/usr/local/bin/vger-server --data-dir /var/lib/vger
 Restart=on-failure
 RestartSec=2
 NoNewPrivileges=true
@@ -134,7 +134,7 @@ backup.example.com {
 
 ```yaml
 repositories:
-  - url: "https://backup.example.com/myrepo"
+  - url: "https://backup.example.com"
     label: "server"
     rest_token: "some-secret-token"
 

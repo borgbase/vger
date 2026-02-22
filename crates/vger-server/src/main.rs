@@ -16,7 +16,7 @@ use crate::state::{write_unpoisoned, AppState};
 #[command(name = "vger-server", version, about = "vger backup server")]
 struct Cli {
     /// Address to listen on
-    #[arg(short, long, default_value = "127.0.0.1:8585")]
+    #[arg(short, long, default_value = "localhost:8585")]
     listen: String,
 
     /// Root directory where repositories are stored
@@ -31,7 +31,7 @@ struct Cli {
     #[arg(long, default_value = "pretty")]
     log_format: String,
 
-    /// Per-repo storage quota (e.g. "500M", "10G", plain bytes). 0 = unlimited.
+    /// Storage quota (e.g. "500M", "10G", plain bytes). 0 = unlimited.
     #[arg(long, default_value = "0", value_parser = parse_size)]
     quota: u64,
 
@@ -129,8 +129,5 @@ async fn async_main(cli: Cli) {
 
 fn cleanup_expired_locks(state: &AppState) {
     let mut locks = write_unpoisoned(&state.inner.locks, "locks");
-    for (_repo, repo_locks) in locks.iter_mut() {
-        repo_locks.retain(|_id, info| !info.is_expired());
-    }
-    locks.retain(|_, repo_locks| !repo_locks.is_empty());
+    locks.retain(|_id, info| !info.is_expired());
 }

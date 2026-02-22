@@ -7,23 +7,21 @@ use crate::config::ServerSection;
 use crate::state::AppState;
 
 pub const TEST_TOKEN: &str = "test-token";
-pub const TEST_REPO: &str = "test-repo";
 
 /// Create a wired-up router and AppState backed by a temp directory.
 ///
 /// The repo directory structure is pre-created so `file_path()` resolves
-/// (the `existing_ancestor_within` check needs the repo dir to exist).
+/// (the `existing_ancestor_within` check needs the dirs to exist).
 pub fn setup_app(quota: u64) -> (Router, AppState, tempfile::TempDir) {
     let tmp = tempfile::tempdir().expect("create tempdir");
     let data_dir = tmp.path().to_path_buf();
 
-    // Create repo structure
-    let repo_dir = data_dir.join(TEST_REPO);
-    std::fs::create_dir_all(repo_dir.join("keys")).unwrap();
-    std::fs::create_dir_all(repo_dir.join("snapshots")).unwrap();
-    std::fs::create_dir_all(repo_dir.join("locks")).unwrap();
+    // Create repo structure directly in data_dir (single-repo mode)
+    std::fs::create_dir_all(data_dir.join("keys")).unwrap();
+    std::fs::create_dir_all(data_dir.join("snapshots")).unwrap();
+    std::fs::create_dir_all(data_dir.join("locks")).unwrap();
     for i in 0..=255u8 {
-        std::fs::create_dir_all(repo_dir.join("packs").join(format!("{i:02x}"))).unwrap();
+        std::fs::create_dir_all(data_dir.join("packs").join(format!("{i:02x}"))).unwrap();
     }
 
     let config = ServerSection {

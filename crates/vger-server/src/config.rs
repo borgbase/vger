@@ -15,7 +15,7 @@ pub struct ServerSection {
     /// Log output format: "json" or "pretty".
     pub log_format: String,
 
-    /// Per-repo storage quota in bytes. 0 = unlimited.
+    /// Storage quota in bytes. 0 = unlimited.
     pub quota_bytes: u64,
 
     /// Default lock TTL in seconds.
@@ -25,7 +25,7 @@ pub struct ServerSection {
 impl Default for ServerSection {
     fn default() -> Self {
         Self {
-            listen: "127.0.0.1:8585".to_string(),
+            listen: "localhost:8585".to_string(),
             data_dir: "/var/lib/vger".to_string(),
             token: String::new(),
             append_only: false,

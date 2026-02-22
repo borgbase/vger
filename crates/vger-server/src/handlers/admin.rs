@@ -1,6 +1,6 @@
 use std::sync::atomic::{AtomicU64, Ordering::Relaxed};
 
-use axum::extract::{Path, Query, State};
+use axum::extract::{Query, State};
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use blake2::digest::{Update, VariableOutput};
@@ -35,71 +35,46 @@ pub struct RepoQuery {
     pub list: Option<String>,
 }
 
-/// GET /{repo} — dispatches based on query parameter.
+/// GET / — dispatches based on query parameter.
 pub async fn repo_dispatch(
     State(state): State<AppState>,
-    Path(repo): Path<String>,
     Query(query): Query<RepoQuery>,
 ) -> Result<Response, ServerError> {
     if query.stats.is_some() {
-        return repo_stats(state, &repo).await;
+        return repo_stats(state).await;
     }
     if query.verify_structure.is_some() {
-        return verify_structure(state, &repo).await;
+        return verify_structure(state).await;
     }
     if query.list.is_some() {
-        return repo_list_all(state, &repo).await;
+        return repo_list_all(state).await;
     }
     Err(ServerError::BadRequest(
         "missing query parameter (stats, verify-structure, list)".into(),
     ))
 }
 
-/// POST /{repo} — dispatches based on query parameter.
+/// POST / — dispatches based on query parameter.
 pub async fn repo_action_dispatch(
     State(state): State<AppState>,
-    Path(repo): Path<String>,
     Query(query): Query<RepoQuery>,
     body: axum::body::Bytes,
 ) -> Result<Response, ServerError> {
     if query.init.is_some() {
-        return repo_init(state, &repo).await;
+        return repo_init(state).await;
     }
     if query.batch_delete.is_some() {
-        return batch_delete(state, &repo, body).await;
+        return batch_delete(state, body).await;
     }
     if query.repack.is_some() {
-        return repack(state, &repo, body).await;
+        return repack(state, body).await;
     }
     if query.verify_packs.is_some() {
-        return verify_packs(state, &repo, body).await;
+        return verify_packs(state, body).await;
     }
     Err(ServerError::BadRequest(
         "missing query parameter (init, batch-delete, repack, verify-packs)".into(),
     ))
-}
-
-/// GET / — list all repos.
-pub async fn list_repos(State(state): State<AppState>) -> Result<Response, ServerError> {
-    let data_dir = state.inner.data_dir.clone();
-    let repos = tokio::task::spawn_blocking(move || {
-        let mut names = Vec::new();
-        if let Ok(entries) = std::fs::read_dir(&data_dir) {
-            for entry in entries.flatten() {
-                if entry.path().is_dir() {
-                    if let Some(name) = entry.file_name().to_str() {
-                        names.push(name.to_string());
-                    }
-                }
-            }
-        }
-        names.sort();
-        names
-    })
-    .await
-    .map_err(|e| ServerError::Internal(e.to_string()))?;
-
-    Ok(axum::Json(repos).into_response())
 }
 
 /// GET /health — unauthenticated health check.
@@ -110,33 +85,18 @@ pub async fn health() -> impl IntoResponse {
     }))
 }
 
-async fn repo_stats(state: AppState, repo: &str) -> Result<Response, ServerError> {
-    let repo_dir = state
-        .repo_path(repo)
-        .ok_or_else(|| ServerError::BadRequest("invalid repo".into()))?;
-
-    match tokio::fs::metadata(&repo_dir).await {
-        Ok(_) => {}
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-            return Err(ServerError::NotFound(format!("repo '{repo}' not found")));
-        }
-        Err(e) => return Err(ServerError::from(e)),
-    }
-
-    let repo_name = repo.to_string();
-    let repo_dir_clone = repo_dir.clone();
+async fn repo_stats(state: AppState) -> Result<Response, ServerError> {
+    let data_dir = state.inner.data_dir.clone();
 
     let (total_bytes, total_objects, total_packs) =
-        tokio::task::spawn_blocking(move || count_repo_stats(&repo_dir_clone))
+        tokio::task::spawn_blocking(move || count_repo_stats(&data_dir))
             .await
             .map_err(|e| ServerError::Internal(e.to_string()))?;
 
-    let last_backup = read_unpoisoned(&state.inner.last_backup_at, "last_backup_at")
-        .get(&repo_name)
-        .cloned();
+    let last_backup = read_unpoisoned(&state.inner.last_backup_at, "last_backup_at").clone();
 
     let quota_bytes = state.inner.config.quota_bytes;
-    let quota_used = state.quota_used(&repo_name);
+    let quota_used = state.quota_used();
 
     Ok(axum::Json(serde_json::json!({
         "total_bytes": total_bytes,
@@ -149,31 +109,38 @@ async fn repo_stats(state: AppState, repo: &str) -> Result<Response, ServerError
     .into_response())
 }
 
-async fn repo_init(state: AppState, repo: &str) -> Result<Response, ServerError> {
-    let repo_dir = state
-        .repo_path(repo)
-        .ok_or_else(|| ServerError::BadRequest("invalid repo".into()))?;
+async fn repo_init(state: AppState) -> Result<Response, ServerError> {
+    let data_dir = state.inner.data_dir.clone();
 
-    match tokio::fs::metadata(&repo_dir).await {
+    // Reject if data_dir contains unexpected entries
+    let bad = crate::state::unexpected_entries(&data_dir);
+    if !bad.is_empty() {
+        return Err(ServerError::Conflict(format!(
+            "data directory contains unexpected entries: {}",
+            bad.join(", ")
+        )));
+    }
+
+    // Check if already initialized (config file exists)
+    let config_path = data_dir.join("config");
+    match tokio::fs::metadata(&config_path).await {
         Ok(_) => {
-            return Err(ServerError::Conflict(format!(
-                "repo '{repo}' already exists"
-            )));
+            return Err(ServerError::Conflict("repo already initialized".into()));
         }
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
         Err(e) => return Err(ServerError::from(e)),
     }
 
-    let repo_dir_clone = repo_dir.clone();
+    let data_dir_clone = data_dir.clone();
     tokio::task::spawn_blocking(move || {
         // Create base dirs
-        std::fs::create_dir_all(&repo_dir_clone)?;
-        std::fs::create_dir_all(repo_dir_clone.join("keys"))?;
-        std::fs::create_dir_all(repo_dir_clone.join("snapshots"))?;
-        std::fs::create_dir_all(repo_dir_clone.join("locks"))?;
+        std::fs::create_dir_all(&data_dir_clone)?;
+        std::fs::create_dir_all(data_dir_clone.join("keys"))?;
+        std::fs::create_dir_all(data_dir_clone.join("snapshots"))?;
+        std::fs::create_dir_all(data_dir_clone.join("locks"))?;
         // Create 256 pack shard directories
         for i in 0..=255u8 {
-            std::fs::create_dir_all(repo_dir_clone.join("packs").join(format!("{i:02x}")))?;
+            std::fs::create_dir_all(data_dir_clone.join("packs").join(format!("{i:02x}")))?;
         }
         Ok::<_, std::io::Error>(())
     })
@@ -184,11 +151,7 @@ async fn repo_init(state: AppState, repo: &str) -> Result<Response, ServerError>
     Ok(StatusCode::CREATED.into_response())
 }
 
-async fn batch_delete(
-    state: AppState,
-    repo: &str,
-    body: axum::body::Bytes,
-) -> Result<Response, ServerError> {
+async fn batch_delete(state: AppState, body: axum::body::Bytes) -> Result<Response, ServerError> {
     if state.inner.config.append_only {
         return Err(ServerError::Forbidden(
             "append-only: batch-delete not allowed".into(),
@@ -198,12 +161,11 @@ async fn batch_delete(
     let keys: Vec<String> = serde_json::from_slice(&body)
         .map_err(|e| ServerError::BadRequest(format!("invalid JSON: {e}")))?;
 
-    let repo_name = repo.to_string();
     let state_clone = state.clone();
 
     for key in keys {
         let file_path = state_clone
-            .file_path(&repo_name, &key)
+            .file_path(&key)
             .ok_or_else(|| ServerError::BadRequest("invalid path".into()))?;
 
         let old_size = match tokio::fs::metadata(&file_path).await {
@@ -216,18 +178,14 @@ async fn batch_delete(
                 return Err(ServerError::from(e));
             }
         } else {
-            state_clone.sub_quota_usage(&repo_name, old_size);
+            state_clone.sub_quota_usage(old_size);
         }
     }
 
     Ok(StatusCode::NO_CONTENT.into_response())
 }
 
-async fn repack(
-    state: AppState,
-    repo: &str,
-    body: axum::body::Bytes,
-) -> Result<Response, ServerError> {
+async fn repack(state: AppState, body: axum::body::Bytes) -> Result<Response, ServerError> {
     let plan: RepackPlanRequest = serde_json::from_slice(&body)
         .map_err(|e| ServerError::BadRequest(format!("invalid repack plan: {e}")))?;
     validate_repack_plan(&plan)?;
@@ -238,77 +196,51 @@ async fn repack(
         ));
     }
 
-    let repo_name = repo.to_string();
     let state_clone = state.clone();
 
-    let results =
-        tokio::task::spawn_blocking(move || execute_repack(&state_clone, &repo_name, &plan))
-            .await
-            .map_err(|e| ServerError::Internal(e.to_string()))?
-            .map_err(|e| ServerError::Internal(e.to_string()))?;
+    let results = tokio::task::spawn_blocking(move || execute_repack(&state_clone, &plan))
+        .await
+        .map_err(|e| ServerError::Internal(e.to_string()))?
+        .map_err(|e| ServerError::Internal(e.to_string()))?;
 
     Ok(axum::Json(results).into_response())
 }
 
 async fn verify_packs(
     state: AppState,
-    repo: &str,
     body: axum::body::Bytes,
 ) -> Result<Response, ServerError> {
     let plan: VerifyPacksPlanRequest = serde_json::from_slice(&body)
         .map_err(|e| ServerError::BadRequest(format!("invalid verify-packs plan: {e}")))?;
     validate_verify_packs_plan(&plan)?;
 
-    let repo_name = repo.to_string();
     let state_clone = state.clone();
 
     let results =
-        tokio::task::spawn_blocking(move || execute_verify_packs(&state_clone, &repo_name, &plan))
+        tokio::task::spawn_blocking(move || execute_verify_packs(&state_clone, &plan))
             .await
             .map_err(|e| ServerError::Internal(e.to_string()))?;
 
     Ok(axum::Json(results).into_response())
 }
 
-async fn verify_structure(state: AppState, repo: &str) -> Result<Response, ServerError> {
-    let repo_dir = state
-        .repo_path(repo)
-        .ok_or_else(|| ServerError::BadRequest("invalid repo".into()))?;
+async fn verify_structure(state: AppState) -> Result<Response, ServerError> {
+    let data_dir = state.inner.data_dir.clone();
 
-    match tokio::fs::metadata(&repo_dir).await {
-        Ok(_) => {}
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-            return Err(ServerError::NotFound(format!("repo '{repo}' not found")));
-        }
-        Err(e) => return Err(ServerError::from(e)),
-    }
-
-    let repo_dir_clone = repo_dir.clone();
-    let result = tokio::task::spawn_blocking(move || check_structure(&repo_dir_clone))
+    let result = tokio::task::spawn_blocking(move || check_structure(&data_dir))
         .await
         .map_err(|e| ServerError::Internal(e.to_string()))?;
 
     Ok(axum::Json(result).into_response())
 }
 
-/// GET /{repo}?list — list all keys in the repository.
-async fn repo_list_all(state: AppState, repo: &str) -> Result<Response, ServerError> {
-    let repo_dir = state
-        .repo_path(repo)
-        .ok_or_else(|| ServerError::BadRequest("invalid repo".into()))?;
+/// GET /?list — list all keys in the repository.
+async fn repo_list_all(state: AppState) -> Result<Response, ServerError> {
+    let data_dir = state.inner.data_dir.clone();
 
-    match tokio::fs::metadata(&repo_dir).await {
-        Ok(_) => {}
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-            return Err(ServerError::NotFound(format!("repo '{repo}' not found")));
-        }
-        Err(e) => return Err(ServerError::from(e)),
-    }
-
-    let repo_dir_clone = repo_dir.clone();
     let keys = tokio::task::spawn_blocking(move || -> std::io::Result<Vec<String>> {
         let mut keys = Vec::new();
-        list_all_recursive(&repo_dir_clone, &repo_dir_clone, &mut keys)?;
+        list_all_recursive(&data_dir, &data_dir, &mut keys)?;
         keys.sort();
         Ok(keys)
     })
@@ -347,7 +279,6 @@ fn list_all_recursive(
 
 fn execute_repack(
     state: &AppState,
-    repo: &str,
     plan: &RepackPlanRequest,
 ) -> Result<RepackResultResponse, String> {
     use std::io::{BufWriter, Read, Seek, SeekFrom, Write};
@@ -356,7 +287,7 @@ fn execute_repack(
 
     for op in &plan.operations {
         let source_path = state
-            .file_path(repo, &op.source_pack)
+            .file_path(&op.source_pack)
             .ok_or_else(|| "invalid pack path".to_string())?;
 
         if op.keep_blobs.is_empty() {
@@ -364,7 +295,7 @@ fn execute_repack(
             if op.delete_after {
                 let old_size = source_path.metadata().map(|m| m.len()).unwrap_or(0);
                 let _ = std::fs::remove_file(&source_path);
-                state.sub_quota_usage(repo, old_size);
+                state.sub_quota_usage(old_size);
             }
             completed.push(RepackOperationResult {
                 source_pack: op.source_pack.clone(),
@@ -484,7 +415,7 @@ fn execute_repack(
         let shard = &pack_id_hex[..2];
         let new_pack_key = format!("packs/{shard}/{pack_id_hex}");
 
-        let new_pack_path = state.file_path(repo, &new_pack_key).ok_or_else(|| {
+        let new_pack_path = state.file_path(&new_pack_key).ok_or_else(|| {
             let _ = std::fs::remove_file(&temp_path);
             "invalid new pack path".to_string()
         })?;
@@ -502,13 +433,13 @@ fn execute_repack(
         })?;
 
         // Update quota
-        state.add_quota_usage(repo, pack_offset);
+        state.add_quota_usage(pack_offset);
 
         // Delete source if requested
         if op.delete_after {
             let old_size = source_path.metadata().map(|m| m.len()).unwrap_or(0);
             let _ = std::fs::remove_file(&source_path);
-            state.sub_quota_usage(repo, old_size);
+            state.sub_quota_usage(old_size);
         }
 
         completed.push(RepackOperationResult {
@@ -627,18 +558,14 @@ fn validate_verify_packs_plan(plan: &VerifyPacksPlanRequest) -> Result<(), Serve
     Ok(())
 }
 
-fn execute_verify_packs(
-    state: &AppState,
-    repo: &str,
-    plan: &VerifyPacksPlanRequest,
-) -> VerifyPacksResponse {
+fn execute_verify_packs(state: &AppState, plan: &VerifyPacksPlanRequest) -> VerifyPacksResponse {
     let mut results = Vec::with_capacity(plan.packs.len());
     let mut bytes_read: u64 = 0;
     let mut truncated = false;
 
     for entry in &plan.packs {
         // Stat before reading to enforce byte cap with actual file sizes.
-        let file_path = match state.file_path(repo, &entry.pack_key) {
+        let file_path = match state.file_path(&entry.pack_key) {
             Some(p) => p,
             None => {
                 results.push(VerifyPackResult {
@@ -916,17 +843,6 @@ mod tests {
             let len = blob.len() as u32;
             buf.extend_from_slice(&len.to_le_bytes());
             buf.extend_from_slice(blob);
-            // The repack code reads from the raw file offsets, so the BlobRef
-            // offset should include the length prefix. We'll store the offset
-            // of the length prefix and the total length (prefix + data) for
-            // keep_blobs. Actually, looking at the repack code, keep_blobs
-            // offset/length refer to arbitrary byte ranges in the source file.
-            // The repack reads [offset..offset+length] verbatim and writes it
-            // to the new pack with a new u32_le length prefix.
-            //
-            // For our tests, we want to keep just the blob data (without the
-            // source length prefix), so offset = past the length prefix,
-            // length = blob data length.
             refs.push((offset + 4, blob.len() as u64));
         }
         (buf, refs)
@@ -938,7 +854,7 @@ mod tests {
         let pack_id = blake2b_256_hex(pack_bytes);
         let shard = &pack_id[..2];
         let key = format!("packs/{shard}/{pack_id}");
-        let path = tmp.join(TEST_REPO).join("packs").join(shard).join(&pack_id);
+        let path = tmp.join("packs").join(shard).join(&pack_id);
         std::fs::write(&path, pack_bytes).expect("write pack file");
         key
     }
@@ -982,7 +898,7 @@ mod tests {
         let source_key = write_pack(tmp.path(), &pack_bytes);
 
         let body = repack_body(&[repack_op(&source_key, &refs, false)]);
-        let resp = authed_post(router.clone(), &format!("/{TEST_REPO}?repack"), body).await;
+        let resp = authed_post(router.clone(), "/?repack", body).await;
         assert_status(&resp, StatusCode::OK);
 
         let result: serde_json::Value = serde_json::from_slice(&body_bytes(resp).await).unwrap();
@@ -994,7 +910,7 @@ mod tests {
         assert!(new_pack_key.starts_with("packs/"));
 
         // Read the new pack file and verify magic + version
-        let new_pack_path = tmp.path().join(TEST_REPO).join(new_pack_key);
+        let new_pack_path = tmp.path().join(new_pack_key);
         let new_pack_data = std::fs::read(&new_pack_path).expect("read new pack");
         assert_eq!(&new_pack_data[..8], PACK_MAGIC);
         assert_eq!(new_pack_data[8], 0x01);
@@ -1014,7 +930,7 @@ mod tests {
         let source_key = write_pack(tmp.path(), &pack_bytes);
 
         let body = repack_body(&[repack_op(&source_key, &refs, false)]);
-        let resp = authed_post(router, &format!("/{TEST_REPO}?repack"), body).await;
+        let resp = authed_post(router, "/?repack", body).await;
         assert_status(&resp, StatusCode::OK);
 
         let result: serde_json::Value = serde_json::from_slice(&body_bytes(resp).await).unwrap();
@@ -1028,7 +944,7 @@ mod tests {
             .collect();
         assert_eq!(new_offsets.len(), 3);
 
-        let new_pack_path = tmp.path().join(TEST_REPO).join(new_pack_key);
+        let new_pack_path = tmp.path().join(new_pack_key);
         let new_pack_data = std::fs::read(&new_pack_path).expect("read new pack");
 
         // Each returned offset should read back the original blob
@@ -1047,7 +963,7 @@ mod tests {
         let source_key = write_pack(tmp.path(), &pack_bytes);
 
         let body = repack_body(&[repack_op(&source_key, &refs, false)]);
-        let resp = authed_post(router, &format!("/{TEST_REPO}?repack"), body).await;
+        let resp = authed_post(router, "/?repack", body).await;
         assert_status(&resp, StatusCode::OK);
 
         let result: serde_json::Value = serde_json::from_slice(&body_bytes(resp).await).unwrap();
@@ -1055,7 +971,7 @@ mod tests {
 
         // The pack key is packs/<shard>/<hex>. The hex should be blake2b-256 of contents.
         let pack_hex = new_pack_key.split('/').next_back().unwrap();
-        let new_pack_path = tmp.path().join(TEST_REPO).join(new_pack_key);
+        let new_pack_path = tmp.path().join(new_pack_key);
         let new_pack_data = std::fs::read(&new_pack_path).expect("read new pack");
         let actual_hash = blake2b_256_hex(&new_pack_data);
         assert_eq!(actual_hash, pack_hex);
@@ -1067,14 +983,14 @@ mod tests {
 
         let (pack_bytes, refs) = build_pack(&[b"delete-me"]);
         let source_key = write_pack(tmp.path(), &pack_bytes);
-        let source_path = tmp.path().join(TEST_REPO).join(&source_key);
+        let source_path = tmp.path().join(&source_key);
         assert!(source_path.exists());
 
         // Seed quota with the source pack size
-        state.add_quota_usage(TEST_REPO, pack_bytes.len() as u64);
+        state.add_quota_usage(pack_bytes.len() as u64);
 
         let body = repack_body(&[repack_op(&source_key, &refs, true)]);
-        let resp = authed_post(router, &format!("/{TEST_REPO}?repack"), body).await;
+        let resp = authed_post(router, "/?repack", body).await;
         assert_status(&resp, StatusCode::OK);
 
         let result: serde_json::Value = serde_json::from_slice(&body_bytes(resp).await).unwrap();
@@ -1092,14 +1008,14 @@ mod tests {
 
         let (pack_bytes, _refs) = build_pack(&[b"going-away"]);
         let source_key = write_pack(tmp.path(), &pack_bytes);
-        let source_path = tmp.path().join(TEST_REPO).join(&source_key);
+        let source_path = tmp.path().join(&source_key);
 
-        state.add_quota_usage(TEST_REPO, pack_bytes.len() as u64);
-        let used_before = state.quota_used(TEST_REPO);
+        state.add_quota_usage(pack_bytes.len() as u64);
+        let used_before = state.quota_used();
 
         // Repack with empty keep_blobs + delete_after
         let body = repack_body(&[repack_op(&source_key, &[], true)]);
-        let resp = authed_post(router, &format!("/{TEST_REPO}?repack"), body).await;
+        let resp = authed_post(router, "/?repack", body).await;
         assert_status(&resp, StatusCode::OK);
 
         let result: serde_json::Value = serde_json::from_slice(&body_bytes(resp).await).unwrap();
@@ -1110,7 +1026,7 @@ mod tests {
 
         assert!(!source_path.exists(), "source pack not deleted");
         assert!(
-            state.quota_used(TEST_REPO) < used_before,
+            state.quota_used() < used_before,
             "quota should have decreased"
         );
     }
@@ -1120,24 +1036,14 @@ mod tests {
         let (router, _state, _tmp) = setup_app(0);
 
         // PUT two known keys
-        let resp = authed_put(
-            router.clone(),
-            &format!("/{TEST_REPO}/config"),
-            b"cfg".to_vec(),
-        )
-        .await;
+        let resp = authed_put(router.clone(), "/config", b"cfg".to_vec()).await;
         assert_status(&resp, StatusCode::CREATED);
 
-        let resp = authed_put(
-            router.clone(),
-            &format!("/{TEST_REPO}/manifest"),
-            b"man".to_vec(),
-        )
-        .await;
+        let resp = authed_put(router.clone(), "/manifest", b"man".to_vec()).await;
         assert_status(&resp, StatusCode::CREATED);
 
-        // GET /{repo}?list should return both keys
-        let resp = authed_get(router.clone(), &format!("/{TEST_REPO}?list")).await;
+        // GET /?list should return both keys
+        let resp = authed_get(router.clone(), "/?list").await;
         assert_status(&resp, StatusCode::OK);
 
         let keys: Vec<String> =

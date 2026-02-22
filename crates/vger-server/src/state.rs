@@ -1,5 +1,6 @@
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, RwLock, RwLockReadGuard, RwLockWriteGuard};
 
 use chrono::{DateTime, Utc};
@@ -15,14 +16,14 @@ pub struct AppState {
 pub struct AppStateInner {
     pub config: ServerSection,
     pub data_dir: PathBuf,
-    /// Per-repo quota usage in bytes. repo_name -> bytes_used.
-    pub quota_usage: RwLock<HashMap<String, u64>>,
+    /// Quota usage in bytes.
+    pub quota_usage: AtomicU64,
 
-    /// Per-repo last backup timestamp (updated on manifest PUT).
-    pub last_backup_at: RwLock<HashMap<String, DateTime<Utc>>>,
+    /// Last backup timestamp (updated on manifest PUT).
+    pub last_backup_at: RwLock<Option<DateTime<Utc>>>,
 
-    /// Active locks: repo_name -> { lock_id -> LockInfo }
-    pub locks: RwLock<HashMap<String, HashMap<String, LockInfo>>>,
+    /// Active locks: lock_id -> LockInfo
+    pub locks: RwLock<HashMap<String, LockInfo>>,
 }
 
 #[derive(Debug, Clone, serde::Serialize)]
@@ -75,6 +76,34 @@ pub(crate) fn write_unpoisoned<'a, T>(
     }
 }
 
+/// Top-level entries that are valid inside a vger data directory.
+const VALID_DATA_DIR_ENTRIES: &[&str] = &[
+    "config",
+    "manifest",
+    "index",
+    "keys",
+    "snapshots",
+    "locks",
+    "packs",
+];
+
+/// Return the names of any top-level entries in `data_dir` that are not part
+/// of a valid vger repository layout. An empty or non-existent directory is fine.
+pub(crate) fn unexpected_entries(data_dir: &Path) -> Vec<String> {
+    let mut bad = Vec::new();
+    if let Ok(entries) = std::fs::read_dir(data_dir) {
+        for entry in entries.flatten() {
+            if let Some(name) = entry.file_name().to_str() {
+                if !VALID_DATA_DIR_ENTRIES.contains(&name) {
+                    bad.push(name.to_string());
+                }
+            }
+        }
+    }
+    bad.sort();
+    bad
+}
+
 impl AppState {
     pub fn new(config: ServerSection) -> Self {
         let configured_data_dir = PathBuf::from(&config.data_dir);
@@ -82,46 +111,44 @@ impl AppState {
             .canonicalize()
             .unwrap_or(configured_data_dir);
 
-        // Initialize quota usage by scanning existing repos
-        let quota_usage = scan_repo_sizes(&data_dir);
+        let bad = unexpected_entries(&data_dir);
+        if !bad.is_empty() {
+            eprintln!(
+                "Error: data directory '{}' contains unexpected entries: {}",
+                data_dir.display(),
+                bad.join(", ")
+            );
+            eprintln!(
+                "The data directory must contain only repository files. \
+                 Remove unrelated files or choose a different --data-dir."
+            );
+            std::process::exit(1);
+        }
+
+        // Initialize quota usage by scanning data_dir
+        let quota_usage = dir_size(&data_dir);
 
         Self {
             inner: Arc::new(AppStateInner {
                 config,
                 data_dir,
-                quota_usage: RwLock::new(quota_usage),
-                last_backup_at: RwLock::new(HashMap::new()),
+                quota_usage: AtomicU64::new(quota_usage),
+                last_backup_at: RwLock::new(None),
                 locks: RwLock::new(HashMap::new()),
             }),
         }
     }
 
-    /// Resolve a repo directory path, ensuring it stays within data_dir.
-    pub fn repo_path(&self, repo: &str) -> Option<PathBuf> {
-        if !is_valid_repo_name(repo) {
-            return None;
-        }
-        let path = self.inner.data_dir.join(repo);
-        if !path.starts_with(&self.inner.data_dir) {
-            return None;
-        }
-        if !existing_ancestor_within(&path, &self.inner.data_dir) {
-            return None;
-        }
-        Some(path)
-    }
-
-    /// Resolve a full file path within a repo, ensuring it stays within data_dir.
-    pub fn file_path(&self, repo: &str, key: &str) -> Option<PathBuf> {
+    /// Resolve a full file path within the repo, ensuring it stays within data_dir.
+    pub fn file_path(&self, key: &str) -> Option<PathBuf> {
         if !is_valid_storage_key(key) {
             return None;
         }
-        let repo_dir = self.repo_path(repo)?;
         let trimmed = key.trim_matches('/');
         let path = if trimmed.is_empty() {
-            repo_dir
+            self.inner.data_dir.clone()
         } else {
-            repo_dir.join(trimmed)
+            self.inner.data_dir.join(trimmed)
         };
         if !path.starts_with(&self.inner.data_dir) {
             return None;
@@ -132,52 +159,31 @@ impl AppState {
         Some(path)
     }
 
-    /// Get current quota usage for a repo.
-    pub fn quota_used(&self, repo: &str) -> u64 {
-        read_unpoisoned(&self.inner.quota_usage, "quota_usage")
-            .get(repo)
-            .copied()
-            .unwrap_or(0)
+    /// Get current quota usage.
+    pub fn quota_used(&self) -> u64 {
+        self.inner.quota_usage.load(Ordering::Relaxed)
     }
 
     /// Update quota usage after a write.
-    pub fn add_quota_usage(&self, repo: &str, bytes: u64) {
-        let mut usage = write_unpoisoned(&self.inner.quota_usage, "quota_usage");
-        let entry = usage.entry(repo.to_string()).or_insert(0);
-        *entry += bytes;
+    pub fn add_quota_usage(&self, bytes: u64) {
+        self.inner.quota_usage.fetch_add(bytes, Ordering::Relaxed);
     }
 
     /// Update quota usage after a delete.
-    pub fn sub_quota_usage(&self, repo: &str, bytes: u64) {
-        let mut usage = write_unpoisoned(&self.inner.quota_usage, "quota_usage");
-        if let Some(entry) = usage.get_mut(repo) {
-            *entry = entry.saturating_sub(bytes);
-        }
+    pub fn sub_quota_usage(&self, bytes: u64) {
+        // Use fetch_update for saturating subtraction
+        let _ = self.inner.quota_usage.fetch_update(
+            Ordering::Relaxed,
+            Ordering::Relaxed,
+            |current| Some(current.saturating_sub(bytes)),
+        );
     }
 
     /// Record that a manifest was written (backup completed).
-    pub fn record_backup(&self, repo: &str) {
-        let mut map = write_unpoisoned(&self.inner.last_backup_at, "last_backup_at");
-        map.insert(repo.to_string(), Utc::now());
+    pub fn record_backup(&self) {
+        let mut ts = write_unpoisoned(&self.inner.last_backup_at, "last_backup_at");
+        *ts = Some(Utc::now());
     }
-}
-
-/// Scan the data directory and compute per-repo disk usage.
-fn scan_repo_sizes(data_dir: &Path) -> HashMap<String, u64> {
-    let mut sizes = HashMap::new();
-    let entries = match std::fs::read_dir(data_dir) {
-        Ok(e) => e,
-        Err(_) => return sizes,
-    };
-    for entry in entries.flatten() {
-        if entry.path().is_dir() {
-            if let Some(name) = entry.file_name().to_str() {
-                let size = dir_size(&entry.path());
-                sizes.insert(name.to_string(), size);
-            }
-        }
-    }
-    sizes
 }
 
 fn dir_size(path: &Path) -> u64 {
@@ -193,16 +199,6 @@ fn dir_size(path: &Path) -> u64 {
         }
     }
     total
-}
-
-fn is_valid_repo_name(repo: &str) -> bool {
-    !repo.is_empty()
-        && repo.len() <= 128
-        && repo != "."
-        && repo != ".."
-        && repo
-            .bytes()
-            .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_' || b == b'.')
 }
 
 fn is_valid_storage_key(key: &str) -> bool {
