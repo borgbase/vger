@@ -1,20 +1,20 @@
-use chacha20poly1305::aead::{Aead, AeadInPlace, KeyInit};
-use chacha20poly1305::{ChaCha20Poly1305, Nonce};
+use aes_gcm::aead::{Aead, AeadInPlace, KeyInit};
+use aes_gcm::{Aes256Gcm, Nonce};
 use rand::RngCore;
 
 use super::CryptoEngine;
-use crate::error::{Result, VgerError};
+use vger_types::error::{Result, VgerError};
 
-/// ChaCha20-Poly1305 authenticated encryption engine.
-pub struct ChaCha20Poly1305Engine {
-    cipher: ChaCha20Poly1305,
+/// AES-256-GCM authenticated encryption engine.
+pub struct Aes256GcmEngine {
+    cipher: Aes256Gcm,
     chunk_id_key: [u8; 32],
 }
 
-impl ChaCha20Poly1305Engine {
+impl Aes256GcmEngine {
     pub fn new(encryption_key: &[u8; 32], chunk_id_key: &[u8; 32]) -> Self {
-        let cipher = ChaCha20Poly1305::new_from_slice(encryption_key)
-            .expect("valid 32-byte key for ChaCha20-Poly1305");
+        let cipher =
+            Aes256Gcm::new_from_slice(encryption_key).expect("valid 32-byte key for AES-256-GCM");
         Self {
             cipher,
             chunk_id_key: *chunk_id_key,
@@ -22,21 +22,21 @@ impl ChaCha20Poly1305Engine {
     }
 }
 
-impl CryptoEngine for ChaCha20Poly1305Engine {
+impl CryptoEngine for Aes256GcmEngine {
     fn encrypt(&self, plaintext: &[u8], aad: &[u8]) -> Result<Vec<u8>> {
         let mut rng = rand::thread_rng();
         let mut nonce_bytes = [0u8; 12];
         rng.fill_bytes(&mut nonce_bytes);
         let nonce = Nonce::from_slice(&nonce_bytes);
 
-        let payload = chacha20poly1305::aead::Payload {
+        let payload = aes_gcm::aead::Payload {
             msg: plaintext,
             aad,
         };
         let ciphertext = self
             .cipher
             .encrypt(nonce, payload)
-            .map_err(|e| VgerError::Other(format!("ChaCha20-Poly1305 encrypt: {e}")))?;
+            .map_err(|e| VgerError::Other(format!("AES-GCM encrypt: {e}")))?;
 
         // Wire format: [12-byte nonce][ciphertext with appended 16-byte tag]
         let mut out = Vec::with_capacity(12 + ciphertext.len());
@@ -52,7 +52,7 @@ impl CryptoEngine for ChaCha20Poly1305Engine {
         let (nonce_bytes, ciphertext) = data.split_at(12);
         let nonce = Nonce::from_slice(nonce_bytes);
 
-        let payload = chacha20poly1305::aead::Payload {
+        let payload = aes_gcm::aead::Payload {
             msg: ciphertext,
             aad,
         };
@@ -68,7 +68,7 @@ impl CryptoEngine for ChaCha20Poly1305Engine {
         let (nonce_bytes, ct_and_tag) = data.split_at(12);
         let nonce = Nonce::from_slice(nonce_bytes);
         let (ciphertext, tag_bytes) = ct_and_tag.split_at(ct_and_tag.len() - 16);
-        let tag = chacha20poly1305::Tag::from_slice(tag_bytes);
+        let tag = aes_gcm::Tag::from_slice(tag_bytes);
         output.clear();
         output.extend_from_slice(ciphertext); // reuses existing capacity
         self.cipher
@@ -81,7 +81,7 @@ impl CryptoEngine for ChaCha20Poly1305Engine {
         &self,
         buffer: &mut [u8],
         aad: &[u8],
-    ) -> crate::error::Result<([u8; 12], [u8; 16])> {
+    ) -> Result<([u8; 12], [u8; 16])> {
         let mut rng = rand::thread_rng();
         let mut nonce_bytes = [0u8; 12];
         rng.fill_bytes(&mut nonce_bytes);
@@ -90,7 +90,7 @@ impl CryptoEngine for ChaCha20Poly1305Engine {
         let tag = self
             .cipher
             .encrypt_in_place_detached(nonce, aad, buffer)
-            .map_err(|e| VgerError::Other(format!("ChaCha20-Poly1305 encrypt_in_place: {e}")))?;
+            .map_err(|e| VgerError::Other(format!("AES-GCM encrypt_in_place: {e}")))?;
 
         let mut tag_bytes = [0u8; 16];
         tag_bytes.copy_from_slice(&tag);

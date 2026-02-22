@@ -123,7 +123,7 @@ struct ConfigDocument {
 type RawConfig = ConfigDocument;
 
 /// Expand `${VAR}` and `${VAR:-default}` placeholders in raw config text.
-fn expand_env_placeholders(input: &str, path: &Path) -> crate::error::Result<String> {
+fn expand_env_placeholders(input: &str, path: &Path) -> vger_types::error::Result<String> {
     let mut out = String::with_capacity(input.len());
     let mut cursor = 0usize;
 
@@ -156,7 +156,7 @@ fn resolve_env_token(
     path: &Path,
     input: &str,
     start: usize,
-) -> crate::error::Result<String> {
+) -> vger_types::error::Result<String> {
     if token.is_empty() {
         return Err(config_expand_error(
             path,
@@ -233,9 +233,9 @@ fn config_expand_error(
     input: &str,
     start: usize,
     message: impl fmt::Display,
-) -> crate::error::VgerError {
+) -> vger_types::error::VgerError {
     let (line, column) = byte_offset_to_line_col(input, start);
-    crate::error::VgerError::Config(format!(
+    vger_types::error::VgerError::Config(format!(
         "invalid config '{}': {message} at line {line}, column {column}",
         path.display()
     ))
@@ -266,21 +266,21 @@ pub struct ResolvedRepo {
 }
 
 /// Load and resolve a config file into one `ResolvedRepo` per repository entry.
-pub fn load_and_resolve(path: &Path) -> crate::error::Result<Vec<ResolvedRepo>> {
+pub fn load_and_resolve(path: &Path) -> vger_types::error::Result<Vec<ResolvedRepo>> {
     let contents = std::fs::read_to_string(path).map_err(|e| {
-        crate::error::VgerError::Config(format!("cannot read '{}': {e}", path.display()))
+        vger_types::error::VgerError::Config(format!("cannot read '{}': {e}", path.display()))
     })?;
     let expanded = expand_env_placeholders(&contents, path)?;
     let raw: ConfigDocument = serde_yaml::from_str(&expanded).map_err(|e| {
-        crate::error::VgerError::Config(format!("invalid config '{}': {e}", path.display()))
+        vger_types::error::VgerError::Config(format!("invalid config '{}': {e}", path.display()))
     })?;
 
     resolve_document(raw)
 }
 
-fn resolve_document(mut raw: ConfigDocument) -> crate::error::Result<Vec<ResolvedRepo>> {
+fn resolve_document(mut raw: ConfigDocument) -> vger_types::error::Result<Vec<ResolvedRepo>> {
     if raw.repositories.is_empty() {
-        return Err(crate::error::VgerError::Config(
+        return Err(vger_types::error::VgerError::Config(
             "'repositories:' must not be empty".into(),
         ));
     }
@@ -289,7 +289,7 @@ fn resolve_document(mut raw: ConfigDocument) -> crate::error::Result<Vec<Resolve
     let mut seen = std::collections::HashSet::new();
     for label in raw.repositories.iter().filter_map(|e| e.label.as_deref()) {
         if !seen.insert(label) {
-            return Err(crate::error::VgerError::Config(format!(
+            return Err(vger_types::error::VgerError::Config(format!(
                 "duplicate repository label: '{label}'"
             )));
         }
@@ -324,7 +324,7 @@ fn resolve_document(mut raw: ConfigDocument) -> crate::error::Result<Vec<Resolve
     let mut source_labels = std::collections::HashSet::new();
     for src in &all_sources {
         if !source_labels.insert(&src.label) {
-            return Err(crate::error::VgerError::Config(format!(
+            return Err(vger_types::error::VgerError::Config(format!(
                 "duplicate source label: '{}'",
                 src.label
             )));
@@ -340,7 +340,7 @@ fn resolve_document(mut raw: ConfigDocument) -> crate::error::Result<Vec<Resolve
     for src in &all_sources {
         for repo_ref in &src.repos {
             if !repo_labels.contains(repo_ref.as_str()) {
-                return Err(crate::error::VgerError::Config(format!(
+                return Err(vger_types::error::VgerError::Config(format!(
                     "source '{}' references unknown repository '{repo_ref}'",
                     src.label
                 )));
@@ -554,7 +554,7 @@ pub fn resolve_config_path(cli_config: Option<&str>) -> Option<ConfigSource> {
 #[deprecated(
     note = "prefer load_and_resolve() and explicit repository selection for multi-repo configs"
 )]
-pub fn load_config(path: &Path) -> crate::error::Result<VgerConfig> {
+pub fn load_config(path: &Path) -> vger_types::error::Result<VgerConfig> {
     let repos = load_and_resolve(path)?;
     Ok(repos.into_iter().next().unwrap().config)
 }

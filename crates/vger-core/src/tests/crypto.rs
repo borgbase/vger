@@ -1,7 +1,7 @@
-use crate::crypto::aes_gcm::Aes256GcmEngine;
-use crate::crypto::chacha20_poly1305::ChaCha20Poly1305Engine;
-use crate::crypto::{CryptoEngine, PlaintextEngine};
-use crate::error::VgerError;
+use vger_crypto::aes_gcm::Aes256GcmEngine;
+use vger_crypto::chacha20_poly1305::ChaCha20Poly1305Engine;
+use vger_crypto::{CryptoEngine, PlaintextEngine};
+use vger_types::error::VgerError;
 
 // --- PlaintextEngine tests ---
 

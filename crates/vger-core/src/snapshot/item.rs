@@ -2,7 +2,7 @@ use std::collections::HashMap;
 
 use serde::{Deserialize, Serialize};
 
-use crate::crypto::chunk_id::ChunkId;
+use vger_types::chunk_id::ChunkId;
 
 /// A single filesystem entry stored in a snapshot.
 #[derive(Debug, Clone, Serialize, Deserialize)]

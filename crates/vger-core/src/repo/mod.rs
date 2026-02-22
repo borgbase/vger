@@ -17,14 +17,14 @@ use tracing::{debug, warn};
 
 use crate::compress;
 use crate::config::{ChunkerConfig, RepositoryConfig, DEFAULT_UPLOAD_CONCURRENCY};
-use crate::crypto::chunk_id::ChunkId;
-use crate::crypto::key::{EncryptedKey, MasterKey};
-use crate::crypto::pack_id::PackId;
-use crate::crypto::{self, CryptoEngine, PlaintextEngine};
-use crate::error::{Result, VgerError};
 use crate::index::dedup_cache::{self, TieredDedupIndex};
 use crate::index::{ChunkIndex, DedupIndex, IndexDelta};
-use crate::storage::StorageBackend;
+use vger_crypto::key::{EncryptedKey, MasterKey};
+use vger_crypto::{self as crypto, CryptoEngine, PlaintextEngine};
+use vger_storage::StorageBackend;
+use vger_types::chunk_id::ChunkId;
+use vger_types::error::{Result, VgerError};
+use vger_types::pack_id::PackId;
 
 use self::file_cache::FileCache;
 use self::format::{
@@ -555,7 +555,7 @@ impl Repository {
     /// Does not mark dirty — this is a read-only memory optimization.
     pub fn retain_chunk_index(
         &mut self,
-        needed: &std::collections::HashSet<crate::crypto::chunk_id::ChunkId>,
+        needed: &std::collections::HashSet<vger_types::chunk_id::ChunkId>,
     ) {
         self.chunk_index.retain_chunks(needed);
     }
@@ -937,7 +937,7 @@ impl Repository {
         // Open the newly merged cache for serialization
         let new_cache = dedup_cache::MmapFullIndexCache::open_path(&cache_path, new_gen)
             .ok_or_else(|| {
-                crate::error::VgerError::Other(
+                vger_types::error::VgerError::Other(
                     "failed to open newly merged full index cache".into(),
                 )
             })?;

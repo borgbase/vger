@@ -1,6 +1,6 @@
 use serde::{Deserialize, Serialize};
 
-use crate::error::{Result, VgerError};
+use vger_types::error::{Result, VgerError};
 
 /// Default maximum number of in-flight background pack uploads.
 pub const DEFAULT_UPLOAD_CONCURRENCY: usize = 2;
@@ -51,6 +51,20 @@ pub struct CpuLimitsConfig {
     pub segment_size_mib: Option<usize>,
 }
 
+/// Validate that an `Option<T>` field, if present, falls within an inclusive range.
+macro_rules! validate_range {
+    ($field:expr, $name:expr, $min:expr, $max:expr) => {
+        if let Some(n) = $field {
+            if !($min..=$max).contains(&n) {
+                return Err(VgerError::Config(format!(
+                    "{} must be in [{}, {}], got {n}",
+                    $name, $min, $max
+                )));
+            }
+        }
+    };
+}
+
 impl CpuLimitsConfig {
     fn validate(&self) -> Result<()> {
         if !(-20..=19).contains(&self.nice) {
@@ -59,48 +73,37 @@ impl CpuLimitsConfig {
                 self.nice
             )));
         }
-        if let Some(n) = self.max_upload_concurrency {
-            if !(1..=16).contains(&n) {
-                return Err(VgerError::Config(format!(
-                    "limits.cpu.max_upload_concurrency must be in [1, 16], got {n}"
-                )));
-            }
-        }
-        if let Some(n) = self.transform_batch_mib {
-            if !(4..=256).contains(&n) {
-                return Err(VgerError::Config(format!(
-                    "limits.cpu.transform_batch_mib must be in [4, 256], got {n}"
-                )));
-            }
-        }
-        if let Some(n) = self.transform_batch_chunks {
-            if !(64..=65536).contains(&n) {
-                return Err(VgerError::Config(format!(
-                    "limits.cpu.transform_batch_chunks must be in [64, 65536], got {n}"
-                )));
-            }
-        }
-        if let Some(n) = self.pipeline_depth {
-            if n > 64 {
-                return Err(VgerError::Config(format!(
-                    "limits.cpu.pipeline_depth must be in [0, 64], got {n}"
-                )));
-            }
-        }
-        if let Some(n) = self.pipeline_buffer_mib {
-            if !(32..=1024).contains(&n) {
-                return Err(VgerError::Config(format!(
-                    "limits.cpu.pipeline_buffer_mib must be in [32, 1024], got {n}"
-                )));
-            }
-        }
-        if let Some(n) = self.segment_size_mib {
-            if !(16..=256).contains(&n) {
-                return Err(VgerError::Config(format!(
-                    "limits.cpu.segment_size_mib must be in [16, 256], got {n}"
-                )));
-            }
-        }
+        validate_range!(
+            self.max_upload_concurrency,
+            "limits.cpu.max_upload_concurrency",
+            1,
+            16
+        );
+        validate_range!(
+            self.transform_batch_mib,
+            "limits.cpu.transform_batch_mib",
+            4,
+            256
+        );
+        validate_range!(
+            self.transform_batch_chunks,
+            "limits.cpu.transform_batch_chunks",
+            64,
+            65536
+        );
+        validate_range!(self.pipeline_depth, "limits.cpu.pipeline_depth", 0, 64);
+        validate_range!(
+            self.pipeline_buffer_mib,
+            "limits.cpu.pipeline_buffer_mib",
+            32,
+            1024
+        );
+        validate_range!(
+            self.segment_size_mib,
+            "limits.cpu.segment_size_mib",
+            16,
+            256
+        );
         Ok(())
     }
 

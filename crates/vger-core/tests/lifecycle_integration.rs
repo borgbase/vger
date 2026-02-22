@@ -9,10 +9,10 @@ use vger_core::config::{
     EncryptionModeConfig, RepositoryConfig, ResourceLimitsConfig, RetentionConfig, RetryConfig,
     ScheduleConfig, SourceEntry, SourceHooksConfig, VgerConfig, XattrsConfig,
 };
-use vger_core::error::VgerError;
 use vger_core::repo::lock;
 use vger_core::repo::{EncryptionMode, Repository};
-use vger_core::storage::local_backend::LocalBackend;
+use vger_storage::local_backend::LocalBackend;
+use vger_types::error::VgerError;
 
 static TEST_ENV_INIT: Once = Once::new();
 

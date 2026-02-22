@@ -1,7 +1,7 @@
 use chrono::{Duration, Utc};
 
-use crate::crypto::snapshot_id::SnapshotId;
 use crate::repo::manifest::{Manifest, SnapshotEntry};
+use vger_types::snapshot_id::SnapshotId;
 
 fn make_entry(name: &str) -> SnapshotEntry {
     SnapshotEntry {

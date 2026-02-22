@@ -16,8 +16,8 @@ use tray_icon::{Icon, TrayIconBuilder};
 use vger_core::app::{self, operations, passphrase};
 use vger_core::commands::find::{FileStatus, FindFilter, FindScope};
 use vger_core::config::{self, ResolvedRepo, ScheduleConfig};
-use vger_core::error::VgerError;
 use vger_core::snapshot::item::{Item, ItemType};
+use vger_types::error::VgerError;
 
 // ── Tree view data structures ──
 

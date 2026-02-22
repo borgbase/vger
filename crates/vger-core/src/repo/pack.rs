@@ -7,10 +7,10 @@ use memmap2::MmapMut;
 use tracing::warn;
 
 use crate::config::CHUNK_MAX_SIZE_HARD_CAP;
-use crate::crypto::chunk_id::ChunkId;
-use crate::crypto::pack_id::PackId;
-use crate::error::{Result, VgerError};
-use crate::storage::StorageBackend;
+use vger_storage::StorageBackend;
+use vger_types::chunk_id::ChunkId;
+use vger_types::error::{Result, VgerError};
+use vger_types::pack_id::PackId;
 
 // Re-export pack format constants from vger-protocol.
 pub use vger_protocol::{

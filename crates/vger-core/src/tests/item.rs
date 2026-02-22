@@ -1,5 +1,5 @@
-use crate::crypto::chunk_id::ChunkId;
 use crate::snapshot::item::{ChunkRef, Item, ItemType};
+use vger_types::chunk_id::ChunkId;
 
 fn make_file_item() -> Item {
     Item {

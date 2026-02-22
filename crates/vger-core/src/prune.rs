@@ -3,8 +3,8 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 use chrono::{DateTime, Datelike, IsoWeek, Timelike, Utc};
 
 use crate::config::RetentionConfig;
-use crate::error::{Result, VgerError};
 use crate::repo::manifest::SnapshotEntry;
+use vger_types::error::{Result, VgerError};
 
 #[derive(Debug, Clone)]
 pub enum PruneDecision {

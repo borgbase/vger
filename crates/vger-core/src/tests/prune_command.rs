@@ -2,9 +2,9 @@ use std::time::Duration;
 
 use crate::commands;
 use crate::config::RetentionConfig;
-use crate::error::VgerError;
 use crate::repo::Repository;
-use crate::storage::local_backend::LocalBackend;
+use vger_storage::local_backend::LocalBackend;
+use vger_types::error::VgerError;
 
 use super::helpers::{
     backup_single_source, init_repo, init_test_environment, make_test_config, source_entry,

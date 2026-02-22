@@ -1,7 +1,7 @@
-use crate::crypto::chunk_id::ChunkId;
-use crate::crypto::pack_id::PackId;
 use crate::index::ChunkIndex;
 use crate::testutil::test_chunk_id_key;
+use vger_types::chunk_id::ChunkId;
+use vger_types::pack_id::PackId;
 
 fn make_id(data: &[u8]) -> ChunkId {
     ChunkId::compute(&test_chunk_id_key(), data)

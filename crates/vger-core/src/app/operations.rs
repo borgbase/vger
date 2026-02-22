@@ -3,9 +3,9 @@ use rand::RngCore;
 use crate::commands;
 use crate::compress::Compression;
 use crate::config::{ResolvedRepo, SourceEntry, VgerConfig};
-use crate::error::{Result, VgerError};
 use crate::repo::manifest::SnapshotEntry;
 use crate::snapshot::item::Item;
+use vger_types::error::{Result, VgerError};
 
 #[derive(Debug, Clone)]
 pub struct BackupSourceResult {

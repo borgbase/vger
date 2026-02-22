@@ -1,7 +1,7 @@
 use crate::repo::lock::{acquire_lock, break_lock, release_lock};
-use crate::storage::StorageBackend;
 use crate::testutil::{LockableMemoryBackend, MemoryBackend};
 use chrono::{Duration, Utc};
+use vger_storage::StorageBackend;
 
 #[test]
 fn acquire_and_release_lock() {

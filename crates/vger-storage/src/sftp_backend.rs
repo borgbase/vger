@@ -10,10 +10,10 @@ use russh_sftp::client::SftpSession;
 use russh_sftp::protocol::{OpenFlags, StatusCode};
 use tokio::io::{AsyncReadExt, AsyncSeekExt, AsyncWriteExt};
 
-use crate::config::RetryConfig;
-use crate::error::{Result, VgerError};
-use crate::platform::paths;
-use crate::storage::StorageBackend;
+use crate::paths;
+use crate::RetryConfig;
+use crate::StorageBackend;
+use vger_types::error::{Result, VgerError};
 
 use super::runtime::ASYNC_RUNTIME;
 

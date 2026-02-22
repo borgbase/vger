@@ -1,5 +1,5 @@
 use crate::compress::{compress, decompress, decompress_with_hint, Compression};
-use crate::error::VgerError;
+use vger_types::error::VgerError;
 
 #[test]
 fn roundtrip_none() {

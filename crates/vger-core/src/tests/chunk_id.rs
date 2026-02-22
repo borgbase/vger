@@ -1,5 +1,5 @@
-use crate::crypto::chunk_id::ChunkId;
 use crate::testutil::test_chunk_id_key;
+use vger_types::chunk_id::ChunkId;
 
 #[test]
 fn compute_deterministic() {

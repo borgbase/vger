@@ -4,9 +4,10 @@ use std::time::Duration;
 use rusty_s3::actions::{ListObjectsV2, S3Action};
 use rusty_s3::{Bucket, Credentials, UrlStyle};
 
-use crate::config::RetryConfig;
-use crate::error::{Result, VgerError};
-use crate::storage::StorageBackend;
+use crate::RetryConfig;
+use vger_types::error::{Result, VgerError};
+
+use crate::StorageBackend;
 
 /// Duration for presigned URL validity.
 const PRESIGN_DURATION: Duration = Duration::from_secs(3600);
@@ -81,36 +82,7 @@ impl S3Backend {
         op_name: &str,
         f: impl Fn() -> std::result::Result<T, ureq::Error>,
     ) -> std::result::Result<T, ureq::Error> {
-        let mut delay_ms = self.retry.retry_delay_ms;
-        let mut last_err = None;
-
-        for attempt in 0..=self.retry.max_retries {
-            if attempt > 0 {
-                let jitter = rand::random::<u64>() % delay_ms.max(1);
-                std::thread::sleep(Duration::from_millis(delay_ms + jitter));
-                delay_ms = (delay_ms * 2).min(self.retry.retry_max_delay_ms);
-            }
-            match f() {
-                Ok(val) => return Ok(val),
-                Err(e) if Self::is_retryable(&e) && attempt < self.retry.max_retries => {
-                    tracing::warn!(
-                        "S3 {op_name}: transient error (attempt {}/{}), retrying: {e}",
-                        attempt + 1,
-                        self.retry.max_retries,
-                    );
-                    last_err = Some(e);
-                }
-                Err(e) => return Err(e),
-            }
-        }
-        Err(last_err.unwrap())
-    }
-
-    fn is_retryable(err: &ureq::Error) -> bool {
-        match err {
-            ureq::Error::Transport(_) => true,
-            ureq::Error::Status(code, _) => *code == 429 || *code >= 500,
-        }
+        crate::retry::retry_http(&self.retry, op_name, "S3", f)
     }
 }
 
@@ -186,16 +158,8 @@ impl StorageBackend for S3Backend {
             self.agent.head(url.as_str()).call()
         }) {
             Ok(resp) => {
-                let header = resp.header("Content-Length").ok_or_else(|| {
-                    VgerError::Other(format!(
-                        "S3 HEAD {key}: response missing Content-Length header"
-                    ))
-                })?;
-                let len = header.parse::<u64>().map_err(|_| {
-                    VgerError::Other(format!(
-                        "S3 HEAD {key}: invalid Content-Length header: {header}"
-                    ))
-                })?;
+                let len =
+                    crate::http_util::extract_content_length(&resp, &format!("S3 HEAD {key}"))?;
                 Ok(Some(len))
             }
             Err(ureq::Error::Status(404, _)) => Ok(None),

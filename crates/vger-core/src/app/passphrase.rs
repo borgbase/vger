@@ -4,8 +4,8 @@ use std::time::Duration;
 use zeroize::{Zeroize, Zeroizing};
 
 use crate::config::{EncryptionModeConfig, VgerConfig};
-use crate::error::{Result, VgerError};
 use crate::platform::shell;
+use vger_types::error::{Result, VgerError};
 
 /// Default timeout for passcommand execution (60 seconds).
 const PASSCOMMAND_TIMEOUT: Duration = Duration::from_secs(60);

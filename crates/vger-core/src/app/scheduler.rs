@@ -3,7 +3,7 @@ use std::time::{Duration, Instant};
 use rand::Rng;
 
 use crate::config::ScheduleConfig;
-use crate::error::Result;
+use vger_types::error::Result;
 
 pub fn schedule_interval(schedule: &ScheduleConfig) -> Result<Duration> {
     schedule.every_duration()

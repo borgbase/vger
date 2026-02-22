@@ -6,10 +6,7 @@ use crate::testutil::test_repo_plaintext;
 /// Helper: store two distinct chunks and flush, returning their chunk IDs.
 fn store_two_chunks(
     repo: &mut crate::repo::Repository,
-) -> (
-    crate::crypto::chunk_id::ChunkId,
-    crate::crypto::chunk_id::ChunkId,
-) {
+) -> (vger_types::chunk_id::ChunkId, vger_types::chunk_id::ChunkId) {
     let (id_a, _, _) = repo
         .store_chunk(
             b"chunk-a-data-for-compact-test",

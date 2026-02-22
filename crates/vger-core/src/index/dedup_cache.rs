@@ -7,11 +7,11 @@ use memmap2::Mmap;
 use tracing::{debug, warn};
 use xorf::{Filter, Xor8};
 
-use crate::crypto::chunk_id::ChunkId;
-use crate::crypto::pack_id::PackId;
-use crate::error::Result;
 use crate::index::{ChunkIndex, ChunkIndexEntry, IndexDelta};
 use crate::repo::file_cache::repo_cache_dir;
+use vger_types::chunk_id::ChunkId;
+use vger_types::error::Result;
+use vger_types::pack_id::PackId;
 
 /// Magic bytes at the start of the dedup cache file.
 const MAGIC: &[u8; 8] = b"VGDEDUP\0";
@@ -895,14 +895,14 @@ pub fn load_chunk_index_from_full_cache(
     cache_dir: Option<&Path>,
 ) -> Result<ChunkIndex> {
     let path = full_index_cache_path(repo_id, cache_dir)
-        .ok_or_else(|| crate::error::VgerError::Other("no cache dir available".into()))?;
+        .ok_or_else(|| vger_types::error::VgerError::Other("no cache dir available".into()))?;
     load_chunk_index_from_full_cache_path(&path, generation)
 }
 
 /// Load a ChunkIndex from an explicit path (used by tests).
 pub fn load_chunk_index_from_full_cache_path(path: &Path, generation: u64) -> Result<ChunkIndex> {
     let cache = MmapFullIndexCache::open_path(path, generation).ok_or_else(|| {
-        crate::error::VgerError::Other("full index cache not found or stale".into())
+        vger_types::error::VgerError::Other("full index cache not found or stale".into())
     })?;
 
     let mut index = ChunkIndex::with_capacity(cache.entry_count() as usize);
@@ -980,7 +980,7 @@ impl<'a> serde::Serialize for FullCacheSerializable<'a> {
 /// Returns a single Vec suitable for upload as the "index" key.
 pub fn serialize_full_cache_to_packed_object(
     cache: &MmapFullIndexCache,
-    crypto: &dyn crate::crypto::CryptoEngine,
+    crypto: &dyn vger_crypto::CryptoEngine,
 ) -> Result<Vec<u8>> {
     // Estimate: ~86 bytes/entry for msgpack (ChunkId newtype + struct fields)
     let estimated = cache.entry_count() as usize * 86;
@@ -993,7 +993,7 @@ pub fn serialize_full_cache_to_packed_object(
         crypto,
         |buf| {
             rmp_serde::encode::write(buf, &serializable)
-                .map_err(crate::error::VgerError::Serialization)?;
+                .map_err(vger_types::error::VgerError::Serialization)?;
             Ok(())
         },
     )
@@ -1018,7 +1018,7 @@ pub fn build_dedup_cache_from_full_cache(
     }
 
     let cache = MmapFullIndexCache::open_path(full_cache_path, generation).ok_or_else(|| {
-        crate::error::VgerError::Other("full index cache not found or stale".into())
+        vger_types::error::VgerError::Other("full index cache not found or stale".into())
     })?;
 
     let entry_count = cache.entry_count();
@@ -1066,7 +1066,7 @@ pub fn build_restore_cache_from_full_cache(
     }
 
     let cache = MmapFullIndexCache::open_path(full_cache_path, generation).ok_or_else(|| {
-        crate::error::VgerError::Other("full index cache not found or stale".into())
+        vger_types::error::VgerError::Other("full index cache not found or stale".into())
     })?;
 
     let entry_count = cache.entry_count();
@@ -1128,7 +1128,7 @@ mod tests {
         let path = dir.path().join("dedup_cache");
 
         let mut index = ChunkIndex::new();
-        let pack_id = crate::crypto::pack_id::PackId([0x01; 32]);
+        let pack_id = vger_types::pack_id::PackId([0x01; 32]);
 
         // Insert some test entries
         for i in 0u8..10 {
@@ -1193,7 +1193,7 @@ mod tests {
         let path = dir.path().join("dedup_cache");
 
         let mut index = ChunkIndex::new();
-        let pack_id = crate::crypto::pack_id::PackId([0x01; 32]);
+        let pack_id = vger_types::pack_id::PackId([0x01; 32]);
         let chunk_id = ChunkId([0xAA; 32]);
         index.add(chunk_id, 100, pack_id, 0);
 
@@ -1433,7 +1433,7 @@ mod tests {
         let cache = MmapFullIndexCache::open_path(&path, gen).unwrap();
 
         // Serialize via streaming using plaintext engine
-        let engine = crate::crypto::PlaintextEngine::new(&[0xAA; 32]);
+        let engine = vger_crypto::PlaintextEngine::new(&[0xAA; 32]);
         let packed = serialize_full_cache_to_packed_object(&cache, &engine).unwrap();
 
         // Decrypt (plaintext) and deserialize

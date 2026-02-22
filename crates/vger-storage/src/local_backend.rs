@@ -2,8 +2,9 @@ use std::fs;
 use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::{Component, Path, PathBuf};
 
-use crate::error::{Result, VgerError};
-use crate::storage::StorageBackend;
+use vger_types::error::{Result, VgerError};
+
+use crate::StorageBackend;
 
 /// Storage backend for local filesystem using `std::fs` directly.
 pub struct LocalBackend {

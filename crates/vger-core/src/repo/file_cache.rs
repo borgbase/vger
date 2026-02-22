@@ -6,10 +6,10 @@ use blake2::Blake2bVar;
 use serde::{Deserialize, Serialize};
 use tracing::debug;
 
-use crate::crypto::CryptoEngine;
-use crate::error::{Result, VgerError};
 use crate::platform::paths;
 use crate::snapshot::item::ChunkRef;
+use vger_crypto::CryptoEngine;
+use vger_types::error::{Result, VgerError};
 
 use super::format::{
     pack_object_streaming_with_context, unpack_object_expect_with_context, ObjectType,
@@ -150,7 +150,7 @@ impl FileCache {
     /// to guarantee that every ChunkRef in every surviving entry is valid.
     pub fn prune_stale_entries(
         &mut self,
-        chunk_exists: &dyn Fn(&crate::crypto::chunk_id::ChunkId) -> bool,
+        chunk_exists: &dyn Fn(&vger_types::chunk_id::ChunkId) -> bool,
     ) -> usize {
         let before = self.entries.len();
         self.entries
@@ -372,7 +372,7 @@ impl<'de> Deserialize<'de> for PathHashKey {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::crypto::chunk_id::ChunkId;
+    use vger_types::chunk_id::ChunkId;
 
     fn sample_chunk_refs() -> Vec<ChunkRef> {
         vec![ChunkRef {

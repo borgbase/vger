@@ -5,15 +5,13 @@ use crate::commands;
 use crate::commands::check::{
     process_verify_response, try_server_verify, verify_pack_full, CheckError, ServerVerifyOutcome,
 };
-use crate::crypto::chunk_id::ChunkId;
-use crate::crypto::pack_id::PackId;
-use crate::error::{Result, VgerError};
 use crate::index::ChunkIndexEntry;
 use crate::repo::Repository;
-use crate::storage::local_backend::LocalBackend;
-use crate::storage::{
-    StorageBackend, VerifyPackResult, VerifyPacksPlanRequest, VerifyPacksResponse,
-};
+use vger_storage::local_backend::LocalBackend;
+use vger_storage::{StorageBackend, VerifyPackResult, VerifyPacksPlanRequest, VerifyPacksResponse};
+use vger_types::chunk_id::ChunkId;
+use vger_types::error::{Result, VgerError};
+use vger_types::pack_id::PackId;
 
 use super::helpers::{backup_single_source, init_repo, init_test_environment};
 
@@ -362,7 +360,7 @@ fn test_verify_pack_full_overflow_offset() {
     init_test_environment();
     let storage =
         LocalBackend::new(&tempfile::tempdir().unwrap().path().to_string_lossy()).unwrap();
-    let crypto = crate::crypto::PlaintextEngine::new(&[0u8; 32]);
+    let crypto = vger_crypto::PlaintextEngine::new(&[0u8; 32]);
     let chunk_id_key = [0u8; 32];
     let pack_id = PackId([0u8; 32]);
 
@@ -404,7 +402,7 @@ fn test_verify_pack_full_overflow_add() {
     init_test_environment();
     let storage =
         LocalBackend::new(&tempfile::tempdir().unwrap().path().to_string_lossy()).unwrap();
-    let crypto = crate::crypto::PlaintextEngine::new(&[0u8; 32]);
+    let crypto = vger_crypto::PlaintextEngine::new(&[0u8; 32]);
     let chunk_id_key = [0u8; 32];
     let pack_id = PackId([0u8; 32]);
 

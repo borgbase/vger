@@ -1,6 +1,6 @@
-use crate::crypto::chunk_id::ChunkId;
-use crate::error::Result;
 use crate::repo::Repository;
+use vger_types::chunk_id::ChunkId;
+use vger_types::error::Result;
 
 use super::list;
 

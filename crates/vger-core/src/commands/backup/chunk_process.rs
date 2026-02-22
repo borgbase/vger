@@ -1,8 +1,8 @@
 use crate::compress::{compress_append, compressed_size_bound, Compression};
-use crate::crypto::chunk_id::ChunkId;
-use crate::crypto::CryptoEngine;
-use crate::error::Result;
 use crate::repo::format::{pack_object_streaming_with_context, ObjectType};
+use vger_crypto::CryptoEngine;
+use vger_types::chunk_id::ChunkId;
+use vger_types::error::Result;
 
 pub(crate) struct PreparedChunk {
     pub(crate) chunk_id: ChunkId,
@@ -72,8 +72,8 @@ fn pack_chunk_data(
 mod tests {
     use super::*;
     use crate::compress::decompress;
-    use crate::crypto::PlaintextEngine;
     use crate::repo::format::unpack_object_expect_with_context;
+    use vger_crypto::PlaintextEngine;
 
     /// Verify pack_chunk_data output can be unpacked and decompressed to the
     /// original data — i.e., it's wire-compatible with the old
@@ -141,7 +141,7 @@ mod tests {
     /// wrong context is rejected.
     #[test]
     fn pack_chunk_data_aes_gcm_roundtrip_and_context_binding() {
-        use crate::crypto::aes_gcm::Aes256GcmEngine;
+        use vger_crypto::aes_gcm::Aes256GcmEngine;
 
         let enc_key = [0x11; 32];
         let cid_key = [0x22; 32];

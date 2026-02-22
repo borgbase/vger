@@ -9,11 +9,11 @@ use nix::errno::Errno;
 use tracing::warn;
 
 use crate::config::ResourceLimitsConfig;
-use crate::error::{Result, VgerError};
-use crate::storage::{
+use vger_storage::{
     parse_repo_url, BackendLockInfo, ParsedUrl, RepackPlanRequest, RepackResultResponse,
     StorageBackend,
 };
+use vger_types::error::{Result, VgerError};
 
 // ── Rate limiting runtime ────────────────────────────────────────────────────
 

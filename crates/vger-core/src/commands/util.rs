@@ -1,10 +1,10 @@
 use std::path::PathBuf;
 
 use crate::config::VgerConfig;
-use crate::error::Result;
 use crate::repo::lock;
 use crate::repo::Repository;
 use crate::storage;
+use vger_types::error::Result;
 
 /// Extract the cache_dir override from config as a PathBuf.
 pub(crate) fn cache_dir_from_config(config: &VgerConfig) -> Option<PathBuf> {

@@ -4,7 +4,7 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
 use crate::config::ChunkerConfig;
-use crate::crypto::chunk_id::ChunkId;
+use vger_types::chunk_id::ChunkId;
 
 /// Metadata for a single snapshot, stored at `snapshots/<id>`.
 #[derive(Debug, Clone, Serialize, Deserialize)]

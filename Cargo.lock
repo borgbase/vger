@@ -6957,6 +6957,8 @@ dependencies = [
  "tracing",
  "tracing-subscriber",
  "vger-core",
+ "vger-storage",
+ "vger-types",
  "windows-sys 0.59.0",
  "zeroize",
 ]
@@ -6965,11 +6967,8 @@ dependencies = [
 name = "vger-core"
 version = "0.7.1"
 dependencies = [
- "aes-gcm",
- "argon2",
  "blake2",
  "bytes",
- "chacha20poly1305",
  "chrono",
  "crossbeam-channel",
  "dav-server",
@@ -6989,9 +6988,6 @@ dependencies = [
  "rayon",
  "rmp",
  "rmp-serde",
- "russh",
- "russh-sftp",
- "rusty-s3",
  "serde",
  "serde_json",
  "serde_yaml",
@@ -7000,13 +6996,29 @@ dependencies = [
  "thiserror 2.0.18",
  "tokio",
  "tracing",
- "ureq",
- "url",
+ "vger-crypto",
  "vger-protocol",
+ "vger-storage",
+ "vger-types",
  "xattr",
  "xorf",
  "zeroize",
  "zstd",
+]
+
+[[package]]
+name = "vger-crypto"
+version = "0.7.1"
+dependencies = [
+ "aes-gcm",
+ "argon2",
+ "blake2",
+ "chacha20poly1305",
+ "rand",
+ "rmp-serde",
+ "serde",
+ "vger-types",
+ "zeroize",
 ]
 
 [[package]]
@@ -7021,6 +7033,7 @@ dependencies = [
  "tinyfiledialogs",
  "tray-icon",
  "vger-core",
+ "vger-types",
  "zeroize",
 ]
 
@@ -7053,6 +7066,40 @@ dependencies = [
  "tracing",
  "tracing-subscriber",
  "vger-protocol",
+]
+
+[[package]]
+name = "vger-storage"
+version = "0.7.1"
+dependencies = [
+ "blake2",
+ "hex",
+ "nix 0.29.0",
+ "rand",
+ "russh",
+ "russh-sftp",
+ "rusty-s3",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "tokio",
+ "tracing",
+ "ureq",
+ "url",
+ "vger-protocol",
+ "vger-types",
+]
+
+[[package]]
+name = "vger-types"
+version = "0.7.1"
+dependencies = [
+ "blake2",
+ "hex",
+ "rand",
+ "rmp-serde",
+ "serde",
+ "thiserror 2.0.18",
 ]
 
 [[package]]

@@ -4,9 +4,10 @@ use std::time::Duration;
 use blake2::digest::{Update, VariableOutput};
 use blake2::Blake2bVar;
 
-use crate::config::RetryConfig;
-use crate::error::{Result, VgerError};
-use crate::storage::{
+use crate::RetryConfig;
+use vger_types::error::{Result, VgerError};
+
+use crate::{
     BackendLockInfo, RepackPlanRequest, RepackResultResponse, StorageBackend,
     VerifyPacksPlanRequest, VerifyPacksResponse,
 };
@@ -58,36 +59,7 @@ impl RestBackend {
         op_name: &str,
         f: impl Fn() -> std::result::Result<T, ureq::Error>,
     ) -> std::result::Result<T, ureq::Error> {
-        let mut delay_ms = self.retry.retry_delay_ms;
-        let mut last_err = None;
-
-        for attempt in 0..=self.retry.max_retries {
-            if attempt > 0 {
-                let jitter = rand::random::<u64>() % delay_ms.max(1);
-                std::thread::sleep(Duration::from_millis(delay_ms + jitter));
-                delay_ms = (delay_ms * 2).min(self.retry.retry_max_delay_ms);
-            }
-            match f() {
-                Ok(val) => return Ok(val),
-                Err(e) if Self::is_retryable(&e) && attempt < self.retry.max_retries => {
-                    tracing::warn!(
-                        "REST {op_name}: transient error (attempt {}/{}), retrying: {e}",
-                        attempt + 1,
-                        self.retry.max_retries,
-                    );
-                    last_err = Some(e);
-                }
-                Err(e) => return Err(e),
-            }
-        }
-        Err(last_err.unwrap())
-    }
-
-    fn is_retryable(err: &ureq::Error) -> bool {
-        match err {
-            ureq::Error::Transport(_) => true,
-            ureq::Error::Status(code, _) => *code == 429 || *code >= 500,
-        }
+        crate::retry::retry_http(&self.retry, op_name, "REST", f)
     }
 
     /// Batch delete multiple keys in a single request.
@@ -348,16 +320,8 @@ impl StorageBackend for RestBackend {
             req.call()
         }) {
             Ok(resp) => {
-                let header = resp.header("Content-Length").ok_or_else(|| {
-                    VgerError::Other(format!(
-                        "REST HEAD {key}: response missing Content-Length header"
-                    ))
-                })?;
-                let len = header.parse::<u64>().map_err(|_| {
-                    VgerError::Other(format!(
-                        "REST HEAD {key}: invalid Content-Length header: {header}"
-                    ))
-                })?;
+                let len =
+                    crate::http_util::extract_content_length(&resp, &format!("REST HEAD {key}"))?;
                 Ok(Some(len))
             }
             Err(ureq::Error::Status(404, _)) => Ok(None),
@@ -488,13 +452,9 @@ impl StorageBackend for RestBackend {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::RetryConfig;
+    use crate::RetryConfig;
     use std::io::{BufRead, BufReader, Write};
     use std::net::TcpListener;
-
-    // -----------------------------------------------------------------------
-    // validate_content_range unit tests
-    // -----------------------------------------------------------------------
 
     #[test]
     fn validate_content_range_accepts_valid_header() {
@@ -541,10 +501,6 @@ mod tests {
             .to_string();
         assert!(err.contains("malformed Content-Range"), "got: {err}");
     }
-
-    // -----------------------------------------------------------------------
-    // Mock-server integration tests for get_range status/header validation
-    // -----------------------------------------------------------------------
 
     /// Spin up a TCP listener that responds with a canned HTTP response to
     /// the first request, then return the listener's URL and a join handle.
@@ -621,10 +577,6 @@ mod tests {
         handle.join().unwrap();
     }
 
-    // -----------------------------------------------------------------------
-    // try_extract_pack_hex / compute_blake2b_256_hex unit tests
-    // -----------------------------------------------------------------------
-
     #[test]
     fn extract_pack_hex_returns_hex_for_pack_key() {
         let hex = "ab".to_string() + &"cd".repeat(31);
@@ -647,7 +599,7 @@ mod tests {
 
     #[test]
     fn compute_blake2b_matches_pack_id() {
-        use crate::crypto::pack_id::PackId;
+        use vger_types::pack_id::PackId;
         let data = b"hello world test data for blake2b verification";
         let pack_id = PackId::compute(data);
         let computed = RestBackend::compute_blake2b_256_hex(data);

@@ -4,7 +4,7 @@ use std::time::Duration;
 
 use tempfile::TempDir;
 use vger_core::repo::Repository;
-use vger_core::storage::local_backend::LocalBackend;
+use vger_storage::local_backend::LocalBackend;
 
 struct CliFixture {
     _tmp: TempDir,

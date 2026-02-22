@@ -4,9 +4,9 @@ use chrono::{DateTime, Utc};
 use globset::GlobMatcher;
 
 use crate::config::VgerConfig;
-use crate::crypto::chunk_id::ChunkId;
-use crate::error::Result;
 use crate::snapshot::item::{Item, ItemType};
+use vger_types::chunk_id::ChunkId;
+use vger_types::error::Result;
 
 use super::list;
 use super::util::open_repo;

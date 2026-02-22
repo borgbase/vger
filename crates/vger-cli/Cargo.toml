@@ -13,6 +13,8 @@ workspace = true
 
 [dependencies]
 vger-core = { workspace = true, features = ["mount", "backend-sftp"] }
+vger-types.workspace = true
+vger-storage.workspace = true
 clap.workspace = true
 serde.workspace = true
 serde_yaml.workspace = true

@@ -38,18 +38,6 @@ pub(super) fn default_allow_insecure_http() -> bool {
     false
 }
 
-pub(super) fn default_max_retries() -> usize {
-    3
-}
-
-pub(super) fn default_retry_delay_ms() -> u64 {
-    1000
-}
-
-pub(super) fn default_retry_max_delay_ms() -> u64 {
-    60_000
-}
-
 pub(super) fn default_one_file_system() -> bool {
     false
 }
@@ -71,10 +59,10 @@ pub(super) fn default_passphrase_prompt_timeout_seconds() -> u64 {
 }
 
 /// Parse a simple duration string like "30m", "4h", or "2d".
-pub fn parse_human_duration(raw: &str) -> crate::error::Result<Duration> {
+pub fn parse_human_duration(raw: &str) -> vger_types::error::Result<Duration> {
     let input = raw.trim();
     if input.is_empty() {
-        return Err(crate::error::VgerError::Config(
+        return Err(vger_types::error::VgerError::Config(
             "duration must not be empty".into(),
         ));
     }
@@ -83,22 +71,22 @@ pub fn parse_human_duration(raw: &str) -> crate::error::Result<Duration> {
         Some(c) if c.is_ascii_alphabetic() => (&input[..input.len() - 1], Some(c)),
         Some(_) => (input, None),
         None => {
-            return Err(crate::error::VgerError::Config(
+            return Err(vger_types::error::VgerError::Config(
                 "duration must not be empty".into(),
             ));
         }
     };
 
-    let value: u64 = num_part
-        .parse()
-        .map_err(|_| crate::error::VgerError::Config(format!("invalid duration value: '{raw}'")))?;
+    let value: u64 = num_part.parse().map_err(|_| {
+        vger_types::error::VgerError::Config(format!("invalid duration value: '{raw}'"))
+    })?;
 
     let secs = match unit {
         Some('m') | Some('M') => value.saturating_mul(60),
         Some('h') | Some('H') => value.saturating_mul(60 * 60),
         Some('d') | Some('D') => value.saturating_mul(60 * 60 * 24),
         Some(other) => {
-            return Err(crate::error::VgerError::Config(format!(
+            return Err(vger_types::error::VgerError::Config(format!(
                 "unsupported duration suffix '{other}' in '{raw}' (use m/h/d)"
             )));
         }
@@ -106,7 +94,7 @@ pub fn parse_human_duration(raw: &str) -> crate::error::Result<Duration> {
     };
 
     if secs == 0 {
-        return Err(crate::error::VgerError::Config(
+        return Err(vger_types::error::VgerError::Config(
             "duration must be greater than zero".into(),
         ));
     }

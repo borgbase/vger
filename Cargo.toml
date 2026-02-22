@@ -1,5 +1,8 @@
 [workspace]
 members = [
+    "crates/vger-types",
+    "crates/vger-crypto",
+    "crates/vger-storage",
     "crates/vger-core",
     "crates/vger-cli",
     "crates/vger-server",
@@ -10,6 +13,9 @@ resolver = "2"
 
 [workspace.dependencies]
 # Internal crates
+vger-types = { path = "crates/vger-types" }
+vger-crypto = { path = "crates/vger-crypto" }
+vger-storage = { path = "crates/vger-storage" }
 vger-core = { path = "crates/vger-core" }
 vger-protocol = { path = "crates/vger-protocol" }
 
@@ -17,6 +23,10 @@ vger-protocol = { path = "crates/vger-protocol" }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 serde_yaml = "0.9"
+rmp-serde = "1"
+
+# Error handling
+thiserror = "2"
 
 # Crypto
 blake2 = "0.10"

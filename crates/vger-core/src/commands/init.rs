@@ -1,8 +1,8 @@
 use crate::config::{EncryptionModeConfig, VgerConfig};
-use crate::crypto::select::{self, AutoAeadMode};
-use crate::error::Result;
 use crate::repo::{EncryptionMode, Repository};
 use crate::storage;
+use vger_crypto::select::{self, AutoAeadMode};
+use vger_types::error::Result;
 
 /// Run `vger init`.
 pub fn run(config: &VgerConfig, passphrase: Option<&str>) -> Result<Repository> {

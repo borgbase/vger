@@ -4,8 +4,8 @@ use chrono::Utc;
 use tracing::warn;
 
 use crate::config::{RetentionConfig, SourceEntry, VgerConfig};
-use crate::error::{Result, VgerError};
 use crate::prune::{apply_policy, apply_policy_by_label, PruneDecision};
+use vger_types::error::{Result, VgerError};
 
 use super::list::{load_snapshot_item_stream, load_snapshot_meta};
 use super::snapshot_ops::decrement_snapshot_chunk_refs;

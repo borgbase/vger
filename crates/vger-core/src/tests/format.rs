@@ -1,11 +1,11 @@
-use crate::crypto::aes_gcm::Aes256GcmEngine;
-use crate::crypto::PlaintextEngine;
-use crate::error::VgerError;
 use crate::repo::format::{
     pack_object, pack_object_streaming, pack_object_with_context, unpack_object,
     unpack_object_expect, unpack_object_expect_with_context, unpack_object_with_context,
     ObjectType,
 };
+use vger_crypto::aes_gcm::Aes256GcmEngine;
+use vger_crypto::PlaintextEngine;
+use vger_types::error::VgerError;
 
 #[test]
 fn roundtrip_plaintext() {

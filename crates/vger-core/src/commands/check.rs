@@ -4,20 +4,20 @@ use std::sync::{Arc, Mutex};
 
 use crate::compress;
 use crate::config::VgerConfig;
-use crate::crypto::chunk_id::ChunkId;
-use crate::crypto::pack_id::PackId;
-use crate::crypto::CryptoEngine;
-use crate::error::{Result, VgerError};
 use crate::index::ChunkIndexEntry;
 use crate::repo::format::{unpack_object_expect_with_context, ObjectType};
 use crate::repo::pack::{
     read_blob_from_pack, PACK_HEADER_SIZE, PACK_MAGIC, PACK_VERSION_MAX, PACK_VERSION_MIN,
 };
 use crate::snapshot::item::ItemType;
-use crate::storage::{
+use vger_crypto::CryptoEngine;
+use vger_storage::{
     StorageBackend, VerifyBlobRef, VerifyPackRequest, VerifyPacksPlanRequest, VerifyPacksResponse,
     PROTOCOL_VERSION,
 };
+use vger_types::chunk_id::ChunkId;
+use vger_types::error::{Result, VgerError};
+use vger_types::pack_id::PackId;
 
 use super::list::{for_each_decoded_item, load_snapshot_item_stream, load_snapshot_meta};
 use super::util::open_repo;
@@ -143,10 +143,10 @@ pub fn run_with_progress(
 
     // Detect if this is a remote backend (REST/S3/SFTP) for concurrency tuning.
     let is_remote = matches!(
-        crate::storage::parse_repo_url(&config.repository.url),
-        Ok(crate::storage::ParsedUrl::Rest { .. }
-            | crate::storage::ParsedUrl::S3 { .. }
-            | crate::storage::ParsedUrl::Sftp { .. })
+        vger_storage::parse_repo_url(&config.repository.url),
+        Ok(vger_storage::ParsedUrl::Rest { .. }
+            | vger_storage::ParsedUrl::S3 { .. }
+            | vger_storage::ParsedUrl::Sftp { .. })
     );
     let concurrency = if is_remote {
         REMOTE_CONCURRENCY

@@ -5,7 +5,7 @@ use rand::RngCore;
 use serde::{Deserialize, Serialize};
 use zeroize::{Zeroize, ZeroizeOnDrop, Zeroizing};
 
-use crate::error::{Result, VgerError};
+use vger_types::error::{Result, VgerError};
 
 /// The master key material — never stored in plaintext on disk.
 /// Automatically zeroized on drop to prevent key material from lingering in memory.

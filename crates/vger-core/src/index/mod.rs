@@ -7,8 +7,8 @@ use serde::{Deserialize, Serialize};
 use tracing::debug;
 use xorf::Xor8;
 
-use crate::crypto::chunk_id::ChunkId;
-use crate::crypto::pack_id::PackId;
+use vger_types::chunk_id::ChunkId;
+use vger_types::pack_id::PackId;
 
 /// In-memory index of all chunks in the repository.
 /// Maps chunk_id -> (refcount, stored_size, pack_id, pack_offset).

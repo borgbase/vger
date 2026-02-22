@@ -1,5 +1,5 @@
-use crate::crypto::CryptoEngine;
-use crate::error::{Result, VgerError};
+use vger_crypto::CryptoEngine;
+use vger_types::error::{Result, VgerError};
 
 /// Domain-separation marker for object identity binding in AEAD AAD.
 const OBJECT_CONTEXT_AAD_PREFIX: &[u8] = b"vger:object-context:v1\0";

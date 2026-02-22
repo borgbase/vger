@@ -6,10 +6,10 @@ use ignore::WalkBuilder;
 use tracing::warn;
 
 use crate::config::ChunkerConfig;
-use crate::error::{Result, VgerError};
 use crate::platform::fs;
 use crate::repo::file_cache::FileCache;
 use crate::snapshot::item::{ChunkRef, Item, ItemType};
+use vger_types::error::{Result, VgerError};
 
 use super::concurrency::ByteBudget;
 

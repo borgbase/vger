@@ -1,8 +1,8 @@
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
-use crate::crypto::snapshot_id::SnapshotId;
-use crate::error::{Result, VgerError};
+use vger_types::error::{Result, VgerError};
+use vger_types::snapshot_id::SnapshotId;
 
 /// The manifest — list of all snapshots in the repository.
 /// Stored encrypted at the `manifest` key.

@@ -1,6 +1,6 @@
 use crate::app::operations::{run_backup_for_all_repos, run_backup_for_repo};
 use crate::config::{HooksConfig, ResolvedRepo};
-use crate::error::VgerError;
+use vger_types::error::VgerError;
 
 use super::helpers::{init_repo, source_entry};
 
@@ -30,7 +30,7 @@ fn run_backup_for_all_repos_propagates_passphrase_lookup_errors() {
         sources: Vec::new(),
     }];
 
-    let mut lookup = |_repo: &ResolvedRepo| -> crate::error::Result<Option<String>> {
+    let mut lookup = |_repo: &ResolvedRepo| -> vger_types::error::Result<Option<String>> {
         Err(VgerError::Other("lookup failed".into()))
     };
 

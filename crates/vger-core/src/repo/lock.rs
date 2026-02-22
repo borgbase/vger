@@ -1,8 +1,8 @@
 use chrono::{Duration, Utc};
 use serde::{Deserialize, Serialize};
 
-use crate::error::{Result, VgerError};
-use crate::storage::{BackendLockInfo, StorageBackend};
+use vger_storage::{BackendLockInfo, StorageBackend};
+use vger_types::error::{Result, VgerError};
 
 /// A simple advisory lock stored in `locks/<uuid>.json`.
 #[derive(Debug, Serialize, Deserialize)]
@@ -74,7 +74,7 @@ pub fn acquire_lock(storage: &dyn StorageBackend) -> Result<LockGuard> {
     let ts = now.timestamp_micros();
     let key = format!("{LOCKS_PREFIX}{ts:020}-{uuid}.json");
     let data = serde_json::to_vec(&entry)
-        .map_err(|e| crate::error::VgerError::Other(format!("lock serialize: {e}")))?;
+        .map_err(|e| vger_types::error::VgerError::Other(format!("lock serialize: {e}")))?;
 
     storage.put(&key, &data)?;
 

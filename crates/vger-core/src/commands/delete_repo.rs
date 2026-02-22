@@ -3,8 +3,9 @@ use std::path::Path;
 use tracing::info;
 
 use crate::config::VgerConfig;
-use crate::error::{Result, VgerError};
-use crate::storage::{backend_from_config, parse_repo_url, ParsedUrl};
+use crate::storage::backend_from_config;
+use vger_storage::{parse_repo_url, ParsedUrl};
+use vger_types::error::{Result, VgerError};
 
 const KNOWN_ROOT_FILES: &[&str] = &["config", "manifest", "index"];
 const KNOWN_DIR_PREFIXES: &[&str] = &["keys/", "snapshots/", "packs/", "locks/"];

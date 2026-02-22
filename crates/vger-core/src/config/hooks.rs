@@ -3,7 +3,7 @@ use std::collections::HashMap;
 use serde::{Deserialize, Serialize};
 
 use super::deserialize::{deserialize_strict_hooks_map, deserialize_string_or_vec};
-use crate::error::{Result, VgerError};
+use vger_types::error::{Result, VgerError};
 
 /// Valid hook prefixes.
 const HOOK_PREFIXES: &[&str] = &["before", "after", "failed", "finally"];

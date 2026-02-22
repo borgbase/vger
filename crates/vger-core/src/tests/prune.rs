@@ -1,9 +1,9 @@
 use chrono::{Duration, Utc};
 
 use crate::config::RetentionConfig;
-use crate::crypto::snapshot_id::SnapshotId;
 use crate::prune::{apply_policy, parse_duration, PruneDecision};
 use crate::repo::manifest::SnapshotEntry;
+use vger_types::snapshot_id::SnapshotId;
 
 #[test]
 fn parse_duration_days() {

@@ -4,9 +4,9 @@ use std::sync::{Arc, Mutex};
 
 use crate::commands::util::with_repo_lock;
 use crate::config::ChunkerConfig;
-use crate::error::{Result, VgerError};
 use crate::repo::{EncryptionMode, Repository};
-use crate::storage::{BackendLockInfo, StorageBackend};
+use vger_storage::{BackendLockInfo, StorageBackend};
+use vger_types::error::{Result, VgerError};
 
 #[derive(Clone)]
 struct AdvisoryLockBackend {

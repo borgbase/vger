@@ -3,8 +3,6 @@ pub mod chunker;
 pub mod commands;
 pub mod compress;
 pub mod config;
-pub mod crypto;
-pub mod error;
 pub mod index;
 pub mod limits;
 pub mod platform;

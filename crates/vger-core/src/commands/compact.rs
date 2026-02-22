@@ -6,15 +6,15 @@ use tracing::{info, warn};
 
 use super::util::{open_repo, with_repo_lock};
 use crate::config::VgerConfig;
-use crate::crypto::chunk_id::ChunkId;
-use crate::crypto::pack_id::PackId;
-use crate::error::{Result, VgerError};
 use crate::repo::pack::{
     PackType, PackWriter, DEFAULT_MAX_BLOB_OVERHEAD, PACK_HEADER_SIZE, PACK_MAGIC,
     PACK_VERSION_MAX, PACK_VERSION_MIN,
 };
 use crate::repo::Repository;
-use crate::storage::{RepackBlobRef, RepackOperationRequest, RepackPlanRequest, StorageBackend};
+use vger_storage::{RepackBlobRef, RepackOperationRequest, RepackPlanRequest, StorageBackend};
+use vger_types::chunk_id::ChunkId;
+use vger_types::error::{Result, VgerError};
+use vger_types::pack_id::PackId;
 
 /// Concurrency for remote (REST/S3/SFTP) backends.
 const REMOTE_CONCURRENCY: usize = 16;
@@ -70,10 +70,10 @@ pub fn run(
     let mut repo = open_repo(config, passphrase)?;
 
     let is_remote = matches!(
-        crate::storage::parse_repo_url(&config.repository.url),
-        Ok(crate::storage::ParsedUrl::Rest { .. }
-            | crate::storage::ParsedUrl::S3 { .. }
-            | crate::storage::ParsedUrl::Sftp { .. })
+        vger_storage::parse_repo_url(&config.repository.url),
+        Ok(vger_storage::ParsedUrl::Rest { .. }
+            | vger_storage::ParsedUrl::S3 { .. }
+            | vger_storage::ParsedUrl::Sftp { .. })
     );
 
     with_repo_lock(&mut repo, |repo| {
@@ -503,7 +503,7 @@ fn try_server_side_repack(
     }
     let plan = RepackPlanRequest {
         operations,
-        protocol_version: crate::storage::PROTOCOL_VERSION,
+        protocol_version: vger_storage::PROTOCOL_VERSION,
     };
 
     let response = match repo.storage.server_repack(&plan) {
@@ -512,7 +512,7 @@ fn try_server_side_repack(
         Err(err) => return Err(err),
     };
 
-    let mut completed_by_source: HashMap<String, crate::storage::RepackOperationResult> = response
+    let mut completed_by_source: HashMap<String, vger_storage::RepackOperationResult> = response
         .completed
         .into_iter()
         .map(|op| (op.source_pack.clone(), op))

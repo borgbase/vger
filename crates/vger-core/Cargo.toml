@@ -9,6 +9,9 @@ workspace = true
 
 [dependencies]
 # Internal
+vger-types.workspace = true
+vger-crypto.workspace = true
+vger-storage.workspace = true
 vger-protocol.workspace = true
 
 # Serialization
@@ -16,13 +19,10 @@ serde.workspace = true
 serde_json.workspace = true
 serde_yaml.workspace = true
 rmp = "0.8"
-rmp-serde = "1"
+rmp-serde.workspace = true
 
 # Crypto
-aes-gcm = "0.10"
-chacha20poly1305 = "0.10"
 blake2.workspace = true
-argon2 = "0.5"
 rand.workspace = true
 zeroize.workspace = true
 hex.workspace = true
@@ -33,10 +33,6 @@ zstd = "0.13"
 
 # Chunking
 fastcdc = "3"
-
-# Storage
-rusty-s3 = "0.8"
-url = "2"
 
 # Filesystem
 tempfile.workspace = true
@@ -56,22 +52,15 @@ xorf = "0.12"
 smallvec = "1"
 
 # Error handling
-thiserror = "2"
+thiserror.workspace = true
 
 # Logging
 tracing.workspace = true
 rayon = "1"
 crossbeam-channel.workspace = true
 
-# Async runtime (SFTP + mount only)
+# Async runtime (mount only)
 tokio = { workspace = true, features = ["rt-multi-thread"], optional = true }
-
-# HTTP client (S3 + REST backends)
-ureq = { version = "2", features = ["json"] }
-
-# SSH/SFTP (direct russh implementation)
-russh = { version = "0.54", default-features = false, features = ["aws-lc-rs"], optional = true }
-russh-sftp = { version = "2.1", optional = true }
 
 # Mount (WebDAV server)
 dav-server = { version = "0.10", optional = true }
@@ -83,7 +72,7 @@ futures-util = { version = "0.3", optional = true }
 
 [features]
 default = ["backend-sftp"]
-backend-sftp = ["russh", "russh-sftp", "tokio"]
+backend-sftp = ["vger-storage/backend-sftp"]
 mount = ["dav-server", "tokio/rt-multi-thread", "tokio/macros", "tokio/signal", "tokio/net", "hyper", "hyper-util", "lru", "bytes", "futures-util"]
 
 [dev-dependencies]

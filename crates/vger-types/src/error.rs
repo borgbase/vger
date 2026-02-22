@@ -56,7 +56,7 @@ pub enum VgerError {
     Locked(String),
 
     #[error("chunk not found in index: {0}")]
-    ChunkNotInIndex(crate::crypto::chunk_id::ChunkId),
+    ChunkNotInIndex(crate::chunk_id::ChunkId),
 
     #[error("decompression error: {0}")]
     Decompression(String),

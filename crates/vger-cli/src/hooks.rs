@@ -1,8 +1,8 @@
 use std::time::Duration;
 
 use vger_core::config::{HooksConfig, SourceHooksConfig, HOOK_COMMANDS};
-use vger_core::error::{Result, VgerError};
 use vger_core::platform::shell;
+use vger_types::error::{Result, VgerError};
 
 // ── Hook runner ──────────────────────────────────────────────────────────────
 

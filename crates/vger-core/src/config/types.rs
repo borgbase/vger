@@ -110,7 +110,7 @@ impl Default for ScheduleConfig {
 }
 
 impl ScheduleConfig {
-    pub fn every_duration(&self) -> crate::error::Result<Duration> {
+    pub fn every_duration(&self) -> vger_types::error::Result<Duration> {
         super::defaults::parse_human_duration(&self.every)
     }
 }
@@ -302,26 +302,5 @@ impl CompactConfig {
     }
 }
 
-/// Retry configuration for remote storage backends (S3, SFTP, REST).
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct RetryConfig {
-    /// Maximum number of retry attempts (0 = no retries).
-    #[serde(default = "default_max_retries")]
-    pub max_retries: usize,
-    /// Initial delay between retries in milliseconds.
-    #[serde(default = "default_retry_delay_ms")]
-    pub retry_delay_ms: u64,
-    /// Maximum delay between retries in milliseconds.
-    #[serde(default = "default_retry_max_delay_ms")]
-    pub retry_max_delay_ms: u64,
-}
-
-impl Default for RetryConfig {
-    fn default() -> Self {
-        Self {
-            max_retries: default_max_retries(),
-            retry_delay_ms: default_retry_delay_ms(),
-            retry_max_delay_ms: default_retry_max_delay_ms(),
-        }
-    }
-}
+// RetryConfig is defined in vger-storage; re-exported here for ergonomic config construction.
+pub use vger_storage::RetryConfig;

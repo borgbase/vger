@@ -6,12 +6,12 @@ use vger_core::config::{
     RepositoryConfig, ResourceLimitsConfig, RetentionConfig, RetryConfig, ScheduleConfig,
     VgerConfig, XattrsConfig,
 };
-use vger_core::crypto::snapshot_id::SnapshotId;
 use vger_core::repo::manifest::SnapshotEntry;
 use vger_core::repo::pack::PackType;
 use vger_core::repo::{EncryptionMode, Repository};
 use vger_core::snapshot::item::ItemType;
-use vger_core::storage::local_backend::LocalBackend;
+use vger_storage::local_backend::LocalBackend;
+use vger_types::snapshot_id::SnapshotId;
 
 static TEST_ENV_INIT: std::sync::Once = std::sync::Once::new();
 

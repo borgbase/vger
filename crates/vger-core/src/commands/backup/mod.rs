@@ -14,9 +14,6 @@ use tracing::{info, warn};
 use super::util::with_repo_lock;
 use crate::compress::Compression;
 use crate::config::{ChunkerConfig, CommandDump, VgerConfig};
-use crate::crypto::chunk_id::ChunkId;
-use crate::crypto::snapshot_id::SnapshotId;
-use crate::error::{Result, VgerError};
 use crate::limits::{self, ByteRateLimiter};
 use crate::platform::fs;
 use crate::repo::file_cache::FileCache;
@@ -27,6 +24,9 @@ use crate::repo::Repository;
 use crate::snapshot::item::Item;
 use crate::snapshot::{SnapshotMeta, SnapshotStats};
 use crate::storage;
+use vger_types::chunk_id::ChunkId;
+use vger_types::error::{Result, VgerError};
+use vger_types::snapshot_id::SnapshotId;
 
 use walk::items_chunker_config;
 

@@ -1,8 +1,8 @@
 use chrono::{DateTime, Utc};
 
 use crate::config::VgerConfig;
-use crate::error::Result;
 use crate::repo::EncryptionMode;
+use vger_types::error::Result;
 
 use super::list::load_snapshot_meta;
 use super::util::open_repo;

@@ -1,7 +1,7 @@
 use std::path::Path;
 
 use crate::config::{self, ConfigSource, ResolvedRepo, ScheduleConfig};
-use crate::error::{Result, VgerError};
+use vger_types::error::{Result, VgerError};
 
 pub mod operations;
 pub mod passphrase;

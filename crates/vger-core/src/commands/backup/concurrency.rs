@@ -2,7 +2,7 @@ use std::mem;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Condvar, Mutex};
 
-use crate::error::{Result, VgerError};
+use vger_types::error::{Result, VgerError};
 
 // ---------------------------------------------------------------------------
 // ByteBudget — semaphore-style memory cap for in-flight pipeline data

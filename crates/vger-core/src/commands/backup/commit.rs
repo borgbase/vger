@@ -1,9 +1,9 @@
 use crate::compress::Compression;
-use crate::error::Result;
 use crate::repo::pack::PackType;
 use crate::repo::Repository;
 use crate::snapshot::item::{ChunkRef, Item};
 use crate::snapshot::SnapshotStats;
+use vger_types::error::Result;
 
 use super::chunk_process::WorkerChunk;
 

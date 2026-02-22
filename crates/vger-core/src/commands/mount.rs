@@ -24,10 +24,10 @@ use tokio::net::TcpListener;
 
 use crate::commands::list as list_cmd;
 use crate::config::VgerConfig;
-use crate::crypto::chunk_id::ChunkId;
-use crate::error::{Result, VgerError};
 use crate::repo::Repository;
 use crate::snapshot::item::{ChunkRef, Item, ItemType};
+use vger_types::chunk_id::ChunkId;
+use vger_types::error::{Result, VgerError};
 
 use super::util::open_repo;
 

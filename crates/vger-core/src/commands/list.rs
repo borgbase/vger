@@ -1,14 +1,14 @@
 use serde::Deserialize;
 
 use crate::config::VgerConfig;
-use crate::crypto::chunk_id::ChunkId;
-use crate::crypto::pack_id::PackId;
-use crate::error::{Result, VgerError};
 use crate::repo::format::{unpack_object_expect_with_context, ObjectType};
 use crate::repo::manifest::SnapshotEntry;
 use crate::repo::Repository;
 use crate::snapshot::item::Item;
 use crate::snapshot::SnapshotMeta;
+use vger_types::chunk_id::ChunkId;
+use vger_types::error::{Result, VgerError};
+use vger_types::pack_id::PackId;
 
 use super::util::open_repo;
 

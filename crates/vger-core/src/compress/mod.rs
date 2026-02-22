@@ -3,7 +3,7 @@ use std::io::Read;
 use serde::{Deserialize, Serialize};
 
 use crate::config::CompressionAlgorithm;
-use crate::error::{Result, VgerError};
+use vger_types::error::{Result, VgerError};
 
 const TAG_NONE: u8 = 0x00;
 const TAG_LZ4: u8 = 0x01;

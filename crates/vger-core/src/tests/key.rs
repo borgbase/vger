@@ -1,4 +1,4 @@
-use crate::crypto::key::{EncryptedKey, MasterKey};
+use vger_crypto::key::{EncryptedKey, MasterKey};
 
 #[test]
 fn generate_produces_nonzero_keys() {

@@ -4,13 +4,13 @@ use tracing::{info, warn};
 use crate::chunker;
 use crate::compress::Compression;
 use crate::config::{ChunkerConfig, CommandDump};
-use crate::crypto::chunk_id::ChunkId;
-use crate::error::{Result, VgerError};
 use crate::platform::shell;
 use crate::repo::pack::PackType;
 use crate::repo::Repository;
 use crate::snapshot::item::{ChunkRef, Item, ItemType};
 use crate::snapshot::SnapshotStats;
+use vger_types::chunk_id::ChunkId;
+use vger_types::error::{Result, VgerError};
 
 use super::{append_item_to_stream, emit_stats_progress, BackupProgressEvent};
 

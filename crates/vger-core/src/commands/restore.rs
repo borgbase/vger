@@ -12,16 +12,16 @@ use tracing::{debug, info};
 
 use crate::compress;
 use crate::config::VgerConfig;
-use crate::crypto::chunk_id::ChunkId;
-use crate::crypto::pack_id::PackId;
-use crate::crypto::CryptoEngine;
-use crate::error::{Result, VgerError};
 use crate::platform::fs;
 use crate::repo::format::{unpack_object_expect_with_context_into, ObjectType};
 #[cfg(test)]
 use crate::snapshot::item::Item;
 use crate::snapshot::item::ItemType;
-use crate::storage::StorageBackend;
+use vger_crypto::CryptoEngine;
+use vger_storage::StorageBackend;
+use vger_types::chunk_id::ChunkId;
+use vger_types::error::{Result, VgerError};
+use vger_types::pack_id::PackId;
 
 use crate::repo::Repository;
 
@@ -1276,14 +1276,14 @@ mod tests {
     use tempfile::tempdir;
 
     use crate::compress::Compression;
-    use crate::crypto::chunk_id::ChunkId;
-    use crate::crypto::pack_id::PackId;
-    use crate::crypto::PlaintextEngine;
     use crate::index::ChunkIndex;
     use crate::repo::format::pack_object_with_context;
     use crate::snapshot::item::{ChunkRef, Item, ItemType};
-    use crate::storage::StorageBackend;
     use crate::testutil::{test_chunk_id_key, MemoryBackend};
+    use vger_crypto::PlaintextEngine;
+    use vger_storage::StorageBackend;
+    use vger_types::chunk_id::ChunkId;
+    use vger_types::pack_id::PackId;
 
     #[test]
     fn split_unix_nanos_handles_negative_values() {

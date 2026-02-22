@@ -76,7 +76,7 @@ pub(super) fn normalize_sources(
     default_one_file_system: bool,
     default_git_ignore: bool,
     default_xattrs_enabled: bool,
-) -> crate::error::Result<Vec<SourceEntry>> {
+) -> vger_types::error::Result<Vec<SourceEntry>> {
     let mut simple_paths: Vec<String> = Vec::new();
     let mut rich_entries: Vec<SourceEntry> = Vec::new();
 
@@ -102,18 +102,18 @@ pub(super) fn normalize_sources(
                 // Validate command_dumps
                 for dump in &command_dumps {
                     if dump.name.is_empty() {
-                        return Err(crate::error::VgerError::Config(
+                        return Err(vger_types::error::VgerError::Config(
                             "command_dumps: 'name' must not be empty".into(),
                         ));
                     }
                     if dump.name.contains('/') || dump.name.contains('\\') {
-                        return Err(crate::error::VgerError::Config(format!(
+                        return Err(vger_types::error::VgerError::Config(format!(
                             "command_dumps: name '{}' must not contain '/' or '\\'",
                             dump.name
                         )));
                     }
                     if dump.command.is_empty() {
-                        return Err(crate::error::VgerError::Config(format!(
+                        return Err(vger_types::error::VgerError::Config(format!(
                             "command_dumps: command for '{}' must not be empty",
                             dump.name
                         )));
@@ -124,7 +124,7 @@ pub(super) fn normalize_sources(
                     let mut seen_names = std::collections::HashSet::new();
                     for dump in &command_dumps {
                         if !seen_names.insert(&dump.name) {
-                            return Err(crate::error::VgerError::Config(format!(
+                            return Err(vger_types::error::VgerError::Config(format!(
                                 "command_dumps: duplicate name '{}'",
                                 dump.name
                             )));
@@ -136,20 +136,20 @@ pub(super) fn normalize_sources(
                     (Some(p), None) => vec![expand_tilde(&p)],
                     (None, Some(ps)) => {
                         if ps.is_empty() {
-                            return Err(crate::error::VgerError::Config(
+                            return Err(vger_types::error::VgerError::Config(
                                 "source 'paths' must not be empty".into(),
                             ));
                         }
                         ps.iter().map(|p| expand_tilde(p)).collect()
                     }
                     (Some(_), Some(_)) => {
-                        return Err(crate::error::VgerError::Config(
+                        return Err(vger_types::error::VgerError::Config(
                             "source entry cannot have both 'path' and 'paths'".into(),
                         ));
                     }
                     (None, None) => {
                         if command_dumps.is_empty() {
-                            return Err(crate::error::VgerError::Config(
+                            return Err(vger_types::error::VgerError::Config(
                                 "source entry must have 'path', 'paths', or 'command_dumps'".into(),
                             ));
                         }
@@ -159,14 +159,14 @@ pub(super) fn normalize_sources(
 
                 // Multi-path rich entries require an explicit label
                 if resolved_paths.len() > 1 && label.is_none() {
-                    return Err(crate::error::VgerError::Config(
+                    return Err(vger_types::error::VgerError::Config(
                         "multi-path source entries require an explicit 'label'".into(),
                     ));
                 }
 
                 // Dump-only sources (no paths) require an explicit label
                 if resolved_paths.is_empty() && label.is_none() {
-                    return Err(crate::error::VgerError::Config(
+                    return Err(vger_types::error::VgerError::Config(
                         "dump-only source entries require an explicit 'label'".into(),
                     ));
                 }
@@ -183,7 +183,7 @@ pub(super) fn normalize_sources(
                     for p in &resolved_paths {
                         let base = label_from_path(p);
                         if !basenames.insert(base.clone()) {
-                            return Err(crate::error::VgerError::Config(format!(
+                            return Err(vger_types::error::VgerError::Config(format!(
                                 "duplicate basename '{base}' in multi-path source '{label}'"
                             )));
                         }
@@ -222,7 +222,7 @@ pub(super) fn normalize_sources(
             for p in &simple_paths {
                 let base = label_from_path(p);
                 if !basenames.insert(base.clone()) {
-                    return Err(crate::error::VgerError::Config(format!(
+                    return Err(vger_types::error::VgerError::Config(format!(
                         "duplicate basename '{base}' in simple sources (use rich entries with explicit labels to disambiguate)"
                     )));
                 }

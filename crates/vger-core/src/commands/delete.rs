@@ -1,6 +1,6 @@
 use crate::config::VgerConfig;
-use crate::error::Result;
 use tracing::warn;
+use vger_types::error::Result;
 
 use super::list::{load_snapshot_item_stream, load_snapshot_meta};
 use super::snapshot_ops::{count_snapshot_chunk_impact, decrement_snapshot_chunk_refs};
@@ -23,7 +23,7 @@ pub fn run(
         let entry = repo
             .manifest()
             .find_snapshot(snapshot_name)
-            .ok_or_else(|| crate::error::VgerError::SnapshotNotFound(snapshot_name.into()))?;
+            .ok_or_else(|| vger_types::error::VgerError::SnapshotNotFound(snapshot_name.into()))?;
         let snapshot_key = entry.id.storage_key();
 
         // Load snapshot metadata and item stream to find all chunk refs.
