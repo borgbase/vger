@@ -133,6 +133,13 @@ pub trait StorageBackend: Send + Sync {
             "server-side verify-packs API".into(),
         ))
     }
+
+    /// Server-side repository directory scaffolding (keys/, snapshots/, locks/, packs/*).
+    fn server_init(&self) -> Result<()> {
+        Err(VgerError::UnsupportedBackend(
+            "server-side init API".into(),
+        ))
+    }
 }
 
 impl StorageBackend for Arc<dyn StorageBackend> {
@@ -186,6 +193,9 @@ impl StorageBackend for Arc<dyn StorageBackend> {
     }
     fn server_verify_packs(&self, plan: &VerifyPacksPlanRequest) -> Result<VerifyPacksResponse> {
         (**self).server_verify_packs(plan)
+    }
+    fn server_init(&self) -> Result<()> {
+        (**self).server_init()
     }
 }
 

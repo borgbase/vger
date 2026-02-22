@@ -447,6 +447,16 @@ impl StorageBackend for RestBackend {
     fn server_verify_packs(&self, plan: &VerifyPacksPlanRequest) -> Result<VerifyPacksResponse> {
         self.verify_packs(plan)
     }
+
+    fn server_init(&self) -> Result<()> {
+        let url = format!("{}?init", self.base_url);
+        self.retry_call("INIT", || {
+            let req = self.apply_auth(self.agent.post(&url));
+            req.call()
+        })
+        .map_err(|e| VgerError::Other(format!("REST INIT: {e}")))?;
+        Ok(())
+    }
 }
 
 #[cfg(test)]

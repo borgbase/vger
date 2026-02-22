@@ -242,13 +242,24 @@ impl Repository {
                 }
             };
 
+        // Try server-side init (creates keys/, snapshots/, locks/, packs/* in one request).
+        // Placed after all validation and crypto setup so a failure above doesn't
+        // leave a partially scaffolded repo on the server.
+        let server_did_init = match storage.server_init() {
+            Ok(()) => true,
+            Err(VgerError::UnsupportedBackend(_)) => false,
+            Err(err) => return Err(err),
+        };
+
         // Store config (unencrypted)
         let config_data = rmp_serde::to_vec(&repo_config)?;
         storage.put("config", &config_data)?;
 
         // Store encrypted key if applicable
         if let Some(enc_key) = &encrypted_key {
-            storage.create_dir("keys/")?;
+            if !server_did_init {
+                storage.create_dir("keys/")?;
+            }
             let key_data = rmp_serde::to_vec(enc_key)?;
             storage.put("keys/repokey", &key_data)?;
         }
@@ -280,11 +291,13 @@ impl Repository {
         )?;
         storage.put("index", &index_packed)?;
 
-        // Create directory structure
-        storage.create_dir("snapshots/")?;
-        storage.create_dir("locks/")?;
-        for i in 0u8..=255 {
-            storage.create_dir(&format!("packs/{:02x}/", i))?;
+        // Create directory structure (skip if server already did it)
+        if !server_did_init {
+            storage.create_dir("snapshots/")?;
+            storage.create_dir("locks/")?;
+            for i in 0u8..=255 {
+                storage.create_dir(&format!("packs/{:02x}/", i))?;
+            }
         }
 
         // No packs yet, so data target = min_pack_size
