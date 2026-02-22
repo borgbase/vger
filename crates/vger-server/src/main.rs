@@ -40,11 +40,15 @@ struct Cli {
     lock_ttl_seconds: u64,
 
     /// Maximum number of blocking threads for file I/O (minimum 1)
-    #[arg(long, default_value_t = 6, value_parser = parse_blocking_threads)]
+    #[arg(long, default_value_t = 6, value_parser = parse_min_one)]
     max_blocking_threads: usize,
+
+    /// Number of tokio worker threads (minimum 1)
+    #[arg(long, default_value_t = 4, value_parser = parse_min_one)]
+    worker_threads: usize,
 }
 
-fn parse_blocking_threads(s: &str) -> Result<usize, String> {
+fn parse_min_one(s: &str) -> Result<usize, String> {
     let n: usize = s.parse().map_err(|e| format!("{e}"))?;
     if n == 0 {
         return Err("value must be at least 1".into());
@@ -56,8 +60,9 @@ fn main() {
     let cli = Cli::parse();
 
     let runtime = tokio::runtime::Builder::new_multi_thread()
-        .enable_all()
+        .worker_threads(cli.worker_threads)
         .max_blocking_threads(cli.max_blocking_threads)
+        .enable_all()
         .build()
         .unwrap_or_else(|e| {
             eprintln!("Error: failed to build tokio runtime: {e}");
