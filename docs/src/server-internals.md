@@ -153,8 +153,8 @@ See `vger-server --help` for the full list of flags and defaults.
 Client config:
 ```yaml
 repositories:
-  - url: https://backup.example.com
-    label: server
+  - label: server
+    url: https://backup.example.com
     access_token: "secret-token-here"
 ```
 

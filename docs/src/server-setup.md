@@ -134,8 +134,8 @@ backup.example.com {
 
 ```yaml
 repositories:
-  - url: "https://backup.example.com"
-    label: "server"
+  - label: "server"
+    url: "https://backup.example.com"
     access_token: "some-secret-token"
 
 encryption:

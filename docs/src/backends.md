@@ -19,8 +19,8 @@ HTTP transport is blocked by default for remote backends.
 
 ```yaml
 repositories:
-  - url: "http://localhost:8484/myrepo"
-    label: "dev-only"
+  - label: "dev-only"
+    url: "http://localhost:8484/myrepo"
     allow_insecure_http: true
 ```
 
@@ -32,8 +32,8 @@ Store backups on a local or mounted disk. No extra configuration needed.
 
 ```yaml
 repositories:
-  - url: "/backups/repo"
-    label: "local"
+  - label: "local"
+    url: "/backups/repo"
 ```
 
 Accepted URL formats: absolute paths (`/backups/repo`), relative paths (`./repo`), or `file:///backups/repo`.
@@ -47,8 +47,8 @@ S3 URLs must include an explicit endpoint and bucket path.
 
 ```yaml
 repositories:
-  - url: "s3://s3.us-east-1.amazonaws.com/my-bucket/vger"
-    label: "s3"
+  - label: "s3"
+    url: "s3://s3.us-east-1.amazonaws.com/my-bucket/vger"
     region: "us-east-1"                    # Default if omitted
     access_key_id: "AKIA..."
     secret_access_key: "..."
@@ -60,8 +60,8 @@ The endpoint is always the URL host, and the first path segment is the bucket:
 
 ```yaml
 repositories:
-  - url: "s3://minio.local:9000/my-bucket/vger"
-    label: "minio"
+  - label: "minio"
+    url: "s3://minio.local:9000/my-bucket/vger"
     region: "us-east-1"
     access_key_id: "minioadmin"
     secret_access_key: "minioadmin"
@@ -71,8 +71,8 @@ repositories:
 
 ```yaml
 repositories:
-  - url: "s3+http://minio.local:9000/my-bucket/vger"
-    label: "minio-dev"
+  - label: "minio-dev"
+    url: "s3+http://minio.local:9000/my-bucket/vger"
     region: "us-east-1"
     access_key_id: "minioadmin"
     secret_access_key: "minioadmin"
@@ -96,8 +96,8 @@ Host keys are verified with an OpenSSH `known_hosts` file. Unknown hosts use TOF
 
 ```yaml
 repositories:
-  - url: "sftp://backup@nas.local/backups/vger"
-    label: "nas"
+  - label: "nas"
+    url: "sftp://backup@nas.local/backups/vger"
     # sftp_key: "/home/user/.ssh/id_rsa"  # Path to private key (optional)
     # sftp_known_hosts: "/home/user/.ssh/known_hosts"  # Optional known_hosts path
     # sftp_max_connections: 4  # Optional concurrency limit (1..=32)
@@ -119,8 +119,8 @@ Store backups on a dedicated [vger-server](server-setup.md) instance via HTTP/HT
 
 ```yaml
 repositories:
-  - url: "https://backup.example.com/myrepo"
-    label: "server"
+  - label: "server"
+    url: "https://backup.example.com/myrepo"
     access_token: "my-secret-token"          # Bearer token for authentication
 ```
 

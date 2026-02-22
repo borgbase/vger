@@ -40,16 +40,16 @@ sources:
 
 ```yaml
 repositories:
-  - url: "/backups/repo"
-    label: "local"
+  - label: "local"
+    url: "/backups/repo"
 ```
 
 **S3:**
 
 ```yaml
 repositories:
-  - url: "s3://s3.us-east-1.amazonaws.com/my-bucket/vger"
-    label: "s3"
+  - label: "s3"
+    url: "s3://s3.us-east-1.amazonaws.com/my-bucket/vger"
     region: "us-east-1"
     access_key_id: "AKIA..."
     secret_access_key: "..."
@@ -368,11 +368,11 @@ Add more entries to `repositories:` to back up to multiple destinations. Top-lev
 
 ```yaml
 repositories:
-  - url: "/backups/local"
-    label: "local"
+  - label: "local"
+    url: "/backups/local"
 
-  - url: "s3://s3.us-east-1.amazonaws.com/bucket/remote"
-    label: "remote"
+  - label: "remote"
+    url: "s3://s3.us-east-1.amazonaws.com/bucket/remote"
     region: "us-east-1"
     access_key_id: "AKIA..."
     secret_access_key: "..."

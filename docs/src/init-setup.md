@@ -30,8 +30,8 @@ Set the repository URL and the directories to back up:
 
 ```yaml
 repositories:
-  - url: "/backup/repo"
-    label: "main"
+  - label: "main"
+    url: "/backup/repo"
 
 sources:
   - "/home/user/documents"

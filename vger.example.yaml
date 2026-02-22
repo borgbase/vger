@@ -19,8 +19,8 @@ sources:
   - /home/user/documents
 
 repositories:
-  - url: /backups/myrepo
-    label: main
+  - label: main
+    url: /backups/myrepo
 
 # --- Common options many users enable ---------------------------------------
 
@@ -103,14 +103,14 @@ compression:
 # Simple repository form:
 #
 # repositories:
-#   - url: /backups/myrepo
-#     label: main
+#   - label: main
+#     url: /backups/myrepo
 
 # Rich repository form (backend options + per-repo overrides):
 #
 # repositories:
-#   - url: s3://s3.us-east-1.amazonaws.com/my-bucket/vger
-#     label: offsite
+#   - label: offsite
+#     url: s3://s3.us-east-1.amazonaws.com/my-bucket/vger
 #     region: us-east-1
 #     access_key_id: AWS_ACCESS_KEY_ID
 #     secret_access_key: AWS_SECRET_ACCESS_KEY
