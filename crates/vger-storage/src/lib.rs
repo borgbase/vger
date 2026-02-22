@@ -136,9 +136,7 @@ pub trait StorageBackend: Send + Sync {
 
     /// Server-side repository directory scaffolding (keys/, snapshots/, locks/, packs/*).
     fn server_init(&self) -> Result<()> {
-        Err(VgerError::UnsupportedBackend(
-            "server-side init API".into(),
-        ))
+        Err(VgerError::UnsupportedBackend("server-side init API".into()))
     }
 }
 
