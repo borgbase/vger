@@ -12,7 +12,7 @@ pub fn storage_config_from_repo(cfg: &RepositoryConfig) -> StorageConfig {
         sftp_key: cfg.sftp_key.clone(),
         sftp_known_hosts: cfg.sftp_known_hosts.clone(),
         sftp_max_connections: cfg.sftp_max_connections,
-        rest_token: cfg.rest_token.clone(),
+        access_token: cfg.access_token.clone(),
         allow_insecure_http: cfg.allow_insecure_http,
         retry: cfg.retry.clone(),
     }

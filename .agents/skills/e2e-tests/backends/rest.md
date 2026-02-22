@@ -26,7 +26,7 @@ Validate vger backup and restore correctness over the REST backend using a local
 2. Create config from `~/vger.sample.yaml` with REST repo definition:
    - `url: "http://127.0.0.1:8484/<repo-name>"`
    - `label: "rest"`
-   - `rest_token: "<token>"`
+   - `access_token: "<token>"`
 3. `export VGER_PASSPHRASE=123`
 
 ## Local REST Cleanup (before each run)

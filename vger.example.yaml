@@ -117,7 +117,7 @@ compression:
 #     # sftp_key: ~/.ssh/id_ed25519
 #     # sftp_known_hosts: ~/.ssh/known_hosts
 #     # sftp_max_connections: 4
-#     # rest_token: VGER_REST_TOKEN
+#     # access_token: VGER_ACCESS_TOKEN
 #
 #     min_pack_size: 33554432      # 32 MiB
 #     max_pack_size: 536870912     # 512 MiB

@@ -357,7 +357,7 @@ pub struct StorageConfig {
     pub sftp_key: Option<String>,
     pub sftp_known_hosts: Option<String>,
     pub sftp_max_connections: Option<usize>,
-    pub rest_token: Option<String>,
+    pub access_token: Option<String>,
     pub allow_insecure_http: bool,
     pub retry: RetryConfig,
 }
@@ -457,7 +457,7 @@ pub fn backend_from_config(cfg: &StorageConfig) -> Result<Box<dyn StorageBackend
             "sftp (compile with feature 'backend-sftp')".into(),
         )),
         ParsedUrl::Rest { url } => {
-            let token = cfg.rest_token.as_deref();
+            let token = cfg.access_token.as_deref();
             Ok(Box::new(rest_backend::RestBackend::new(
                 &url,
                 token,
@@ -684,7 +684,7 @@ mod tests {
             sftp_key: None,
             sftp_known_hosts: None,
             sftp_max_connections: None,
-            rest_token: None,
+            access_token: None,
             allow_insecure_http: false,
             retry: RetryConfig::default(),
         }

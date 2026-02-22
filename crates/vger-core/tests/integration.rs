@@ -59,7 +59,7 @@ fn make_test_config(repo_dir: &std::path::Path) -> VgerConfig {
             sftp_key: None,
             sftp_known_hosts: None,
             sftp_max_connections: None,
-            rest_token: None,
+            access_token: None,
             allow_insecure_http: false,
             min_pack_size: 32 * 1024 * 1024,
             max_pack_size: 512 * 1024 * 1024,

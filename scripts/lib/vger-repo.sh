@@ -79,7 +79,7 @@ CFG
 
   if [[ "$backend" == "rest" ]]; then
     cat >>"$out" <<CFG
-    rest_token: "$(yaml_escape "$REST_TOKEN")"
+    access_token: "$(yaml_escape "$REST_TOKEN")"
 CFG
   fi
 

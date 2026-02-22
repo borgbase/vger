@@ -319,7 +319,7 @@ Config files support environment variable placeholders in values:
 ```yaml
 repositories:
   - url: "${VGER_REPO_URL:-/backup/repo}"
-    # rest_token: "${VGER_REST_TOKEN}"
+    # access_token: "${VGER_ACCESS_TOKEN}"
 ```
 
 Supported syntax:

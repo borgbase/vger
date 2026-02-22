@@ -131,8 +131,8 @@ pub struct RepositoryConfig {
     pub sftp_known_hosts: Option<String>,
     /// Maximum concurrent SFTP connections (default: 4, clamped to 1..=32).
     pub sftp_max_connections: Option<usize>,
-    /// Bearer token for REST backend authentication.
-    pub rest_token: Option<String>,
+    /// Bearer token for server backend authentication.
+    pub access_token: Option<String>,
     /// Allow plaintext HTTP transport for remote endpoints (unsafe; defaults to false).
     #[serde(default = "default_allow_insecure_http")]
     pub allow_insecure_http: bool,

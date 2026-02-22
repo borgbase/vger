@@ -136,7 +136,7 @@ backup.example.com {
 repositories:
   - url: "https://backup.example.com"
     label: "server"
-    rest_token: "some-secret-token"
+    access_token: "some-secret-token"
 
 encryption:
   mode: "auto"

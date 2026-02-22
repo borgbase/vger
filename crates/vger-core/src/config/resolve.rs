@@ -33,8 +33,12 @@ pub struct RepositoryEntry {
     pub sftp_known_hosts: Option<String>,
     #[serde(default)]
     pub sftp_max_connections: Option<usize>,
-    #[serde(default, deserialize_with = "deserialize_optional_strict_string")]
-    pub rest_token: Option<String>,
+    #[serde(
+        default,
+        deserialize_with = "deserialize_optional_strict_string",
+        alias = "rest_token"
+    )]
+    pub access_token: Option<String>,
     #[serde(default = "default_allow_insecure_http")]
     pub allow_insecure_http: bool,
     pub min_pack_size: Option<u32>,
@@ -70,7 +74,7 @@ impl RepositoryEntry {
             sftp_key: self.sftp_key.clone(),
             sftp_known_hosts: self.sftp_known_hosts.clone(),
             sftp_max_connections: self.sftp_max_connections,
-            rest_token: self.rest_token.clone(),
+            access_token: self.access_token.clone(),
             allow_insecure_http: self.allow_insecure_http,
             min_pack_size: self.min_pack_size.unwrap_or_else(default_min_pack_size),
             max_pack_size: self.max_pack_size.unwrap_or_else(default_max_pack_size),
@@ -1169,7 +1173,7 @@ repositories:
                     sftp_key: None,
                     sftp_known_hosts: None,
                     sftp_max_connections: None,
-                    rest_token: None,
+                    access_token: None,
                     allow_insecure_http: false,
                     min_pack_size: default_min_pack_size(),
                     max_pack_size: default_max_pack_size(),

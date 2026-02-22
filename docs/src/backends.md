@@ -121,14 +121,14 @@ Store backups on a dedicated [vger-server](server-setup.md) instance via HTTP/HT
 repositories:
   - url: "https://backup.example.com/myrepo"
     label: "server"
-    rest_token: "my-secret-token"          # Bearer token for authentication
+    access_token: "my-secret-token"          # Bearer token for authentication
 ```
 
 ### REST configuration options
 
 | Field | Description |
 |-------|-------------|
-| `rest_token` | Bearer token sent as `Authorization: Bearer <token>` |
+| `access_token` | Bearer token sent as `Authorization: Bearer <token>` |
 | `allow_insecure_http` | Permit `http://` REST URLs (unsafe; default: `false`) |
 
 See [Server Setup](server-setup.md) for how to set up and configure the server.

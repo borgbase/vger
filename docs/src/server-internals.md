@@ -155,7 +155,7 @@ Client config:
 repositories:
   - url: https://backup.example.com
     label: server
-    rest_token: "secret-token-here"
+    access_token: "secret-token-here"
 ```
 
 ---
