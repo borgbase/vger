@@ -7017,6 +7017,7 @@ dependencies = [
  "rand",
  "rmp-serde",
  "serde",
+ "tracing",
  "vger-types",
  "zeroize",
 ]

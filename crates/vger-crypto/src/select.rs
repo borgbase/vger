@@ -18,13 +18,35 @@ pub enum AutoAeadMode {
     Chacha20Poly1305,
 }
 
+struct CandidateScore {
+    small_mibps: f64,
+    large_mibps: f64,
+    weighted: f64,
+}
+
 pub fn select_best_aead() -> AutoAeadMode {
     let gcm = benchmark_candidate(AutoAeadMode::Aes256Gcm);
     let chacha = benchmark_candidate(AutoAeadMode::Chacha20Poly1305);
-    choose_from_scores(gcm, chacha)
+
+    tracing::debug!(
+        "AES-256-GCM:        small {:.0} MiB/s, large {:.0} MiB/s, weighted {:.0}",
+        gcm.small_mibps,
+        gcm.large_mibps,
+        gcm.weighted
+    );
+    tracing::debug!(
+        "ChaCha20-Poly1305:  small {:.0} MiB/s, large {:.0} MiB/s, weighted {:.0}",
+        chacha.small_mibps,
+        chacha.large_mibps,
+        chacha.weighted
+    );
+
+    let chosen = choose_from_scores(gcm.weighted, chacha.weighted);
+    tracing::info!("auto-selected cipher: {:?}", chosen);
+    chosen
 }
 
-fn benchmark_candidate(candidate: AutoAeadMode) -> f64 {
+fn benchmark_candidate(candidate: AutoAeadMode) -> CandidateScore {
     let encryption_key = [0x3Au8; 32];
     let chunk_id_key = [0xC5u8; 32];
 
@@ -48,7 +70,13 @@ fn benchmark_candidate(candidate: AutoAeadMode) -> f64 {
 
     let small_mibps = measure_mib_per_sec(engine.as_ref(), &small, aad, small_iterations);
     let large_mibps = measure_mib_per_sec(engine.as_ref(), &large, aad, large_iterations);
-    weighted_score(small_mibps, large_mibps)
+    let weighted = weighted_score(small_mibps, large_mibps);
+
+    CandidateScore {
+        small_mibps,
+        large_mibps,
+        weighted,
+    }
 }
 
 fn measure_mib_per_sec(

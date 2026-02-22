@@ -19,6 +19,9 @@ blake2.workspace = true
 rand.workspace = true
 zeroize.workspace = true
 
+# Logging
+tracing.workspace = true
+
 # Serialization
 serde.workspace = true
 rmp-serde.workspace = true
