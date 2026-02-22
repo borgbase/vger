@@ -28,6 +28,24 @@ pub fn list_snapshot_items(
     load_snapshot_items(&mut repo, snapshot_name)
 }
 
+/// List all snapshots with their stats (loaded from snapshot metadata).
+pub fn list_snapshots_with_stats(
+    config: &VgerConfig,
+    passphrase: Option<&str>,
+) -> Result<Vec<(SnapshotEntry, crate::snapshot::SnapshotStats)>> {
+    let repo = open_repo(config, passphrase)?;
+    let entries = repo.manifest().snapshots.clone();
+    let mut result = Vec::with_capacity(entries.len());
+    for entry in entries {
+        let stats = match load_snapshot_meta(&repo, &entry.name) {
+            Ok(meta) => meta.stats,
+            Err(_) => crate::snapshot::SnapshotStats::default(),
+        };
+        result.push((entry, stats));
+    }
+    Ok(result)
+}
+
 /// Get metadata for a specific snapshot.
 pub fn get_snapshot_meta(
     config: &VgerConfig,

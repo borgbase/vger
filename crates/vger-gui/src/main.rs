@@ -18,6 +18,9 @@ use vger_core::config::{self, ResolvedRepo, ScheduleConfig};
 use vger_core::snapshot::item::{Item, ItemType};
 use vger_types::error::VgerError;
 
+mod progress;
+use progress::{format_bytes, format_check_status, format_count, BackupStatusTracker};
+
 // ── Tree view data structures ──
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -380,6 +383,7 @@ slint::slint! {
         url: string,
         snapshots: string,
         last_snapshot: string,
+        size: string,
     }
 
     struct SourceInfo {
@@ -661,6 +665,9 @@ slint::slint! {
         in-out property <string> status_text;
         in-out property <[[StandardListViewItem]]> log_rows: [];
 
+        // Operation busy state — disables all action buttons
+        in-out property <bool> operation_busy: false;
+
         // Repo model (custom cards)
         in-out property <bool> repo_loading: true;
         in-out property <[RepoInfo]> repo_model: [];
@@ -687,6 +694,7 @@ slint::slint! {
         callback snapshots_repo_changed(/* value */ string);
         callback snapshot_sort_ascending(/* column */ int);
         callback snapshot_sort_descending(/* column */ int);
+        callback cancel_clicked();
 
         title: "V'Ger";
         preferred-width: 1100px;
@@ -715,16 +723,24 @@ slint::slint! {
                     Rectangle { horizontal-stretch: 1; }
                     Button {
                         text: "Reload";
+                        enabled: !root.operation_busy;
                         clicked => { root.reload_config_clicked(); }
                     }
                     Button {
                         text: "Find Files";
+                        enabled: !root.operation_busy;
                         clicked => { root.find_files_clicked(); }
                     }
                     Button {
-                        text: "Backup All";
-                        primary: true;
-                        clicked => { root.backup_all_clicked(); }
+                        text: root.operation_busy ? "Cancel" : "Backup All";
+                        primary: !root.operation_busy;
+                        clicked => {
+                            if (root.operation_busy) {
+                                root.cancel_clicked();
+                            } else {
+                                root.backup_all_clicked();
+                            }
+                        }
                     }
                 }
                 HorizontalBox {
@@ -770,16 +786,16 @@ slint::slint! {
                                         horizontal-stretch: 0;
                                         min-width: 250px;
                                         spacing: 4px;
-                                        Text { text: "Snapshots: " + repo.snapshots; }
+                                        Text { text: "Snapshots: " + repo.snapshots + "  ·  Size: " + repo.size; }
                                         Text { text: "Latest: " + repo.last_snapshot; font-size: 11px; color: #888888; }
                                     }
                                     VerticalLayout {
                                         alignment: center;
                                         HorizontalLayout {
                                             spacing: 8px;
-                                            Button { text: "Backup"; primary: true; clicked => { root.backup_repo_clicked(idx); } }
-                                            Button { text: "Check"; clicked => { root.check_repo_clicked(idx); } }
-                                            Button { text: "Compact"; clicked => { root.compact_repo_clicked(idx); } }
+                                            Button { text: "Backup"; primary: true; enabled: !root.operation_busy; clicked => { root.backup_repo_clicked(idx); } }
+                                            Button { text: "Check"; enabled: !root.operation_busy; clicked => { root.check_repo_clicked(idx); } }
+                                            Button { text: "Compact"; enabled: !root.operation_busy; clicked => { root.compact_repo_clicked(idx); } }
                                         }
                                     }
                                 }
@@ -815,7 +831,7 @@ slint::slint! {
                                     }
                                     VerticalLayout {
                                         alignment: center;
-                                        Button { text: "Backup"; primary: true; clicked => { root.backup_source_clicked(idx); } }
+                                        Button { text: "Backup"; primary: true; enabled: !root.operation_busy; clicked => { root.backup_source_clicked(idx); } }
                                     }
                                 }
                             }
@@ -841,6 +857,7 @@ slint::slint! {
                             }
                             Button {
                                 text: "Refresh";
+                                enabled: !root.operation_busy;
                                 clicked => { root.refresh_snapshots_clicked(); }
                             }
                         }
@@ -852,6 +869,8 @@ slint::slint! {
                                 { title: "Time" },
                                 { title: "Source" },
                                 { title: "Label" },
+                                { title: "Files" },
+                                { title: "Size" },
                             ];
                             rows: root.snapshot_rows;
                             sort-ascending(col-idx) => { root.snapshot_sort_ascending(col-idx); }
@@ -862,12 +881,14 @@ slint::slint! {
                             spacing: 8px;
                             Button {
                                 text: "Restore Selected Snapshot";
+                                enabled: !root.operation_busy;
                                 clicked => {
                                     root.restore-selected-snapshot-clicked(snapshot-table.current-row);
                                 }
                             }
                             Button {
                                 text: "Delete Selected Snapshot";
+                                enabled: !root.operation_busy;
                                 clicked => {
                                     root.delete-selected-snapshot-clicked(snapshot-table.current-row);
                                 }
@@ -957,6 +978,7 @@ enum AppCommand {
     OpenConfigFile,
     ReloadConfig,
     ToggleSchedulePause,
+    CancelOperation,
     ShowWindow,
     Quit,
 }
@@ -967,6 +989,7 @@ struct RepoInfoData {
     url: String,
     snapshots: String,
     last_snapshot: String,
+    size: String,
 }
 
 #[derive(Debug, Clone)]
@@ -975,6 +998,10 @@ struct SnapshotRowData {
     time_str: String,
     source: String,
     label: String,
+    files: String,
+    size: String,
+    nfiles: u64,
+    size_bytes: u64,
     time_epoch: i64,
     repo_name: String,
 }
@@ -1026,6 +1053,8 @@ enum UiEvent {
     FindResultsData {
         rows: Vec<FindResultRow>,
     },
+    OperationStarted,
+    OperationFinished,
     Quit,
     ShowWindow,
 }
@@ -1160,23 +1189,6 @@ fn format_repo_name(repo: &ResolvedRepo) -> String {
         .unwrap_or_else(|| repo.config.repository.url.clone())
 }
 
-fn format_bytes(bytes: u64) -> String {
-    const KB: f64 = 1024.0;
-    const MB: f64 = KB * 1024.0;
-    const GB: f64 = MB * 1024.0;
-
-    let b = bytes as f64;
-    if b >= GB {
-        format!("{:.2} GiB", b / GB)
-    } else if b >= MB {
-        format!("{:.2} MiB", b / MB)
-    } else if b >= KB {
-        format!("{:.2} KiB", b / KB)
-    } else {
-        format!("{bytes} B")
-    }
-}
-
 fn to_table_model(rows: Vec<Vec<String>>) -> ModelRc<ModelRc<StandardListViewItem>> {
     let outer: Vec<ModelRc<StandardListViewItem>> = rows
         .into_iter()
@@ -1206,12 +1218,14 @@ fn sort_snapshot_table(
         return;
     };
 
-    // Columns: 0=ID, 1=Time, 2=Source, 3=Label
+    // Columns: 0=ID, 1=Time, 2=Source, 3=Label, 4=Files, 5=Size
     match col_idx {
         0 => data.sort_by(|a, b| a.id.cmp(&b.id)),
         1 => data.sort_by(|a, b| a.time_epoch.cmp(&b.time_epoch)),
         2 => data.sort_by(|a, b| a.source.cmp(&b.source)),
         3 => data.sort_by(|a, b| a.label.cmp(&b.label)),
+        4 => data.sort_by(|a, b| a.nfiles.cmp(&b.nfiles)),
+        5 => data.sort_by(|a, b| a.size_bytes.cmp(&b.size_bytes)),
         _ => return,
     }
     if !ascending {
@@ -1233,6 +1247,8 @@ fn sort_snapshot_table(
                 d.time_str.clone(),
                 d.source.clone(),
                 d.label.clone(),
+                d.files.clone(),
+                d.size.clone(),
             ]
         })
         .collect();
@@ -1405,6 +1421,7 @@ fn run_worker(
     ui_tx: Sender<UiEvent>,
     scheduler: Arc<Mutex<SchedulerState>>,
     backup_running: Arc<AtomicBool>,
+    cancel_requested: Arc<AtomicBool>,
     mut runtime: app::RuntimeConfig,
 ) {
     let mut passphrases: HashMap<String, zeroize::Zeroizing<String>> = HashMap::new();
@@ -1446,15 +1463,28 @@ fn run_worker(
     while let Ok(cmd) = cmd_rx.recv() {
         match cmd {
             AppCommand::RunBackupAll { scheduled } => {
+                cancel_requested.store(false, Ordering::SeqCst);
                 backup_running.store(true, Ordering::SeqCst);
+                let _ = ui_tx.send(UiEvent::OperationStarted);
                 let _ = ui_tx.send(UiEvent::Status(if scheduled {
                     "Running scheduled backup...".to_string()
                 } else {
                     "Running backup...".to_string()
                 }));
 
-                for repo in &runtime.repos {
+                let total = runtime.repos.len();
+                for (i, repo) in runtime.repos.iter().enumerate() {
+                    if cancel_requested.load(Ordering::SeqCst) {
+                        send_log(&ui_tx, "Backup cancelled by user.");
+                        break;
+                    }
+
                     let repo_name = format_repo_name(repo);
+                    let _ = ui_tx.send(UiEvent::Status(format!(
+                        "Backing up [{}] ({}/{total})...",
+                        repo_name,
+                        i + 1
+                    )));
 
                     let passphrase = match get_or_resolve_passphrase(repo, &mut passphrases) {
                         Ok(pass) => pass,
@@ -1479,10 +1509,17 @@ fn run_worker(
                         continue;
                     }
 
-                    match operations::run_backup_for_repo(
+                    let mut tracker = BackupStatusTracker::new(repo_name.clone());
+                    let ui_tx_progress = ui_tx.clone();
+                    match operations::run_backup_for_repo_with_progress(
                         &repo.config,
                         &repo.sources,
                         passphrase.as_deref().map(|s| s.as_str()),
+                        &mut |event| {
+                            if let Some(status) = tracker.format(&event) {
+                                let _ = ui_tx_progress.send(UiEvent::Status(status));
+                            }
+                        },
                     ) {
                         Ok(report) => log_backup_report(&ui_tx, &repo_name, &report),
                         Err(e) => {
@@ -1492,6 +1529,7 @@ fn run_worker(
                 }
 
                 backup_running.store(false, Ordering::SeqCst);
+                let _ = ui_tx.send(UiEvent::OperationFinished);
                 let _ = ui_tx.send(UiEvent::Status("Idle".to_string()));
             }
             AppCommand::RunBackupRepo { repo_name } => {
@@ -1509,7 +1547,9 @@ fn run_worker(
                     }
                 };
 
+                cancel_requested.store(false, Ordering::SeqCst);
                 backup_running.store(true, Ordering::SeqCst);
+                let _ = ui_tx.send(UiEvent::OperationStarted);
                 let rn = format_repo_name(repo);
                 let _ = ui_tx.send(UiEvent::Status(format!("Running backup for [{rn}]...")));
 
@@ -1518,6 +1558,7 @@ fn run_worker(
                     Err(e) => {
                         send_log(&ui_tx, format!("[{rn}] passphrase error: {e}"));
                         backup_running.store(false, Ordering::SeqCst);
+                        let _ = ui_tx.send(UiEvent::OperationFinished);
                         let _ = ui_tx.send(UiEvent::Status("Idle".to_string()));
                         continue;
                     }
@@ -1531,20 +1572,29 @@ fn run_worker(
                         format!("[{rn}] passphrase prompt canceled; skipping."),
                     );
                     backup_running.store(false, Ordering::SeqCst);
+                    let _ = ui_tx.send(UiEvent::OperationFinished);
                     let _ = ui_tx.send(UiEvent::Status("Idle".to_string()));
                     continue;
                 }
 
-                match operations::run_backup_for_repo(
+                let mut tracker = BackupStatusTracker::new(rn.clone());
+                let ui_tx_progress = ui_tx.clone();
+                match operations::run_backup_for_repo_with_progress(
                     &repo.config,
                     &repo.sources,
                     passphrase.as_deref().map(|s| s.as_str()),
+                    &mut |event| {
+                        if let Some(status) = tracker.format(&event) {
+                            let _ = ui_tx_progress.send(UiEvent::Status(status));
+                        }
+                    },
                 ) {
                     Ok(report) => log_backup_report(&ui_tx, &rn, &report),
                     Err(e) => send_log(&ui_tx, format!("[{rn}] backup failed: {e}")),
                 }
 
                 backup_running.store(false, Ordering::SeqCst);
+                let _ = ui_tx.send(UiEvent::OperationFinished);
                 let _ = ui_tx.send(UiEvent::Status("Idle".to_string()));
             }
             AppCommand::RunBackupSource { source_label } => {
@@ -1554,13 +1604,21 @@ fn run_worker(
                     continue;
                 }
 
+                cancel_requested.store(false, Ordering::SeqCst);
                 backup_running.store(true, Ordering::SeqCst);
+                let _ = ui_tx.send(UiEvent::OperationStarted);
                 let _ = ui_tx.send(UiEvent::Status(format!(
                     "Running backup for source '{source_label}'..."
                 )));
 
                 let mut any_backed_up = false;
-                for repo in &runtime.repos {
+                let total = runtime.repos.len();
+                for (i, repo) in runtime.repos.iter().enumerate() {
+                    if cancel_requested.load(Ordering::SeqCst) {
+                        send_log(&ui_tx, "Backup cancelled by user.");
+                        break;
+                    }
+
                     let matching_sources: Vec<config::SourceEntry> = repo
                         .sources
                         .iter()
@@ -1573,6 +1631,12 @@ fn run_worker(
                     }
 
                     let repo_name = format_repo_name(repo);
+                    let _ = ui_tx.send(UiEvent::Status(format!(
+                        "Backing up [{}] ({}/{total})...",
+                        repo_name,
+                        i + 1
+                    )));
+
                     let passphrase = match get_or_resolve_passphrase(repo, &mut passphrases) {
                         Ok(p) => p,
                         Err(e) => {
@@ -1591,10 +1655,17 @@ fn run_worker(
                         continue;
                     }
 
-                    match operations::run_backup_for_repo(
+                    let mut tracker = BackupStatusTracker::new(repo_name.clone());
+                    let ui_tx_progress = ui_tx.clone();
+                    match operations::run_backup_for_repo_with_progress(
                         &repo.config,
                         &matching_sources,
                         passphrase.as_deref().map(|s| s.as_str()),
+                        &mut |event| {
+                            if let Some(status) = tracker.format(&event) {
+                                let _ = ui_tx_progress.send(UiEvent::Status(status));
+                            }
+                        },
                     ) {
                         Ok(report) => {
                             any_backed_up = true;
@@ -1614,6 +1685,7 @@ fn run_worker(
                 }
 
                 backup_running.store(false, Ordering::SeqCst);
+                let _ = ui_tx.send(UiEvent::OperationFinished);
                 let _ = ui_tx.send(UiEvent::Status("Idle".to_string()));
             }
             AppCommand::FetchAllRepoInfo => {
@@ -1622,8 +1694,14 @@ fn run_worker(
                 let mut items = Vec::new();
                 let mut labels = Vec::new();
 
-                for repo in &runtime.repos {
+                let total = runtime.repos.len();
+                for (i, repo) in runtime.repos.iter().enumerate() {
                     let repo_name = format_repo_name(repo);
+                    let _ = ui_tx.send(UiEvent::Status(format!(
+                        "Loading repo info: [{}] ({}/{total})...",
+                        repo_name,
+                        i + 1
+                    )));
                     let url = repo.config.repository.url.clone();
                     let passphrase = match get_or_resolve_passphrase(repo, &mut passphrases) {
                         Ok(p) => p,
@@ -1651,6 +1729,7 @@ fn run_worker(
                                 url,
                                 snapshots: stats.snapshot_count.to_string(),
                                 last_snapshot,
+                                size: format_bytes(stats.deduplicated_size),
                             });
                             labels.push(repo_name);
                         }
@@ -1687,13 +1766,13 @@ fn run_worker(
                         }
                     };
 
-                    match operations::list_snapshots(
+                    match operations::list_snapshots_with_stats(
                         &repo.config,
                         passphrase.as_deref().map(|s| s.as_str()),
                     ) {
                         Ok(mut snapshots) => {
-                            snapshots.sort_by_key(|s| s.time);
-                            for s in snapshots {
+                            snapshots.sort_by_key(|(s, _)| s.time);
+                            for (s, stats) in snapshots {
                                 let ts: DateTime<Local> = s.time.with_timezone(&Local);
                                 let sources = if s.source_paths.is_empty() {
                                     if s.source_label.is_empty() {
@@ -1714,6 +1793,10 @@ fn run_worker(
                                     time_str: ts.format("%Y-%m-%d %H:%M:%S").to_string(),
                                     source: sources,
                                     label,
+                                    files: format_count(stats.nfiles),
+                                    size: format_bytes(stats.deduplicated_size),
+                                    nfiles: stats.nfiles,
+                                    size_bytes: stats.deduplicated_size,
                                     time_epoch: s.time.timestamp(),
                                     repo_name: repo_name.clone(),
                                 });
@@ -1780,6 +1863,8 @@ fn run_worker(
                 dest,
                 paths,
             } => {
+                cancel_requested.store(false, Ordering::SeqCst);
+                let _ = ui_tx.send(UiEvent::OperationStarted);
                 let _ = ui_tx.send(UiEvent::Status("Restoring selected items...".to_string()));
 
                 match find_repo_for_snapshot(
@@ -1827,15 +1912,19 @@ fn run_worker(
                     }
                 }
 
+                let _ = ui_tx.send(UiEvent::OperationFinished);
                 let _ = ui_tx.send(UiEvent::Status("Idle".to_string()));
             }
             AppCommand::CheckRepo { repo_name } => {
+                cancel_requested.store(false, Ordering::SeqCst);
+                let _ = ui_tx.send(UiEvent::OperationStarted);
                 let _ = ui_tx.send(UiEvent::Status("Checking repository...".to_string()));
 
                 let repo = match config::select_repo(&runtime.repos, &repo_name) {
                     Some(r) => r,
                     None => {
                         send_log(&ui_tx, format!("No repository matching '{repo_name}'."));
+                        let _ = ui_tx.send(UiEvent::OperationFinished);
                         let _ = ui_tx.send(UiEvent::Status("Idle".to_string()));
                         continue;
                     }
@@ -1845,15 +1934,22 @@ fn run_worker(
                     Ok(p) => p,
                     Err(e) => {
                         send_log(&ui_tx, format!("[{repo_name}] passphrase error: {e}"));
+                        let _ = ui_tx.send(UiEvent::OperationFinished);
                         let _ = ui_tx.send(UiEvent::Status("Idle".to_string()));
                         continue;
                     }
                 };
 
-                match operations::check_repo(
+                let ui_tx_progress = ui_tx.clone();
+                let rn = repo_name.clone();
+                match operations::check_repo_with_progress(
                     &repo.config,
                     passphrase.as_deref().map(|s| s.as_str()),
                     false,
+                    &mut |event| {
+                        let _ =
+                            ui_tx_progress.send(UiEvent::Status(format_check_status(&rn, &event)));
+                    },
                 ) {
                     Ok(result) => {
                         send_log(
@@ -1872,15 +1968,19 @@ fn run_worker(
                     }
                     Err(e) => send_log(&ui_tx, format!("[{repo_name}] check failed: {e}")),
                 }
+                let _ = ui_tx.send(UiEvent::OperationFinished);
                 let _ = ui_tx.send(UiEvent::Status("Idle".to_string()));
             }
             AppCommand::CompactRepo { repo_name } => {
+                cancel_requested.store(false, Ordering::SeqCst);
+                let _ = ui_tx.send(UiEvent::OperationStarted);
                 let _ = ui_tx.send(UiEvent::Status("Compacting repository...".to_string()));
 
                 let repo = match config::select_repo(&runtime.repos, &repo_name) {
                     Some(r) => r,
                     None => {
                         send_log(&ui_tx, format!("No repository matching '{repo_name}'."));
+                        let _ = ui_tx.send(UiEvent::OperationFinished);
                         let _ = ui_tx.send(UiEvent::Status("Idle".to_string()));
                         continue;
                     }
@@ -1890,6 +1990,7 @@ fn run_worker(
                     Ok(p) => p,
                     Err(e) => {
                         send_log(&ui_tx, format!("[{repo_name}] passphrase error: {e}"));
+                        let _ = ui_tx.send(UiEvent::OperationFinished);
                         let _ = ui_tx.send(UiEvent::Status("Idle".to_string()));
                         continue;
                     }
@@ -1915,6 +2016,7 @@ fn run_worker(
                     }
                     Err(e) => send_log(&ui_tx, format!("[{repo_name}] compact failed: {e}")),
                 }
+                let _ = ui_tx.send(UiEvent::OperationFinished);
                 let _ = ui_tx.send(UiEvent::Status("Idle".to_string()));
             }
             AppCommand::DeleteSnapshot {
@@ -1936,12 +2038,15 @@ fn run_worker(
                     continue;
                 }
 
+                cancel_requested.store(false, Ordering::SeqCst);
+                let _ = ui_tx.send(UiEvent::OperationStarted);
                 let _ = ui_tx.send(UiEvent::Status("Deleting snapshot...".to_string()));
 
                 let repo = match config::select_repo(&runtime.repos, &repo_name) {
                     Some(r) => r,
                     None => {
                         send_log(&ui_tx, format!("No repository matching '{repo_name}'."));
+                        let _ = ui_tx.send(UiEvent::OperationFinished);
                         let _ = ui_tx.send(UiEvent::Status("Idle".to_string()));
                         continue;
                     }
@@ -1951,6 +2056,7 @@ fn run_worker(
                     Ok(p) => p,
                     Err(e) => {
                         send_log(&ui_tx, format!("[{repo_name}] passphrase error: {e}"));
+                        let _ = ui_tx.send(UiEvent::OperationFinished);
                         let _ = ui_tx.send(UiEvent::Status("Idle".to_string()));
                         continue;
                     }
@@ -1980,18 +2086,22 @@ fn run_worker(
                         send_log(&ui_tx, format!("[{repo_name}] delete failed: {e}"));
                     }
                 }
+                let _ = ui_tx.send(UiEvent::OperationFinished);
                 let _ = ui_tx.send(UiEvent::Status("Idle".to_string()));
             }
             AppCommand::FindFiles {
                 repo_name,
                 name_pattern,
             } => {
+                cancel_requested.store(false, Ordering::SeqCst);
+                let _ = ui_tx.send(UiEvent::OperationStarted);
                 let _ = ui_tx.send(UiEvent::Status("Searching files...".to_string()));
 
                 let repo = match config::select_repo(&runtime.repos, &repo_name) {
                     Some(r) => r,
                     None => {
                         send_log(&ui_tx, format!("No repository matching '{repo_name}'."));
+                        let _ = ui_tx.send(UiEvent::OperationFinished);
                         let _ = ui_tx.send(UiEvent::Status("Idle".to_string()));
                         continue;
                     }
@@ -2001,6 +2111,7 @@ fn run_worker(
                     Ok(p) => p,
                     Err(e) => {
                         send_log(&ui_tx, format!("[{repo_name}] passphrase error: {e}"));
+                        let _ = ui_tx.send(UiEvent::OperationFinished);
                         let _ = ui_tx.send(UiEvent::Status("Idle".to_string()));
                         continue;
                     }
@@ -2018,6 +2129,7 @@ fn run_worker(
                     Ok(f) => f,
                     Err(e) => {
                         send_log(&ui_tx, format!("Invalid name pattern: {e}"));
+                        let _ = ui_tx.send(UiEvent::OperationFinished);
                         let _ = ui_tx.send(UiEvent::Status("Idle".to_string()));
                         continue;
                     }
@@ -2069,6 +2181,7 @@ fn run_worker(
                     }
                 }
 
+                let _ = ui_tx.send(UiEvent::OperationFinished);
                 let _ = ui_tx.send(UiEvent::Status("Idle".to_string()));
             }
             AppCommand::OpenConfigFile => {
@@ -2127,6 +2240,12 @@ fn run_worker(
                         );
                     }
                 }
+            }
+            AppCommand::CancelOperation => {
+                send_log(
+                    &ui_tx,
+                    "Cancel requested; will stop after current step completes.".to_string(),
+                );
             }
             AppCommand::ToggleSchedulePause => {
                 schedule_paused = !schedule_paused;
@@ -2292,6 +2411,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let scheduler = Arc::new(Mutex::new(SchedulerState::default()));
     let backup_running = Arc::new(AtomicBool::new(false));
+    let cancel_requested = Arc::new(AtomicBool::new(false));
 
     spawn_scheduler(app_tx.clone(), scheduler.clone(), backup_running.clone());
 
@@ -2299,7 +2419,18 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let app_tx = app_tx.clone();
         let scheduler = scheduler.clone();
         let backup_running = backup_running.clone();
-        move || run_worker(app_tx, app_rx, ui_tx, scheduler, backup_running, runtime)
+        let cancel_requested = cancel_requested.clone();
+        move || {
+            run_worker(
+                app_tx,
+                app_rx,
+                ui_tx,
+                scheduler,
+                backup_running,
+                cancel_requested,
+                runtime,
+            )
+        }
     });
 
     let ui = MainWindow::new()?;
@@ -2379,6 +2510,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 url: d.url.into(),
                                 snapshots: d.snapshots.into(),
                                 last_snapshot: d.last_snapshot.into(),
+                                size: d.size.into(),
                             })
                             .collect();
                         ui.set_repo_model(ModelRc::new(VecModel::from(model)));
@@ -2413,6 +2545,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                     d.time_str.clone(),
                                     d.source.clone(),
                                     d.label.clone(),
+                                    d.files.clone(),
+                                    d.size.clone(),
                                 ]
                             })
                             .collect();
@@ -2450,6 +2584,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                             fw.set_status_text(format!("{count} results found.").into());
                         }
                     }
+                    UiEvent::OperationStarted => {
+                        ui.set_operation_busy(true);
+                    }
+                    UiEvent::OperationFinished => {
+                        ui.set_operation_busy(false);
+                    }
                     UiEvent::Quit => {
                         let _ = slint::quit_event_loop();
                     }
@@ -2472,6 +2612,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     ui.on_backup_all_clicked(move || {
         let _ = tx.send(AppCommand::RunBackupAll { scheduled: false });
     });
+
+    {
+        let cancel_flag = cancel_requested.clone();
+        let tx = app_tx.clone();
+        ui.on_cancel_clicked(move || {
+            cancel_flag.store(true, Ordering::SeqCst);
+            let _ = tx.send(AppCommand::CancelOperation);
+        });
+    }
 
     // Find Files button — sync repo names and show FindWindow
     {

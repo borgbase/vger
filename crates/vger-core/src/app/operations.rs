@@ -45,6 +45,15 @@ pub fn run_backup_for_repo(
     sources: &[SourceEntry],
     passphrase: Option<&str>,
 ) -> Result<BackupRunReport> {
+    run_backup_for_repo_with_progress(config, sources, passphrase, &mut |_| {})
+}
+
+pub fn run_backup_for_repo_with_progress(
+    config: &VgerConfig,
+    sources: &[SourceEntry],
+    passphrase: Option<&str>,
+    progress: &mut dyn FnMut(commands::backup::BackupProgressEvent),
+) -> Result<BackupRunReport> {
     if sources.is_empty() {
         return Err(VgerError::Config(
             "no sources configured for this repository".into(),
@@ -58,7 +67,7 @@ pub fn run_backup_for_repo(
 
     for source in sources {
         let snapshot_name = generate_snapshot_name();
-        let stats = commands::backup::run(
+        let stats = commands::backup::run_with_progress(
             config,
             commands::backup::BackupRequest {
                 snapshot_name: &snapshot_name,
@@ -73,6 +82,7 @@ pub fn run_backup_for_repo(
                 compression,
                 command_dumps: &source.command_dumps,
             },
+            Some(progress),
         )?;
 
         report.created.push(BackupSourceResult {
@@ -105,6 +115,13 @@ pub fn run_backup_for_all_repos(
 
 pub fn list_snapshots(config: &VgerConfig, passphrase: Option<&str>) -> Result<Vec<SnapshotEntry>> {
     commands::list::list_snapshots(config, passphrase)
+}
+
+pub fn list_snapshots_with_stats(
+    config: &VgerConfig,
+    passphrase: Option<&str>,
+) -> Result<Vec<(SnapshotEntry, crate::snapshot::SnapshotStats)>> {
+    commands::list::list_snapshots_with_stats(config, passphrase)
 }
 
 pub fn list_snapshot_items(
@@ -153,6 +170,15 @@ pub fn check_repo(
     verify_data: bool,
 ) -> Result<commands::check::CheckResult> {
     commands::check::run(config, passphrase, verify_data, false)
+}
+
+pub fn check_repo_with_progress(
+    config: &VgerConfig,
+    passphrase: Option<&str>,
+    verify_data: bool,
+    progress: &mut dyn FnMut(commands::check::CheckProgressEvent),
+) -> Result<commands::check::CheckResult> {
+    commands::check::run_with_progress(config, passphrase, verify_data, false, Some(progress))
 }
 
 pub fn delete_snapshot(
