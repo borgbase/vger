@@ -584,6 +584,10 @@ sources:
 #   keep_daily: 7
 #   keep_weekly: 4
 #
+# compression:
+#   algorithm: zstd
+#   zstd_level: 3
+#
 # exclude_patterns:
 #   - "*.tmp"
 #   - ".cache/**"
