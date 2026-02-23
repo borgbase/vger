@@ -34,6 +34,7 @@ fn main() {
     tracing_subscriber::fmt()
         .with_env_filter(filter)
         .with_target(false)
+        .with_writer(progress::ProgressAwareStderr)
         .init();
 
     // Handle `config` subcommand early — no config file needed
