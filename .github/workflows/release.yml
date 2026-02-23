@@ -74,6 +74,51 @@ jobs:
           name: linux-x86_64-unknown-linux-gnu
           path: vger-*.tar.gz
 
+  build-linux-musl:
+    name: linux-x86_64-unknown-linux-musl
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-unknown-linux-musl
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: release-linux-musl${{ github.event.inputs.debug_build == 'true' && '-profiling' || '' }}
+          cache-on-failure: true
+      - name: Install musl tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y musl-tools
+      - name: Build
+        run: |
+          if [ "${{ github.event.inputs.debug_build }}" = "true" ]; then
+            cargo build --profile profiling --target x86_64-unknown-linux-musl -p vger-cli -p vger-server
+          else
+            cargo build --release --target x86_64-unknown-linux-musl -p vger-cli -p vger-server
+          fi
+      - name: Package
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            VERSION="${{ github.event.inputs.version }}"
+          else
+            VERSION="${GITHUB_REF_NAME}"
+          fi
+          if [ "${{ github.event.inputs.debug_build }}" = "true" ]; then
+            PROFILE_DIR="profiling"
+            SUFFIX="-debug"
+          else
+            PROFILE_DIR="release"
+            SUFFIX=""
+          fi
+          ARCHIVE="vger-${VERSION}-x86_64-unknown-linux-musl${SUFFIX}.tar.gz"
+          tar -czf "${ARCHIVE}" -C "target/x86_64-unknown-linux-musl/${PROFILE_DIR}" vger vger-server
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: linux-x86_64-unknown-linux-musl
+          path: vger-*.tar.gz
+
   build-macos:
     name: macos-aarch64-apple-darwin
     if: github.event_name != 'workflow_dispatch' || github.event.inputs.linux_only != 'true'
@@ -148,9 +193,12 @@ jobs:
   release:
     name: publish
     runs-on: ubuntu-latest
-    if: github.event_name == 'push' || github.event.inputs.publish_release == 'true'
+    if: >-
+      always() && !failure() && !cancelled() &&
+      (github.event_name == 'push' || github.event.inputs.publish_release == 'true')
     needs:
       - build-linux
+      - build-linux-musl
       - build-macos
       - build-windows
     steps:
@@ -161,10 +209,12 @@ jobs:
       - name: Generate checksums
         run: |
           cd dist
-          for f in *.tar.gz *.zip; do
+          shopt -s nullglob
+          files=(*.tar.gz *.zip)
+          for f in "${files[@]}"; do
             sha256sum "$f" > "$f.sha256"
           done
-          sha256sum *.tar.gz *.zip > SHA256SUMS
+          sha256sum "${files[@]}" > SHA256SUMS
       - name: Publish GitHub release
         uses: softprops/action-gh-release@v2
         with:
