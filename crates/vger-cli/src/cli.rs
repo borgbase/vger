@@ -334,6 +334,21 @@ impl Commands {
         }
     }
 
+    /// Returns the targeted snapshot name, if the command references one.
+    pub(crate) fn snapshot_name(&self) -> Option<&str> {
+        match self {
+            Self::Restore { snapshot, .. } => Some(snapshot),
+            Self::Snapshot { command } => match command {
+                SnapshotCommand::List { snapshot, .. }
+                | SnapshotCommand::Info { snapshot, .. }
+                | SnapshotCommand::Delete { snapshot, .. } => Some(snapshot),
+                _ => None,
+            },
+            Self::Mount { snapshot, .. } => snapshot.as_deref(),
+            _ => None,
+        }
+    }
+
     pub(crate) fn name(&self) -> &'static str {
         match self {
             Self::Init { .. } => "init",

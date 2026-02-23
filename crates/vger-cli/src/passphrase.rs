@@ -1,7 +1,16 @@
+use std::collections::HashMap;
+use std::sync::{LazyLock, Mutex};
+
 use zeroize::Zeroizing;
 
 use crate::prompt::prompt_hidden;
 use vger_core::config::{EncryptionModeConfig, VgerConfig};
+
+/// Process-level passphrase cache keyed by repository URL.
+/// Avoids double interactive prompts when probe-then-dispatch opens the same
+/// repo twice (once to check the manifest, once to run the command).
+static PASSPHRASE_CACHE: LazyLock<Mutex<HashMap<String, Option<Zeroizing<String>>>>> =
+    LazyLock::new(|| Mutex::new(HashMap::new()));
 
 pub(crate) fn with_repo_passphrase<T>(
     config: &VgerConfig,
@@ -20,7 +29,18 @@ pub(crate) fn get_passphrase(
         return Ok(None);
     }
 
+    let cache_key = config.repository.url.clone();
+
+    // Check cache first (avoids double interactive prompt during probe+dispatch)
+    if let Some(cached) = PASSPHRASE_CACHE.lock().unwrap_or_else(|p| p.into_inner()).get(&cache_key) {
+        return Ok(cached.clone());
+    }
+
     if let Some(pass) = configured_passphrase(config)? {
+        PASSPHRASE_CACHE
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .insert(cache_key, Some(pass.clone()));
         return Ok(Some(pass));
     }
 
@@ -30,6 +50,10 @@ pub(crate) fn get_passphrase(
         None => "Enter passphrase: ".to_string(),
     };
     let pass = Zeroizing::new(prompt_hidden(&prompt)?);
+    PASSPHRASE_CACHE
+        .lock()
+        .unwrap_or_else(|p| p.into_inner())
+        .insert(cache_key, Some(pass.clone()));
     Ok(Some(pass))
 }
 

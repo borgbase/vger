@@ -14,6 +14,7 @@ use clap::Parser;
 use vger_core::config::{self, ResolvedRepo};
 
 use crate::hooks::HookContext;
+use crate::passphrase::with_repo_passphrase;
 
 use cli::{Cli, Commands};
 use config_gen::run_config_generate;
@@ -104,58 +105,72 @@ fn main() {
     };
 
     let multi = repos.len() > 1;
+
+    // Smart snapshot dispatch: when multiple repos are configured and the
+    // command targets a specific snapshot, probe repos to find the one that
+    // actually contains it, rather than running against all repos.
+    if let (true, Some(snap)) = (multi, cli.command.as_ref().and_then(|c| c.snapshot_name())) {
+        // Emit REST/plaintext warnings before probing backends
+        for repo in &repos {
+            warn_if_untrusted_rest(&repo.config, repo.label.as_deref());
+        }
+
+        match classify_snapshot_target(snap, &repos) {
+            SnapshotDispatch::RequireRepo => {
+                eprintln!(
+                    "Error: 'latest' requires -R / --repo when multiple repositories are configured"
+                );
+                std::process::exit(1);
+            }
+            SnapshotDispatch::NotFound => {
+                eprintln!(
+                    "Error: snapshot '{snap}' not found in any configured repository"
+                );
+                std::process::exit(1);
+            }
+            SnapshotDispatch::Unique(idx) => {
+                // Single match — dispatch without banner
+                if let Err(e) = run_repo_command(&cli, repos[idx]) {
+                    eprintln!("Error: {e}");
+                    std::process::exit(1);
+                }
+            }
+            SnapshotDispatch::Ambiguous(indices) => {
+                let names: Vec<&str> = indices.iter().map(|i| repo_display_name(repos[*i])).collect();
+                eprintln!(
+                    "Error: snapshot '{snap}' found in multiple repositories: {}. \
+                     Use -R / --repo to select one.",
+                    names.join(", ")
+                );
+                std::process::exit(1);
+            }
+            SnapshotDispatch::ProbeError { matches, errors } => {
+                eprintln!("Error: could not probe all repositories");
+                for (i, err) in &errors {
+                    eprintln!("  {}:  {err}", repo_display_name(repos[*i]));
+                }
+                for i in &matches {
+                    eprintln!("  {}:  found '{snap}'", repo_display_name(repos[*i]));
+                }
+                eprintln!("Use -R / --repo to target a specific repository.");
+                std::process::exit(1);
+            }
+        }
+        return;
+    }
+
+    // Default path: run against all selected repos
     let mut had_error = false;
 
     for repo in &repos {
         if multi {
-            let name = repo.label.as_deref().unwrap_or(&repo.config.repository.url);
-            eprintln!("--- Repository: {name} ---");
+            eprintln!("--- Repository: {} ---", repo_display_name(repo));
         }
 
-        let label = repo.label.as_deref();
-        let cfg = &repo.config;
-        warn_if_untrusted_rest(cfg, label);
-
-        let has_hooks = !repo.global_hooks.is_empty() || !repo.repo_hooks.is_empty();
-
-        let result = match &cli.command {
-            Some(cmd) => {
-                let run_action = || dispatch_command(cmd, cfg, label, &repo.sources);
-                if has_hooks {
-                    let mut ctx = HookContext {
-                        command: cmd.name().to_string(),
-                        repository: cfg.repository.url.clone(),
-                        label: repo.label.clone(),
-                        error: None,
-                        source_label: None,
-                        source_paths: None,
-                    };
-                    hooks::run_with_hooks(
-                        &repo.global_hooks,
-                        &repo.repo_hooks,
-                        &mut ctx,
-                        run_action,
-                    )
-                } else {
-                    run_action()
-                }
-            }
-            None => run_default_actions(
-                cfg,
-                label,
-                &repo.sources,
-                &repo.global_hooks,
-                &repo.repo_hooks,
-                &repo.label,
-                None,
-            ),
-        };
-
-        if let Err(e) = result {
+        if let Err(e) = run_repo_command(&cli, repo) {
             eprintln!("Error: {e}");
             had_error = true;
             if multi {
-                // Continue to next repo
                 continue;
             } else {
                 std::process::exit(1);
@@ -165,5 +180,117 @@ fn main() {
 
     if had_error {
         std::process::exit(1);
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Helpers
+// ---------------------------------------------------------------------------
+
+fn repo_display_name(repo: &ResolvedRepo) -> &str {
+    repo.label.as_deref().unwrap_or(&repo.config.repository.url)
+}
+
+/// Result of probing multiple repos for a snapshot name.
+enum SnapshotDispatch {
+    /// "latest" is ambiguous across repos — caller must specify --repo.
+    RequireRepo,
+    /// Snapshot not found in any repo (and all probes succeeded).
+    NotFound,
+    /// Exactly one repo contains the snapshot.
+    Unique(usize),
+    /// Multiple repos contain the snapshot.
+    Ambiguous(Vec<usize>),
+    /// At least one probe failed — we can't be sure of the result.
+    ProbeError {
+        matches: Vec<usize>,
+        errors: Vec<(usize, String)>,
+    },
+}
+
+/// Classify where a snapshot lives across multiple repos.
+/// Pure decision logic — no I/O side effects beyond the lightweight probes.
+fn classify_snapshot_target(snap: &str, repos: &[&ResolvedRepo]) -> SnapshotDispatch {
+    if snap.eq_ignore_ascii_case("latest") {
+        return SnapshotDispatch::RequireRepo;
+    }
+
+    let mut matches: Vec<usize> = Vec::new();
+    let mut errors: Vec<(usize, String)> = Vec::new();
+
+    for (i, repo) in repos.iter().enumerate() {
+        match probe_snapshot(&repo.config, repo.label.as_deref(), snap) {
+            Ok(true) => matches.push(i),
+            Ok(false) => {}
+            Err(e) => errors.push((i, e.to_string())),
+        }
+    }
+
+    if !errors.is_empty() {
+        return SnapshotDispatch::ProbeError { matches, errors };
+    }
+
+    match matches.len() {
+        0 => SnapshotDispatch::NotFound,
+        1 => SnapshotDispatch::Unique(matches[0]),
+        _ => SnapshotDispatch::Ambiguous(matches),
+    }
+}
+
+/// Probe whether a repo's manifest contains a snapshot (lightweight open).
+fn probe_snapshot(
+    config: &vger_core::config::VgerConfig,
+    label: Option<&str>,
+    snapshot_name: &str,
+) -> Result<bool, Box<dyn std::error::Error>> {
+    with_repo_passphrase(config, label, |passphrase| {
+        let repo = vger_core::commands::util::open_repo_without_index_or_cache(config, passphrase)
+            .map_err(|e| -> Box<dyn std::error::Error> { Box::new(e) })?;
+        Ok(repo.manifest().find_snapshot(snapshot_name).is_some())
+    })
+}
+
+/// Execute the CLI command (or default actions) against one repo.
+fn run_repo_command(
+    cli: &Cli,
+    repo: &ResolvedRepo,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let label = repo.label.as_deref();
+    let cfg = &repo.config;
+    warn_if_untrusted_rest(cfg, label);
+
+    let has_hooks = !repo.global_hooks.is_empty() || !repo.repo_hooks.is_empty();
+
+    match &cli.command {
+        Some(cmd) => {
+            let run_action = || dispatch_command(cmd, cfg, label, &repo.sources);
+            if has_hooks {
+                let mut ctx = HookContext {
+                    command: cmd.name().to_string(),
+                    repository: cfg.repository.url.clone(),
+                    label: repo.label.clone(),
+                    error: None,
+                    source_label: None,
+                    source_paths: None,
+                };
+                hooks::run_with_hooks(
+                    &repo.global_hooks,
+                    &repo.repo_hooks,
+                    &mut ctx,
+                    run_action,
+                )
+            } else {
+                run_action()
+            }
+        }
+        None => run_default_actions(
+            cfg,
+            label,
+            &repo.sources,
+            &repo.global_hooks,
+            &repo.repo_hooks,
+            &repo.label,
+            None,
+        ),
     }
 }
