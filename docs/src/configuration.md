@@ -188,6 +188,7 @@ limits:                              # Optional backup resource limits
   cpu:
     max_threads: 0                   # 0 = default rayon behavior
     nice: 0                          # Unix niceness target (-20..19), ignored on Windows
+    max_upload_concurrency: 2        # In-flight pack uploads to remote backends (1-16)
   io:
     read_mib_per_sec: 0              # Source file reads during backup
     write_mib_per_sec: 0             # Local repository writes during backup

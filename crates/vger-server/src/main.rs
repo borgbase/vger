@@ -39,13 +39,13 @@ struct Cli {
     #[arg(long, default_value_t = 3600)]
     lock_ttl_seconds: u64,
 
-    /// Maximum number of blocking threads for file I/O (minimum 1)
-    #[arg(long, default_value_t = 6, value_parser = parse_min_one)]
-    max_blocking_threads: usize,
-
-    /// Number of tokio worker threads (minimum 1)
+    /// Number of async threads for handling network connections (minimum 1)
     #[arg(long, default_value_t = 4, value_parser = parse_min_one)]
-    worker_threads: usize,
+    network_threads: usize,
+
+    /// Number of threads for blocking disk I/O (reads, writes, hashing) (minimum 1)
+    #[arg(long, default_value_t = 6, value_parser = parse_min_one)]
+    io_threads: usize,
 }
 
 fn parse_min_one(s: &str) -> Result<usize, String> {
@@ -60,8 +60,8 @@ fn main() {
     let cli = Cli::parse();
 
     let runtime = tokio::runtime::Builder::new_multi_thread()
-        .worker_threads(cli.worker_threads)
-        .max_blocking_threads(cli.max_blocking_threads)
+        .worker_threads(cli.network_threads)
+        .max_blocking_threads(cli.io_threads)
         .enable_all()
         .build()
         .unwrap_or_else(|e| {

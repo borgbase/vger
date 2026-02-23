@@ -65,7 +65,7 @@ pub(crate) fn run_default_actions(
         global_hooks,
         repo_hooks,
         &mut make_hook_ctx("backup", cfg, repo_label),
-        || cmd::backup::run_backup(cfg, label, None, None, vec![], sources, &[]),
+        || cmd::backup::run_backup(cfg, label, None, None, None, vec![], sources, &[]),
     ) {
         Ok(()) => {
             steps.push(("backup", StepResult::Ok));
@@ -200,6 +200,7 @@ pub(crate) fn dispatch_command(
         Commands::Backup {
             label: user_label,
             compression,
+            upload_concurrency,
             source,
             paths,
             ..
@@ -208,6 +209,7 @@ pub(crate) fn dispatch_command(
             label,
             user_label.clone(),
             compression.clone(),
+            upload_concurrency.map(|v| v as usize),
             paths.clone(),
             sources,
             source,

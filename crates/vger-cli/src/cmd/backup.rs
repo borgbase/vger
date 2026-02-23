@@ -32,10 +32,21 @@ pub(crate) fn run_backup(
     label: Option<&str>,
     user_label: Option<String>,
     compression_override: Option<String>,
+    upload_concurrency: Option<usize>,
     paths: Vec<String>,
     sources: &[SourceEntry],
     source_filter: &[String],
 ) -> Result<(), Box<dyn std::error::Error>> {
+    // Apply upload concurrency override before opening the repo
+    let config = if let Some(uc) = upload_concurrency {
+        let mut cfg = config.clone();
+        cfg.limits.cpu.max_upload_concurrency = Some(uc);
+        cfg
+    } else {
+        config.clone()
+    };
+    let config = &config;
+
     with_repo_passphrase(config, label, |passphrase| {
         let user_label_str = user_label.as_deref().unwrap_or("");
         let show_progress = std::io::stderr().is_terminal();

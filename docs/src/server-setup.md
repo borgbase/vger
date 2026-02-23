@@ -36,7 +36,8 @@ All settings are passed as CLI flags. The authentication token is read from the 
 | `--log-format` | `pretty` | Log output format: `json` or `pretty` |
 | `--quota` | `0` | Storage quota (`500M`, `10G`, plain bytes). 0 = unlimited |
 | `--lock-ttl-seconds` | `3600` | Auto-expire locks after this many seconds |
-| `--max-blocking-threads` | `6` | Maximum number of blocking threads for file I/O |
+| `--network-threads` | `4` | Async threads for handling network connections |
+| `--io-threads` | `6` | Threads for blocking disk I/O (reads, writes, hashing) |
 
 ### Environment variables
 

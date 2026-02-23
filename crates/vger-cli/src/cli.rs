@@ -57,6 +57,10 @@ pub(crate) enum Commands {
         #[arg(short = 'S', long = "source")]
         source: Vec<String>,
 
+        /// Max concurrent pack uploads to remote backends (1-16, overrides config)
+        #[arg(long, value_parser = clap::value_parser!(u16).range(1..=16))]
+        upload_concurrency: Option<u16>,
+
         /// Ad-hoc paths to back up (grouped into a single snapshot)
         paths: Vec<String>,
     },
