@@ -125,6 +125,8 @@ encryption:
   # passcommand: "pass show borg"    # Shell command that prints the passphrase
 ```
 
+`none` mode requires no passphrase and creates no key file. Data is still checksummed via keyed BLAKE2b-256 chunk IDs to detect storage corruption, but is not authenticated against tampering. See [Architecture — Plaintext Mode](architecture.md#plaintext-mode-none) for details.
+
 `passcommand` runs through the platform shell:
 
 - Unix: `sh -c`

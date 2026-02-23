@@ -17,6 +17,12 @@ Rationale:
 - 32-byte symmetric keys (simpler key management than split-key schemes)
 - AEAD AAD always includes the 1-byte type tag; for identity-bound objects it also includes a domain-separated object context (for example: `manifest`, `index`, snapshot ID, chunk ID, or `filecache`)
 
+### Plaintext Mode (`none`)
+
+When `encryption` is set to `none`, vger uses a `PlaintextEngine` — an identity transform where `encrypt()` and `decrypt()` return data unchanged. AAD is ignored (there is no AEAD construction to bind it to). The format layer detects plaintext mode via `is_encrypting() == false` and uses the shorter wire format: `[1-byte type_tag][plaintext]` (1-byte overhead instead of 29 bytes).
+
+This mode does **not** provide authentication or tamper protection — it is designed for trusted storage where confidentiality is unnecessary. Data integrity against accidental corruption is still provided via keyed BLAKE2b-256 chunk IDs (see [Hashing / Chunk IDs](#hashing--chunk-ids) below).
+
 ### Key Derivation
 
 Argon2id for passphrase-to-key derivation.
@@ -24,6 +30,8 @@ Argon2id for passphrase-to-key derivation.
 Rationale:
 - Modern memory-hard KDF recommended by OWASP and IETF
 - Resists both GPU and ASIC brute-force attacks
+
+In `none` mode no passphrase or key file is needed. The `chunk_id_key` is deterministically derived as `BLAKE2b-256(repo_id)`. Since `repo_id` is stored unencrypted in the repo `config`, this key is not secret — it exists only so that the same keyed hashing path is used in all modes. No `keys/repokey` file is created.
 
 ### Hashing / Chunk IDs
 
@@ -33,6 +41,8 @@ Rationale:
 - Prevents content confirmation attacks (an adversary cannot check whether known plaintext exists in the backup without the key)
 - BLAKE2b is faster than SHA-256 in software
 - Trade-off: keyed IDs prevent dedup across different encryption keys (acceptable for vger's single-key-per-repo model)
+
+In `none` mode the same keyed BLAKE2b-256 construction is used, but the key is derived from the public `repo_id` rather than a secret master key. The MAC therefore acts as a **checksum for corruption detection**, not as authentication against tampering. `vger check --verify-data` recomputes chunk IDs and compares them to detect bit-rot or storage corruption — this works identically across all encryption modes.
 
 ---
 
@@ -89,10 +99,11 @@ All persistent data structures use **msgpack** via `rmp_serde`. Structs serializ
 
 ### RepoObj Envelope
 
-Every encrypted object stored in the repository is wrapped in a `RepoObj` envelope (`repo/format.rs`):
+Every object stored in the repository is wrapped in a `RepoObj` envelope (`repo/format.rs`). The wire format depends on the encryption mode:
 
 ```text
-[1-byte type_tag][12-byte nonce][ciphertext + 16-byte AEAD tag]
+Encrypted:  [1-byte type_tag][12-byte nonce][ciphertext + 16-byte AEAD tag]
+Plaintext:  [1-byte type_tag][plaintext]
 ```
 
 The type tag identifies the object kind via the `ObjectType` enum:
@@ -118,7 +129,7 @@ The type tag byte is always included in AAD (authenticated additional data). For
 ```text
 <repo>/
 |- config                    # Repository metadata (unencrypted msgpack)
-|- keys/repokey              # Encrypted master key (Argon2id-wrapped)
+|- keys/repokey              # Encrypted master key (Argon2id-wrapped; absent in `none` mode)
 |- manifest                  # Encrypted snapshot list
 |- index                     # Encrypted chunk index
 |- snapshots/<id>            # Encrypted snapshot metadata
