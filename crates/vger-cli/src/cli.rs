@@ -82,10 +82,6 @@ pub(crate) enum Commands {
 
     /// Inspect snapshot contents and metadata
     Snapshot {
-        /// Select repository by label or path
-        #[arg(short = 'R', long = "repo")]
-        repo: Option<String>,
-
         #[command(subcommand)]
         command: SnapshotCommand,
     },
@@ -236,6 +232,9 @@ pub(crate) enum SortField {
 pub(crate) enum SnapshotCommand {
     /// Show contents of a snapshot
     List {
+        /// Select repository by label or path
+        #[arg(short = 'R', long = "repo")]
+        repo: Option<String>,
         /// Snapshot to inspect
         snapshot: String,
         /// Show only files under this subtree
@@ -250,11 +249,17 @@ pub(crate) enum SnapshotCommand {
     },
     /// Show metadata of a snapshot
     Info {
+        /// Select repository by label or path
+        #[arg(short = 'R', long = "repo")]
+        repo: Option<String>,
         /// Snapshot to inspect
         snapshot: String,
     },
     /// Delete a specific snapshot
     Delete {
+        /// Select repository by label or path
+        #[arg(short = 'R', long = "repo")]
+        repo: Option<String>,
         /// Snapshot name to delete
         snapshot: String,
         /// Only show what would be deleted, don't actually delete
@@ -263,6 +268,9 @@ pub(crate) enum SnapshotCommand {
     },
     /// Find files across snapshots
     Find {
+        /// Select repository by label or path
+        #[arg(short = 'R', long = "repo")]
+        repo: Option<String>,
         /// Starting directory (default: root)
         path: Option<String>,
         /// Filter by source label
@@ -296,13 +304,23 @@ pub(crate) enum SnapshotCommand {
     },
 }
 
+impl SnapshotCommand {
+    pub(crate) fn repo(&self) -> Option<&str> {
+        match self {
+            Self::List { repo, .. }
+            | Self::Info { repo, .. }
+            | Self::Delete { repo, .. }
+            | Self::Find { repo, .. } => repo.as_deref(),
+        }
+    }
+}
+
 impl Commands {
     pub(crate) fn repo(&self) -> Option<&str> {
         match self {
             Self::Init { repo, .. }
             | Self::Backup { repo, .. }
             | Self::List { repo, .. }
-            | Self::Snapshot { repo, .. }
             | Self::Restore { repo, .. }
             | Self::Delete { repo, .. }
             | Self::Prune { repo, .. }
@@ -311,6 +329,7 @@ impl Commands {
             | Self::Mount { repo, .. }
             | Self::BreakLock { repo, .. }
             | Self::Compact { repo, .. } => repo.as_deref(),
+            Self::Snapshot { command, .. } => command.repo(),
             Self::Config { .. } | Self::Daemon => None,
         }
     }

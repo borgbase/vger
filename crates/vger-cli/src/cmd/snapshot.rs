@@ -26,6 +26,7 @@ pub(crate) fn run_snapshot_command(
             path,
             long,
             sort,
+            ..
         } => {
             let mut items = with_repo_passphrase(config, label, |passphrase| {
                 commands::list::list_snapshot_items(config, passphrase, snapshot)
@@ -75,7 +76,7 @@ pub(crate) fn run_snapshot_command(
             }
             Ok(())
         }
-        SnapshotCommand::Delete { snapshot, dry_run } => {
+        SnapshotCommand::Delete { snapshot, dry_run, .. } => {
             super::delete::run_delete(config, label, snapshot.clone(), *dry_run)
         }
         SnapshotCommand::Find {
@@ -88,10 +89,11 @@ pub(crate) fn run_snapshot_command(
             since,
             larger,
             smaller,
+            ..
         } => run_snapshot_find(
             config, label, path, source, last, name, iname, entry_type, since, larger, smaller,
         ),
-        SnapshotCommand::Info { snapshot } => {
+        SnapshotCommand::Info { snapshot, .. } => {
             let meta = with_repo_passphrase(config, label, |passphrase| {
                 commands::list::get_snapshot_meta(config, passphrase, snapshot)
                     .map_err(|e| -> Box<dyn std::error::Error> { Box::new(e) })
