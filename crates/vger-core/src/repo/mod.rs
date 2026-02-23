@@ -496,10 +496,26 @@ impl Repository {
         })
     }
 
-    /// Load the chunk index from storage on demand.
+    /// Load the chunk index from storage on demand (using local blob cache).
     /// Can be called after `open_without_index()` to lazily load the index.
     /// Also recalculates the data pack writer target from the loaded index.
     pub fn load_chunk_index(&mut self) -> Result<()> {
+        self.chunk_index = self.reload_full_index_cached()?;
+        let num_data_packs = self.chunk_index.count_distinct_packs();
+        let data_target = compute_data_pack_target(
+            num_data_packs,
+            self.config.min_pack_size,
+            self.config.max_pack_size,
+        );
+        self.data_pack_writer =
+            PackWriter::new_default(PackType::Data, data_target, self.repo_cache_dir());
+        Ok(())
+    }
+
+    /// Load the chunk index from storage, bypassing the local blob cache.
+    /// Use this for operations like `check` that must verify what's actually
+    /// in the remote repository.
+    pub fn load_chunk_index_uncached(&mut self) -> Result<()> {
         self.chunk_index = self.reload_full_index()?;
         let num_data_packs = self.chunk_index.count_distinct_packs();
         let data_target = compute_data_pack_target(
@@ -1033,20 +1049,95 @@ impl Repository {
         Ok(true)
     }
 
-    /// Reload the full chunk index from storage.
+    /// Reload the full chunk index from storage (always downloads from remote).
     fn reload_full_index(&self) -> Result<ChunkIndex> {
         if let Some(index_data) = self.storage.get("index")? {
-            let compressed = unpack_object_expect_with_context(
-                &index_data,
-                ObjectType::ChunkIndex,
-                INDEX_OBJECT_CONTEXT,
-                self.crypto.as_ref(),
-            )?;
-            let index_bytes = compress::decompress_metadata(&compressed)?;
-            Ok(rmp_serde::from_slice(&index_bytes)?)
+            Self::decode_index_blob(&index_data, self.crypto.as_ref())
         } else {
             Ok(ChunkIndex::new())
         }
+    }
+
+    /// Load the index blob, trying the local blob cache first.
+    /// Falls back to remote download on cache miss.
+    fn load_index_blob_cached(&self) -> Result<Option<Vec<u8>>> {
+        let generation = self.manifest.index_generation;
+        let cache_dir = self.cache_dir_override.as_deref();
+
+        // Try local blob cache
+        if let Some(blob) = dedup_cache::read_index_blob_cache(
+            &self.config.id,
+            generation,
+            cache_dir,
+        ) {
+            debug!("index blob cache hit (generation {generation})");
+            return Ok(Some(blob));
+        }
+
+        // Cache miss — download from remote
+        let Some(blob) = self.storage.get("index")? else {
+            return Ok(None);
+        };
+
+        // Save to local cache (non-fatal on error)
+        if let Err(e) = dedup_cache::write_index_blob_cache(
+            &blob,
+            generation,
+            &self.config.id,
+            cache_dir,
+        ) {
+            debug!("failed to write index blob cache: {e}");
+        }
+
+        Ok(Some(blob))
+    }
+
+    /// Reload the full chunk index, trying the local blob cache first.
+    /// Falls back to remote download if the cached blob is corrupt.
+    fn reload_full_index_cached(&self) -> Result<ChunkIndex> {
+        if let Some(index_data) = self.load_index_blob_cached()? {
+            match Self::decode_index_blob(&index_data, self.crypto.as_ref()) {
+                Ok(index) => return Ok(index),
+                Err(e) => {
+                    warn!("index blob cache corrupt, falling back to remote: {e}");
+                    // Fall through to uncached remote download
+                }
+            }
+        } else {
+            return Ok(ChunkIndex::new());
+        }
+
+        // Cached blob was corrupt — download fresh and rewrite the cache
+        let Some(blob) = self.storage.get("index")? else {
+            return Ok(ChunkIndex::new());
+        };
+        let index = Self::decode_index_blob(&blob, self.crypto.as_ref())?;
+
+        if let Err(e) = dedup_cache::write_index_blob_cache(
+            &blob,
+            self.manifest.index_generation,
+            &self.config.id,
+            self.cache_dir_override.as_deref(),
+        ) {
+            debug!("failed to rewrite index blob cache: {e}");
+        }
+
+        Ok(index)
+    }
+
+    /// Decrypt, decompress, and deserialize an index blob.
+    fn decode_index_blob(
+        index_data: &[u8],
+        crypto: &dyn CryptoEngine,
+    ) -> Result<ChunkIndex> {
+        let compressed = unpack_object_expect_with_context(
+            index_data,
+            ObjectType::ChunkIndex,
+            INDEX_OBJECT_CONTEXT,
+            crypto,
+        )?;
+        let index_bytes = compress::decompress_metadata(&compressed)?;
+        Ok(rmp_serde::from_slice(&index_bytes)?)
     }
 
     /// Increment refcount if this chunk already exists in committed or pending state.

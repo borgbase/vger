@@ -20,7 +20,7 @@ use vger_types::error::{Result, VgerError};
 use vger_types::pack_id::PackId;
 
 use super::list::{for_each_decoded_item, load_snapshot_item_stream, load_snapshot_meta};
-use super::util::open_repo;
+use super::util::open_repo_without_index;
 
 /// Concurrency for remote (REST/S3/SFTP) backends.
 const REMOTE_CONCURRENCY: usize = 16;
@@ -135,7 +135,8 @@ pub fn run_with_progress(
     distrust_server: bool,
     mut progress: Option<&mut dyn FnMut(CheckProgressEvent)>,
 ) -> Result<CheckResult> {
-    let mut repo = open_repo(config, passphrase)?;
+    let mut repo = open_repo_without_index(config, passphrase)?;
+    repo.load_chunk_index_uncached()?;
 
     let mut errors: Vec<CheckError> = Vec::new();
     let mut snapshots_checked: usize = 0;

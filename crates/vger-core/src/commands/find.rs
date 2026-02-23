@@ -6,10 +6,10 @@ use globset::GlobMatcher;
 use crate::config::VgerConfig;
 use crate::snapshot::item::{Item, ItemType};
 use vger_types::chunk_id::ChunkId;
-use vger_types::error::Result;
+use vger_types::error::{Result, VgerError};
 
 use super::list;
-use super::util::open_repo;
+use super::util::open_repo_without_index;
 
 /// Filter criteria (all fields are AND-combined).
 pub struct FindFilter {
@@ -98,13 +98,15 @@ pub struct PathTimeline {
 }
 
 /// Run the find command: search for files across snapshots.
+/// Tries the local restore cache first to avoid downloading the full index.
+/// Falls back to the full index (with blob cache) on cache miss.
 pub fn run(
     config: &VgerConfig,
     passphrase: Option<&str>,
     scope: &FindScope,
     filter: &FindFilter,
 ) -> Result<Vec<PathTimeline>> {
-    let mut repo = open_repo(config, passphrase)?;
+    let mut repo = open_repo_without_index(config, passphrase)?;
 
     // Select and sort snapshots chronologically
     let mut entries: Vec<_> = repo.manifest().snapshots.clone();
@@ -122,6 +124,10 @@ pub fn run(
         }
     }
 
+    // Try restore cache first
+    let mut restore_cache = repo.open_restore_cache();
+    let mut index_loaded = false;
+
     // Collect hits per path
     let mut hits_by_path: BTreeMap<String, Vec<FindHit>> = BTreeMap::new();
 
@@ -129,7 +135,30 @@ pub fn run(
         let snapshot_name = entry.name.clone();
         let snapshot_time = entry.time;
 
-        list::for_each_snapshot_item(&mut repo, &snapshot_name, |item| {
+        // Try restore cache path, fall back to full index
+        let items_stream = if let Some(ref cache) = restore_cache {
+            match list::load_snapshot_item_stream_via_lookup(&mut repo, &snapshot_name, |id| {
+                cache.lookup(id)
+            }) {
+                Ok(s) => s,
+                Err(VgerError::ChunkNotInIndex(_)) => {
+                    // Restore cache incomplete — fall back to full index
+                    restore_cache = None;
+                    repo.load_chunk_index()?;
+                    index_loaded = true;
+                    list::load_snapshot_item_stream(&mut repo, &snapshot_name)?
+                }
+                Err(e) => return Err(e),
+            }
+        } else {
+            if !index_loaded {
+                repo.load_chunk_index()?;
+                index_loaded = true;
+            }
+            list::load_snapshot_item_stream(&mut repo, &snapshot_name)?
+        };
+
+        list::for_each_decoded_item(&items_stream, |item| {
             if matches_filter(&item, filter) {
                 let chunk_ids: Vec<ChunkId> = item.chunks.iter().map(|c| c.id).collect();
                 hits_by_path

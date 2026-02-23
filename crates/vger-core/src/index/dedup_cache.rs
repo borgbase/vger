@@ -1104,6 +1104,116 @@ pub fn build_restore_cache_from_full_cache(
     Ok(())
 }
 
+// ===========================================================================
+// Index blob cache — caches the raw encrypted+compressed index blob locally
+// ===========================================================================
+
+/// Magic bytes at the start of the index blob cache file.
+const INDEX_BLOB_MAGIC: &[u8; 8] = b"VGIDXB\0\0";
+
+/// Current index blob cache format version.
+const INDEX_BLOB_VERSION: u32 = 1;
+
+/// Size of the index blob cache header in bytes:
+/// magic(8) + version(4) + generation(8) + reserved(4) = 24.
+const INDEX_BLOB_HEADER_SIZE: usize = 24;
+
+/// Return the local filesystem path for the index blob cache file.
+pub fn index_blob_cache_path(repo_id: &[u8], cache_dir: Option<&Path>) -> Option<PathBuf> {
+    repo_cache_dir(repo_id, cache_dir).map(|d| d.join("index_blob"))
+}
+
+/// Read the cached index blob if it exists and matches the expected generation.
+/// Returns `None` on any error (missing file, wrong magic/version/generation).
+pub fn read_index_blob_cache(
+    repo_id: &[u8],
+    expected_generation: u64,
+    cache_dir: Option<&Path>,
+) -> Option<Vec<u8>> {
+    if expected_generation == 0 {
+        return None;
+    }
+    let path = index_blob_cache_path(repo_id, cache_dir)?;
+    let data = std::fs::read(&path).ok()?;
+
+    if data.len() < INDEX_BLOB_HEADER_SIZE {
+        debug!("index blob cache: file too small for header");
+        return None;
+    }
+
+    if &data[0..8] != INDEX_BLOB_MAGIC {
+        debug!("index blob cache: bad magic");
+        return None;
+    }
+
+    let version = u32::from_le_bytes(data[8..12].try_into().unwrap());
+    if version != INDEX_BLOB_VERSION {
+        debug!(version, "index blob cache: unsupported version");
+        return None;
+    }
+
+    let generation = u64::from_le_bytes(data[12..20].try_into().unwrap());
+    if generation != expected_generation {
+        debug!(
+            cache_gen = generation,
+            expected_gen = expected_generation,
+            "index blob cache: generation mismatch"
+        );
+        return None;
+    }
+
+    debug!(
+        generation,
+        blob_bytes = data.len() - INDEX_BLOB_HEADER_SIZE,
+        "index blob cache hit"
+    );
+
+    Some(data[INDEX_BLOB_HEADER_SIZE..].to_vec())
+}
+
+/// Write the raw index blob to the local cache with the given generation.
+/// Atomic via temp-file + rename.
+pub fn write_index_blob_cache(
+    blob: &[u8],
+    generation: u64,
+    repo_id: &[u8],
+    cache_dir: Option<&Path>,
+) -> Result<()> {
+    let Some(path) = index_blob_cache_path(repo_id, cache_dir) else {
+        return Ok(());
+    };
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+
+    let tmp_path = path.with_extension("tmp");
+    let file = std::fs::File::create(&tmp_path)?;
+    let mut w = BufWriter::new(file);
+
+    // Header
+    w.write_all(INDEX_BLOB_MAGIC)?;
+    w.write_all(&INDEX_BLOB_VERSION.to_le_bytes())?;
+    w.write_all(&generation.to_le_bytes())?;
+    w.write_all(&0u32.to_le_bytes())?; // reserved
+
+    // Blob payload
+    w.write_all(blob)?;
+
+    w.flush()?;
+    drop(w);
+
+    std::fs::rename(&tmp_path, &path)?;
+
+    debug!(
+        generation,
+        blob_bytes = blob.len(),
+        path = %path.display(),
+        "wrote index blob cache"
+    );
+
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1560,5 +1670,52 @@ mod tests {
             let chunk_id = ChunkId(id_bytes);
             assert_eq!(cache1.lookup(&chunk_id), cache2.lookup(&chunk_id));
         }
+    }
+
+    // -------------------------------------------------------------------
+    // Index blob cache tests
+    // -------------------------------------------------------------------
+
+    #[test]
+    fn index_blob_cache_roundtrip() {
+        let dir = tempfile::tempdir().unwrap();
+        let repo_id = [0xBBu8; 32];
+        let generation = 42u64;
+        let blob = b"some encrypted index data here";
+
+        // Write
+        write_index_blob_cache(blob, generation, &repo_id, Some(dir.path())).unwrap();
+
+        // Read back
+        let cached = read_index_blob_cache(&repo_id, generation, Some(dir.path()));
+        assert_eq!(cached.as_deref(), Some(blob.as_slice()));
+    }
+
+    #[test]
+    fn index_blob_cache_rejects_wrong_generation() {
+        let dir = tempfile::tempdir().unwrap();
+        let repo_id = [0xCCu8; 32];
+        let blob = b"test blob";
+
+        write_index_blob_cache(blob, 42, &repo_id, Some(dir.path())).unwrap();
+
+        assert!(read_index_blob_cache(&repo_id, 99, Some(dir.path())).is_none());
+        assert!(read_index_blob_cache(&repo_id, 42, Some(dir.path())).is_some());
+    }
+
+    #[test]
+    fn index_blob_cache_rejects_generation_zero() {
+        let repo_id = [0xDDu8; 32];
+        assert!(read_index_blob_cache(&repo_id, 0, None).is_none());
+    }
+
+    #[test]
+    fn index_blob_cache_path_returns_some() {
+        let repo_id = [0xEEu8; 32];
+        let path = index_blob_cache_path(&repo_id, None);
+        assert!(path.is_some());
+        let p = path.unwrap();
+        assert!(p.to_string_lossy().contains("index_blob"));
+        assert!(p.to_string_lossy().contains(&hex::encode(repo_id)));
     }
 }

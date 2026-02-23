@@ -10,7 +10,7 @@ use vger_types::chunk_id::ChunkId;
 use vger_types::error::{Result, VgerError};
 use vger_types::pack_id::PackId;
 
-use super::util::{open_repo, open_repo_without_index};
+use super::util::open_repo_without_index;
 
 /// List all snapshots in the repository.
 pub fn list_snapshots(config: &VgerConfig, passphrase: Option<&str>) -> Result<Vec<SnapshotEntry>> {
@@ -19,12 +19,28 @@ pub fn list_snapshots(config: &VgerConfig, passphrase: Option<&str>) -> Result<V
 }
 
 /// List all items in a specific snapshot.
+/// Tries the local restore cache first to avoid downloading the full index.
+/// Falls back to the full index (with blob cache) on cache miss.
 pub fn list_snapshot_items(
     config: &VgerConfig,
     passphrase: Option<&str>,
     snapshot_name: &str,
 ) -> Result<Vec<Item>> {
-    let mut repo = open_repo(config, passphrase)?;
+    let mut repo = open_repo_without_index(config, passphrase)?;
+
+    // Try restore cache first (avoids loading the full index entirely)
+    if let Some(ref cache) = repo.open_restore_cache() {
+        match load_snapshot_items_via_lookup(&mut repo, snapshot_name, |id| cache.lookup(id)) {
+            Ok(items) => return Ok(items),
+            Err(VgerError::ChunkNotInIndex(_)) => {
+                // Restore cache incomplete — fall through to full index
+            }
+            Err(e) => return Err(e),
+        }
+    }
+
+    // Fall back to full index load (benefits from blob cache)
+    repo.load_chunk_index()?;
     load_snapshot_items(&mut repo, snapshot_name)
 }
 
