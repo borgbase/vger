@@ -62,6 +62,9 @@ fn default_max_pack_size() -> u32 {
 /// Maximum total weight (bytes) of cached blobs in the blob cache.
 const BLOB_CACHE_MAX_BYTES: usize = 32 * 1024 * 1024; // 32 MiB
 
+/// Extra upload handles allowed beyond `max_in_flight_uploads` before blocking.
+const UPLOAD_QUEUE_HEADROOM: usize = 2;
+
 const MANIFEST_OBJECT_CONTEXT: &[u8] = b"manifest";
 const INDEX_OBJECT_CONTEXT: &[u8] = b"index";
 
@@ -138,7 +141,7 @@ pub struct Repository {
     data_pack_writer: PackWriter,
     tree_pack_writer: PackWriter,
     /// Background pack upload threads waiting to be joined.
-    pending_uploads: VecDeque<JoinHandle<Result<()>>>,
+    pending_uploads: Vec<JoinHandle<Result<()>>>,
     /// Lightweight dedup-only index used during backup to save memory.
     /// When active, `chunk_index` is empty and all lookups go through this.
     dedup_index: Option<DedupIndex>,
@@ -318,7 +321,7 @@ impl Repository {
                 pack_temp_dir.clone(),
             ),
             tree_pack_writer: PackWriter::new_default(PackType::Tree, tree_target, pack_temp_dir),
-            pending_uploads: VecDeque::new(),
+            pending_uploads: Vec::new(),
             dedup_index: None,
             tiered_dedup: None,
             index_delta: None,
@@ -479,7 +482,7 @@ impl Repository {
                 pack_temp_dir.clone(),
             ),
             tree_pack_writer: PackWriter::new_default(PackType::Tree, tree_target, pack_temp_dir),
-            pending_uploads: VecDeque::new(),
+            pending_uploads: Vec::new(),
             dedup_index: None,
             tiered_dedup: None,
             index_delta: None,
@@ -601,28 +604,56 @@ impl Repository {
         self.file_cache_dirty = true;
     }
 
-    /// Wait for one background pack upload to finish (if any).
-    fn wait_one_pending_upload(&mut self) -> Result<()> {
-        if let Some(handle) = self.pending_uploads.pop_front() {
-            handle
-                .join()
-                .map_err(|_| VgerError::Other("pack upload thread panicked".into()))??;
+    /// Join all finished upload threads, propagating the first error.
+    fn drain_finished_uploads(&mut self) -> Result<()> {
+        let mut i = 0;
+        while i < self.pending_uploads.len() {
+            if self.pending_uploads[i].is_finished() {
+                let handle = self.pending_uploads.swap_remove(i);
+                handle
+                    .join()
+                    .map_err(|_| VgerError::Other("pack upload thread panicked".into()))??;
+                // Don't increment i — swap_remove moved last element to position i
+            } else {
+                i += 1;
+            }
         }
         Ok(())
     }
 
     /// Wait for all background pack uploads to finish.
     fn wait_pending_uploads(&mut self) -> Result<()> {
-        while !self.pending_uploads.is_empty() {
-            self.wait_one_pending_upload()?;
+        let mut first_err: Option<VgerError> = None;
+        for handle in self.pending_uploads.drain(..) {
+            let res = handle
+                .join()
+                .map_err(|_| VgerError::Other("pack upload thread panicked".into()))
+                .and_then(|r| r);
+            if first_err.is_none() {
+                if let Err(e) = res {
+                    first_err = Some(e);
+                }
+            }
         }
-        Ok(())
+        match first_err {
+            Some(e) => Err(e),
+            None => Ok(()),
+        }
     }
 
     /// Apply backpressure to keep the number of in-flight uploads bounded.
     fn cap_pending_uploads(&mut self) -> Result<()> {
-        while self.pending_uploads.len() >= self.max_in_flight_uploads {
-            self.wait_one_pending_upload()?;
+        self.drain_finished_uploads()?;
+        if self.pending_uploads.len()
+            >= self
+                .max_in_flight_uploads
+                .saturating_add(UPLOAD_QUEUE_HEADROOM)
+        {
+            // All slots + buffer full — block on one handle.
+            let handle = self.pending_uploads.swap_remove(0);
+            handle
+                .join()
+                .map_err(|_| VgerError::Other("pack upload thread panicked".into()))??;
         }
         Ok(())
     }
@@ -1197,7 +1228,7 @@ impl Repository {
         let storage = Arc::clone(&self.storage);
         let key = pack_id.storage_key();
         self.pending_uploads
-            .push_back(std::thread::spawn(move || data.put_to(&*storage, &key)));
+            .push(std::thread::spawn(move || data.put_to(&*storage, &key)));
 
         Ok(())
     }
