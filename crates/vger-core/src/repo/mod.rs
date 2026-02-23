@@ -1065,11 +1065,9 @@ impl Repository {
         let cache_dir = self.cache_dir_override.as_deref();
 
         // Try local blob cache
-        if let Some(blob) = dedup_cache::read_index_blob_cache(
-            &self.config.id,
-            generation,
-            cache_dir,
-        ) {
+        if let Some(blob) =
+            dedup_cache::read_index_blob_cache(&self.config.id, generation, cache_dir)
+        {
             debug!("index blob cache hit (generation {generation})");
             return Ok(Some(blob));
         }
@@ -1080,12 +1078,9 @@ impl Repository {
         };
 
         // Save to local cache (non-fatal on error)
-        if let Err(e) = dedup_cache::write_index_blob_cache(
-            &blob,
-            generation,
-            &self.config.id,
-            cache_dir,
-        ) {
+        if let Err(e) =
+            dedup_cache::write_index_blob_cache(&blob, generation, &self.config.id, cache_dir)
+        {
             debug!("failed to write index blob cache: {e}");
         }
 
@@ -1126,10 +1121,7 @@ impl Repository {
     }
 
     /// Decrypt, decompress, and deserialize an index blob.
-    fn decode_index_blob(
-        index_data: &[u8],
-        crypto: &dyn CryptoEngine,
-    ) -> Result<ChunkIndex> {
+    fn decode_index_blob(index_data: &[u8], crypto: &dyn CryptoEngine) -> Result<ChunkIndex> {
         let compressed = unpack_object_expect_with_context(
             index_data,
             ObjectType::ChunkIndex,

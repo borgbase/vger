@@ -27,6 +27,7 @@ fn run_backup_operation(
     result.map_err(|e| -> Box<dyn std::error::Error> { Box::new(e) })
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn run_backup(
     config: &VgerConfig,
     label: Option<&str>,

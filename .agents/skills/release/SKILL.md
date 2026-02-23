@@ -9,10 +9,18 @@ Release workflow for vger. The CI pipeline lives in `.github/workflows/release.y
 
 ## Steps
 
-### 1. Bump version
+### 1. Pre-flight checks
 
-Update the `version` field in all workspace crates:
+Run `make pre-commit` first to catch formatting, clippy, and test issues before bumping versions. Fix any problems before proceeding.
 
+### 2. Bump version
+
+Update the `version` field in **all** workspace crates:
+
+- `crates/vger-types/Cargo.toml`
+- `crates/vger-crypto/Cargo.toml`
+- `crates/vger-storage/Cargo.toml`
+- `crates/vger-protocol/Cargo.toml`
 - `crates/vger-core/Cargo.toml`
 - `crates/vger-cli/Cargo.toml`
 - `crates/vger-server/Cargo.toml`
@@ -20,7 +28,7 @@ Update the `version` field in all workspace crates:
 
 Run `cargo check` to regenerate `Cargo.lock` with the new versions.
 
-### 2. Commit, tag, and push
+### 3. Commit, tag, and push
 
 Commit the version bump (include any other pending changes that should ship). Create a git tag `v<version>` and push both the commit and tag to `origin main`. Pushing the tag triggers the release workflow.
 
@@ -30,7 +38,7 @@ git tag v<version>
 git push origin main --tags
 ```
 
-### 3. Wait for the release workflow
+### 4. Wait for the release workflow
 
 Use the GitHub CLI to find the triggered workflow run and watch it until all jobs complete:
 
@@ -41,7 +49,7 @@ gh run watch <run-id> --exit-status
 
 The workflow builds on three runners (Linux, macOS, Windows), then a `publish` job downloads the artifacts, generates SHA256 checksums, and creates the GitHub Release via `softprops/action-gh-release`.
 
-### 4. Draft release notes
+### 5. Draft release notes
 
 Review all commits since the previous tag:
 
