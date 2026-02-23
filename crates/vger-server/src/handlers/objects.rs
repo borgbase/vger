@@ -161,7 +161,7 @@ pub async fn put_object(
         let temp_file = tokio::fs::File::create(&temp_path)
             .await
             .map_err(ServerError::from)?;
-        let mut writer = BufWriter::new(temp_file);
+        let mut writer = BufWriter::with_capacity(256 * 1024, temp_file);
 
         let mut hasher = expected_blake2b
             .as_ref()
@@ -195,12 +195,10 @@ pub async fn put_object(
                 writer.write_all(&buf[..n]).await.map_err(ServerError::from)?;
             }
             writer.flush().await.map_err(ServerError::from)?;
+            writer.into_inner().sync_data().await.map_err(ServerError::from)?;
             Ok(())
         }
         .await;
-
-        // Drop writer (closes file handle) before any cleanup or rename
-        drop(writer);
 
         if let Err(e) = write_result {
             let _ = tokio::fs::remove_file(&temp_path).await;
