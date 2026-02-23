@@ -180,11 +180,50 @@ impl BackupProgressRenderer {
 }
 
 fn terminal_columns() -> usize {
-    std::env::var("COLUMNS")
-        .ok()
-        .and_then(|v| v.parse::<usize>().ok())
-        .filter(|v| *v > 0)
+    terminal_columns_os()
+        .or_else(|| {
+            std::env::var("COLUMNS")
+                .ok()
+                .and_then(|v| v.parse::<usize>().ok())
+                .filter(|&v| v > 0)
+        })
         .unwrap_or(DEFAULT_PROGRESS_COLUMNS)
+}
+
+/// Query the OS for the terminal width of stderr.
+#[cfg(unix)]
+fn terminal_columns_os() -> Option<usize> {
+    use libc::{ioctl, winsize, STDERR_FILENO, TIOCGWINSZ};
+    unsafe {
+        let mut ws: winsize = std::mem::zeroed();
+        if ioctl(STDERR_FILENO, TIOCGWINSZ, &mut ws) == 0 && ws.ws_col > 0 {
+            Some(ws.ws_col as usize)
+        } else {
+            None
+        }
+    }
+}
+
+#[cfg(windows)]
+fn terminal_columns_os() -> Option<usize> {
+    use windows_sys::Win32::System::Console::{
+        GetConsoleScreenBufferInfo, GetStdHandle, CONSOLE_SCREEN_BUFFER_INFO, STD_ERROR_HANDLE,
+    };
+    unsafe {
+        let handle = GetStdHandle(STD_ERROR_HANDLE);
+        let mut info: CONSOLE_SCREEN_BUFFER_INFO = std::mem::zeroed();
+        if GetConsoleScreenBufferInfo(handle, &mut info) != 0 {
+            let width = (info.srWindow.Right - info.srWindow.Left + 1) as usize;
+            if width > 0 { Some(width) } else { None }
+        } else {
+            None
+        }
+    }
+}
+
+#[cfg(not(any(unix, windows)))]
+fn terminal_columns_os() -> Option<usize> {
+    None
 }
 
 // ---------------------------------------------------------------------------
