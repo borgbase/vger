@@ -338,12 +338,12 @@ impl Commands {
     pub(crate) fn snapshot_name(&self) -> Option<&str> {
         match self {
             Self::Restore { snapshot, .. } => Some(snapshot),
-            Self::Snapshot { command } => match command {
-                SnapshotCommand::List { snapshot, .. }
-                | SnapshotCommand::Info { snapshot, .. }
-                | SnapshotCommand::Delete { snapshot, .. } => Some(snapshot),
-                _ => None,
-            },
+            Self::Snapshot {
+                command:
+                    SnapshotCommand::List { snapshot, .. }
+                    | SnapshotCommand::Info { snapshot, .. }
+                    | SnapshotCommand::Delete { snapshot, .. },
+            } => Some(snapshot),
             Self::Mount { snapshot, .. } => snapshot.as_deref(),
             _ => None,
         }

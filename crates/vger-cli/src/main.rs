@@ -123,9 +123,7 @@ fn main() {
                 std::process::exit(1);
             }
             SnapshotDispatch::NotFound => {
-                eprintln!(
-                    "Error: snapshot '{snap}' not found in any configured repository"
-                );
+                eprintln!("Error: snapshot '{snap}' not found in any configured repository");
                 std::process::exit(1);
             }
             SnapshotDispatch::Unique(idx) => {
@@ -136,7 +134,10 @@ fn main() {
                 }
             }
             SnapshotDispatch::Ambiguous(indices) => {
-                let names: Vec<&str> = indices.iter().map(|i| repo_display_name(repos[*i])).collect();
+                let names: Vec<&str> = indices
+                    .iter()
+                    .map(|i| repo_display_name(repos[*i]))
+                    .collect();
                 eprintln!(
                     "Error: snapshot '{snap}' found in multiple repositories: {}. \
                      Use -R / --repo to select one.",
@@ -251,10 +252,7 @@ fn probe_snapshot(
 }
 
 /// Execute the CLI command (or default actions) against one repo.
-fn run_repo_command(
-    cli: &Cli,
-    repo: &ResolvedRepo,
-) -> Result<(), Box<dyn std::error::Error>> {
+fn run_repo_command(cli: &Cli, repo: &ResolvedRepo) -> Result<(), Box<dyn std::error::Error>> {
     let label = repo.label.as_deref();
     let cfg = &repo.config;
     warn_if_untrusted_rest(cfg, label);
@@ -273,12 +271,7 @@ fn run_repo_command(
                     source_label: None,
                     source_paths: None,
                 };
-                hooks::run_with_hooks(
-                    &repo.global_hooks,
-                    &repo.repo_hooks,
-                    &mut ctx,
-                    run_action,
-                )
+                hooks::run_with_hooks(&repo.global_hooks, &repo.repo_hooks, &mut ctx, run_action)
             } else {
                 run_action()
             }

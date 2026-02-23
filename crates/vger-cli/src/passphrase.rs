@@ -32,7 +32,11 @@ pub(crate) fn get_passphrase(
     let cache_key = config.repository.url.clone();
 
     // Check cache first (avoids double interactive prompt during probe+dispatch)
-    if let Some(cached) = PASSPHRASE_CACHE.lock().unwrap_or_else(|p| p.into_inner()).get(&cache_key) {
+    if let Some(cached) = PASSPHRASE_CACHE
+        .lock()
+        .unwrap_or_else(|p| p.into_inner())
+        .get(&cache_key)
+    {
         return Ok(cached.clone());
     }
 
@@ -72,6 +76,9 @@ pub(crate) fn get_init_passphrase(
         return Ok(None);
     }
     if let Some(pass) = configured_passphrase(config)? {
+        tracing::warn!(
+            "using plaintext encryption.passphrase from config; prefer encryption.passcommand or VGER_PASSPHRASE"
+        );
         return Ok(Some(pass));
     }
 

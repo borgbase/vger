@@ -19,7 +19,7 @@ pub struct PassphrasePrompt {
 
 pub fn configured_passphrase(config: &VgerConfig) -> Result<Option<Zeroizing<String>>> {
     if let Some(ref p) = config.encryption.passphrase {
-        tracing::warn!(
+        tracing::debug!(
             "using plaintext encryption.passphrase from config; prefer encryption.passcommand or VGER_PASSPHRASE"
         );
         return Ok(Some(Zeroizing::new(p.clone())));
