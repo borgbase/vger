@@ -2,9 +2,9 @@ use chrono::Utc;
 use vger_core::commands;
 use vger_core::compress::Compression;
 use vger_core::config::{
-    ChunkerConfig, CompactConfig, CompressionConfig, EncryptionConfig, EncryptionModeConfig,
-    RepositoryConfig, ResourceLimitsConfig, RetentionConfig, RetryConfig, ScheduleConfig,
-    VgerConfig, XattrsConfig,
+    ChunkerConfig, CompactConfig, CompressionConfig, CpuLimitsConfig, EncryptionConfig,
+    EncryptionModeConfig, RepositoryConfig, ResourceLimitsConfig, RetentionConfig, RetryConfig,
+    ScheduleConfig, VgerConfig, XattrsConfig,
 };
 use vger_core::repo::manifest::SnapshotEntry;
 use vger_core::repo::pack::PackType;
@@ -1437,4 +1437,121 @@ fn backup_pipeline_mixed_cache_hit_processed_and_large_roundtrip() {
         std::fs::read(restore_dir.join("new-large.bin")).unwrap(),
         new_large
     );
+}
+
+#[test]
+fn backup_emits_intermediate_progress_during_large_file() {
+    let tmp = tempfile::tempdir().unwrap();
+    let repo_dir = tmp.path().join("repo");
+    let source_dir = tmp.path().join("source");
+    std::fs::create_dir_all(&repo_dir).unwrap();
+    std::fs::create_dir_all(&source_dir).unwrap();
+
+    // Write a file large enough to trigger multiple batch flushes.
+    // With small chunker params (min=1KiB, avg=4KiB, max=16KiB) and
+    // transform_batch_chunks=64, the flush fires every 64 chunks.
+    // 3 MiB of uniform data → ~192 chunks (at max_size=16KiB) → 3 loop flushes.
+    let big_data = vec![0xABu8; 3 * 1024 * 1024];
+    std::fs::write(source_dir.join("big.bin"), &big_data).unwrap();
+
+    let mut config = make_test_config(&repo_dir);
+    config.chunker = ChunkerConfig {
+        min_size: 1024,
+        avg_size: 4096,
+        max_size: 16384,
+    };
+    // Force sequential path (no pipeline) and frequent batch flushes.
+    config.limits.cpu = CpuLimitsConfig {
+        max_threads: 1,
+        pipeline_depth: Some(0),
+        transform_batch_chunks: Some(64),
+        ..Default::default()
+    };
+
+    commands::init::run(&config, None).unwrap();
+
+    let source_paths = vec![source_dir.to_string_lossy().to_string()];
+    let exclude_if_present: Vec<String> = Vec::new();
+    let exclude_patterns: Vec<String> = Vec::new();
+
+    let mut events = Vec::new();
+    let mut on_progress = |event| events.push(event);
+
+    commands::backup::run_with_progress(
+        &config,
+        commands::backup::BackupRequest {
+            snapshot_name: "snap-intermediate",
+            passphrase: None,
+            source_paths: &source_paths,
+            source_label: "source",
+            exclude_patterns: &exclude_patterns,
+            exclude_if_present: &exclude_if_present,
+            one_file_system: true,
+            git_ignore: false,
+            xattrs_enabled: false,
+            compression: Compression::None,
+            command_dumps: &[],
+        },
+        Some(&mut on_progress),
+        None,
+    )
+    .unwrap();
+
+    // Scope assertions to the big.bin window: from FileStarted{big.bin} until
+    // the final StatsUpdated with current_file: Some(..big.bin).  This avoids
+    // false failures from StatsUpdated events emitted for other entries
+    // (directories, small files, cache hits) outside the large-file window.
+    let big_start = events
+        .iter()
+        .position(|e| matches!(e, commands::backup::BackupProgressEvent::FileStarted { path } if path.ends_with("big.bin")))
+        .expect("expected FileStarted for big.bin");
+
+    let big_end = events
+        .iter()
+        .rposition(|e| matches!(e, commands::backup::BackupProgressEvent::StatsUpdated { current_file: Some(f), .. } if f.ends_with("big.bin")))
+        .expect("expected final StatsUpdated for big.bin");
+
+    let big_stats: Vec<_> = events[big_start..=big_end]
+        .iter()
+        .filter_map(|e| match e {
+            commands::backup::BackupProgressEvent::StatsUpdated {
+                original_size,
+                current_file,
+                ..
+            } => Some((*original_size, current_file.clone())),
+            _ => None,
+        })
+        .collect();
+
+    // Must have at least 3 events in the window: ≥2 intermediate (None) + 1 final (Some).
+    assert!(
+        big_stats.len() >= 3,
+        "expected at least 3 StatsUpdated events for big.bin, got {}",
+        big_stats.len()
+    );
+
+    // Intermediate events (all but last) should have current_file: None.
+    for (i, (_size, file)) in big_stats.iter().take(big_stats.len() - 1).enumerate() {
+        assert!(
+            file.is_none(),
+            "intermediate StatsUpdated[{i}] should have current_file: None, got {file:?}"
+        );
+    }
+
+    // Last event in the window should identify big.bin.
+    let (_, last_file) = big_stats.last().unwrap();
+    assert!(
+        last_file.as_ref().is_some_and(|f| f.ends_with("big.bin")),
+        "final StatsUpdated should reference big.bin, got {last_file:?}"
+    );
+
+    // original_size must increase monotonically across the window.
+    for window in big_stats.windows(2) {
+        assert!(
+            window[1].0 >= window[0].0,
+            "original_size should increase: {} -> {}",
+            window[0].0,
+            window[1].0
+        );
+    }
 }

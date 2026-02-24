@@ -464,6 +464,10 @@ fn consume_processed_entry(
             )?;
             budget.release(acquired_bytes);
 
+            if segment_index < num_segments - 1 {
+                emit_stats_progress(progress, stats, None);
+            }
+
             if segment_index == num_segments - 1 {
                 // Last segment: finalize.
                 let mut accum = large_file_accum.take().ok_or_else(|| {

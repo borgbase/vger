@@ -47,6 +47,7 @@ pub fn format_count(n: u64) -> String {
 pub struct BackupStatusTracker {
     repo_name: String,
     last_update: Instant,
+    current_file: Option<String>,
 }
 
 impl BackupStatusTracker {
@@ -54,6 +55,7 @@ impl BackupStatusTracker {
         Self {
             repo_name,
             last_update: Instant::now() - std::time::Duration::from_millis(THROTTLE_MS as u64),
+            current_file: None,
         }
     }
 
@@ -68,18 +70,25 @@ impl BackupStatusTracker {
                     self.repo_name, source_path
                 ))
             }
+            BackupProgressEvent::FileStarted { path } => {
+                self.current_file = Some(path.clone());
+                None
+            }
             BackupProgressEvent::StatsUpdated {
                 nfiles,
                 original_size,
                 current_file,
                 ..  // errors, compressed_size, deduplicated_size
             } => {
+                if let Some(f) = current_file {
+                    self.current_file = Some(f.clone());
+                }
                 let now = Instant::now();
                 if now.duration_since(self.last_update).as_millis() < THROTTLE_MS {
                     return None;
                 }
                 self.last_update = now;
-                let file_suffix = match current_file {
+                let file_suffix = match &self.current_file {
                     Some(f) => format!(" - {}", truncate_middle(f, 60)),
                     None => String::new(),
                 };

@@ -306,6 +306,7 @@ pub(super) fn process_regular_file_item(
                 stats,
                 dedup_filter,
             )?;
+            emit_stats_progress(progress, stats, None);
             pending_bytes = 0;
         }
     }
