@@ -216,7 +216,8 @@ fn backup_exclude_if_present_skips_marked_directories() {
             command_dumps: &[],
         },
     )
-    .unwrap();
+    .unwrap()
+    .stats;
 
     assert_eq!(stats.nfiles, 1);
 }
@@ -255,7 +256,8 @@ fn backup_git_ignore_respected_when_enabled() {
             command_dumps: &[],
         },
     )
-    .unwrap();
+    .unwrap()
+    .stats;
 
     let stats_with_gitignore = commands::backup::run(
         &config,
@@ -273,7 +275,8 @@ fn backup_git_ignore_respected_when_enabled() {
             command_dumps: &[],
         },
     )
-    .unwrap();
+    .unwrap()
+    .stats;
 
     assert_eq!(stats_without_gitignore.nfiles, 3);
     assert_eq!(stats_with_gitignore.nfiles, 2);
@@ -319,7 +322,8 @@ fn backup_deduplicates_identical_files_and_extracts_correctly() {
             command_dumps: &[],
         },
     )
-    .unwrap();
+    .unwrap()
+    .stats;
 
     assert_eq!(stats.nfiles, 2);
     assert!(stats.deduplicated_size > 0);
@@ -396,7 +400,8 @@ fn backup_run_with_progress_emits_events_and_final_stats() {
         },
         Some(&mut on_progress),
     )
-    .unwrap();
+    .unwrap()
+    .stats;
 
     let file_started_count = events
         .iter()
@@ -596,7 +601,8 @@ fn file_cache_persists_and_matches_snapshot_items() {
             command_dumps: &[],
         },
     )
-    .unwrap();
+    .unwrap()
+    .stats;
     assert_eq!(stats1.nfiles, 2);
     assert!(
         stats1.deduplicated_size > 0,
@@ -840,7 +846,8 @@ fn info_reports_repository_statistics() {
             command_dumps: &[],
         },
     )
-    .unwrap();
+    .unwrap()
+    .stats;
 
     let info = commands::info::run(&config, None).unwrap();
     assert_eq!(info.snapshot_count, 1);
@@ -885,7 +892,8 @@ fn command_dump_backup_and_restore() {
             command_dumps: &dumps,
         },
     )
-    .unwrap();
+    .unwrap()
+    .stats;
 
     assert_eq!(stats.nfiles, 1);
     assert!(stats.original_size > 0);
@@ -999,7 +1007,8 @@ fn command_dump_mixed_with_files() {
             command_dumps: &dumps,
         },
     )
-    .unwrap();
+    .unwrap()
+    .stats;
 
     // Should have both the real file and the dump
     assert_eq!(stats.nfiles, 2);
@@ -1075,7 +1084,8 @@ fn backup_many_small_files_plus_large_file_roundtrip() {
             command_dumps: &[],
         },
     )
-    .unwrap();
+    .unwrap()
+    .stats;
 
     assert_eq!(stats.nfiles, 501);
     assert!(stats.original_size > 0);
@@ -1140,7 +1150,8 @@ fn backup_many_small_files_plus_large_file_roundtrip() {
             command_dumps: &[],
         },
     )
-    .unwrap();
+    .unwrap()
+    .stats;
 
     assert_eq!(stats2.nfiles, 501);
 
@@ -1231,7 +1242,8 @@ fn backup_pipeline_threshold_splitting_roundtrip() {
             command_dumps: &[],
         },
     )
-    .unwrap();
+    .unwrap()
+    .stats;
 
     assert_eq!(stats.nfiles, 2);
     assert!(stats.original_size > 0);
@@ -1310,7 +1322,8 @@ fn backup_pipeline_preserves_walk_order_with_mixed_file_sizes() {
             command_dumps: &[],
         },
     )
-    .unwrap();
+    .unwrap()
+    .stats;
 
     assert_eq!(stats.nfiles, 4);
 
@@ -1390,7 +1403,8 @@ fn backup_pipeline_mixed_cache_hit_processed_and_large_roundtrip() {
             command_dumps: &[],
         },
     )
-    .unwrap();
+    .unwrap()
+    .stats;
 
     assert_eq!(stats2.nfiles, 4);
     assert!(stats2.original_size > 0);

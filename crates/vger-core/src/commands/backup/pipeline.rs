@@ -5,7 +5,7 @@ use std::sync::Arc;
 
 use std::collections::BTreeMap;
 
-use tracing::debug;
+use tracing::{debug, warn};
 
 use crate::chunker;
 use crate::compress::Compression;
@@ -63,6 +63,14 @@ pub(crate) enum ProcessedEntry {
     NonFile {
         item: Item,
     },
+    /// A file skipped due to a soft error (permission denied, not found).
+    /// No data was committed for this file.
+    Skipped,
+    /// Segment 0 of a large file was skipped due to a soft error.
+    /// The consumer must drain remaining segments via `segments_to_skip`.
+    SegmentSkipped {
+        num_segments: usize,
+    },
     SourceStarted {
         path: String,
     },
@@ -80,12 +88,69 @@ fn estimate_chunk_count(data_len: u64, avg_chunk_size: u32) -> usize {
     est.min(4096) as usize
 }
 
-/// Process a single walk entry in a parallel worker thread.
+/// Wrapper that converts soft I/O errors into `Skipped` / `SegmentSkipped`
+/// for entries where no data has been committed yet.
+///
+/// Segment N>0 errors are NEVER converted — they propagate as hard errors
+/// because earlier segments may already be committed.
+#[allow(clippy::too_many_arguments)]
+fn process_file_worker(
+    entry: WalkEntry,
+    chunk_id_key: &[u8; 32],
+    crypto: &dyn CryptoEngine,
+    compression: Compression,
+    chunker_config: &ChunkerConfig,
+    read_limiter: Option<&ByteRateLimiter>,
+    budget: &ByteBudget,
+    pre_acquired_bytes: usize,
+    dedup_filter: Option<&xorf::Xor8>,
+) -> Result<ProcessedEntry> {
+    // Extract info needed for soft-error conversion before moving entry.
+    let is_regular_file = matches!(&entry, WalkEntry::File { .. });
+    let segment_info = match &entry {
+        WalkEntry::FileSegment {
+            segment_index,
+            num_segments,
+            ..
+        } => Some((*segment_index, *num_segments)),
+        _ => None,
+    };
+
+    match process_file_worker_inner(
+        entry,
+        chunk_id_key,
+        crypto,
+        compression,
+        chunker_config,
+        read_limiter,
+        budget,
+        pre_acquired_bytes,
+        dedup_filter,
+    ) {
+        Ok(processed) => Ok(processed),
+        Err(e) if e.is_soft_file_error() => {
+            if is_regular_file {
+                warn!(error = %e, "skipping file in pipeline (soft error)");
+                Ok(ProcessedEntry::Skipped)
+            } else if let Some((0, num_segments)) = segment_info {
+                // Segment 0 only — safe because no data committed yet.
+                warn!(error = %e, "skipping segmented file in pipeline (soft error on segment 0)");
+                Ok(ProcessedEntry::SegmentSkipped { num_segments })
+            } else {
+                // Segment N>0: NOT safe to convert — propagate as hard error.
+                Err(e)
+            }
+        }
+        Err(e) => Err(e),
+    }
+}
+
+/// Inner implementation: process a single walk entry in a parallel worker thread.
 ///
 /// Budget bytes are pre-acquired by the walk thread; `pre_acquired_bytes`
 /// is wrapped in a [`BudgetGuard`] for error safety (auto-release on `?` bail).
 #[allow(clippy::too_many_arguments)]
-fn process_file_worker(
+fn process_file_worker_inner(
     entry: WalkEntry,
     chunk_id_key: &[u8; 32],
     crypto: &dyn CryptoEngine,
@@ -230,6 +295,8 @@ fn process_file_worker(
         }),
 
         WalkEntry::NonFile { item } => Ok(ProcessedEntry::NonFile { item }),
+
+        WalkEntry::Skipped => Ok(ProcessedEntry::Skipped),
 
         WalkEntry::SourceStarted { path } => Ok(ProcessedEntry::SourceStarted { path }),
 
@@ -488,6 +555,11 @@ fn consume_processed_entry(
                 BackupProgressEvent::SourceFinished { source_path: path },
             );
         }
+
+        // Skipped entries are handled in the consumer loop before reaching here.
+        ProcessedEntry::Skipped | ProcessedEntry::SegmentSkipped { .. } => {
+            unreachable!("Skipped/SegmentSkipped should be handled before consume_processed_entry");
+        }
     }
 
     Ok(())
@@ -648,6 +720,8 @@ pub(crate) fn run_parallel_pipeline(
             BTreeMap::new();
         let mut consume_err: Option<VgerError> = None;
         let mut large_file_accum: Option<LargeFileAccum> = None;
+        // When segment 0 is skipped, we drain remaining segments silently.
+        let mut segments_to_skip: usize = 0;
 
         for msg in &result_rx {
             match msg {
@@ -658,6 +732,11 @@ pub(crate) fn run_parallel_pipeline(
                     pending.insert(idx, Err(e));
                 }
                 PipelineResult::WalkErr(e) => {
+                    if e.is_soft_file_error() {
+                        // Soft walk error — count it and continue.
+                        stats.errors += 1;
+                        continue;
+                    }
                     // Walk errors bypass the reorder buffer — some earlier
                     // entries already dispatched to workers may not be
                     // consumed. This is fine: the backup will fail, no
@@ -672,24 +751,53 @@ pub(crate) fn run_parallel_pipeline(
             // Drain consecutive entries starting from next_expected.
             while let Some(result) = pending.remove(&next_expected) {
                 next_expected += 1;
-                match result.and_then(|entry| {
-                    consume_processed_entry(
-                        entry,
-                        repo,
-                        stats,
-                        new_file_cache,
-                        items_config,
-                        item_stream,
-                        item_ptrs,
-                        compression,
-                        progress,
-                        &budget,
-                        dedup_filter,
-                        &mut large_file_accum,
-                    )
-                }) {
-                    Ok(()) => {}
+
+                // Draining remaining segments of a skipped file.
+                if segments_to_skip > 0 {
+                    if let Ok(ProcessedEntry::FileSegment { acquired_bytes, .. }) = &result {
+                        budget.release(*acquired_bytes);
+                    }
+                    // SegmentSkipped / errors: budget already released by guard.
+                    segments_to_skip -= 1;
+                    continue;
+                }
+
+                match result {
+                    Ok(ProcessedEntry::Skipped) => {
+                        stats.errors += 1;
+                    }
+                    Ok(ProcessedEntry::SegmentSkipped { num_segments }) => {
+                        stats.errors += 1;
+                        // Skip the remaining N-1 segments.
+                        segments_to_skip = num_segments.saturating_sub(1);
+                    }
+                    Ok(entry) => {
+                        if let Err(e) = consume_processed_entry(
+                            entry,
+                            repo,
+                            stats,
+                            new_file_cache,
+                            items_config,
+                            item_stream,
+                            item_ptrs,
+                            compression,
+                            progress,
+                            &budget,
+                            dedup_filter,
+                            &mut large_file_accum,
+                        ) {
+                            budget.poison();
+                            consume_err = Some(e);
+                            break;
+                        }
+                    }
                     Err(e) => {
+                        // Safety net: soft WorkerErr on a regular file (no
+                        // data committed). Only safe if we're not mid-accumulation.
+                        if e.is_soft_file_error() && large_file_accum.is_none() {
+                            stats.errors += 1;
+                            continue;
+                        }
                         budget.poison();
                         consume_err = Some(e);
                         break;

@@ -30,6 +30,7 @@ pub(crate) fn warn_if_untrusted_rest(config: &VgerConfig, label: Option<&str>) {
 
 enum StepResult {
     Ok,
+    Partial,
     Failed(String),
     Skipped(&'static str),
 }
@@ -45,6 +46,7 @@ fn make_hook_ctx(command: &str, cfg: &VgerConfig, repo_label: &Option<String>) -
     }
 }
 
+/// Returns `Ok(had_partial)` — `true` if backup had soft errors but still succeeded.
 pub(crate) fn run_default_actions(
     cfg: &VgerConfig,
     label: Option<&str>,
@@ -53,7 +55,7 @@ pub(crate) fn run_default_actions(
     repo_hooks: &HooksConfig,
     repo_label: &Option<String>,
     shutdown: Option<&AtomicBool>,
-) -> Result<(), Box<dyn std::error::Error>> {
+) -> Result<bool, Box<dyn std::error::Error>> {
     let start = std::time::Instant::now();
     let mut steps: Vec<(&str, StepResult)> = Vec::new();
 
@@ -61,14 +63,20 @@ pub(crate) fn run_default_actions(
 
     // 1. Backup
     eprintln!("==> Starting backup");
+    let mut had_partial = false;
     let backup_ok = match hooks::run_with_hooks(
         global_hooks,
         repo_hooks,
         &mut make_hook_ctx("backup", cfg, repo_label),
         || cmd::backup::run_backup(cfg, label, None, None, None, vec![], sources, &[]),
     ) {
-        Ok(()) => {
-            steps.push(("backup", StepResult::Ok));
+        Ok(partial) => {
+            if partial {
+                had_partial = true;
+                steps.push(("backup", StepResult::Partial));
+            } else {
+                steps.push(("backup", StepResult::Ok));
+            }
             true
         }
         Err(e) => {
@@ -79,7 +87,7 @@ pub(crate) fn run_default_actions(
     };
 
     if shutting_down(shutdown) {
-        return print_summary(&steps, start);
+        return print_summary(&steps, start, had_partial);
     }
 
     // 2. Prune — skip if no retention rules configured
@@ -109,7 +117,7 @@ pub(crate) fn run_default_actions(
     }
 
     if shutting_down(shutdown) {
-        return print_summary(&steps, start);
+        return print_summary(&steps, start, had_partial);
     }
 
     // 3. Compact
@@ -132,7 +140,7 @@ pub(crate) fn run_default_actions(
     }
 
     if shutting_down(shutdown) {
-        return print_summary(&steps, start);
+        return print_summary(&steps, start, had_partial);
     }
 
     // 4. Check (metadata-only)
@@ -150,13 +158,15 @@ pub(crate) fn run_default_actions(
         }
     }
 
-    print_summary(&steps, start)
+    print_summary(&steps, start, had_partial)
 }
 
+/// Prints the summary and returns `Ok(had_partial)`.
 fn print_summary(
     steps: &[(&str, StepResult)],
     start: std::time::Instant,
-) -> Result<(), Box<dyn std::error::Error>> {
+    had_partial: bool,
+) -> Result<bool, Box<dyn std::error::Error>> {
     let elapsed = start.elapsed();
     let mut had_failure = false;
 
@@ -165,6 +175,7 @@ fn print_summary(
     for (name, result) in steps {
         match result {
             StepResult::Ok => eprintln!("  {name:<12} ok"),
+            StepResult::Partial => eprintln!("  {name:<12} ok (partial)"),
             StepResult::Failed(e) => {
                 had_failure = true;
                 eprintln!("  {name:<12} FAILED: {e}");
@@ -185,18 +196,19 @@ fn print_summary(
     if had_failure {
         Err("one or more steps failed".into())
     } else {
-        Ok(())
+        Ok(had_partial)
     }
 }
 
+/// Returns `Ok(had_partial)` — `true` if backup had soft errors but still succeeded.
 pub(crate) fn dispatch_command(
     command: &Commands,
     cfg: &VgerConfig,
     label: Option<&str>,
     sources: &[SourceEntry],
-) -> Result<(), Box<dyn std::error::Error>> {
+) -> Result<bool, Box<dyn std::error::Error>> {
     match command {
-        Commands::Init { .. } => cmd::init::run_init(cfg, label),
+        Commands::Init { .. } => cmd::init::run_init(cfg, label).map(|()| false),
         Commands::Backup {
             label: user_label,
             compression,
@@ -214,33 +226,37 @@ pub(crate) fn dispatch_command(
             sources,
             source,
         ),
-        Commands::List { source, last, .. } => cmd::list::run_list(cfg, label, source, *last),
+        Commands::List { source, last, .. } => {
+            cmd::list::run_list(cfg, label, source, *last).map(|()| false)
+        }
         Commands::Snapshot { command, .. } => {
-            cmd::snapshot::run_snapshot_command(command, cfg, label)
+            cmd::snapshot::run_snapshot_command(command, cfg, label).map(|()| false)
         }
         Commands::Restore {
             snapshot,
             dest,
             pattern,
             ..
-        } => cmd::restore::run_restore(cfg, label, snapshot.clone(), dest.clone(), pattern.clone()),
+        } => cmd::restore::run_restore(cfg, label, snapshot.clone(), dest.clone(), pattern.clone())
+            .map(|()| false),
         Commands::Delete {
             yes_delete_this_repo,
             ..
-        } => cmd::delete::run_delete_repo(cfg, label, *yes_delete_this_repo),
+        } => cmd::delete::run_delete_repo(cfg, label, *yes_delete_this_repo).map(|()| false),
         Commands::Prune {
             dry_run,
             list,
             source,
             compact,
             ..
-        } => cmd::prune::run_prune(cfg, label, *dry_run, *list, sources, source, *compact),
+        } => cmd::prune::run_prune(cfg, label, *dry_run, *list, sources, source, *compact)
+            .map(|()| false),
         Commands::Check {
             verify_data,
             distrust_server,
             ..
-        } => cmd::check::run_check(cfg, label, *verify_data, *distrust_server),
-        Commands::Info { .. } => cmd::info::run_info(cfg, label),
+        } => cmd::check::run_check(cfg, label, *verify_data, *distrust_server).map(|()| false),
+        Commands::Info { .. } => cmd::info::run_info(cfg, label).map(|()| false),
         Commands::Mount {
             snapshot,
             source,
@@ -254,8 +270,9 @@ pub(crate) fn dispatch_command(
             address.clone(),
             *cache_size,
             source,
-        ),
-        Commands::BreakLock { .. } => cmd::break_lock::run_break_lock(cfg, label),
+        )
+        .map(|()| false),
+        Commands::BreakLock { .. } => cmd::break_lock::run_break_lock(cfg, label).map(|()| false),
         Commands::Compact {
             threshold,
             max_repack_size,
@@ -264,6 +281,7 @@ pub(crate) fn dispatch_command(
         } => {
             let t = threshold.unwrap_or(cfg.compact.threshold);
             cmd::compact::run_compact(cfg, label, t, max_repack_size.clone(), *dry_run)
+                .map(|()| false)
         }
         Commands::Config { .. } => {
             Err("'config' command should be handled before config resolution".into())

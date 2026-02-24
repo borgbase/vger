@@ -72,7 +72,7 @@ impl BackupStatusTracker {
                 nfiles,
                 original_size,
                 current_file,
-                ..
+                ..  // errors, compressed_size, deduplicated_size
             } => {
                 let now = Instant::now();
                 if now.duration_since(self.last_update).as_millis() < THROTTLE_MS {

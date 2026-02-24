@@ -79,6 +79,7 @@ pub(crate) struct BackupProgressRenderer {
     original_size: u64,
     compressed_size: u64,
     deduplicated_size: u64,
+    errors: u64,
     last_draw: Instant,
     last_line_len: usize,
     rendered_any: bool,
@@ -93,6 +94,7 @@ impl BackupProgressRenderer {
             original_size: 0,
             compressed_size: 0,
             deduplicated_size: 0,
+            errors: 0,
             last_draw: Instant::now(),
             last_line_len: 0,
             rendered_any: false,
@@ -110,12 +112,14 @@ impl BackupProgressRenderer {
                 original_size,
                 compressed_size,
                 deduplicated_size,
+                errors,
                 current_file,
             } => {
                 self.nfiles = nfiles;
                 self.original_size = original_size;
                 self.compressed_size = compressed_size;
                 self.deduplicated_size = deduplicated_size;
+                self.errors = errors;
                 if let Some(path) = current_file {
                     self.current_file = Some(path);
                 }
@@ -153,8 +157,13 @@ impl BackupProgressRenderer {
         self.last_draw = Instant::now();
 
         let file = self.current_file.as_deref().unwrap_or("-");
+        let errors_suffix = if self.errors > 0 {
+            format!(", Errors: {}", self.errors)
+        } else {
+            String::new()
+        };
         let prefix = format!(
-            "Files: {}, Original: {}, Compressed: {}, Deduplicated: {}, Current: ",
+            "Files: {}, Original: {}, Compressed: {}, Deduplicated: {}{errors_suffix}, Current: ",
             self.nfiles,
             format_bytes(self.original_size),
             format_bytes(self.compressed_size),
@@ -214,7 +223,11 @@ fn terminal_columns_os() -> Option<usize> {
         let mut info: CONSOLE_SCREEN_BUFFER_INFO = std::mem::zeroed();
         if GetConsoleScreenBufferInfo(handle, &mut info) != 0 {
             let width = (info.srWindow.Right - info.srWindow.Left + 1) as usize;
-            if width > 0 { Some(width) } else { None }
+            if width > 0 {
+                Some(width)
+            } else {
+                None
+            }
         } else {
             None
         }

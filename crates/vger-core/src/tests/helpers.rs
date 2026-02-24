@@ -113,4 +113,5 @@ pub fn backup_single_source(
         },
     )
     .unwrap()
+    .stats
 }

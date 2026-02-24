@@ -67,3 +67,14 @@ pub enum VgerError {
     #[error("{0}")]
     Other(String),
 }
+
+impl VgerError {
+    /// Returns `true` for I/O errors that indicate a file was unreadable
+    /// (permission denied or file vanished) **before** any data was committed.
+    /// These are safe to skip for partial-backup support.
+    pub fn is_soft_file_error(&self) -> bool {
+        matches!(self, VgerError::Io(e)
+            if matches!(e.kind(),
+                std::io::ErrorKind::PermissionDenied | std::io::ErrorKind::NotFound))
+    }
+}

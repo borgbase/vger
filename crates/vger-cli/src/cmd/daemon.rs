@@ -94,6 +94,7 @@ fn run_backup_cycle(repos: &[&ResolvedRepo]) {
     tracing::info!("backup cycle starting");
     let cycle_start = Instant::now();
     let mut had_error = false;
+    let mut had_partial = false;
 
     for repo in repos {
         if SHUTDOWN.load(Ordering::SeqCst) {
@@ -120,7 +121,12 @@ fn run_backup_cycle(repos: &[&ResolvedRepo]) {
             &repo.label,
             Some(&SHUTDOWN),
         ) {
-            Ok(()) => {}
+            Ok(partial) => {
+                if partial {
+                    tracing::warn!(repo = name, "backup cycle partial: some files were skipped");
+                    had_partial = true;
+                }
+            }
             Err(e) => {
                 tracing::error!(repo = name, error = %e, "backup cycle failed for repo");
                 had_error = true;
@@ -131,6 +137,8 @@ fn run_backup_cycle(repos: &[&ResolvedRepo]) {
     let elapsed = cycle_start.elapsed();
     if had_error {
         tracing::warn!(duration = ?elapsed, "backup cycle finished with errors");
+    } else if had_partial {
+        tracing::warn!(duration = ?elapsed, "backup cycle finished with partial success (some files skipped)");
     } else {
         tracing::info!(duration = ?elapsed, "backup cycle finished successfully");
     }

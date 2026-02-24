@@ -19,3 +19,11 @@
 | `vger info` | Show repository statistics (snapshot counts and size totals) |
 | `vger compact` | Free space by repacking pack files after delete/prune |
 | `vger mount` | Browse snapshots via a local WebDAV server |
+
+## Exit codes
+
+- `0`: Success
+- `1`: Error (command failed)
+- `3`: Partial success (backup completed, but one or more files were skipped)
+
+`vger backup` and the default `vger` workflow can return `3` when a backup succeeds with skipped unreadable/missing files.

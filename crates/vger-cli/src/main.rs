@@ -20,6 +20,11 @@ use cli::{Cli, Commands};
 use config_gen::run_config_generate;
 use dispatch::{dispatch_command, run_default_actions, warn_if_untrusted_rest};
 
+/// Exit code: hard error (backup failed, config error, etc.).
+const EXIT_ERROR: i32 = 1;
+/// Exit code: partial success (backup completed but some files were skipped).
+const EXIT_PARTIAL: i32 = 3;
+
 fn main() {
     let cli = Cli::parse();
 
@@ -129,9 +134,13 @@ fn main() {
             }
             SnapshotDispatch::Unique(idx) => {
                 // Single match — dispatch without banner
-                if let Err(e) = run_repo_command(&cli, repos[idx]) {
-                    eprintln!("Error: {e}");
-                    std::process::exit(1);
+                match run_repo_command(&cli, repos[idx]) {
+                    Ok(true) => std::process::exit(EXIT_PARTIAL),
+                    Ok(false) => {}
+                    Err(e) => {
+                        eprintln!("Error: {e}");
+                        std::process::exit(EXIT_ERROR);
+                    }
                 }
             }
             SnapshotDispatch::Ambiguous(indices) => {
@@ -163,25 +172,36 @@ fn main() {
 
     // Default path: run against all selected repos
     let mut had_error = false;
+    let mut had_partial = false;
 
     for repo in &repos {
         if multi {
             eprintln!("--- Repository: {} ---", repo_display_name(repo));
         }
 
-        if let Err(e) = run_repo_command(&cli, repo) {
-            eprintln!("Error: {e}");
-            had_error = true;
-            if multi {
-                continue;
-            } else {
-                std::process::exit(1);
+        match run_repo_command(&cli, repo) {
+            Ok(partial) => {
+                if partial {
+                    had_partial = true;
+                }
+            }
+            Err(e) => {
+                eprintln!("Error: {e}");
+                had_error = true;
+                if multi {
+                    continue;
+                } else {
+                    std::process::exit(EXIT_ERROR);
+                }
             }
         }
     }
 
     if had_error {
-        std::process::exit(1);
+        std::process::exit(EXIT_ERROR);
+    }
+    if had_partial {
+        std::process::exit(EXIT_PARTIAL);
     }
 }
 
@@ -253,7 +273,8 @@ fn probe_snapshot(
 }
 
 /// Execute the CLI command (or default actions) against one repo.
-fn run_repo_command(cli: &Cli, repo: &ResolvedRepo) -> Result<(), Box<dyn std::error::Error>> {
+/// Returns `Ok(had_partial)` where `true` means backup had soft errors.
+fn run_repo_command(cli: &Cli, repo: &ResolvedRepo) -> Result<bool, Box<dyn std::error::Error>> {
     let label = repo.label.as_deref();
     let cfg = &repo.config;
     warn_if_untrusted_rest(cfg, label);

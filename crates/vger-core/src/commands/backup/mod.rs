@@ -60,6 +60,14 @@ pub(crate) fn append_item_to_stream(
     Ok(())
 }
 
+/// Result of a backup run, containing stats and partial-success flag.
+#[derive(Debug, Clone)]
+pub struct BackupOutcome {
+    pub stats: SnapshotStats,
+    /// `true` when one or more files were skipped due to soft errors.
+    pub is_partial: bool,
+}
+
 #[derive(Debug, Clone)]
 pub enum BackupProgressEvent {
     SourceStarted {
@@ -76,6 +84,7 @@ pub enum BackupProgressEvent {
         original_size: u64,
         compressed_size: u64,
         deduplicated_size: u64,
+        errors: u64,
         current_file: Option<String>,
     },
 }
@@ -101,6 +110,7 @@ pub(crate) fn emit_stats_progress(
             original_size: stats.original_size,
             compressed_size: stats.compressed_size,
             deduplicated_size: stats.deduplicated_size,
+            errors: stats.errors,
             current_file,
         },
     );
@@ -121,7 +131,7 @@ pub struct BackupRequest<'a> {
     pub command_dumps: &'a [CommandDump],
 }
 
-pub fn run(config: &VgerConfig, req: BackupRequest<'_>) -> Result<SnapshotStats> {
+pub fn run(config: &VgerConfig, req: BackupRequest<'_>) -> Result<BackupOutcome> {
     run_with_progress(config, req, None)
 }
 
@@ -129,7 +139,7 @@ pub fn run_with_progress(
     config: &VgerConfig,
     req: BackupRequest<'_>,
     mut progress: Option<&mut dyn FnMut(BackupProgressEvent)>,
-) -> Result<SnapshotStats> {
+) -> Result<BackupOutcome> {
     let snapshot_name = req.snapshot_name;
     let passphrase = req.passphrase;
     let source_paths = req.source_paths;
@@ -377,15 +387,28 @@ pub fn run_with_progress(
         // Save manifest, index, and file cache
         repo.save_state()?;
 
-        info!(
-            "Snapshot '{}' created: {} files, {} original, {} compressed, {} deduplicated",
-            snapshot_name,
-            stats.nfiles,
-            stats.original_size,
-            stats.compressed_size,
-            stats.deduplicated_size
-        );
+        if stats.errors > 0 {
+            info!(
+                "Snapshot '{}' created: {} files, {} errors, {} original, {} compressed, {} deduplicated",
+                snapshot_name,
+                stats.nfiles,
+                stats.errors,
+                stats.original_size,
+                stats.compressed_size,
+                stats.deduplicated_size
+            );
+        } else {
+            info!(
+                "Snapshot '{}' created: {} files, {} original, {} compressed, {} deduplicated",
+                snapshot_name,
+                stats.nfiles,
+                stats.original_size,
+                stats.compressed_size,
+                stats.deduplicated_size
+            );
+        }
 
-        Ok(stats)
+        let is_partial = stats.errors > 0;
+        Ok(BackupOutcome { stats, is_partial })
     })
 }

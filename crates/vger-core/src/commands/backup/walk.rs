@@ -13,6 +13,19 @@ use vger_types::error::{Result, VgerError};
 
 use super::concurrency::ByteBudget;
 
+/// Returns `true` for I/O errors safe to skip (permission denied, not found).
+pub(super) fn is_soft_io_error(e: &std::io::Error) -> bool {
+    matches!(
+        e.kind(),
+        std::io::ErrorKind::PermissionDenied | std::io::ErrorKind::NotFound
+    )
+}
+
+/// Returns `true` for walk errors caused by soft I/O conditions.
+pub(super) fn is_soft_walk_error(e: &ignore::Error) -> bool {
+    e.io_error().is_some_and(is_soft_io_error)
+}
+
 /// Items chunker config — finer granularity for the item metadata stream.
 pub(super) fn items_chunker_config() -> ChunkerConfig {
     ChunkerConfig {
@@ -203,6 +216,8 @@ pub(super) enum WalkEntry {
     NonFile {
         item: Item,
     },
+    /// A file that was skipped due to a soft error (permission denied, not found).
+    Skipped,
     SourceStarted {
         path: String,
     },
@@ -220,6 +235,7 @@ pub(super) fn reserve_budget(entry: &WalkEntry, budget: &ByteBudget) -> Result<u
             budget.acquire(usize::try_from(*file_size).unwrap_or(usize::MAX))
         }
         WalkEntry::FileSegment { len, .. } => budget.acquire(*len as usize),
+        WalkEntry::Skipped => Ok(0),
         _ => Ok(0),
     }
 }
@@ -408,6 +424,10 @@ fn walk_source<'a>(
             let entry = match entry_result {
                 Ok(e) => e,
                 Err(e) => {
+                    if is_soft_walk_error(&e) {
+                        warn!(error = %e, "skipping entry (walk error)");
+                        return WalkItems::One(Some(Ok(WalkEntry::Skipped)));
+                    }
                     return WalkItems::One(Some(Err(VgerError::Other(format!("walk error: {e}")))));
                 }
             };
@@ -426,6 +446,10 @@ fn walk_source<'a>(
             let metadata = match std::fs::symlink_metadata(entry.path()) {
                 Ok(m) => m,
                 Err(e) => {
+                    if is_soft_io_error(&e) {
+                        warn!(path = %entry.path().display(), error = %e, "skipping entry (stat error)");
+                        return WalkItems::One(Some(Ok(WalkEntry::Skipped)));
+                    }
                     return WalkItems::One(Some(Err(VgerError::Other(format!(
                         "stat error for {}: {e}",
                         entry.path().display()
@@ -445,6 +469,10 @@ fn walk_source<'a>(
                         Some(target.to_string_lossy().to_string()),
                     ),
                     Err(e) => {
+                        if is_soft_io_error(&e) {
+                            warn!(path = %entry.path().display(), error = %e, "skipping entry (readlink error)");
+                            return WalkItems::One(Some(Ok(WalkEntry::Skipped)));
+                        }
                         return WalkItems::One(Some(Err(VgerError::Other(format!(
                             "readlink: {e}"
                         )))));

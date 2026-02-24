@@ -10,6 +10,8 @@ vger backup
 
 By default, V'Ger preserves filesystem extended attributes (`xattrs`). Configure this globally with `xattrs.enabled`, and override per source in rich `sources` entries.
 
+If some files are unreadable or disappear during the run (for example, permission denied or a file vanishes), V'Ger skips those files, still creates the snapshot from everything else, and returns exit code `3` to indicate partial success.
+
 ## Sources and labels
 
 In its simplest form, sources are just a list of paths:

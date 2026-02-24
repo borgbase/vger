@@ -117,6 +117,7 @@ fn backup_source(
         },
     )
     .unwrap()
+    .stats
 }
 
 #[test]

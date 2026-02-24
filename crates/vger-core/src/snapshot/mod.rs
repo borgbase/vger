@@ -39,4 +39,7 @@ pub struct SnapshotStats {
     pub original_size: u64,
     pub compressed_size: u64,
     pub deduplicated_size: u64,
+    /// Number of files that could not be read (soft errors skipped).
+    #[serde(default)]
+    pub errors: u64,
 }

@@ -13,7 +13,7 @@ fn run_backup_operation(
     config: &VgerConfig,
     req: commands::backup::BackupRequest<'_>,
     show_progress: bool,
-) -> Result<vger_core::snapshot::SnapshotStats, Box<dyn std::error::Error>> {
+) -> Result<commands::backup::BackupOutcome, Box<dyn std::error::Error>> {
     if !show_progress {
         return commands::backup::run(config, req)
             .map_err(|e| -> Box<dyn std::error::Error> { Box::new(e) });
@@ -27,6 +27,8 @@ fn run_backup_operation(
     result.map_err(|e| -> Box<dyn std::error::Error> { Box::new(e) })
 }
 
+/// Returns `Ok(true)` if the backup completed with partial success (some files skipped),
+/// `Ok(false)` for full success.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn run_backup(
     config: &VgerConfig,
@@ -37,7 +39,7 @@ pub(crate) fn run_backup(
     paths: Vec<String>,
     sources: &[SourceEntry],
     source_filter: &[String],
-) -> Result<(), Box<dyn std::error::Error>> {
+) -> Result<bool, Box<dyn std::error::Error>> {
     // Apply upload concurrency override before opening the repo
     let config = if let Some(uc) = upload_concurrency {
         let mut cfg = config.clone();
@@ -67,6 +69,8 @@ pub(crate) fn run_backup(
             return Err("--label can only be used with ad-hoc paths".into());
         }
 
+        let mut had_partial = false;
+
         if !paths.is_empty() {
             // Ad-hoc paths mode: group all paths into a single snapshot
             let expanded: Vec<String> = paths.iter().map(|p| config::expand_tilde(p)).collect();
@@ -79,7 +83,7 @@ pub(crate) fn run_backup(
             };
             let name = generate_snapshot_name();
 
-            let stats = run_backup_operation(
+            let outcome = run_backup_operation(
                 config,
                 commands::backup::BackupRequest {
                     snapshot_name: &name,
@@ -97,16 +101,36 @@ pub(crate) fn run_backup(
                 show_progress,
             )?;
 
+            let stats = &outcome.stats;
+            if outcome.is_partial {
+                had_partial = true;
+                eprintln!(
+                    "Warning: {} file(s) could not be read and were excluded from the snapshot",
+                    stats.errors
+                );
+            }
+
             println!("Snapshot created: {name}");
             let paths_display = expanded.join(", ");
             println!("  Source: {paths_display} (label: {source_label})");
-            println!(
-                "  Files: {}, Original: {}, Compressed: {}, Deduplicated: {}",
-                stats.nfiles,
-                format_bytes(stats.original_size),
-                format_bytes(stats.compressed_size),
-                format_bytes(stats.deduplicated_size),
-            );
+            if stats.errors > 0 {
+                println!(
+                    "  Files: {}, Errors: {}, Original: {}, Compressed: {}, Deduplicated: {}",
+                    stats.nfiles,
+                    stats.errors,
+                    format_bytes(stats.original_size),
+                    format_bytes(stats.compressed_size),
+                    format_bytes(stats.deduplicated_size),
+                );
+            } else {
+                println!(
+                    "  Files: {}, Original: {}, Compressed: {}, Deduplicated: {}",
+                    stats.nfiles,
+                    format_bytes(stats.original_size),
+                    format_bytes(stats.compressed_size),
+                    format_bytes(stats.deduplicated_size),
+                );
+            }
         } else if sources.is_empty() {
             return Err("no sources configured and no paths specified".into());
         } else {
@@ -126,8 +150,9 @@ pub(crate) fn run_backup(
                     || !source.hooks.failed.is_empty()
                     || !source.hooks.finally.is_empty();
 
-                let backup_action = || -> Result<(), Box<dyn std::error::Error>> {
-                    let stats = run_backup_operation(
+                let partial_flag = &mut had_partial;
+                let mut backup_action = || -> Result<(), Box<dyn std::error::Error>> {
+                    let outcome = run_backup_operation(
                         config,
                         commands::backup::BackupRequest {
                             snapshot_name: &name,
@@ -145,16 +170,36 @@ pub(crate) fn run_backup(
                         show_progress,
                     )?;
 
+                    let stats = &outcome.stats;
+                    if outcome.is_partial {
+                        *partial_flag = true;
+                        eprintln!(
+                            "Warning: {} file(s) could not be read and were excluded from the snapshot",
+                            stats.errors
+                        );
+                    }
+
                     println!("Snapshot created: {name}");
                     let paths_display = source.paths.join(", ");
                     println!("  Source: {paths_display} (label: {})", source.label);
-                    println!(
-                        "  Files: {}, Original: {}, Compressed: {}, Deduplicated: {}",
-                        stats.nfiles,
-                        format_bytes(stats.original_size),
-                        format_bytes(stats.compressed_size),
-                        format_bytes(stats.deduplicated_size),
-                    );
+                    if stats.errors > 0 {
+                        println!(
+                            "  Files: {}, Errors: {}, Original: {}, Compressed: {}, Deduplicated: {}",
+                            stats.nfiles,
+                            stats.errors,
+                            format_bytes(stats.original_size),
+                            format_bytes(stats.compressed_size),
+                            format_bytes(stats.deduplicated_size),
+                        );
+                    } else {
+                        println!(
+                            "  Files: {}, Original: {}, Compressed: {}, Deduplicated: {}",
+                            stats.nfiles,
+                            format_bytes(stats.original_size),
+                            format_bytes(stats.compressed_size),
+                            format_bytes(stats.deduplicated_size),
+                        );
+                    }
                     Ok(())
                 };
 
@@ -174,6 +219,6 @@ pub(crate) fn run_backup(
             }
         }
 
-        Ok(())
+        Ok(had_partial)
     })
 }

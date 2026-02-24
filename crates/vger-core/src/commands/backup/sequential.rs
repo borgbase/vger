@@ -2,7 +2,7 @@ use std::fs::File;
 use std::path::Path;
 
 use rayon::prelude::*;
-use tracing::debug;
+use tracing::{debug, warn};
 
 use crate::chunker;
 use crate::compress::Compression;
@@ -18,7 +18,9 @@ use vger_types::error::{Result, VgerError};
 
 use super::chunk_process::{classify_chunk, WorkerChunk};
 use super::commit::process_worker_chunks;
-use super::walk::{build_configured_walker, read_item_xattrs};
+use super::walk::{
+    build_configured_walker, is_soft_io_error, is_soft_walk_error, read_item_xattrs,
+};
 use super::BackupProgressEvent;
 use super::{append_item_to_stream, emit_progress, emit_stats_progress};
 
@@ -413,7 +415,17 @@ pub(super) fn process_source_path(
     let mut cross_batch = CrossFileBatch::new();
 
     for entry in walk_builder.build() {
-        let entry = entry.map_err(|e| VgerError::Other(format!("walk error: {e}")))?;
+        let entry = match entry {
+            Ok(e) => e,
+            Err(e) => {
+                if is_soft_walk_error(&e) {
+                    warn!(error = %e, "skipping entry (walk error)");
+                    stats.errors += 1;
+                    continue;
+                }
+                return Err(VgerError::Other(format!("walk error: {e}")));
+            }
+        };
 
         let rel_path = entry
             .path()
@@ -427,9 +439,20 @@ pub(super) fn process_source_path(
             continue;
         }
 
-        let metadata = std::fs::symlink_metadata(entry.path()).map_err(|e| {
-            VgerError::Other(format!("stat error for {}: {e}", entry.path().display()))
-        })?;
+        let metadata = match std::fs::symlink_metadata(entry.path()) {
+            Ok(m) => m,
+            Err(e) => {
+                if is_soft_io_error(&e) {
+                    warn!(path = %entry.path().display(), error = %e, "skipping entry (stat error)");
+                    stats.errors += 1;
+                    continue;
+                }
+                return Err(VgerError::Other(format!(
+                    "stat error for {}: {e}",
+                    entry.path().display()
+                )));
+            }
+        };
 
         let file_type = metadata.file_type();
         let metadata_summary = fs::summarize_metadata(&metadata, &file_type);
@@ -437,12 +460,20 @@ pub(super) fn process_source_path(
         let (entry_type, link_target) = if file_type.is_dir() {
             (ItemType::Directory, None)
         } else if file_type.is_symlink() {
-            let target = std::fs::read_link(entry.path())
-                .map_err(|e| VgerError::Other(format!("readlink: {e}")))?;
-            (
-                ItemType::Symlink,
-                Some(target.to_string_lossy().to_string()),
-            )
+            match std::fs::read_link(entry.path()) {
+                Ok(target) => (
+                    ItemType::Symlink,
+                    Some(target.to_string_lossy().to_string()),
+                ),
+                Err(e) => {
+                    if is_soft_io_error(&e) {
+                        warn!(path = %entry.path().display(), error = %e, "skipping entry (readlink error)");
+                        stats.errors += 1;
+                        continue;
+                    }
+                    return Err(VgerError::Other(format!("readlink: {e}")));
+                }
+            }
         } else if file_type.is_file() {
             (ItemType::RegularFile, None)
         } else {
@@ -533,7 +564,17 @@ pub(super) fn process_source_path(
                     emit_stats_progress(progress, stats, Some(item.path.clone()));
                 } else {
                     // Cache miss — read and add to batch.
-                    let data = std::fs::read(entry.path()).map_err(VgerError::Io)?;
+                    let data = match std::fs::read(entry.path()) {
+                        Ok(d) => d,
+                        Err(e) => {
+                            if is_soft_io_error(&e) {
+                                warn!(path = %entry.path().display(), error = %e, "skipping file (read error)");
+                                stats.errors += 1;
+                                continue;
+                            }
+                            return Err(VgerError::Io(e));
+                        }
+                    };
                     cross_batch.add_file(item, data, metadata_summary, abs_path);
 
                     if cross_batch.should_flush() {
@@ -571,7 +612,7 @@ pub(super) fn process_source_path(
                     dedup_filter,
                 )?;
 
-                process_regular_file_item(
+                if let Err(e) = process_regular_file_item(
                     repo,
                     entry.path(),
                     metadata_summary,
@@ -585,7 +626,14 @@ pub(super) fn process_source_path(
                     max_pending_transform_bytes,
                     max_pending_file_actions,
                     dedup_filter,
-                )?;
+                ) {
+                    if e.is_soft_file_error() {
+                        warn!(path = %entry.path().display(), error = %e, "skipping file");
+                        stats.errors += 1;
+                        continue;
+                    }
+                    return Err(e);
+                }
             }
         } else {
             // Non-regular-file — flush batch first to maintain walk order.

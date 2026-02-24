@@ -67,7 +67,7 @@ pub fn run_backup_for_repo_with_progress(
 
     for source in sources {
         let snapshot_name = generate_snapshot_name();
-        let stats = commands::backup::run_with_progress(
+        let outcome = commands::backup::run_with_progress(
             config,
             commands::backup::BackupRequest {
                 snapshot_name: &snapshot_name,
@@ -89,7 +89,7 @@ pub fn run_backup_for_repo_with_progress(
             source_label: source.label.clone(),
             snapshot_name,
             source_paths: source.paths.clone(),
-            stats,
+            stats: outcome.stats,
         });
     }
 
