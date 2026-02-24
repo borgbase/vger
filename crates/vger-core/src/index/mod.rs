@@ -192,6 +192,76 @@ impl DedupIndex {
     }
 }
 
+// --- Pending index journal types (for interrupted backup recovery) ---
+
+/// A single chunk's location within a pending pack.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PendingChunkEntry {
+    pub chunk_id: ChunkId,
+    pub stored_size: u32,
+    pub pack_offset: u64,
+}
+
+/// All chunks belonging to a single pack in the pending index journal.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PendingPackEntry {
+    pub pack_id: PackId,
+    pub chunks: Vec<PendingChunkEntry>,
+}
+
+/// In-memory journal of pack→chunk mappings for packs flushed during an
+/// incomplete backup session. Keyed by `PackId` to prevent duplicate growth
+/// across repeated interruption/recovery cycles.
+///
+/// Serialized as `Vec<PendingPackEntry>` on the wire (zstd-compressed, encrypted).
+#[derive(Debug, Default)]
+pub struct PendingIndexJournal {
+    packs: HashMap<PackId, PendingPackEntry>,
+}
+
+impl PendingIndexJournal {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.packs.is_empty()
+    }
+
+    /// Number of packs recorded in this journal.
+    pub fn len(&self) -> usize {
+        self.packs.len()
+    }
+
+    /// Record a pack and its chunk entries. Replaces any previous entry for
+    /// the same `pack_id` (idempotent for recovery seeding).
+    pub fn record_pack(&mut self, pack_id: PackId, chunks: Vec<PendingChunkEntry>) {
+        self.packs
+            .insert(pack_id, PendingPackEntry { pack_id, chunks });
+    }
+
+    /// Serialize to the wire format (`Vec<PendingPackEntry>`).
+    pub fn to_wire(&self) -> Vec<PendingPackEntry> {
+        self.packs.values().cloned().collect()
+    }
+
+    /// Deserialize from the wire format.
+    pub fn from_wire(entries: Vec<PendingPackEntry>) -> Self {
+        let packs = entries.into_iter().map(|e| (e.pack_id, e)).collect();
+        Self { packs }
+    }
+}
+
+/// Lightweight entry for recovered chunks (from a previous interrupted session).
+/// Lives in `Repository::recovered_chunks` until promoted into the active dedup
+/// structure on a dedup hit.
+#[derive(Debug, Clone)]
+pub struct RecoveredChunkEntry {
+    pub stored_size: u32,
+    pub pack_id: PackId,
+    pub pack_offset: u64,
+}
+
 /// Records all index mutations that happen while in dedup-only mode.
 ///
 /// At save time, these are applied to a freshly-loaded full `ChunkIndex`.
@@ -268,5 +338,99 @@ impl IndexDelta {
                 index.increment_refcount(&id);
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn make_chunk_id(byte: u8) -> ChunkId {
+        ChunkId([byte; 32])
+    }
+
+    fn make_pack_id(byte: u8) -> PackId {
+        PackId([byte; 32])
+    }
+
+    #[test]
+    fn pending_journal_round_trip() {
+        let mut journal = PendingIndexJournal::new();
+        assert!(journal.is_empty());
+        assert_eq!(journal.len(), 0);
+
+        let pack1 = make_pack_id(1);
+        let pack2 = make_pack_id(2);
+
+        journal.record_pack(
+            pack1,
+            vec![
+                PendingChunkEntry {
+                    chunk_id: make_chunk_id(10),
+                    stored_size: 100,
+                    pack_offset: 0,
+                },
+                PendingChunkEntry {
+                    chunk_id: make_chunk_id(11),
+                    stored_size: 200,
+                    pack_offset: 100,
+                },
+            ],
+        );
+        journal.record_pack(
+            pack2,
+            vec![PendingChunkEntry {
+                chunk_id: make_chunk_id(20),
+                stored_size: 300,
+                pack_offset: 0,
+            }],
+        );
+
+        assert_eq!(journal.len(), 2);
+        assert!(!journal.is_empty());
+
+        // Serialize → deserialize round-trip
+        let wire = journal.to_wire();
+        let serialized = rmp_serde::to_vec(&wire).unwrap();
+        let deserialized: Vec<PendingPackEntry> = rmp_serde::from_slice(&serialized).unwrap();
+        let restored = PendingIndexJournal::from_wire(deserialized);
+
+        assert_eq!(restored.len(), 2);
+        let restored_wire = restored.to_wire();
+
+        // Both packs present (order may differ)
+        let mut pack_ids: Vec<PackId> = restored_wire.iter().map(|e| e.pack_id).collect();
+        pack_ids.sort_by_key(|p| p.0);
+        assert_eq!(pack_ids, vec![pack1, pack2]);
+    }
+
+    #[test]
+    fn pending_journal_dedup_on_reinsert() {
+        let mut journal = PendingIndexJournal::new();
+        let pack = make_pack_id(1);
+
+        journal.record_pack(
+            pack,
+            vec![PendingChunkEntry {
+                chunk_id: make_chunk_id(10),
+                stored_size: 100,
+                pack_offset: 0,
+            }],
+        );
+        assert_eq!(journal.len(), 1);
+
+        // Re-insert same pack_id — should replace, not duplicate
+        journal.record_pack(
+            pack,
+            vec![PendingChunkEntry {
+                chunk_id: make_chunk_id(10),
+                stored_size: 100,
+                pack_offset: 0,
+            }],
+        );
+        assert_eq!(journal.len(), 1);
+
+        let wire = journal.to_wire();
+        assert_eq!(wire.len(), 1);
     }
 }

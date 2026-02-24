@@ -18,7 +18,9 @@ use tracing::{debug, warn};
 use crate::compress;
 use crate::config::{ChunkerConfig, RepositoryConfig, DEFAULT_UPLOAD_CONCURRENCY};
 use crate::index::dedup_cache::{self, TieredDedupIndex};
-use crate::index::{ChunkIndex, DedupIndex, IndexDelta};
+use crate::index::{
+    ChunkIndex, DedupIndex, IndexDelta, PendingChunkEntry, PendingIndexJournal, RecoveredChunkEntry,
+};
 use vger_crypto::key::{EncryptedKey, MasterKey};
 use vger_crypto::{self as crypto, CryptoEngine, PlaintextEngine};
 use vger_storage::StorageBackend;
@@ -67,6 +69,11 @@ const UPLOAD_QUEUE_HEADROOM: usize = 2;
 
 const MANIFEST_OBJECT_CONTEXT: &[u8] = b"manifest";
 const INDEX_OBJECT_CONTEXT: &[u8] = b"index";
+const PENDING_INDEX_KEY: &str = "pending_index";
+const PENDING_INDEX_OBJECT_CONTEXT: &[u8] = b"pending_index";
+
+/// Number of new packs between debounced `pending_index` writes.
+const JOURNAL_WRITE_INTERVAL: usize = 8;
 
 /// FIFO blob cache bounded by total weight in bytes.
 /// Caches decrypted+decompressed chunks to avoid redundant storage reads.
@@ -164,6 +171,14 @@ pub struct Repository {
     rebuild_dedup_cache: bool,
     /// Override for the cache directory root (from config `cache_dir`).
     cache_dir_override: Option<PathBuf>,
+    /// Journal of chunk→pack mappings for packs flushed in the current session.
+    /// Written to storage periodically so interrupted backups can recover.
+    pending_journal: PendingIndexJournal,
+    /// Number of packs in journal when last written to storage (for debouncing).
+    pending_journal_last_written: usize,
+    /// Chunks recovered from a previous interrupted session's `pending_index`.
+    /// Promoted into the active dedup structure on dedup hit.
+    recovered_chunks: StdHashMap<ChunkId, RecoveredChunkEntry>,
 }
 
 impl Repository {
@@ -332,6 +347,9 @@ impl Repository {
             file_cache_dirty: false,
             rebuild_dedup_cache: false,
             cache_dir_override: cache_dir,
+            pending_journal: PendingIndexJournal::new(),
+            pending_journal_last_written: 0,
+            recovered_chunks: StdHashMap::new(),
         })
     }
 
@@ -493,6 +511,9 @@ impl Repository {
             file_cache_dirty: false,
             rebuild_dedup_cache: false,
             cache_dir_override: cache_dir,
+            pending_journal: PendingIndexJournal::new(),
+            pending_journal_last_written: 0,
+            recovered_chunks: StdHashMap::new(),
         })
     }
 
@@ -634,6 +655,7 @@ impl Repository {
                 i += 1;
             }
         }
+        self.maybe_write_pending_index();
         Ok(())
     }
 
@@ -650,6 +672,10 @@ impl Repository {
                     first_err = Some(e);
                 }
             }
+        }
+        // Final flush of journal before returning (best-effort).
+        if !self.pending_journal.is_empty() {
+            self.write_pending_index_best_effort();
         }
         match first_err {
             Some(e) => Err(e),
@@ -670,6 +696,7 @@ impl Repository {
             handle
                 .join()
                 .map_err(|_| VgerError::Other("pack upload thread panicked".into()))??;
+            self.maybe_write_pending_index();
         }
         Ok(())
     }
@@ -968,6 +995,13 @@ impl Repository {
         // Now propagate any file cache save error
         fc_result?;
 
+        // Reset pending journal state — save_state succeeded, so all entries
+        // are now in the persisted index. The pending_index file itself is
+        // deleted later by clear_pending_index() from the backup command.
+        self.pending_journal = PendingIndexJournal::new();
+        self.pending_journal_last_written = 0;
+        self.recovered_chunks.clear();
+
         Ok(())
     }
 
@@ -1134,6 +1168,7 @@ impl Repository {
 
     /// Increment refcount if this chunk already exists in committed or pending state.
     /// Returns stored size when found. Works in normal, dedup, and tiered modes.
+    /// Falls back to recovered chunks from a previous interrupted session.
     pub fn bump_ref_if_exists(&mut self, chunk_id: &ChunkId) -> Option<u32> {
         // Tiered dedup mode: check xor filter + mmap + session_new
         if let Some(ref tiered) = self.tiered_dedup {
@@ -1158,6 +1193,11 @@ impl Repository {
             return Some(stored_size);
         }
 
+        // Check recovered chunks before pending pack writers.
+        if let Some(stored_size) = self.promote_recovered_chunk(chunk_id) {
+            return Some(stored_size);
+        }
+
         self.bump_ref_pending(chunk_id)
     }
 
@@ -1169,6 +1209,9 @@ impl Repository {
                 if let Some(ref mut delta) = self.index_delta {
                     delta.bump_refcount(chunk_id);
                 }
+                return Some(stored_size);
+            }
+            if let Some(stored_size) = self.promote_recovered_chunk(chunk_id) {
                 return Some(stored_size);
             }
             return self.bump_ref_pending(chunk_id);
@@ -1184,6 +1227,9 @@ impl Repository {
                 if let Some(ref mut delta) = self.index_delta {
                     delta.bump_refcount(chunk_id);
                 }
+                return Some(stored_size);
+            }
+            if let Some(stored_size) = self.promote_recovered_chunk(chunk_id) {
                 return Some(stored_size);
             }
             return self.bump_ref_pending(chunk_id);
@@ -1306,6 +1352,19 @@ impl Repository {
             PackType::Tree => self.tree_pack_writer.seal()?,
         };
 
+        // Record journal entries before apply_sealed_entries consumes them.
+        let journal_chunks: Vec<PendingChunkEntry> = entries
+            .iter()
+            .map(
+                |&(chunk_id, stored_size, offset, _refcount)| PendingChunkEntry {
+                    chunk_id,
+                    stored_size,
+                    pack_offset: offset,
+                },
+            )
+            .collect();
+        self.pending_journal.record_pack(pack_id, journal_chunks);
+
         self.apply_sealed_entries(pack_id, entries);
 
         let storage = Arc::clone(&self.storage);
@@ -1400,5 +1459,195 @@ impl Repository {
         // Wait for all background uploads to complete before returning.
         self.wait_pending_uploads()?;
         Ok(())
+    }
+
+    // --- Pending index journal (interrupted backup recovery) ---
+
+    /// Write the pending index journal to storage (debounced helper).
+    /// Only writes if enough new packs have accumulated since the last write.
+    fn maybe_write_pending_index(&mut self) {
+        let current = self.pending_journal.len();
+        if current >= self.pending_journal_last_written + JOURNAL_WRITE_INTERVAL {
+            self.write_pending_index_best_effort();
+        }
+    }
+
+    /// Serialize and write the pending index journal to storage.
+    /// Best-effort: logs a warning on failure, never propagates errors.
+    fn write_pending_index_best_effort(&mut self) {
+        if self.pending_journal.is_empty() {
+            return;
+        }
+        match self.write_pending_index() {
+            Ok(()) => {
+                self.pending_journal_last_written = self.pending_journal.len();
+            }
+            Err(e) => {
+                warn!("failed to write pending_index: {e}");
+            }
+        }
+    }
+
+    /// Serialize, compress, encrypt, and write the pending index journal to storage.
+    fn write_pending_index(&self) -> Result<()> {
+        let wire = self.pending_journal.to_wire();
+        let serialized = rmp_serde::to_vec(&wire)?;
+        let compressed = compress::compress(compress::Compression::Zstd { level: 3 }, &serialized)?;
+        let packed = pack_object_with_context(
+            ObjectType::PendingIndex,
+            PENDING_INDEX_OBJECT_CONTEXT,
+            &compressed,
+            self.crypto.as_ref(),
+        )?;
+        self.storage.put(PENDING_INDEX_KEY, &packed)?;
+        debug!(
+            packs = wire.len(),
+            bytes = packed.len(),
+            "wrote pending_index to storage"
+        );
+        Ok(())
+    }
+
+    /// Recover chunk→pack mappings from a previous interrupted session's
+    /// `pending_index` file. Verifies each pack exists before adding entries.
+    ///
+    /// Must be called inside the repo lock, before `enable_tiered_dedup_mode()`.
+    /// Returns the number of recovered chunk entries.
+    pub fn recover_pending_index(&mut self) -> Result<usize> {
+        let data = match self.storage.get(PENDING_INDEX_KEY)? {
+            Some(d) => d,
+            None => return Ok(0),
+        };
+
+        let compressed = match unpack_object_expect_with_context(
+            &data,
+            ObjectType::PendingIndex,
+            PENDING_INDEX_OBJECT_CONTEXT,
+            self.crypto.as_ref(),
+        ) {
+            Ok(c) => c,
+            Err(e) => {
+                warn!("pending_index: decrypt failed, skipping recovery: {e}");
+                return Ok(0);
+            }
+        };
+
+        let serialized = match compress::decompress_metadata(&compressed) {
+            Ok(s) => s,
+            Err(e) => {
+                warn!("pending_index: decompress failed, skipping recovery: {e}");
+                return Ok(0);
+            }
+        };
+
+        let wire: Vec<crate::index::PendingPackEntry> = match rmp_serde::from_slice(&serialized) {
+            Ok(w) => w,
+            Err(e) => {
+                warn!("pending_index: deserialize failed, skipping recovery: {e}");
+                return Ok(0);
+            }
+        };
+
+        warn!(
+            packs = wire.len(),
+            "found pending index from interrupted session, verifying packs…"
+        );
+
+        let mut recovered = 0usize;
+        for pack_entry in &wire {
+            let pack_key = pack_entry.pack_id.storage_key();
+            match self.storage.exists(&pack_key) {
+                Ok(true) => {}
+                Ok(false) => {
+                    warn!(
+                        pack_id = %pack_entry.pack_id,
+                        "pending_index: pack missing from storage, skipping"
+                    );
+                    continue;
+                }
+                Err(e) => {
+                    warn!(
+                        pack_id = %pack_entry.pack_id,
+                        "pending_index: cannot verify pack existence ({e}), skipping"
+                    );
+                    continue;
+                }
+            }
+
+            for chunk in &pack_entry.chunks {
+                // Only add if not already in the chunk index (e.g. from a
+                // successful prior save that didn't delete pending_index).
+                if !self.chunk_index.contains(&chunk.chunk_id) {
+                    self.recovered_chunks.insert(
+                        chunk.chunk_id,
+                        RecoveredChunkEntry {
+                            stored_size: chunk.stored_size,
+                            pack_id: pack_entry.pack_id,
+                            pack_offset: chunk.pack_offset,
+                        },
+                    );
+                    recovered += 1;
+                }
+            }
+
+            // Seed journal so re-interruption preserves these entries.
+            self.pending_journal
+                .record_pack(pack_entry.pack_id, pack_entry.chunks.clone());
+        }
+
+        debug!(
+            packs = wire.len(),
+            recovered_chunks = recovered,
+            "recovered pending_index entries"
+        );
+        Ok(recovered)
+    }
+
+    /// Best-effort delete of the `pending_index` file from storage.
+    /// Called from the backup command after `save_state()` succeeds.
+    pub fn clear_pending_index(&self) {
+        match self.storage.delete(PENDING_INDEX_KEY) {
+            Ok(()) => {
+                debug!("cleared pending_index from storage");
+            }
+            Err(e) => {
+                warn!("failed to clear pending_index: {e}");
+            }
+        }
+    }
+
+    /// Promote a recovered chunk into the active dedup structure and index delta.
+    /// Returns the stored size if the chunk was in `recovered_chunks`, None otherwise.
+    fn promote_recovered_chunk(&mut self, chunk_id: &ChunkId) -> Option<u32> {
+        let entry = self.recovered_chunks.remove(chunk_id)?;
+
+        // Promote into active dedup structure.
+        if let Some(ref mut tiered) = self.tiered_dedup {
+            tiered.insert(*chunk_id, entry.stored_size);
+        } else if let Some(ref mut dedup) = self.dedup_index {
+            dedup.insert(*chunk_id, entry.stored_size);
+        } else {
+            self.chunk_index.add(
+                *chunk_id,
+                entry.stored_size,
+                entry.pack_id,
+                entry.pack_offset,
+            );
+            self.index_dirty = true;
+            return Some(entry.stored_size);
+        }
+
+        // Record in delta as a new entry with refcount=1.
+        if let Some(ref mut delta) = self.index_delta {
+            delta.add_new_entry(
+                *chunk_id,
+                entry.stored_size,
+                entry.pack_id,
+                entry.pack_offset,
+                1,
+            );
+        }
+
+        Some(entry.stored_size)
     }
 }

@@ -289,7 +289,6 @@ fn xfs_get_quota_fd(
 fn get_project_id(path: &Path) -> Option<u32> {
     use std::os::unix::io::AsRawFd;
 
-    // FS_IOC_FSGETXATTR = 0x801C581F
     // libc::Ioctl is c_ulong on glibc, c_int on musl; the kernel truncates to u32.
     const FS_IOC_FSGETXATTR: libc::Ioctl = 0x801C_581Fu32 as i32 as libc::Ioctl;
 

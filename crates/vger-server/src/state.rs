@@ -275,7 +275,7 @@ fn is_valid_storage_key(key: &str) -> bool {
         return false;
     }
     match parts[0] {
-        "config" | "manifest" | "index" => parts.len() == 1,
+        "config" | "manifest" | "index" | "pending_index" => parts.len() == 1,
         "keys" | "snapshots" | "locks" => (1..=2).contains(&parts.len()),
         "packs" => is_valid_packs_key(&parts),
         _ => false,
@@ -301,6 +301,25 @@ fn is_valid_packs_key(parts: &[&str]) -> bool {
         return pack.len() == 64 && pack.chars().all(|c| c.is_ascii_hexdigit());
     }
     false
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn valid_single_file_keys() {
+        assert!(is_valid_storage_key("config"));
+        assert!(is_valid_storage_key("manifest"));
+        assert!(is_valid_storage_key("index"));
+        assert!(is_valid_storage_key("pending_index"));
+    }
+
+    #[test]
+    fn rejects_unknown_top_level_keys() {
+        assert!(!is_valid_storage_key("unknown"));
+        assert!(!is_valid_storage_key("pending_index/sub"));
+    }
 }
 
 fn existing_ancestor_within(path: &Path, base: &Path) -> bool {

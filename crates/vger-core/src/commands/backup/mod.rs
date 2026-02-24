@@ -216,6 +216,22 @@ pub fn run_with_progress(
             return Err(VgerError::SnapshotAlreadyExists(snapshot_name.into()));
         }
 
+        // Recover chunk→pack mappings from a previous interrupted session.
+        // Must happen before enable_tiered_dedup_mode() which drops the full
+        // chunk index — recovered entries go into a separate map.
+        match repo.recover_pending_index() {
+            Ok(0) => {}
+            Ok(n) => {
+                info!(
+                    recovered_chunks = n,
+                    "recovered pending index from interrupted session"
+                );
+            }
+            Err(e) => {
+                warn!("failed to recover pending index: {e}");
+            }
+        }
+
         // Pre-sanitize stale file-cache entries whose chunks were pruned by
         // delete+compact. Must happen before enable_dedup_mode() which drops
         // the full chunk index. We temporarily take the cache to avoid
@@ -386,6 +402,10 @@ pub fn run_with_progress(
 
         // Save manifest, index, and file cache
         repo.save_state()?;
+
+        // Clean up the pending_index now that all entries are in the persisted
+        // index. Best-effort — a stale pending_index is harmless.
+        repo.clear_pending_index();
 
         if stats.errors > 0 {
             info!(
