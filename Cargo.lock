@@ -7058,6 +7058,7 @@ dependencies = [
  "clap",
  "futures-util",
  "hex",
+ "libc",
  "serde",
  "serde_json",
  "subtle",

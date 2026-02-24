@@ -46,5 +46,8 @@ futures-util = "0.3"
 # Hex encoding
 hex.workspace = true
 
+# System calls (statvfs, quotactl)
+libc = "0.2"
+
 [dev-dependencies]
 tempfile = { workspace = true }

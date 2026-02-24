@@ -15,9 +15,6 @@ pub struct ServerSection {
     /// Log output format: "json" or "pretty".
     pub log_format: String,
 
-    /// Storage quota in bytes. 0 = unlimited.
-    pub quota_bytes: u64,
-
     /// Default lock TTL in seconds.
     pub lock_ttl_seconds: u64,
 }
@@ -30,7 +27,6 @@ impl Default for ServerSection {
             token: String::new(),
             append_only: false,
             log_format: "pretty".to_string(),
-            quota_bytes: 0,
             lock_ttl_seconds: 3600,
         }
     }

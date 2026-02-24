@@ -6,6 +6,7 @@ use std::sync::{Arc, RwLock, RwLockReadGuard, RwLockWriteGuard};
 use chrono::{DateTime, Utc};
 
 use crate::config::ServerSection;
+use crate::quota::{self, QuotaState};
 
 /// Shared application state, wrapped in Arc for axum handlers.
 #[derive(Clone)]
@@ -18,6 +19,8 @@ pub struct AppStateInner {
     pub data_dir: PathBuf,
     /// Quota usage in bytes.
     pub quota_usage: AtomicU64,
+    /// Auto-detected or explicit quota state.
+    pub quota_state: Arc<QuotaState>,
 
     /// Last backup timestamp (updated on manifest PUT).
     pub last_backup_at: RwLock<Option<DateTime<Utc>>>,
@@ -105,7 +108,7 @@ pub(crate) fn unexpected_entries(data_dir: &Path) -> Vec<String> {
 }
 
 impl AppState {
-    pub fn new(config: ServerSection) -> Self {
+    pub fn new(config: ServerSection, explicit_quota: Option<u64>) -> Self {
         let configured_data_dir = PathBuf::from(&config.data_dir);
         let data_dir = configured_data_dir
             .canonicalize()
@@ -128,11 +131,55 @@ impl AppState {
         // Initialize quota usage by scanning data_dir
         let quota_usage = dir_size(&data_dir);
 
+        // Detect quota
+        let (source, limit) = quota::detect_quota(&data_dir, explicit_quota, quota_usage);
+        quota::log_quota(source, limit);
+        let is_explicit = matches!(explicit_quota, Some(v) if v > 0);
+        let quota_state = QuotaState::new(source, limit, is_explicit, data_dir.clone());
+
         Self {
             inner: Arc::new(AppStateInner {
                 config,
                 data_dir,
                 quota_usage: AtomicU64::new(quota_usage),
+                quota_state,
+                last_backup_at: RwLock::new(None),
+                locks: RwLock::new(HashMap::new()),
+            }),
+        }
+    }
+
+    /// Build state with a pre-constructed `QuotaState`, skipping auto-detection.
+    /// Used by tests to get deterministic behavior.
+    #[cfg(test)]
+    pub fn new_with_quota(config: ServerSection, quota_state: Arc<QuotaState>) -> Self {
+        let configured_data_dir = PathBuf::from(&config.data_dir);
+        let data_dir = configured_data_dir
+            .canonicalize()
+            .unwrap_or(configured_data_dir);
+
+        let bad = unexpected_entries(&data_dir);
+        if !bad.is_empty() {
+            eprintln!(
+                "Error: data directory '{}' contains unexpected entries: {}",
+                data_dir.display(),
+                bad.join(", ")
+            );
+            eprintln!(
+                "The data directory must contain only repository files. \
+                 Remove unrelated files or choose a different --data-dir."
+            );
+            std::process::exit(1);
+        }
+
+        let quota_usage = dir_size(&data_dir);
+
+        Self {
+            inner: Arc::new(AppStateInner {
+                config,
+                data_dir,
+                quota_usage: AtomicU64::new(quota_usage),
+                quota_state,
                 last_backup_at: RwLock::new(None),
                 locks: RwLock::new(HashMap::new()),
             }),
@@ -157,6 +204,11 @@ impl AppState {
             return None;
         }
         Some(path)
+    }
+
+    /// Get current effective quota limit in bytes. 0 = unlimited.
+    pub fn quota_limit(&self) -> u64 {
+        self.inner.quota_state.limit()
     }
 
     /// Get current quota usage.
@@ -184,6 +236,11 @@ impl AppState {
     pub fn record_backup(&self) {
         let mut ts = write_unpoisoned(&self.inner.last_backup_at, "last_backup_at");
         *ts = Some(Utc::now());
+
+        // Refresh quota in the background (fire-and-forget).
+        let qs = self.inner.quota_state.clone();
+        let usage = self.quota_used();
+        tokio::task::spawn_blocking(move || qs.refresh(usage));
     }
 }
 

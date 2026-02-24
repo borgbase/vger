@@ -4,6 +4,7 @@ use axum::Router;
 use tower::ServiceExt;
 
 use crate::config::ServerSection;
+use crate::quota::{QuotaSource, QuotaState};
 use crate::state::AppState;
 
 pub const TEST_TOKEN: &str = "test-token";
@@ -24,14 +25,21 @@ pub fn setup_app(quota: u64) -> (Router, AppState, tempfile::TempDir) {
         std::fs::create_dir_all(data_dir.join("packs").join(format!("{i:02x}"))).unwrap();
     }
 
+    // Build a deterministic QuotaState — no auto-detection in tests.
+    let (source, limit) = if quota > 0 {
+        (QuotaSource::Explicit, quota)
+    } else {
+        (QuotaSource::Unlimited, 0)
+    };
+    let quota_state = QuotaState::new(source, limit, true, data_dir.clone());
+
     let config = ServerSection {
         data_dir: data_dir.to_string_lossy().into_owned(),
         token: TEST_TOKEN.to_string(),
-        quota_bytes: quota,
         ..Default::default()
     };
 
-    let state = AppState::new(config);
+    let state = AppState::new_with_quota(config, quota_state);
     let router = super::router(state.clone());
     (router, state, tmp)
 }

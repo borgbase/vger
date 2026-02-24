@@ -93,10 +93,18 @@ async fn repo_stats(state: AppState) -> Result<Response, ServerError> {
             .await
             .map_err(|e| ServerError::Internal(e.to_string()))?;
 
+    // Refresh quota from filesystem before reporting.
+    let qs = state.inner.quota_state.clone();
+    let usage = state.quota_used();
+    tokio::task::spawn_blocking(move || qs.refresh(usage))
+        .await
+        .map_err(|e| ServerError::Internal(e.to_string()))?;
+
     let last_backup = *read_unpoisoned(&state.inner.last_backup_at, "last_backup_at");
 
-    let quota_bytes = state.inner.config.quota_bytes;
+    let quota_bytes = state.quota_limit();
     let quota_used = state.quota_used();
+    let quota_source = state.inner.quota_state.source();
 
     Ok(axum::Json(serde_json::json!({
         "total_bytes": total_bytes,
@@ -105,6 +113,7 @@ async fn repo_stats(state: AppState) -> Result<Response, ServerError> {
         "last_backup_at": last_backup,
         "quota_bytes": quota_bytes,
         "quota_used_bytes": quota_used,
+        "quota_source": quota_source,
     }))
     .into_response())
 }

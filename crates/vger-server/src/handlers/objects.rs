@@ -101,7 +101,7 @@ pub async fn put_object(
     let old_size = existing_meta.as_ref().map_or(0, |m| m.len());
 
     // Quota pre-check using Content-Length if available
-    let quota = state.inner.config.quota_bytes;
+    let quota = state.quota_limit();
     if quota > 0 {
         if let Some(content_length) = headers
             .get("Content-Length")

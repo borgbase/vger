@@ -1,6 +1,7 @@
 mod config;
 mod error;
 mod handlers;
+mod quota;
 mod state;
 
 use std::time::Duration;
@@ -31,9 +32,10 @@ struct Cli {
     #[arg(long, default_value = "pretty")]
     log_format: String,
 
-    /// Storage quota (e.g. "500M", "10G", plain bytes). 0 = unlimited.
-    #[arg(long, default_value = "0", value_parser = parse_size)]
-    quota: u64,
+    /// Storage quota (e.g. "500M", "10G"). Overrides auto-detection.
+    /// Omit for automatic detection from filesystem quotas or free space.
+    #[arg(long, value_parser = parse_size)]
+    quota: Option<u64>,
 
     /// Lock TTL in seconds
     #[arg(long, default_value_t = 3600)]
@@ -46,6 +48,10 @@ struct Cli {
     /// Number of threads for blocking disk I/O (reads, writes, hashing) (minimum 1)
     #[arg(long, default_value_t = 6, value_parser = parse_min_one)]
     io_threads: usize,
+
+    /// Enable debug logging
+    #[arg(long, default_value_t = false)]
+    debug: bool,
 }
 
 fn parse_min_one(s: &str) -> Result<usize, String> {
@@ -86,17 +92,24 @@ async fn async_main(cli: Cli) {
         token,
         append_only: cli.append_only,
         log_format: cli.log_format,
-        quota_bytes: cli.quota,
         lock_ttl_seconds: cli.lock_ttl_seconds,
     };
 
     // Initialize tracing
+    let log_level = if cli.debug {
+        tracing::Level::DEBUG
+    } else {
+        tracing::Level::INFO
+    };
     match config.log_format.as_str() {
         "json" => {
-            tracing_subscriber::fmt().json().init();
+            tracing_subscriber::fmt()
+                .json()
+                .with_max_level(log_level)
+                .init();
         }
         _ => {
-            tracing_subscriber::fmt().init();
+            tracing_subscriber::fmt().with_max_level(log_level).init();
         }
     }
 
@@ -110,7 +123,7 @@ async fn async_main(cli: Cli) {
     });
 
     let listen_addr = config.listen.clone();
-    let state = AppState::new(config);
+    let state = AppState::new(config, cli.quota);
 
     // Spawn lock cleanup background task
     let cleanup_state = state.clone();
