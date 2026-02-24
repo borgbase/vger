@@ -170,11 +170,11 @@ impl BackupProgressRenderer {
             format_bytes(self.deduplicated_size),
         );
 
-        let columns = terminal_columns();
-        let available = columns.saturating_sub(prefix.chars().count());
+        let columns = terminal_columns().saturating_sub(5);
+        let available = columns.saturating_sub(str_display_width(&prefix));
         let current = truncate_middle(file, available);
         let line = format!("{prefix}{current}");
-        let line_len = line.chars().count();
+        let line_len = str_display_width(&line);
         let pad_len = self.last_line_len.saturating_sub(line_len);
 
         {
@@ -240,18 +240,50 @@ fn terminal_columns_os() -> Option<usize> {
 }
 
 // ---------------------------------------------------------------------------
+// Display-width helpers (East Asian Wide / Fullwidth characters)
+// ---------------------------------------------------------------------------
+
+/// Return the terminal display width of a single character.
+/// CJK and fullwidth characters occupy 2 columns; everything else occupies 1.
+fn char_display_width(c: char) -> usize {
+    let cp = c as u32;
+    if matches!(cp,
+        0x1100..=0x115F   // Hangul Jamo initials
+        | 0x2E80..=0x303E // CJK Radicals, Kangxi, Symbols & Punctuation
+        | 0x3040..=0x33FF // Hiragana, Katakana, Bopomofo, CJK Compat
+        | 0x3400..=0x4DBF // CJK Extension A
+        | 0x4E00..=0x9FFF // CJK Unified Ideographs
+        | 0xAC00..=0xD7AF // Hangul Syllables
+        | 0xF900..=0xFAFF // CJK Compat Ideographs
+        | 0xFE30..=0xFE6F // CJK Compat Forms
+        | 0xFF01..=0xFF60 // Fullwidth Forms
+        | 0xFFE0..=0xFFE6 // Fullwidth Signs
+        | 0x20000..=0x3FFFF // CJK Extensions B–G
+    ) {
+        2
+    } else {
+        1
+    }
+}
+
+/// Return the terminal display width of a string (sum of character widths).
+fn str_display_width(s: &str) -> usize {
+    s.chars().map(char_display_width).sum()
+}
+
+// ---------------------------------------------------------------------------
 // Middle-truncation for file paths
 // ---------------------------------------------------------------------------
 
-/// Truncate a string to `max_cols` characters, showing both the beginning and
-/// end with `...` in the middle (e.g. `/very/l...file.txt`).
+/// Truncate a string to `max_cols` **display columns**, showing both the
+/// beginning and end with `...` in the middle (e.g. `/very/l...file.txt`).
 fn truncate_middle(input: &str, max_cols: usize) -> String {
     if max_cols == 0 {
         return String::new();
     }
 
-    let input_len = input.chars().count();
-    if input_len <= max_cols {
+    let input_width = str_display_width(input);
+    if input_width <= max_cols {
         return input.to_string();
     }
 
@@ -259,17 +291,42 @@ fn truncate_middle(input: &str, max_cols: usize) -> String {
         return ".".repeat(max_cols);
     }
 
-    let keep = max_cols - 3;
-    let head = keep / 2;
-    let tail = keep - head;
-    let head_str: String = input.chars().take(head).collect();
-    let tail_str: String = input.chars().skip(input_len - tail).collect();
+    let keep = max_cols - 3; // columns available for head + tail
+    let head_budget = keep / 2;
+    let tail_budget = keep - head_budget;
+
+    // Build head: take chars until we'd exceed head_budget columns.
+    let mut head_str = String::new();
+    let mut head_used = 0;
+    for c in input.chars() {
+        let w = char_display_width(c);
+        if head_used + w > head_budget {
+            break;
+        }
+        head_str.push(c);
+        head_used += w;
+    }
+
+    // Build tail: take chars from the end until we'd exceed tail_budget columns.
+    let mut tail_chars: Vec<char> = Vec::new();
+    let mut tail_used = 0;
+    for c in input.chars().rev() {
+        let w = char_display_width(c);
+        if tail_used + w > tail_budget {
+            break;
+        }
+        tail_chars.push(c);
+        tail_used += w;
+    }
+    tail_chars.reverse();
+    let tail_str: String = tail_chars.into_iter().collect();
+
     format!("{head_str}...{tail_str}")
 }
 
 #[cfg(test)]
 mod tests {
-    use super::truncate_middle;
+    use super::{str_display_width, truncate_middle};
 
     #[test]
     fn truncate_middle_shows_head_and_tail() {
@@ -277,7 +334,7 @@ mod tests {
         let out = truncate_middle(input, 16);
         // keep = 13, head = 6, tail = 7
         assert_eq!(out, "/very/...ile.txt");
-        assert_eq!(out.chars().count(), 16);
+        assert_eq!(str_display_width(&out), 16);
     }
 
     #[test]
@@ -306,15 +363,28 @@ mod tests {
         let input = "abcdefghijk";
         let out = truncate_middle(input, 10);
         assert_eq!(out, "abc...hijk");
-        assert_eq!(out.chars().count(), 10);
+        assert_eq!(str_display_width(&out), 10);
     }
 
     #[test]
     fn truncate_middle_unicode() {
-        let input = "aaaa\u{00e9}\u{00e9}\u{00e9}\u{00e9}bbbb"; // 12 chars
+        let input = "aaaa\u{00e9}\u{00e9}\u{00e9}\u{00e9}bbbb"; // 12 chars, all width 1
         let out = truncate_middle(input, 10);
         // keep=7, head=3, tail=4
         assert_eq!(out, "aaa...bbbb");
-        assert_eq!(out.chars().count(), 10);
+        assert_eq!(str_display_width(&out), 10);
+    }
+
+    #[test]
+    fn truncate_middle_cjk() {
+        // Each CJK char = 2 columns. "文件" = 4 cols, "/" = 1, "路径" = 4, "/" = 1,
+        // "测试报告.pdf" = 8+4 = 12. Total display width = 22.
+        let input = "文件/路径/测试报告.pdf";
+        let out = truncate_middle(input, 16);
+        // keep=13, head_budget=6, tail_budget=7
+        // head: "文件/" = 2+2+1 = 5 cols (next char "路" would be 7 > 6) → "文件/"
+        // tail from end: ".pdf" = 4, "告" = 2 → 6, "报" = 2 → 8 > 7 → tail = "告.pdf"
+        assert_eq!(out, "文件/...告.pdf");
+        assert!(str_display_width(&out) <= 16);
     }
 }
