@@ -197,7 +197,7 @@ impl Default for EncryptionConfig {
 /// Hard cap on `ChunkerConfig::max_size`. Any user-configured value above
 /// this is clamped down during validation. This bounds the maximum encrypted
 /// blob size to `CHUNK_MAX_SIZE_HARD_CAP + 1024` (compression tag + encryption
-/// envelope), which is used to size mmap allocations for pack assembly.
+/// envelope).
 pub const CHUNK_MAX_SIZE_HARD_CAP: u32 = 16 * 1024 * 1024; // 16 MiB
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

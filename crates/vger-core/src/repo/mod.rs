@@ -320,7 +320,6 @@ impl Repository {
         // No packs yet, so data target = min_pack_size
         let data_target = min_pack_size as usize;
         let tree_target = compute_tree_pack_target(min_pack_size);
-        let pack_temp_dir = file_cache::repo_cache_dir(&repo_config.id, cache_dir.as_deref());
 
         Ok(Repository {
             storage,
@@ -329,12 +328,8 @@ impl Repository {
             chunk_index,
             config: repo_config,
             file_cache: FileCache::new(),
-            data_pack_writer: PackWriter::new_default(
-                PackType::Data,
-                data_target,
-                pack_temp_dir.clone(),
-            ),
-            tree_pack_writer: PackWriter::new_default(PackType::Tree, tree_target, pack_temp_dir),
+            data_pack_writer: PackWriter::new(PackType::Data, data_target),
+            tree_pack_writer: PackWriter::new(PackType::Tree, tree_target),
             pending_uploads: Vec::new(),
             dedup_index: None,
             tiered_dedup: None,
@@ -486,7 +481,6 @@ impl Repository {
         // Use min_pack_size as default pack target (recalculated after index load).
         let data_target = repo_config.min_pack_size as usize;
         let tree_target = compute_tree_pack_target(repo_config.min_pack_size);
-        let pack_temp_dir = file_cache::repo_cache_dir(&repo_config.id, cache_dir.as_deref());
 
         Ok(Repository {
             storage,
@@ -495,12 +489,8 @@ impl Repository {
             chunk_index: ChunkIndex::new(),
             config: repo_config,
             file_cache,
-            data_pack_writer: PackWriter::new_default(
-                PackType::Data,
-                data_target,
-                pack_temp_dir.clone(),
-            ),
-            tree_pack_writer: PackWriter::new_default(PackType::Tree, tree_target, pack_temp_dir),
+            data_pack_writer: PackWriter::new(PackType::Data, data_target),
+            tree_pack_writer: PackWriter::new(PackType::Tree, tree_target),
             pending_uploads: Vec::new(),
             dedup_index: None,
             tiered_dedup: None,
@@ -570,11 +560,6 @@ impl Repository {
     /// Mark the file cache as needing persistence on the next `save_state()`.
     pub fn mark_file_cache_dirty(&mut self) {
         self.file_cache_dirty = true;
-    }
-
-    /// Return the resolved repo cache directory for this repository.
-    pub(crate) fn repo_cache_dir(&self) -> Option<PathBuf> {
-        file_cache::repo_cache_dir(&self.config.id, self.cache_dir_override.as_deref())
     }
 
     /// Try to open the mmap'd restore cache for this repository.

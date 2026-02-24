@@ -1,12 +1,6 @@
 use std::collections::HashMap;
-use std::fs::File;
-use std::path::PathBuf;
 use std::time::Instant;
 
-use memmap2::MmapMut;
-use tracing::warn;
-
-use crate::config::CHUNK_MAX_SIZE_HARD_CAP;
 use vger_storage::StorageBackend;
 use vger_types::chunk_id::ChunkId;
 use vger_types::error::{Result, VgerError};
@@ -39,29 +33,14 @@ pub const MAX_BLOBS_PER_PACK: usize = 10_000;
 /// from sitting in memory indefinitely during long backups.
 pub const PACK_MAX_AGE_SECS: u64 = 300;
 
-/// Default max blob overhead for the backup path: bounded by the chunk cap,
-/// plus encryption envelope (1-byte type tag + 12-byte nonce + 16-byte GCM tag +
-/// 1-byte compression tag = 30 bytes, rounded up to 1024 for margin), plus
-/// 4-byte length prefix.
-pub const DEFAULT_MAX_BLOB_OVERHEAD: usize = CHUNK_MAX_SIZE_HARD_CAP as usize + 1024 + 4;
-
 /// Tuple describing one chunk's location and refcount in a sealed/flushed pack.
 pub type PackedChunkEntry = (ChunkId, u32, u64, u32);
 
 /// Result of flushing a pack to storage: (pack_id, chunk entries).
 pub type FlushedPackResult = (PackId, Vec<PackedChunkEntry>);
 
-/// Mmap-backed buffer for data packs.
-struct MmapBuffer {
-    mmap: MmapMut,
-    _file: File, // keep fd alive (anonymous temp file)
-    write_pos: usize,
-    capacity: usize,
-}
-
-/// Buffer backing a pack writer — mmap'd temp file for data packs, heap Vec for tree packs.
+/// Buffer backing a pack writer — heap-allocated Vec<u8>.
 enum PackBuffer {
-    Mmap(MmapBuffer),
     Memory(Vec<u8>),
 }
 
@@ -73,13 +52,8 @@ pub struct SealedPack {
     pub data: SealedData,
 }
 
-/// Sealed pack data — either mmap-backed or heap-backed.
+/// Sealed pack data — heap-backed buffer ready for upload.
 pub enum SealedData {
-    Mmap {
-        mmap: MmapMut,
-        _file: File,
-        len: usize,
-    },
     Memory(Vec<u8>),
 }
 
@@ -93,40 +67,27 @@ const _: () = {
 
 impl SealedData {
     pub fn as_slice(&self) -> &[u8] {
-        match self {
-            SealedData::Mmap { mmap, len, .. } => &mmap[..*len],
-            SealedData::Memory(v) => v.as_slice(),
-        }
+        let SealedData::Memory(v) = self;
+        v.as_slice()
     }
 
-    /// Upload pack data, choosing the zero-copy path when possible.
-    ///
-    /// - `Memory(Vec<u8>)`: passes owned Vec via `put_owned` (zero-copy for backends that support owned buffers).
-    /// - `Mmap`: borrows the mapped region via `put` (no materialization to Vec).
+    /// Upload pack data via `put_owned` (zero-copy for backends that support owned buffers).
     pub fn put_to(self, storage: &dyn StorageBackend, key: &str) -> Result<()> {
-        match self {
-            SealedData::Memory(v) => storage.put_owned(key, v),
-            SealedData::Mmap { mmap, len, _file } => {
-                storage.put(key, &mmap[..len])
-                // mmap + _file dropped here after put returns
-            }
-        }
+        let SealedData::Memory(v) = self;
+        storage.put_owned(key, v)
     }
 }
 
 /// Accumulates encrypted blobs and flushes them as pack files.
 ///
-/// Data packs use mmap'd temporary files: the OS kernel manages which pages
-/// stay resident vs. get paged out, giving graceful degradation under memory
-/// pressure instead of fixed heap allocation.
-///
-/// Tree packs stay as `Vec<u8>` — they're capped at ~4 MiB and accessed
-/// frequently during serialization, so mmap overhead isn't worthwhile.
+/// All pack types use heap-allocated `Vec<u8>` buffers. Previous versions used
+/// writable file-backed mmap (`MmapMut`) for data packs, but this caused
+/// `D`-state hangs and `balance_dirty_pages` stalls on some systems (e.g.
+/// TrueNAS/musl), so it was removed in favour of simple heap buffers.
 pub struct PackWriter {
     pack_type: PackType,
     target_size: usize,
-    max_blob_overhead: usize,
-    /// Data packs: mmap'd temp file. Tree packs: Vec<u8>. None until first blob.
+    /// Heap-backed buffer. None until first blob.
     buffer: Option<PackBuffer>,
     /// Lightweight metadata per blob (no data — data lives in the buffer).
     blob_meta: Vec<BlobMeta>,
@@ -135,151 +96,27 @@ pub struct PackWriter {
     pending: HashMap<ChunkId, (u32, u32)>,
     /// When the first blob was added to the current buffer.
     first_blob_time: Option<Instant>,
-    /// Directory for mmap temp files. None = system temp.
-    temp_dir: Option<PathBuf>,
 }
 
 impl PackWriter {
-    /// Create a new pack writer with explicit max_blob_overhead.
-    ///
-    /// `max_blob_overhead` controls the mmap allocation size:
-    ///   `alloc_size = PACK_HEADER_SIZE + target_size + max_blob_overhead`
-    ///
-    /// For backup, use `DEFAULT_MAX_BLOB_OVERHEAD`. For compact, pre-scan
-    /// existing blobs to find the maximum per-blob append size.
-    pub fn new(
-        pack_type: PackType,
-        target_size: usize,
-        max_blob_overhead: usize,
-        temp_dir: Option<PathBuf>,
-    ) -> Self {
+    pub fn new(pack_type: PackType, target_size: usize) -> Self {
         Self {
             pack_type,
             target_size,
-            max_blob_overhead,
             buffer: None,
             blob_meta: Vec::new(),
             current_size: 0,
             pending: HashMap::new(),
             first_blob_time: None,
-            temp_dir,
         }
     }
 
-    /// Create a new pack writer using `DEFAULT_MAX_BLOB_OVERHEAD` (for backup).
-    pub fn new_default(pack_type: PackType, target_size: usize, temp_dir: Option<PathBuf>) -> Self {
-        Self::new(pack_type, target_size, DEFAULT_MAX_BLOB_OVERHEAD, temp_dir)
-    }
-
-    /// Compute the mmap allocation size for data packs.
-    fn alloc_size(&self) -> usize {
-        PACK_HEADER_SIZE
-            .saturating_add(self.target_size)
-            .saturating_add(self.max_blob_overhead)
-    }
-
-    /// Initialize the buffer on first blob.
-    fn init_buffer(&mut self) -> Result<()> {
-        let alloc_size = self.alloc_size();
-
-        match self.pack_type {
-            PackType::Data => {
-                // Try mmap'd temp file; fall back to Vec on failure or low disk space.
-                match self.try_create_mmap(alloc_size) {
-                    Ok(buf) => self.buffer = Some(PackBuffer::Mmap(buf)),
-                    Err(e) => {
-                        warn!("mmap pack buffer failed ({e}), falling back to Vec");
-                        let mut v = Vec::with_capacity(self.target_size.min(512 * 1024 * 1024));
-                        v.extend_from_slice(PACK_MAGIC);
-                        v.push(PACK_VERSION_CURRENT);
-                        self.buffer = Some(PackBuffer::Memory(v));
-                        return Ok(());
-                    }
-                }
-            }
-            PackType::Tree => {
-                let mut v = Vec::with_capacity(self.target_size.min(512 * 1024 * 1024));
-                v.extend_from_slice(PACK_MAGIC);
-                v.push(PACK_VERSION_CURRENT);
-                self.buffer = Some(PackBuffer::Memory(v));
-            }
-        }
-
-        // Write pack magic + version into mmap buffer if we used mmap
-        if let Some(PackBuffer::Mmap(ref mut mb)) = self.buffer {
-            mb.mmap[..8].copy_from_slice(PACK_MAGIC);
-            mb.mmap[8] = PACK_VERSION_CURRENT;
-            mb.write_pos = PACK_HEADER_SIZE;
-        }
-
-        Ok(())
-    }
-
-    /// Try to create an mmap'd temp file of the given size.
-    fn try_create_mmap(&self, alloc_size: usize) -> Result<MmapBuffer> {
-        // Best-effort pre-flight check: verify the target temp dir has enough
-        // free space. This is racy (other processes can consume space between
-        // check and use) and only checks per-pack (not cumulative across
-        // concurrent mmaps).
-        let required = (alloc_size as u64).saturating_mul(2);
-
-        let file = if let Some(ref dir) = self.temp_dir {
-            let dir_ok = match temp_dir_free_space(Some(dir)) {
-                Some(free) if free < required => {
-                    warn!(
-                        "{} has {free} bytes free (need {required}), using system temp",
-                        dir.display()
-                    );
-                    false
-                }
-                _ => true, // unknown or sufficient
-            };
-            if dir_ok {
-                std::fs::create_dir_all(dir)
-                    .and_then(|()| tempfile::tempfile_in(dir))
-                    .or_else(|e| {
-                        warn!(
-                            "temp file in {} failed ({e}), using system temp",
-                            dir.display()
-                        );
-                        tempfile::tempfile()
-                    })
-            } else {
-                tempfile::tempfile()
-            }
-        } else {
-            // No configured dir — check system temp space.
-            if let Some(free) = temp_dir_free_space(None) {
-                if free < required {
-                    return Err(VgerError::Other(format!(
-                        "temp dir has {free} bytes free, need at least {required}"
-                    )));
-                }
-            }
-            tempfile::tempfile()
-        }
-        .map_err(|e| VgerError::Other(format!("failed to create temp file for pack mmap: {e}")))?;
-        file.set_len(alloc_size as u64)
-            .map_err(|e| VgerError::Other(format!("failed to set temp file length: {e}")))?;
-
-        // SAFETY: The file is an anonymous temp file exclusively owned by this
-        // process. No other process or thread accesses it. The mmap region is
-        // valid for the lifetime of the file.
-        let mmap = unsafe { MmapMut::map_mut(&file) }
-            .map_err(|e| VgerError::Other(format!("failed to mmap temp file: {e}")))?;
-
-        // Hint to the kernel: we write sequentially.
-        #[cfg(unix)]
-        {
-            let _ = mmap.advise(memmap2::Advice::Sequential);
-        }
-
-        Ok(MmapBuffer {
-            capacity: mmap.len(),
-            mmap,
-            _file: file,
-            write_pos: 0,
-        })
+    /// Initialize the heap-backed pack buffer on first blob.
+    fn init_buffer(&mut self) {
+        let mut v = Vec::with_capacity(self.target_size.min(512 * 1024 * 1024));
+        v.extend_from_slice(PACK_MAGIC);
+        v.push(PACK_VERSION_CURRENT);
+        self.buffer = Some(PackBuffer::Memory(v));
     }
 
     /// Add an encrypted blob to the pack buffer. Returns the offset within the pack
@@ -289,32 +126,16 @@ impl PackWriter {
 
         // On first blob: initialize the buffer.
         if self.blob_meta.is_empty() {
-            self.init_buffer()?;
+            self.init_buffer();
         }
 
         // Offset accounts for: pack header + bytes already buffered + this blob's 4B len prefix.
         let offset = PACK_HEADER_SIZE as u64 + self.current_size as u64 + 4;
 
         // Append [4B length LE][encrypted_data] into the buffer.
-        match self.buffer.as_mut().expect("buffer initialized above") {
-            PackBuffer::Mmap(mb) => {
-                let needed = 4 + encrypted_blob.len();
-                if mb.write_pos + needed > mb.capacity {
-                    return Err(VgerError::Other(format!(
-                        "blob would overflow mmap buffer: write_pos={}, needed={needed}, capacity={}",
-                        mb.write_pos, mb.capacity
-                    )));
-                }
-                let pos = mb.write_pos;
-                mb.mmap[pos..pos + 4].copy_from_slice(&blob_len.to_le_bytes());
-                mb.mmap[pos + 4..pos + 4 + encrypted_blob.len()].copy_from_slice(&encrypted_blob);
-                mb.write_pos += needed;
-            }
-            PackBuffer::Memory(v) => {
-                v.extend_from_slice(&blob_len.to_le_bytes());
-                v.extend_from_slice(&encrypted_blob);
-            }
-        }
+        let PackBuffer::Memory(v) = self.buffer.as_mut().expect("buffer initialized above");
+        v.extend_from_slice(&blob_len.to_le_bytes());
+        v.extend_from_slice(&encrypted_blob);
 
         self.current_size += 4 + encrypted_blob.len();
 
@@ -412,17 +233,8 @@ impl PackWriter {
             results.push((meta.chunk_id, meta.stored_size, offset, refcount));
         }
 
-        let sealed_data = match self.buffer.take().expect("buffer was initialized") {
-            PackBuffer::Mmap(mb) => {
-                let len = mb.write_pos;
-                SealedData::Mmap {
-                    mmap: mb.mmap,
-                    _file: mb._file,
-                    len,
-                }
-            }
-            PackBuffer::Memory(v) => SealedData::Memory(v),
-        };
+        let PackBuffer::Memory(v) = self.buffer.take().expect("buffer was initialized");
+        let sealed_data = SealedData::Memory(v);
 
         let pack_id = PackId::compute(sealed_data.as_slice());
 
@@ -450,32 +262,6 @@ impl PackWriter {
         storage.put(&pack_id.storage_key(), data.as_slice())?;
         Ok((pack_id, entries))
     }
-}
-
-/// Best-effort check: return free bytes in the given directory (or system temp), or None if
-/// the check is unsupported or fails.
-#[cfg(unix)]
-fn temp_dir_free_space(dir: Option<&std::path::Path>) -> Option<u64> {
-    use std::ffi::CString;
-
-    let tmp = match dir {
-        Some(d) => d.to_path_buf(),
-        None => std::env::temp_dir(),
-    };
-    let c_path = CString::new(tmp.as_os_str().as_encoded_bytes()).ok()?;
-    let mut stat: libc::statvfs = unsafe { std::mem::zeroed() };
-    let ret = unsafe { libc::statvfs(c_path.as_ptr(), &mut stat) };
-    if ret == 0 {
-        #[allow(clippy::unnecessary_cast)] // f_bavail/f_frsize types vary by platform
-        Some(stat.f_bavail as u64 * stat.f_frsize as u64)
-    } else {
-        None
-    }
-}
-
-#[cfg(not(unix))]
-fn temp_dir_free_space(_dir: Option<&std::path::Path>) -> Option<u64> {
-    None
 }
 
 /// Read a single blob from a pack file using a range read.
@@ -577,7 +363,7 @@ mod tests {
 
     #[test]
     fn should_flush_on_size() {
-        let mut w = PackWriter::new_default(PackType::Data, 100, None);
+        let mut w = PackWriter::new(PackType::Data, 100);
         assert!(!w.should_flush());
         w.add_blob(dummy_chunk_id(0), vec![0u8; 120]).unwrap();
         assert!(w.should_flush());
@@ -586,7 +372,7 @@ mod tests {
     #[test]
     fn should_flush_on_blob_count() {
         // Use a very large target size so size-based flush never triggers
-        let mut w = PackWriter::new_default(PackType::Data, usize::MAX, None);
+        let mut w = PackWriter::new(PackType::Data, usize::MAX);
         for i in 0..MAX_BLOBS_PER_PACK {
             assert!(!w.should_flush(), "should not flush at {i} blobs");
             let mut id_bytes = [0u8; 32];
@@ -598,7 +384,7 @@ mod tests {
 
     #[test]
     fn seal_resets_first_blob_time() {
-        let mut w = PackWriter::new_default(PackType::Data, usize::MAX, None);
+        let mut w = PackWriter::new(PackType::Data, usize::MAX);
         w.add_blob(dummy_chunk_id(0), vec![0u8; 10]).unwrap();
         assert!(w.first_blob_time.is_some());
 
@@ -624,7 +410,7 @@ mod tests {
             0x03, 0x00, 0x00, 0x00, 0xbe, 0xef, 0x42,
         ];
 
-        let mut w = PackWriter::new_default(PackType::Data, usize::MAX, None);
+        let mut w = PackWriter::new(PackType::Data, usize::MAX);
         w.add_blob(dummy_chunk_id(0xAA), vec![0xDE, 0xAD]).unwrap();
         w.add_blob(dummy_chunk_id(0xBB), vec![0xBE, 0xEF, 0x42])
             .unwrap();
@@ -651,7 +437,7 @@ mod tests {
             (dummy_chunk_id(3), vec![30u8; 30]),
         ];
 
-        let mut w = PackWriter::new_default(PackType::Data, usize::MAX, None);
+        let mut w = PackWriter::new(PackType::Data, usize::MAX);
         for (chunk_id, data) in &blobs {
             w.add_blob(*chunk_id, data.clone()).unwrap();
         }
@@ -675,7 +461,7 @@ mod tests {
     /// Seal clears writer state after success.
     #[test]
     fn seal_clears_state() {
-        let mut w = PackWriter::new_default(PackType::Data, usize::MAX, None);
+        let mut w = PackWriter::new(PackType::Data, usize::MAX);
         w.add_blob(dummy_chunk_id(1), vec![0xAA; 100]).unwrap();
         w.add_blob(dummy_chunk_id(2), vec![0xBB; 200]).unwrap();
 
@@ -689,28 +475,28 @@ mod tests {
         assert_eq!(w.current_size, 0);
     }
 
-    /// Data packs use mmap, tree packs use Vec.
+    /// Both data and tree packs use heap-backed Memory buffers.
     #[test]
-    fn data_packs_use_mmap_tree_packs_use_vec() {
-        let mut data_w = PackWriter::new_default(PackType::Data, 1024, None);
+    fn data_and_tree_packs_both_use_memory() {
+        let mut data_w = PackWriter::new(PackType::Data, 1024);
         data_w.add_blob(dummy_chunk_id(0), vec![0u8; 10]).unwrap();
         assert!(
-            matches!(data_w.buffer, Some(PackBuffer::Mmap(_))),
-            "data pack should use mmap buffer"
+            matches!(data_w.buffer, Some(PackBuffer::Memory(_))),
+            "data pack should use Memory buffer"
         );
 
-        let mut tree_w = PackWriter::new_default(PackType::Tree, 1024, None);
+        let mut tree_w = PackWriter::new(PackType::Tree, 1024);
         tree_w.add_blob(dummy_chunk_id(0), vec![0u8; 10]).unwrap();
         assert!(
             matches!(tree_w.buffer, Some(PackBuffer::Memory(_))),
-            "tree pack should use Vec buffer"
+            "tree pack should use Memory buffer"
         );
     }
 
     /// Validates `current_size` tracks correctly across add → add → seal.
     #[test]
     fn current_size_invariant() {
-        let mut w = PackWriter::new_default(PackType::Tree, usize::MAX, None);
+        let mut w = PackWriter::new(PackType::Tree, usize::MAX);
 
         // Add blobs, check invariant after each (Vec path).
         w.add_blob(dummy_chunk_id(1), vec![0xAA; 100]).unwrap();
@@ -730,57 +516,11 @@ mod tests {
         assert_eq!(w.current_size, 0);
     }
 
-    /// Bounds-check error when a blob would overflow the mmap buffer.
-    #[test]
-    fn mmap_overflow_returns_error() {
-        let mut w = PackWriter::new(PackType::Data, 64, 64, None);
-        // First small blob succeeds.
-        w.add_blob(dummy_chunk_id(0), vec![0u8; 10]).unwrap();
-        // A blob larger than the remaining mmap capacity should fail.
-        let big = vec![0u8; 256];
-        let result = w.add_blob(dummy_chunk_id(1), big);
-        assert!(result.is_err(), "should fail when blob overflows mmap");
-    }
-
-    /// Backup-path writer with small data still seals correctly (mmap path).
-    #[test]
-    fn small_backup_on_mmap() {
-        let mut w = PackWriter::new_default(PackType::Data, 256 * 1024, None);
-
-        w.add_blob(dummy_chunk_id(0), vec![0xAB; 1024]).unwrap();
-
-        let sealed = w.seal().unwrap();
-        assert_eq!(sealed.entries.len(), 1);
-        // Output should be small: header(9) + len(4) + blob(1024) < 2 KiB
-        assert!(
-            sealed.data.as_slice().len() < 2048,
-            "sealed output unexpectedly large: {}",
-            sealed.data.as_slice().len()
-        );
-    }
-
-    #[test]
-    fn data_pack_falls_back_to_system_temp_when_configured_dir_unusable() {
-        let temp = tempfile::tempdir().unwrap();
-        let blocker = temp.path().join("blocker");
-        std::fs::write(&blocker, b"x").unwrap();
-        let unusable_dir = blocker.join("subdir");
-
-        let mut w = PackWriter::new_default(PackType::Data, 1024, Some(unusable_dir));
-        w.add_blob(dummy_chunk_id(1), vec![0u8; 16]).unwrap();
-
-        assert!(
-            matches!(w.buffer, Some(PackBuffer::Mmap(_))),
-            "expected mmap buffer after falling back to system temp"
-        );
-    }
-
-    /// SealedData::put_to dispatches Memory to put_owned and Mmap to put.
+    /// SealedData::put_to dispatches Memory to put_owned.
     #[test]
     fn put_to_dispatches_correctly() {
         use std::sync::atomic::{AtomicU8, Ordering};
 
-        const CALLED_PUT: u8 = 1;
         const CALLED_PUT_OWNED: u8 = 2;
 
         struct RecordingBackend {
@@ -791,7 +531,6 @@ mod tests {
                 Ok(None)
             }
             fn put(&self, _: &str, _: &[u8]) -> Result<()> {
-                self.called.store(CALLED_PUT, Ordering::SeqCst);
                 Ok(())
             }
             fn put_owned(&self, _: &str, _: Vec<u8>) -> Result<()> {
@@ -825,25 +564,6 @@ mod tests {
             backend.called.load(Ordering::SeqCst),
             CALLED_PUT_OWNED,
             "Memory variant should call put_owned"
-        );
-
-        // Mmap variant → put
-        let backend = RecordingBackend {
-            called: AtomicU8::new(0),
-        };
-        let file = tempfile::tempfile().unwrap();
-        file.set_len(64).unwrap();
-        let mmap = unsafe { memmap2::MmapMut::map_mut(&file) }.unwrap();
-        let data = SealedData::Mmap {
-            mmap,
-            _file: file,
-            len: 32,
-        };
-        data.put_to(&backend, "test").unwrap();
-        assert_eq!(
-            backend.called.load(Ordering::SeqCst),
-            CALLED_PUT,
-            "Mmap variant should call put"
         );
     }
 
@@ -969,7 +689,7 @@ mod tests {
 
     #[test]
     fn set_target_size_after_seal() {
-        let mut w = PackWriter::new_default(PackType::Data, 100, None);
+        let mut w = PackWriter::new(PackType::Data, 100);
         w.add_blob(dummy_chunk_id(0), vec![0u8; 120]).unwrap();
         assert!(w.should_flush());
 

@@ -7,8 +7,7 @@ use tracing::{info, warn};
 use super::util::{check_interrupted, open_repo, with_repo_lock};
 use crate::config::VgerConfig;
 use crate::repo::pack::{
-    PackType, PackWriter, DEFAULT_MAX_BLOB_OVERHEAD, PACK_HEADER_SIZE, PACK_MAGIC,
-    PACK_VERSION_MAX, PACK_VERSION_MIN,
+    PackType, PackWriter, PACK_HEADER_SIZE, PACK_MAGIC, PACK_VERSION_MAX, PACK_VERSION_MIN,
 };
 use crate::repo::Repository;
 use vger_storage::{RepackBlobRef, RepackOperationRequest, RepackPlanRequest, StorageBackend};
@@ -343,21 +342,7 @@ pub fn compact_repo(
             continue;
         }
 
-        // Pre-scan for max blob overhead: legacy repos may contain blobs larger
-        // than the current 16 MiB chunk cap, so the compact path sizes dynamically.
-        let max_blob_overhead = analysis
-            .live_entries
-            .iter()
-            .map(|e| e.length as usize + 4) // 4-byte length prefix + blob data
-            .max()
-            .unwrap_or(DEFAULT_MAX_BLOB_OVERHEAD);
-
-        let mut writer = PackWriter::new(
-            PackType::Data,
-            pack_target,
-            max_blob_overhead,
-            repo.repo_cache_dir(),
-        );
+        let mut writer = PackWriter::new(PackType::Data, pack_target);
 
         for entry in &analysis.live_entries {
             // Read the 4-byte length prefix together with the blob data in a
