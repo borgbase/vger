@@ -11,14 +11,22 @@ TMPDIR=$(mktemp -d)
 ICONSET="$TMPDIR/AppIcon.iconset"
 mkdir -p "$ICONSET"
 
-# If SVG, rasterise to a 1024x1024 PNG first
+# If SVG, rasterise to a 1024x1024 PNG with margin for macOS icon guidelines
 if [[ "$SRC" == *.svg ]]; then
     if ! command -v rsvg-convert &>/dev/null; then
         echo "Error: rsvg-convert not found. Install with: brew install librsvg" >&2
         exit 1
     fi
     SRC_PNG="$TMPDIR/source.png"
-    rsvg-convert -w 1024 -h 1024 "$SRC" -o "$SRC_PNG"
+    CANVAS=1024
+    MARGIN_PCT=10
+    RENDER_SIZE=$(( CANVAS * (100 - 2 * MARGIN_PCT) / 100 ))
+    OFFSET=$(( (CANVAS - RENDER_SIZE) / 2 ))
+    rsvg-convert \
+        --page-width "$CANVAS" --page-height "$CANVAS" \
+        -w "$RENDER_SIZE" -h "$RENDER_SIZE" \
+        --top "$OFFSET" --left "$OFFSET" \
+        "$SRC" -o "$SRC_PNG"
     SRC="$SRC_PNG"
 fi
 
