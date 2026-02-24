@@ -266,7 +266,11 @@ main() {
 
     log "[$i/$ITERATIONS] backup"
     CURRENT_STEP="backup"
-    backup_log="$(run_vger "$i" backup backup -R "$REPO_LABEL")"
+    if [[ "$BACKEND" == "rest" ]]; then
+      backup_log="$(run_vger "$i" backup backup -R "$REPO_LABEL" --upload-concurrency 6)"
+    else
+      backup_log="$(run_vger "$i" backup backup -R "$REPO_LABEL")"
+    fi
     LAST_LOGS[backup]="$backup_log"
     snapshot="$(extract_snapshot_id "$backup_log")" || die "failed to parse snapshot ID"
     CURRENT_SNAPSHOT="$snapshot"
@@ -300,7 +304,7 @@ main() {
 
     log "[$i/$ITERATIONS] delete"
     CURRENT_STEP="delete"
-    LAST_LOGS[delete]="$(run_vger "$i" delete snapshot -R "$REPO_LABEL" delete "$snapshot")"
+    LAST_LOGS[delete]="$(run_vger "$i" delete snapshot delete "$snapshot" -R "$REPO_LABEL")"
     deletes=$((deletes + 1))
     check_locks_clear
 

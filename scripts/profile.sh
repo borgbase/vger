@@ -241,7 +241,7 @@ case "$MODE" in
     [[ -n "$SEED_SNAPSHOT" ]] || die "could not resolve seed snapshot for compact setup"
     echo "[setup] Deleting seed snapshot: $SEED_SNAPSHOT" | tee -a "$SETUP_LOG"
     add_setup_step "delete seed snapshot ($SEED_SNAPSHOT)"
-    "$VGER_BIN" --config "$CONFIG_PATH" snapshot -R "$REPO_LABEL" delete "$SEED_SNAPSHOT" 2>&1 | tee -a "$SETUP_LOG"
+    "$VGER_BIN" --config "$CONFIG_PATH" snapshot delete "$SEED_SNAPSHOT" -R "$REPO_LABEL" 2>&1 | tee -a "$SETUP_LOG"
     PROFILE_CMD=( "$VGER_BIN" --config "$CONFIG_PATH" compact -R "$REPO_LABEL" --threshold "$COMPACT_THRESHOLD" )
     (( DRY_RUN == 1 )) && PROFILE_CMD+=( -n )
     ;;
