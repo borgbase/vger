@@ -79,25 +79,18 @@ pub(crate) fn write_unpoisoned<'a, T>(
     }
 }
 
-/// Top-level entries that are valid inside a vger data directory.
-const VALID_DATA_DIR_ENTRIES: &[&str] = &[
-    "config",
-    "manifest",
-    "index",
-    "keys",
-    "snapshots",
-    "locks",
-    "packs",
-];
-
 /// Return the names of any top-level entries in `data_dir` that are not part
 /// of a valid vger repository layout. An empty or non-existent directory is fine.
+/// Server-created temp files (`.tmp.*`) are tolerated — they come from interrupted PUTs.
 pub(crate) fn unexpected_entries(data_dir: &Path) -> Vec<String> {
     let mut bad = Vec::new();
     if let Ok(entries) = std::fs::read_dir(data_dir) {
         for entry in entries.flatten() {
             if let Some(name) = entry.file_name().to_str() {
-                if !VALID_DATA_DIR_ENTRIES.contains(&name) {
+                let known = vger_protocol::KNOWN_ROOT_FILES.contains(&name)
+                    || vger_protocol::KNOWN_ROOT_DIRS.contains(&name)
+                    || vger_protocol::is_temp_file(name);
+                if !known {
                     bad.push(name.to_string());
                 }
             }
@@ -206,6 +199,27 @@ impl AppState {
         Some(path)
     }
 
+    /// Lenient path resolution for cleanup/deletion. Performs path-traversal safety
+    /// checks but does NOT enforce the strict repo key schema, allowing deletion of
+    /// `.tmp.*` leftover files from interrupted PUTs.
+    pub fn file_path_for_cleanup(&self, key: &str) -> Option<PathBuf> {
+        if !is_safe_relative_path(key) {
+            return None;
+        }
+        let trimmed = key.trim_matches('/');
+        if trimmed.is_empty() {
+            return None;
+        }
+        let path = self.inner.data_dir.join(trimmed);
+        if !path.starts_with(&self.inner.data_dir) {
+            return None;
+        }
+        if !existing_ancestor_within(&path, &self.inner.data_dir) {
+            return None;
+        }
+        Some(path)
+    }
+
     /// Get current effective quota limit in bytes. 0 = unlimited.
     pub fn quota_limit(&self) -> u64 {
         self.inner.quota_state.limit()
@@ -259,6 +273,21 @@ fn dir_size(path: &Path) -> u64 {
     total
 }
 
+/// Path-traversal safety check without schema enforcement. Rejects null bytes,
+/// backslashes, empty segments, `.` and `..` — but allows any filename.
+fn is_safe_relative_path(key: &str) -> bool {
+    if key.contains('\0') || key.contains('\\') {
+        return false;
+    }
+    let trimmed = key.trim_matches('/');
+    if trimmed.is_empty() {
+        return true;
+    }
+    !trimmed
+        .split('/')
+        .any(|part| part.is_empty() || part == "." || part == "..")
+}
+
 fn is_valid_storage_key(key: &str) -> bool {
     if key.contains('\0') || key.contains('\\') {
         return false;
@@ -274,8 +303,10 @@ fn is_valid_storage_key(key: &str) -> bool {
     {
         return false;
     }
+    if vger_protocol::KNOWN_ROOT_FILES.contains(&parts[0]) {
+        return parts.len() == 1;
+    }
     match parts[0] {
-        "config" | "manifest" | "index" | "pending_index" => parts.len() == 1,
         "keys" | "snapshots" | "locks" => (1..=2).contains(&parts.len()),
         "packs" => is_valid_packs_key(&parts),
         _ => false,
@@ -303,6 +334,20 @@ fn is_valid_packs_key(parts: &[&str]) -> bool {
     false
 }
 
+fn existing_ancestor_within(path: &Path, base: &Path) -> bool {
+    let mut cursor = Some(path);
+    while let Some(candidate) = cursor {
+        if candidate.exists() {
+            return candidate
+                .canonicalize()
+                .map(|canon| canon.starts_with(base))
+                .unwrap_or(false);
+        }
+        cursor = candidate.parent();
+    }
+    false
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -320,18 +365,4 @@ mod tests {
         assert!(!is_valid_storage_key("unknown"));
         assert!(!is_valid_storage_key("pending_index/sub"));
     }
-}
-
-fn existing_ancestor_within(path: &Path, base: &Path) -> bool {
-    let mut cursor = Some(path);
-    while let Some(candidate) = cursor {
-        if candidate.exists() {
-            return candidate
-                .canonicalize()
-                .map(|canon| canon.starts_with(base))
-                .unwrap_or(false);
-        }
-        cursor = candidate.parent();
-    }
-    false
 }

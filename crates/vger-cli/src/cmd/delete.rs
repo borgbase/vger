@@ -41,13 +41,17 @@ pub(crate) fn run_delete_repo(
     label: Option<&str>,
     yes_delete_this_repo: bool,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    // Verify the repo exists before prompting
+    // Verify the repo exists before prompting — use list + is_known_repo_key
+    // so we detect partially-deleted repos (e.g. config gone but packs remain).
     let backend = vger_core::storage::backend_from_config(&config.repository)
         .map_err(|e| -> Box<dyn std::error::Error> { Box::new(e) })?;
-    if !backend
-        .exists("config")
-        .map_err(|e| -> Box<dyn std::error::Error> { Box::new(e) })?
-    {
+    let all_keys = backend
+        .list("")
+        .map_err(|e| -> Box<dyn std::error::Error> { Box::new(e) })?;
+    let has_repo_keys = all_keys
+        .iter()
+        .any(|k| commands::delete_repo::is_known_repo_key(k));
+    if !has_repo_keys {
         return Err(format!("no repository found at '{}'", config.repository.url).into());
     }
     drop(backend);

@@ -244,11 +244,7 @@ struct FsDiskQuota {
 /// sandboxed systemd namespaces where `/dev/mapper/*` is not accessible.
 /// Returns the hard limit in bytes, or `None` if not set / error.
 #[cfg(target_os = "linux")]
-fn xfs_get_quota_fd(
-    fd: std::os::unix::io::RawFd,
-    id: u32,
-    quota_type: libc::c_int,
-) -> Option<u64> {
+fn xfs_get_quota_fd(fd: std::os::unix::io::RawFd, id: u32, quota_type: libc::c_int) -> Option<u64> {
     // quotactl_fd(2) — syscall 443 on x86_64, 443 on aarch64
     const SYS_QUOTACTL_FD: libc::c_long = 443;
 
@@ -276,7 +272,10 @@ fn xfs_get_quota_fd(
     }
 
     if dq.d_blk_hardlimit == 0 {
-        debug!(id, quota_type, "quota: quotactl_fd ok but no hard limit set");
+        debug!(
+            id,
+            quota_type, "quota: quotactl_fd ok but no hard limit set"
+        );
         return None;
     }
 
@@ -414,5 +413,4 @@ mod tests {
         assert!(proj_id.is_some(), "FS_IOC_FSGETXATTR should work on /tmp");
         assert_eq!(proj_id.unwrap(), 0);
     }
-
 }

@@ -72,8 +72,12 @@ impl RestBackend {
     }
 
     /// Batch delete multiple keys in a single request.
-    pub fn batch_delete(&self, keys: &[String]) -> Result<()> {
-        let url = format!("{}?batch-delete", self.base_url);
+    pub fn batch_delete(&self, keys: &[String], cleanup_dirs: bool) -> Result<()> {
+        let url = if cleanup_dirs {
+            format!("{}?batch-delete&cleanup-dirs", self.base_url)
+        } else {
+            format!("{}?batch-delete", self.base_url)
+        };
         let payload = keys.to_vec();
         let resp = self
             .retry_call("batch-delete", || {
@@ -471,7 +475,7 @@ impl StorageBackend for RestBackend {
     }
 
     fn batch_delete_keys(&self, keys: &[String]) -> Result<()> {
-        self.batch_delete(keys)
+        self.batch_delete(keys, true)
     }
 
     fn server_verify_packs(&self, plan: &VerifyPacksPlanRequest) -> Result<VerifyPacksResponse> {

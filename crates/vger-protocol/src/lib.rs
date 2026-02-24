@@ -153,6 +153,32 @@ pub struct VerifyPacksResponse {
     pub truncated: bool,
 }
 
+// ── Repository layout ─────────────────────────────────────────────────────
+
+/// Top-level file entries that can appear in a vger repository root.
+pub const KNOWN_ROOT_FILES: &[&str] = &["config", "manifest", "index", "pending_index"];
+
+/// Top-level directory entries that can appear in a vger repository root.
+pub const KNOWN_ROOT_DIRS: &[&str] = &["keys", "snapshots", "packs", "locks"];
+
+/// Returns true if `name` matches the server temp-file naming convention
+/// (`.tmp.{target}.{unique_id}`), used for atomic writes.
+pub fn is_temp_file(name: &str) -> bool {
+    let basename = name.rsplit('/').next().unwrap_or(name);
+    basename.starts_with(".tmp.")
+}
+
+/// Returns true if `key` is a known vger repository storage key.
+///
+/// Matches root files, directory-prefixed paths, and `.tmp.*` temp files.
+pub fn is_known_repo_key(key: &str) -> bool {
+    KNOWN_ROOT_FILES.contains(&key)
+        || KNOWN_ROOT_DIRS
+            .iter()
+            .any(|d| key.starts_with(d) && key.as_bytes().get(d.len()) == Some(&b'/'))
+        || is_temp_file(key)
+}
+
 // ── Transport-level validation ─────────────────────────────────────────────
 
 /// Validate a pack storage key: must be `packs/<2-hex-shard>/<64-hex-id>`.
@@ -312,5 +338,49 @@ mod tests {
     fn protocol_version_max_rejected() {
         let err = check_protocol_version(u32::MAX).unwrap_err();
         assert!(err.contains("not supported"));
+    }
+
+    // ── is_known_repo_key ─────────────────────────────────────────────
+
+    #[test]
+    fn known_root_files_accepted() {
+        for f in KNOWN_ROOT_FILES {
+            assert!(is_known_repo_key(f), "{f} should be known");
+        }
+    }
+
+    #[test]
+    fn known_dir_prefixed_keys_accepted() {
+        assert!(is_known_repo_key("keys/repokey"));
+        assert!(is_known_repo_key("snapshots/abc123"));
+        assert!(is_known_repo_key("packs/ab/deadbeef"));
+        assert!(is_known_repo_key("locks/lock.json"));
+    }
+
+    #[test]
+    fn bare_dir_names_rejected() {
+        for d in KNOWN_ROOT_DIRS {
+            assert!(!is_known_repo_key(d), "bare dir '{d}' should not match");
+        }
+    }
+
+    #[test]
+    fn unknown_keys_rejected() {
+        assert!(!is_known_repo_key("random_file"));
+        assert!(!is_known_repo_key("data/something"));
+    }
+
+    // ── is_temp_file ──────────────────────────────────────────────────
+
+    #[test]
+    fn temp_files_detected() {
+        assert!(is_temp_file(".tmp.config.0"));
+        assert!(is_temp_file("packs/ab/.tmp.deadbeef.0"));
+    }
+
+    #[test]
+    fn non_temp_files_not_detected() {
+        assert!(!is_temp_file("config"));
+        assert!(!is_temp_file("tmp.config"));
     }
 }

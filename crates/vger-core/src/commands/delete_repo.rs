@@ -7,12 +7,7 @@ use crate::storage::backend_from_config;
 use vger_storage::{parse_repo_url, ParsedUrl};
 use vger_types::error::{Result, VgerError};
 
-const KNOWN_ROOT_FILES: &[&str] = &["config", "manifest", "index"];
-const KNOWN_DIR_PREFIXES: &[&str] = &["keys/", "snapshots/", "packs/", "locks/"];
-
-fn is_known_repo_key(key: &str) -> bool {
-    KNOWN_ROOT_FILES.contains(&key) || KNOWN_DIR_PREFIXES.iter().any(|p| key.starts_with(p))
-}
+pub use vger_protocol::is_known_repo_key;
 
 #[derive(Debug)]
 pub struct DeleteRepoStats {
@@ -24,11 +19,6 @@ pub struct DeleteRepoStats {
 
 pub fn run(config: &VgerConfig) -> Result<DeleteRepoStats> {
     let backend = backend_from_config(&config.repository)?;
-
-    // Verify this is actually a vger repository
-    if !backend.exists("config")? {
-        return Err(VgerError::RepoNotFound(config.repository.url.clone()));
-    }
 
     // List all keys in the repo (recursive on all backends)
     let all_keys = backend.list("")?;
@@ -44,19 +34,22 @@ pub fn run(config: &VgerConfig) -> Result<DeleteRepoStats> {
         }
     }
 
+    // If there are no known repo keys at all, this isn't a vger repository
+    if known.is_empty() {
+        return Err(VgerError::RepoNotFound(config.repository.url.clone()));
+    }
+
     let keys_deleted = known.len() as u64;
 
     // Delete only known keys
-    if !known.is_empty() {
-        match backend.batch_delete_keys(&known) {
-            Ok(()) => {}
-            Err(VgerError::UnsupportedBackend(_)) => {
-                for key in &known {
-                    backend.delete(key)?;
-                }
+    match backend.batch_delete_keys(&known) {
+        Ok(()) => {}
+        Err(VgerError::UnsupportedBackend(_)) => {
+            for key in &known {
+                backend.delete(key)?;
             }
-            Err(e) => return Err(e),
         }
+        Err(e) => return Err(e),
     }
 
     let parsed = parse_repo_url(&config.repository.url)?;

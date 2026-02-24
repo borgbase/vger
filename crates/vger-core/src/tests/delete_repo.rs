@@ -77,6 +77,66 @@ fn delete_repo_preserves_unknown_files() {
 }
 
 #[test]
+fn delete_repo_handles_partial_repo() {
+    // Simulate a partially-deleted repo: config/manifest/index are gone,
+    // but packs and snapshots remain (e.g. from a failed prior delete).
+    let tmp = tempfile::tempdir().unwrap();
+    let repo_dir = tmp.path().join("repo");
+    let source_dir = tmp.path().join("source");
+    std::fs::create_dir_all(&repo_dir).unwrap();
+    std::fs::create_dir_all(&source_dir).unwrap();
+    std::fs::write(source_dir.join("file.txt"), b"partial-repo-data").unwrap();
+
+    let config = init_repo(&repo_dir);
+    backup_single_source(&config, &source_dir, "src-a", "snap-partial");
+
+    // Remove the files that would have been deleted in a partial first attempt
+    std::fs::remove_file(repo_dir.join("config")).unwrap();
+    std::fs::remove_file(repo_dir.join("manifest")).unwrap();
+    std::fs::remove_file(repo_dir.join("index")).unwrap();
+
+    // Verify config is gone (old code would fail here with RepoNotFound)
+    assert!(!repo_dir.join("config").exists());
+
+    // delete_repo should still succeed because packs/snapshots/keys remain
+    let stats = commands::delete_repo::run(&config).unwrap();
+    assert!(stats.keys_deleted > 0, "should have deleted remaining keys");
+    assert!(stats.unknown_entries.is_empty());
+    assert!(stats.root_removed, "repo dir should be fully removed");
+    assert!(!repo_dir.exists());
+}
+
+#[test]
+fn delete_repo_handles_temp_files() {
+    // Server-created .tmp.* files should be recognized as known repo keys
+    // and included in the delete, not left behind as "unknown".
+    let tmp = tempfile::tempdir().unwrap();
+    let repo_dir = tmp.path().join("repo");
+    let source_dir = tmp.path().join("source");
+    std::fs::create_dir_all(&repo_dir).unwrap();
+    std::fs::create_dir_all(&source_dir).unwrap();
+    std::fs::write(source_dir.join("file.txt"), b"temp-file-data").unwrap();
+
+    let config = init_repo(&repo_dir);
+    backup_single_source(&config, &source_dir, "src-a", "snap-tmp");
+
+    // Plant server temp files at root level (from interrupted PUTs)
+    std::fs::write(repo_dir.join(".tmp.config.0"), b"partial config").unwrap();
+    std::fs::write(repo_dir.join(".tmp.manifest.0"), b"partial manifest").unwrap();
+
+    let stats = commands::delete_repo::run(&config).unwrap();
+    assert!(stats.keys_deleted > 0);
+    // Temp files should be classified as known, not unknown
+    assert!(
+        stats.unknown_entries.is_empty(),
+        "temp files should not be unknown: {:?}",
+        stats.unknown_entries
+    );
+    assert!(stats.root_removed);
+    assert!(!repo_dir.exists());
+}
+
+#[test]
 fn delete_repo_deletes_all_nested_keys() {
     let tmp = tempfile::tempdir().unwrap();
     let repo_dir = tmp.path().join("repo");
