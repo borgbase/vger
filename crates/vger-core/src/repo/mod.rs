@@ -1599,25 +1599,43 @@ impl Repository {
             "found pending index from interrupted session, verifying packs…"
         );
 
+        // Batch-verify pack existence by listing shard directories instead of
+        // issuing one HEAD request per pack (significant speedup for REST/S3).
+        let shards: std::collections::HashSet<String> = wire
+            .iter()
+            .map(|e| format!("packs/{}", e.pack_id.shard_prefix()))
+            .collect();
+        let mut known_packs: std::collections::HashSet<String> =
+            std::collections::HashSet::new();
+        for shard in &shards {
+            match self.storage.list(shard) {
+                Ok(keys) => known_packs.extend(keys),
+                Err(e) => {
+                    warn!("pending_index: failed to list {shard}: {e}, falling back to per-pack checks");
+                    for entry in &wire {
+                        if format!("packs/{}", entry.pack_id.shard_prefix()) == *shard {
+                            if self
+                                .storage
+                                .exists(&entry.pack_id.storage_key())
+                                .unwrap_or(false)
+                            {
+                                known_packs.insert(entry.pack_id.storage_key());
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
         let mut recovered = 0usize;
         for pack_entry in &wire {
             let pack_key = pack_entry.pack_id.storage_key();
-            match self.storage.exists(&pack_key) {
-                Ok(true) => {}
-                Ok(false) => {
-                    warn!(
-                        pack_id = %pack_entry.pack_id,
-                        "pending_index: pack missing from storage, skipping"
-                    );
-                    continue;
-                }
-                Err(e) => {
-                    warn!(
-                        pack_id = %pack_entry.pack_id,
-                        "pending_index: cannot verify pack existence ({e}), skipping"
-                    );
-                    continue;
-                }
+            if !known_packs.contains(&pack_key) {
+                warn!(
+                    pack_id = %pack_entry.pack_id,
+                    "pending_index: pack missing from storage, skipping"
+                );
+                continue;
             }
 
             for chunk in &pack_entry.chunks {
