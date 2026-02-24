@@ -486,6 +486,193 @@ fn init_rejects_oversized_max_pack_size() {
 }
 
 #[test]
+fn flush_on_abort_writes_pending_index() {
+    use crate::compress;
+    use crate::config::{RepositoryConfig, RetryConfig};
+    use crate::index::PendingPackEntry;
+    use crate::repo::format::{unpack_object_expect_with_context, ObjectType};
+
+    crate::testutil::init_test_environment();
+
+    // Use tiny pack sizes so a single chunk triggers a flush.
+    let small_config = RepositoryConfig {
+        url: String::new(),
+        region: None,
+        access_key_id: None,
+        secret_access_key: None,
+        sftp_key: None,
+        sftp_known_hosts: None,
+        sftp_max_connections: None,
+        access_token: None,
+        allow_insecure_http: false,
+        min_pack_size: 256,
+        max_pack_size: 256,
+        retry: RetryConfig::default(),
+    };
+    let mut repo = Repository::init(
+        Box::new(MemoryBackend::new()),
+        EncryptionMode::None,
+        ChunkerConfig::default(),
+        None,
+        Some(&small_config),
+        None,
+    )
+    .unwrap();
+
+    // Store a chunk large enough to exceed the 256-byte pack target.
+    // After encryption envelope overhead, this will trigger flush_writer_async.
+    let data = vec![0xABu8; 300];
+    repo.store_chunk(&data, Compression::None, PackType::Data)
+        .unwrap();
+
+    // The journal debounce interval is 8 packs, so after 1 pack the
+    // pending_index should NOT have been written to storage yet.
+    assert!(
+        !repo.storage.exists("pending_index").unwrap(),
+        "pending_index should not exist yet (debounce hasn't triggered)"
+    );
+
+    // Store another small chunk that stays in the pack writer buffer.
+    let data2 = vec![0xCDu8; 64];
+    repo.store_chunk(&data2, Compression::None, PackType::Data)
+        .unwrap();
+
+    // Call flush_on_abort — should seal partial packs, join uploads,
+    // and write pending_index.
+    repo.flush_on_abort();
+
+    // Verify pending_index now exists.
+    assert!(
+        repo.storage.exists("pending_index").unwrap(),
+        "pending_index should exist after flush_on_abort"
+    );
+
+    // Decrypt and deserialize to verify contents.
+    let raw = repo.storage.get("pending_index").unwrap().unwrap();
+    let compressed = unpack_object_expect_with_context(
+        &raw,
+        ObjectType::PendingIndex,
+        b"pending_index",
+        repo.crypto.as_ref(),
+    )
+    .unwrap();
+    let serialized = compress::decompress_metadata(&compressed).unwrap();
+    let entries: Vec<PendingPackEntry> = rmp_serde::from_slice(&serialized).unwrap();
+
+    // Should have 2 packs: the first (auto-flushed) and the partial (sealed by abort).
+    assert_eq!(
+        entries.len(),
+        2,
+        "pending_index should contain 2 pack entries, got {}: {entries:?}",
+        entries.len()
+    );
+
+    // Each pack should contain exactly 1 chunk.
+    for entry in &entries {
+        assert_eq!(
+            entry.chunks.len(),
+            1,
+            "each pack should have 1 chunk: {entry:?}"
+        );
+    }
+}
+
+/// Storage backend that fails `put()` for pack keys (packs/*) but succeeds
+/// for everything else.  Used to verify flush_on_abort's best-effort behavior.
+struct FailPackUploadsBackend {
+    inner: MemoryBackend,
+}
+
+impl FailPackUploadsBackend {
+    fn new() -> Self {
+        Self {
+            inner: MemoryBackend::new(),
+        }
+    }
+}
+
+impl vger_storage::StorageBackend for FailPackUploadsBackend {
+    fn get(&self, key: &str) -> vger_types::error::Result<Option<Vec<u8>>> {
+        self.inner.get(key)
+    }
+    fn put(&self, key: &str, data: &[u8]) -> vger_types::error::Result<()> {
+        if key.starts_with("packs/") {
+            return Err(vger_types::error::VgerError::Other(
+                "simulated pack upload failure".into(),
+            ));
+        }
+        self.inner.put(key, data)
+    }
+    fn delete(&self, key: &str) -> vger_types::error::Result<()> {
+        self.inner.delete(key)
+    }
+    fn exists(&self, key: &str) -> vger_types::error::Result<bool> {
+        self.inner.exists(key)
+    }
+    fn list(&self, prefix: &str) -> vger_types::error::Result<Vec<String>> {
+        self.inner.list(prefix)
+    }
+    fn get_range(
+        &self,
+        key: &str,
+        offset: u64,
+        length: u64,
+    ) -> vger_types::error::Result<Option<Vec<u8>>> {
+        self.inner.get_range(key, offset, length)
+    }
+    fn create_dir(&self, key: &str) -> vger_types::error::Result<()> {
+        self.inner.create_dir(key)
+    }
+}
+
+#[test]
+fn flush_on_abort_survives_pack_upload_failure() {
+    use crate::config::{RepositoryConfig, RetryConfig};
+
+    crate::testutil::init_test_environment();
+
+    let small_config = RepositoryConfig {
+        url: String::new(),
+        region: None,
+        access_key_id: None,
+        secret_access_key: None,
+        sftp_key: None,
+        sftp_known_hosts: None,
+        sftp_max_connections: None,
+        access_token: None,
+        allow_insecure_http: false,
+        min_pack_size: 256,
+        max_pack_size: 256,
+        retry: RetryConfig::default(),
+    };
+    let mut repo = Repository::init(
+        Box::new(FailPackUploadsBackend::new()),
+        EncryptionMode::None,
+        ChunkerConfig::default(),
+        None,
+        Some(&small_config),
+        None,
+    )
+    .unwrap();
+
+    // Store a chunk large enough to trigger flush_writer_async.
+    // The background upload thread will fail (FailPackUploadsBackend rejects packs/).
+    let data = vec![0xABu8; 300];
+    repo.store_chunk(&data, Compression::None, PackType::Data)
+        .unwrap();
+
+    // flush_on_abort should not panic even though upload threads fail.
+    // It should still attempt to write pending_index (which targets a non-pack key).
+    repo.flush_on_abort();
+
+    // pending_index should exist because put("pending_index", ..) succeeds.
+    assert!(
+        repo.storage.exists("pending_index").unwrap(),
+        "pending_index should be written even when pack uploads fail"
+    );
+}
+
+#[test]
 fn open_rejects_oversized_max_pack_size() {
     crate::testutil::init_test_environment();
 

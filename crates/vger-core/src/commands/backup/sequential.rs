@@ -1,8 +1,11 @@
 use std::fs::File;
 use std::path::Path;
+use std::sync::atomic::AtomicBool;
 
 use rayon::prelude::*;
 use tracing::{debug, warn};
+
+use crate::commands::util::check_interrupted;
 
 use crate::chunker;
 use crate::compress::Compression;
@@ -357,6 +360,7 @@ pub(super) fn process_source_path(
     transform_pool: Option<&rayon::ThreadPool>,
     progress: &mut Option<&mut dyn FnMut(BackupProgressEvent)>,
     dedup_filter: Option<&xorf::Xor8>,
+    shutdown: Option<&AtomicBool>,
 ) -> Result<()> {
     emit_progress(
         progress,
@@ -415,6 +419,7 @@ pub(super) fn process_source_path(
     let mut cross_batch = CrossFileBatch::new();
 
     for entry in walk_builder.build() {
+        check_interrupted(shutdown)?;
         let entry = match entry {
             Ok(e) => e,
             Err(e) => {

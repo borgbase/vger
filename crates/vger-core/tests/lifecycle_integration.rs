@@ -146,11 +146,11 @@ fn lifecycle_delete_compact_check_and_restore() {
     std::fs::write(source_dir.join("new.txt"), b"new file").unwrap();
     backup_source(&config, &source_dir, "src-a", "snap-v2", None);
 
-    let delete_stats = commands::delete::run(&config, None, "snap-v1", false).unwrap();
+    let delete_stats = commands::delete::run(&config, None, "snap-v1", false, None).unwrap();
     assert_eq!(delete_stats.snapshot_name, "snap-v1");
     assert!(delete_stats.chunks_deleted > 0);
 
-    let compact_stats = commands::compact::run(&config, None, 0.0, None, false).unwrap();
+    let compact_stats = commands::compact::run(&config, None, 0.0, None, false, None).unwrap();
     assert!(compact_stats.space_freed > 0);
 
     let check = commands::check::run(&config, None, true, false).unwrap();
@@ -222,14 +222,14 @@ fn prune_compact_check_and_restore_kept_snapshots() {
     ];
     let source_filter = vec!["src-a".to_string()];
     let (prune_stats, list_entries) =
-        commands::prune::run(&config, None, false, true, &sources, &source_filter).unwrap();
+        commands::prune::run(&config, None, false, true, &sources, &source_filter, None).unwrap();
 
     assert_eq!(prune_stats.pruned, 1);
     assert_eq!(prune_stats.kept, 1);
     assert!(list_entries.iter().any(|e| e.action == "prune"));
     assert!(list_entries.iter().any(|e| e.action == "keep"));
 
-    let compact_stats = commands::compact::run(&config, None, 0.0, None, false).unwrap();
+    let compact_stats = commands::compact::run(&config, None, 0.0, None, false, None).unwrap();
     assert!(
         compact_stats.packs_repacked > 0
             || compact_stats.packs_deleted_empty > 0

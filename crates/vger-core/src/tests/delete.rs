@@ -18,7 +18,7 @@ fn delete_missing_snapshot_returns_snapshot_not_found() {
     std::fs::create_dir_all(&repo_dir).unwrap();
     let config = init_repo(&repo_dir);
 
-    let result = commands::delete::run(&config, None, "does-not-exist", false);
+    let result = commands::delete::run(&config, None, "does-not-exist", false, None);
     assert!(matches!(result, Err(VgerError::SnapshotNotFound(name)) if name == "does-not-exist"));
 }
 
@@ -39,7 +39,7 @@ fn delete_dry_run_reports_impact_without_mutation() {
     let chunks_before = before.chunk_index().len();
     drop(before);
 
-    let stats = commands::delete::run(&config, None, "snap-delete-dry", true).unwrap();
+    let stats = commands::delete::run(&config, None, "snap-delete-dry", true, None).unwrap();
     assert_eq!(stats.snapshot_name, "snap-delete-dry");
     assert!(stats.chunks_deleted > 0);
     assert!(stats.space_freed > 0);
@@ -70,7 +70,7 @@ fn delete_snapshot_removes_manifest_entry_and_chunk_refs() {
     assert!(chunks_before > 0);
     drop(before);
 
-    let stats = commands::delete::run(&config, None, "snap-delete-live", false).unwrap();
+    let stats = commands::delete::run(&config, None, "snap-delete-live", false, None).unwrap();
     assert_eq!(stats.snapshot_name, "snap-delete-live");
     assert!(stats.chunks_deleted > 0);
 

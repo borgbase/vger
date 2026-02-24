@@ -68,7 +68,7 @@ pub(crate) fn run_default_actions(
         global_hooks,
         repo_hooks,
         &mut make_hook_ctx("backup", cfg, repo_label),
-        || cmd::backup::run_backup(cfg, label, None, None, None, vec![], sources, &[]),
+        || cmd::backup::run_backup(cfg, label, None, None, None, vec![], sources, &[], shutdown),
     ) {
         Ok(partial) => {
             if partial {
@@ -106,7 +106,7 @@ pub(crate) fn run_default_actions(
             global_hooks,
             repo_hooks,
             &mut make_hook_ctx("prune", cfg, repo_label),
-            || cmd::prune::run_prune(cfg, label, false, false, sources, &[], false),
+            || cmd::prune::run_prune(cfg, label, false, false, sources, &[], false, shutdown),
         ) {
             Ok(()) => steps.push(("prune", StepResult::Ok)),
             Err(e) => {
@@ -129,7 +129,7 @@ pub(crate) fn run_default_actions(
             global_hooks,
             repo_hooks,
             &mut make_hook_ctx("compact", cfg, repo_label),
-            || cmd::compact::run_compact(cfg, label, cfg.compact.threshold, None, false),
+            || cmd::compact::run_compact(cfg, label, cfg.compact.threshold, None, false, shutdown),
         ) {
             Ok(()) => steps.push(("compact", StepResult::Ok)),
             Err(e) => {
@@ -206,6 +206,7 @@ pub(crate) fn dispatch_command(
     cfg: &VgerConfig,
     label: Option<&str>,
     sources: &[SourceEntry],
+    shutdown: Option<&AtomicBool>,
 ) -> Result<bool, Box<dyn std::error::Error>> {
     match command {
         Commands::Init { .. } => cmd::init::run_init(cfg, label).map(|()| false),
@@ -225,12 +226,13 @@ pub(crate) fn dispatch_command(
             paths.clone(),
             sources,
             source,
+            shutdown,
         ),
         Commands::List { source, last, .. } => {
             cmd::list::run_list(cfg, label, source, *last).map(|()| false)
         }
         Commands::Snapshot { command, .. } => {
-            cmd::snapshot::run_snapshot_command(command, cfg, label).map(|()| false)
+            cmd::snapshot::run_snapshot_command(command, cfg, label, shutdown).map(|()| false)
         }
         Commands::Restore {
             snapshot,
@@ -249,8 +251,10 @@ pub(crate) fn dispatch_command(
             source,
             compact,
             ..
-        } => cmd::prune::run_prune(cfg, label, *dry_run, *list, sources, source, *compact)
-            .map(|()| false),
+        } => cmd::prune::run_prune(
+            cfg, label, *dry_run, *list, sources, source, *compact, shutdown,
+        )
+        .map(|()| false),
         Commands::Check {
             verify_data,
             distrust_server,
@@ -280,7 +284,7 @@ pub(crate) fn dispatch_command(
             ..
         } => {
             let t = threshold.unwrap_or(cfg.compact.threshold);
-            cmd::compact::run_compact(cfg, label, t, max_repack_size.clone(), *dry_run)
+            cmd::compact::run_compact(cfg, label, t, max_repack_size.clone(), *dry_run, shutdown)
                 .map(|()| false)
         }
         Commands::Config { .. } => {

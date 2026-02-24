@@ -399,6 +399,7 @@ fn backup_run_with_progress_emits_events_and_final_stats() {
             command_dumps: &[],
         },
         Some(&mut on_progress),
+        None,
     )
     .unwrap()
     .stats;

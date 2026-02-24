@@ -2098,6 +2098,7 @@ fn run_worker(
                     repo.config.compact.threshold,
                     None,
                     false,
+                    None,
                 ) {
                     Ok(stats) => {
                         send_log(

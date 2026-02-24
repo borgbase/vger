@@ -1,9 +1,9 @@
+use std::collections::BTreeMap;
 use std::fs::File;
 use std::io::{Read, Seek};
 use std::path::Path;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
-
-use std::collections::BTreeMap;
 
 use tracing::{debug, warn};
 
@@ -613,6 +613,7 @@ pub(crate) fn run_parallel_pipeline(
     progress: &mut Option<&mut dyn FnMut(BackupProgressEvent)>,
     pipeline_buffer_bytes: usize,
     dedup_filter: Option<&xorf::Xor8>,
+    shutdown: Option<&AtomicBool>,
 ) -> Result<()> {
     debug_assert!(segment_size > 0, "segment_size must be non-zero");
     debug_assert!(num_workers > 0, "num_workers must be non-zero");
@@ -654,6 +655,9 @@ pub(crate) fn run_parallel_pipeline(
 
             let mut seq_idx: usize = 0;
             for entry_result in walk_iter {
+                if shutdown.is_some_and(|f| f.load(Ordering::Relaxed)) {
+                    break;
+                }
                 match entry_result {
                     Ok(entry) => {
                         let acquired = match reserve_budget(&entry, budget_ref) {
@@ -724,6 +728,11 @@ pub(crate) fn run_parallel_pipeline(
         let mut segments_to_skip: usize = 0;
 
         for msg in &result_rx {
+            if shutdown.is_some_and(|f| f.load(Ordering::Relaxed)) {
+                budget.poison();
+                consume_err = Some(VgerError::Interrupted);
+                break;
+            }
             match msg {
                 PipelineResult::Ok(idx, entry) => {
                     pending.insert(idx, Ok(*entry));
@@ -830,10 +839,17 @@ pub(crate) fn run_parallel_pipeline(
             pipeline_buffer_bytes,
         );
 
-        match consume_err {
-            Some(e) => Err(e),
-            None => Ok(()),
+        if let Some(e) = consume_err {
+            return Err(e);
         }
+
+        // The walk thread may have exited cleanly on shutdown without
+        // the consumer ever seeing a message.  Catch that here.
+        if shutdown.is_some_and(|f| f.load(Ordering::Relaxed)) {
+            return Err(VgerError::Interrupted);
+        }
+
+        Ok(())
     })
 }
 

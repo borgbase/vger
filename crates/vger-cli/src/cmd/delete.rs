@@ -1,4 +1,5 @@
 use std::io::IsTerminal;
+use std::sync::atomic::AtomicBool;
 
 use vger_core::commands;
 use vger_core::config::VgerConfig;
@@ -11,9 +12,10 @@ pub(crate) fn run_delete(
     label: Option<&str>,
     snapshot_name: String,
     dry_run: bool,
+    shutdown: Option<&AtomicBool>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let stats = with_repo_passphrase(config, label, |passphrase| {
-        commands::delete::run(config, passphrase, &snapshot_name, dry_run)
+        commands::delete::run(config, passphrase, &snapshot_name, dry_run, shutdown)
             .map_err(|e| -> Box<dyn std::error::Error> { Box::new(e) })
     })?;
 

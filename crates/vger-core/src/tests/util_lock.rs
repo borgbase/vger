@@ -3,7 +3,9 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
 use crate::commands::util::with_repo_lock;
-use crate::config::ChunkerConfig;
+use crate::compress::Compression;
+use crate::config::{ChunkerConfig, RepositoryConfig, RetryConfig};
+use crate::repo::pack::PackType;
 use crate::repo::{EncryptionMode, Repository};
 use vger_storage::{BackendLockInfo, StorageBackend};
 use vger_types::error::{Result, VgerError};
@@ -136,4 +138,48 @@ fn with_repo_lock_returns_release_error_when_action_succeeds() {
     let result: Result<()> = with_repo_lock(&mut repo, |_repo| Ok(()));
     assert!(matches!(result, Err(VgerError::Other(msg)) if msg == "forced release failure"));
     assert_eq!(backend.release_calls(), 1);
+}
+
+#[test]
+fn with_repo_lock_flushes_pending_state_on_action_error() {
+    crate::testutil::init_test_environment();
+
+    let backend = AdvisoryLockBackend::new(false);
+    let small_config = RepositoryConfig {
+        url: String::new(),
+        region: None,
+        access_key_id: None,
+        secret_access_key: None,
+        sftp_key: None,
+        sftp_known_hosts: None,
+        sftp_max_connections: None,
+        access_token: None,
+        allow_insecure_http: false,
+        min_pack_size: 256,
+        max_pack_size: 256,
+        retry: RetryConfig::default(),
+    };
+    let mut repo = Repository::init(
+        Box::new(backend.clone()),
+        EncryptionMode::None,
+        ChunkerConfig::default(),
+        None,
+        Some(&small_config),
+        None,
+    )
+    .unwrap();
+
+    let result: Result<()> = with_repo_lock(&mut repo, |repo| {
+        // Store enough to trigger a pack flush, then fail.
+        repo.store_chunk(&vec![0xABu8; 300], Compression::None, PackType::Data)?;
+        Err(VgerError::Other("simulated backup failure".into()))
+    });
+
+    assert!(result.is_err());
+    // flush_on_abort should have written pending_index before releasing the lock.
+    assert!(
+        repo.storage.exists("pending_index").unwrap(),
+        "pending_index should exist after with_repo_lock error path"
+    );
+    assert_eq!(backend.release_calls(), 1, "lock should still be released");
 }

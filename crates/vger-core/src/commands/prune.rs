@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use std::sync::atomic::AtomicBool;
 
 use chrono::Utc;
 use tracing::warn;
@@ -9,7 +10,7 @@ use vger_types::error::{Result, VgerError};
 
 use super::list::{load_snapshot_item_stream, load_snapshot_meta};
 use super::snapshot_ops::decrement_snapshot_chunk_refs;
-use super::util::with_open_repo_lock;
+use super::util::{check_interrupted, with_open_repo_lock};
 
 pub struct PruneStats {
     pub kept: usize,
@@ -32,6 +33,7 @@ pub fn run(
     list: bool,
     sources: &[SourceEntry],
     source_filter: &[String],
+    shutdown: Option<&AtomicBool>,
 ) -> Result<(PruneStats, Vec<PruneListEntry>)> {
     with_open_repo_lock(config, passphrase, |repo| {
         let now = Utc::now();
@@ -130,6 +132,7 @@ pub fn run(
         let mut metadata_keys_to_delete: Vec<(String, String)> = Vec::with_capacity(to_prune.len());
 
         for snapshot_name in &to_prune {
+            check_interrupted(shutdown)?;
             // Get snapshot ID before we modify manifest
             let snapshot_key = repo
                 .manifest()

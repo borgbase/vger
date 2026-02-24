@@ -64,6 +64,9 @@ pub enum VgerError {
     #[error("hook error: {0}")]
     Hook(String),
 
+    #[error("operation interrupted by signal")]
+    Interrupted,
+
     #[error("{0}")]
     Other(String),
 }

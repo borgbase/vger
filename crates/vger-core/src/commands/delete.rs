@@ -17,6 +17,7 @@ pub fn run(
     passphrase: Option<&str>,
     snapshot_name: &str,
     dry_run: bool,
+    _shutdown: Option<&std::sync::atomic::AtomicBool>,
 ) -> Result<DeleteStats> {
     with_open_repo_lock(config, passphrase, |repo| {
         // Verify snapshot exists

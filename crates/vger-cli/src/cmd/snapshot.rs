@@ -1,3 +1,5 @@
+use std::sync::atomic::AtomicBool;
+
 use vger_core::commands;
 use vger_core::config::VgerConfig;
 
@@ -19,6 +21,7 @@ pub(crate) fn run_snapshot_command(
     command: &SnapshotCommand,
     config: &VgerConfig,
     label: Option<&str>,
+    shutdown: Option<&AtomicBool>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     match command {
         SnapshotCommand::List {
@@ -78,7 +81,7 @@ pub(crate) fn run_snapshot_command(
         }
         SnapshotCommand::Delete {
             snapshot, dry_run, ..
-        } => super::delete::run_delete(config, label, snapshot.clone(), *dry_run),
+        } => super::delete::run_delete(config, label, snapshot.clone(), *dry_run, shutdown),
         SnapshotCommand::Find {
             path,
             source,

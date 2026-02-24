@@ -83,6 +83,7 @@ pub fn run_backup_for_repo_with_progress(
                 command_dumps: &source.command_dumps,
             },
             Some(progress),
+            None,
         )?;
 
         report.created.push(BackupSourceResult {
@@ -186,5 +187,5 @@ pub fn delete_snapshot(
     passphrase: Option<&str>,
     snapshot_name: &str,
 ) -> Result<commands::delete::DeleteStats> {
-    commands::delete::run(config, passphrase, snapshot_name, false)
+    commands::delete::run(config, passphrase, snapshot_name, false, None)
 }

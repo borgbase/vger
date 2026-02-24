@@ -1461,6 +1461,52 @@ impl Repository {
         Ok(())
     }
 
+    /// Best-effort cleanup after a failed backup or other operation.
+    ///
+    /// Seals any partial pack writers, waits for in-flight uploads to land,
+    /// and writes the final `pending_index` journal so a subsequent run can
+    /// recover. All errors are logged but never propagated.
+    ///
+    /// No-ops when there is nothing to clean up (no pending uploads, no
+    /// journal entries, no partial packs).
+    pub fn flush_on_abort(&mut self) {
+        let has_partial_packs =
+            self.data_pack_writer.has_pending() || self.tree_pack_writer.has_pending();
+        if self.pending_uploads.is_empty() && self.pending_journal.is_empty() && !has_partial_packs
+        {
+            return;
+        }
+
+        warn!("saving progress for next run\u{2026}");
+
+        // Seal and flush any partial data/tree pack writers.
+        if self.data_pack_writer.has_pending() {
+            if let Err(e) = self.flush_writer_async(PackType::Data) {
+                warn!("flush_on_abort: failed to seal data pack: {e}");
+            }
+        }
+        if self.tree_pack_writer.has_pending() {
+            if let Err(e) = self.flush_writer_async(PackType::Tree) {
+                warn!("flush_on_abort: failed to seal tree pack: {e}");
+            }
+        }
+
+        // Join all in-flight upload threads so packs land on storage.
+        for handle in self.pending_uploads.drain(..) {
+            match handle
+                .join()
+                .map_err(|_| VgerError::Other("pack upload thread panicked".into()))
+                .and_then(|r| r)
+            {
+                Ok(()) => {}
+                Err(e) => warn!("flush_on_abort: upload thread failed: {e}"),
+            }
+        }
+
+        // Write final pending_index so next run can recover.
+        self.write_pending_index_best_effort();
+    }
+
     // --- Pending index journal (interrupted backup recovery) ---
 
     /// Write the pending index journal to storage (debounced helper).

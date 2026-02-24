@@ -26,7 +26,7 @@ fn prune_errors_when_no_retention_rules_are_configured() {
 
     let config = init_repo(&repo_dir);
     let sources = vec![source_entry(&source_dir, "src-a")];
-    let err = commands::prune::run(&config, None, true, false, &sources, &[])
+    let err = commands::prune::run(&config, None, true, false, &sources, &[], None)
         .err()
         .unwrap();
     assert!(matches!(err, VgerError::Config(msg) if msg.contains("no retention rules configured")));
@@ -56,8 +56,9 @@ fn prune_dry_run_reports_without_mutating_state() {
     drop(before);
 
     let sources = vec![source_entry(&source_dir, "src-a")];
-    let (stats, list_entries) = commands::prune::run(&config, None, true, true, &sources, &[])
-        .expect("dry-run prune should succeed");
+    let (stats, list_entries) =
+        commands::prune::run(&config, None, true, true, &sources, &[], None)
+            .expect("dry-run prune should succeed");
 
     assert_eq!(stats.kept, 1);
     assert_eq!(stats.pruned, 1);
@@ -100,7 +101,7 @@ fn prune_source_filter_only_prunes_matching_label() {
     ];
     let source_filter = vec!["src-a".to_string()];
     let (stats, _list_entries) =
-        commands::prune::run(&config, None, false, false, &sources, &source_filter).unwrap();
+        commands::prune::run(&config, None, false, false, &sources, &source_filter, None).unwrap();
 
     assert_eq!(stats.pruned, 1);
     assert_eq!(stats.kept, 1);

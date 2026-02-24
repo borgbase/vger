@@ -1,4 +1,5 @@
 use std::io::IsTerminal;
+use std::sync::atomic::AtomicBool;
 
 use crate::hooks::{self, HookContext};
 use vger_core::commands;
@@ -13,15 +14,16 @@ fn run_backup_operation(
     config: &VgerConfig,
     req: commands::backup::BackupRequest<'_>,
     show_progress: bool,
+    shutdown: Option<&AtomicBool>,
 ) -> Result<commands::backup::BackupOutcome, Box<dyn std::error::Error>> {
     if !show_progress {
-        return commands::backup::run(config, req)
+        return commands::backup::run_with_progress(config, req, None, shutdown)
             .map_err(|e| -> Box<dyn std::error::Error> { Box::new(e) });
     }
 
     let mut renderer = BackupProgressRenderer::new();
     let mut on_progress = |event| renderer.on_event(event);
-    let result = commands::backup::run_with_progress(config, req, Some(&mut on_progress));
+    let result = commands::backup::run_with_progress(config, req, Some(&mut on_progress), shutdown);
     renderer.finish();
 
     result.map_err(|e| -> Box<dyn std::error::Error> { Box::new(e) })
@@ -39,6 +41,7 @@ pub(crate) fn run_backup(
     paths: Vec<String>,
     sources: &[SourceEntry],
     source_filter: &[String],
+    shutdown: Option<&AtomicBool>,
 ) -> Result<bool, Box<dyn std::error::Error>> {
     // Apply upload concurrency override before opening the repo
     let config = if let Some(uc) = upload_concurrency {
@@ -99,6 +102,7 @@ pub(crate) fn run_backup(
                     command_dumps: &[],
                 },
                 show_progress,
+                shutdown,
             )?;
 
             let stats = &outcome.stats;
@@ -168,6 +172,7 @@ pub(crate) fn run_backup(
                             command_dumps: &source.command_dumps,
                         },
                         show_progress,
+                        shutdown,
                     )?;
 
                     let stats = &outcome.stats;

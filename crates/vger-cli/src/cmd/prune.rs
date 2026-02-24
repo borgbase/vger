@@ -1,9 +1,12 @@
+use std::sync::atomic::AtomicBool;
+
 use vger_core::commands;
 use vger_core::config::{SourceEntry, VgerConfig};
 
 use crate::format::format_bytes;
 use crate::passphrase::with_repo_passphrase;
 
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn run_prune(
     config: &VgerConfig,
     label: Option<&str>,
@@ -12,10 +15,19 @@ pub(crate) fn run_prune(
     sources: &[SourceEntry],
     source_filter: &[String],
     compact: bool,
+    shutdown: Option<&AtomicBool>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let (stats, list_entries) = with_repo_passphrase(config, label, |passphrase| {
-        commands::prune::run(config, passphrase, dry_run, list, sources, source_filter)
-            .map_err(|e| -> Box<dyn std::error::Error> { Box::new(e) })
+        commands::prune::run(
+            config,
+            passphrase,
+            dry_run,
+            list,
+            sources,
+            source_filter,
+            shutdown,
+        )
+        .map_err(|e| -> Box<dyn std::error::Error> { Box::new(e) })
     })?;
 
     if list || dry_run {
@@ -50,7 +62,14 @@ pub(crate) fn run_prune(
     }
 
     if compact {
-        super::compact::run_compact(config, label, config.compact.threshold, None, dry_run)?;
+        super::compact::run_compact(
+            config,
+            label,
+            config.compact.threshold,
+            None,
+            dry_run,
+            shutdown,
+        )?;
     }
 
     Ok(())

@@ -1,3 +1,5 @@
+use std::sync::atomic::AtomicBool;
+
 use vger_core::commands;
 use vger_core::config::VgerConfig;
 
@@ -10,11 +12,12 @@ pub(crate) fn run_compact(
     threshold: f64,
     max_repack_size: Option<String>,
     dry_run: bool,
+    shutdown: Option<&AtomicBool>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let max_bytes = max_repack_size.map(|s| parse_size(&s)).transpose()?;
 
     let stats = with_repo_passphrase(config, label, |passphrase| {
-        commands::compact::run(config, passphrase, threshold, max_bytes, dry_run)
+        commands::compact::run(config, passphrase, threshold, max_bytes, dry_run, shutdown)
             .map_err(|e| -> Box<dyn std::error::Error> { Box::new(e) })
     })?;
 

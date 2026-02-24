@@ -8,10 +8,12 @@ mod walk;
 
 pub(crate) use chunk_process::WorkerChunk;
 
+use std::sync::atomic::AtomicBool;
+
 use chrono::Utc;
 use tracing::{info, warn};
 
-use super::util::with_repo_lock;
+use super::util::{check_interrupted, with_repo_lock};
 use crate::compress::Compression;
 use crate::config::{ChunkerConfig, CommandDump, VgerConfig};
 use crate::limits::{self, ByteRateLimiter};
@@ -132,13 +134,14 @@ pub struct BackupRequest<'a> {
 }
 
 pub fn run(config: &VgerConfig, req: BackupRequest<'_>) -> Result<BackupOutcome> {
-    run_with_progress(config, req, None)
+    run_with_progress(config, req, None, None)
 }
 
 pub fn run_with_progress(
     config: &VgerConfig,
     req: BackupRequest<'_>,
     mut progress: Option<&mut dyn FnMut(BackupProgressEvent)>,
+    shutdown: Option<&AtomicBool>,
 ) -> Result<BackupOutcome> {
     let snapshot_name = req.snapshot_name;
     let passphrase = req.passphrase;
@@ -323,10 +326,12 @@ pub fn run_with_progress(
                 &mut progress,
                 pipeline_buffer_bytes,
                 dedup_filter.as_deref(),
+                shutdown,
             )?;
         } else {
             // Sequential fallback (pipeline_depth == 0 or no source paths).
             for source_path in source_paths {
+                check_interrupted(shutdown)?;
                 sequential::process_source_path(
                     repo,
                     source_path,
@@ -348,9 +353,13 @@ pub fn run_with_progress(
                     transform_pool.as_ref(),
                     &mut progress,
                     dedup_filter.as_deref(),
+                    shutdown,
                 )?;
             }
         }
+        // Bail before committing if shutdown was requested during the walk.
+        check_interrupted(shutdown)?;
+
         flush_item_stream_chunk(repo, &mut item_stream, &mut item_ptrs, compression)?;
 
         let time_end = Utc::now();

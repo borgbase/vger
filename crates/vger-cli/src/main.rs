@@ -7,7 +7,10 @@ mod hooks;
 mod passphrase;
 mod progress;
 mod prompt;
+pub(crate) mod signal;
 mod table;
+
+use std::sync::atomic::Ordering;
 
 use clap::Parser;
 
@@ -24,9 +27,12 @@ use dispatch::{dispatch_command, run_default_actions, warn_if_untrusted_rest};
 const EXIT_ERROR: i32 = 1;
 /// Exit code: partial success (backup completed but some files were skipped).
 const EXIT_PARTIAL: i32 = 3;
+/// Exit code: cooperative shutdown via signal (SIGINT/SIGTERM).
+const EXIT_INTERRUPTED: i32 = 130;
 
 fn main() {
     let cli = Cli::parse();
+    signal::install_signal_handlers();
 
     // Initialize logging — auto-upgrade to info for daemon
     let filter = match cli.verbose {
@@ -134,7 +140,12 @@ fn main() {
             }
             SnapshotDispatch::Unique(idx) => {
                 // Single match — dispatch without banner
-                match run_repo_command(&cli, repos[idx]) {
+                let result = run_repo_command(&cli, repos[idx]);
+                if signal::SHUTDOWN.load(Ordering::SeqCst) {
+                    eprintln!("Interrupted");
+                    std::process::exit(EXIT_INTERRUPTED);
+                }
+                match result {
                     Ok(true) => std::process::exit(EXIT_PARTIAL),
                     Ok(false) => {}
                     Err(e) => {
@@ -175,11 +186,19 @@ fn main() {
     let mut had_partial = false;
 
     for repo in &repos {
+        if signal::SHUTDOWN.load(Ordering::SeqCst) {
+            break;
+        }
         if multi {
             eprintln!("--- Repository: {} ---", repo_display_name(repo));
         }
 
-        match run_repo_command(&cli, repo) {
+        let result = run_repo_command(&cli, repo);
+        if signal::SHUTDOWN.load(Ordering::SeqCst) {
+            eprintln!("Interrupted");
+            std::process::exit(EXIT_INTERRUPTED);
+        }
+        match result {
             Ok(partial) => {
                 if partial {
                     had_partial = true;
@@ -197,6 +216,10 @@ fn main() {
         }
     }
 
+    if signal::SHUTDOWN.load(Ordering::SeqCst) {
+        eprintln!("Interrupted");
+        std::process::exit(EXIT_INTERRUPTED);
+    }
     if had_error {
         std::process::exit(EXIT_ERROR);
     }
@@ -281,9 +304,10 @@ fn run_repo_command(cli: &Cli, repo: &ResolvedRepo) -> Result<bool, Box<dyn std:
 
     let has_hooks = !repo.global_hooks.is_empty() || !repo.repo_hooks.is_empty();
 
+    let shutdown = Some(&signal::SHUTDOWN as &std::sync::atomic::AtomicBool);
     match &cli.command {
         Some(cmd) => {
-            let run_action = || dispatch_command(cmd, cfg, label, &repo.sources);
+            let run_action = || dispatch_command(cmd, cfg, label, &repo.sources, shutdown);
             if has_hooks {
                 let mut ctx = HookContext {
                     command: cmd.name().to_string(),
@@ -305,7 +329,7 @@ fn run_repo_command(cli: &Cli, repo: &ResolvedRepo) -> Result<bool, Box<dyn std:
             &repo.global_hooks,
             &repo.repo_hooks,
             &repo.label,
-            None,
+            shutdown,
         ),
     }
 }

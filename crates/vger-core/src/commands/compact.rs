@@ -1,10 +1,10 @@
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Mutex;
 
 use tracing::{info, warn};
 
-use super::util::{open_repo, with_repo_lock};
+use super::util::{check_interrupted, open_repo, with_repo_lock};
 use crate::config::VgerConfig;
 use crate::repo::pack::{
     PackType, PackWriter, DEFAULT_MAX_BLOB_OVERHEAD, PACK_HEADER_SIZE, PACK_MAGIC,
@@ -55,6 +55,7 @@ pub fn run(
     threshold: f64,
     max_repack_size: Option<u64>,
     dry_run: bool,
+    shutdown: Option<&AtomicBool>,
 ) -> Result<CompactStats> {
     let threshold = if !threshold.is_finite() || !(0.0..=100.0).contains(&threshold) {
         let default = config.compact.threshold;
@@ -77,7 +78,14 @@ pub fn run(
     );
 
     with_repo_lock(&mut repo, |repo| {
-        compact_repo(repo, threshold, max_repack_size, dry_run, is_remote)
+        compact_repo(
+            repo,
+            threshold,
+            max_repack_size,
+            dry_run,
+            is_remote,
+            shutdown,
+        )
     })
 }
 
@@ -88,6 +96,7 @@ pub fn compact_repo(
     max_repack_size: Option<u64>,
     dry_run: bool,
     is_remote: bool,
+    shutdown: Option<&AtomicBool>,
 ) -> Result<CompactStats> {
     let mut stats = CompactStats::default();
 
@@ -128,6 +137,9 @@ pub fn compact_repo(
     std::thread::scope(|s| {
         for _ in 0..concurrency {
             s.spawn(|| loop {
+                if shutdown.is_some_and(|f| f.load(Ordering::Relaxed)) {
+                    break;
+                }
                 let idx = work_idx.fetch_add(1, Ordering::Relaxed);
                 if idx >= discovered.len() {
                     break;
@@ -230,6 +242,9 @@ pub fn compact_repo(
     stats.packs_orphan = packs_orphan.load(Ordering::Relaxed);
     stats.blobs_live = blobs_live.load(Ordering::Relaxed);
 
+    // Bail before Phase 2 if shutdown was requested during analysis.
+    check_interrupted(shutdown)?;
+
     let mut analyses = analyses_mu.into_inner().unwrap();
 
     if stats.packs_corrupt > 0 {
@@ -282,6 +297,7 @@ pub fn compact_repo(
     let pack_target = repo.config.min_pack_size as usize;
 
     for analysis in &selected {
+        check_interrupted(shutdown)?;
         if let Some(cap) = max_repack_size {
             if total_repacked_bytes >= cap {
                 info!("Reached max-repack-size limit, stopping");
