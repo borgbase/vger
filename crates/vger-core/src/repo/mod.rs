@@ -16,7 +16,10 @@ use serde::{Deserialize, Serialize};
 use tracing::{debug, warn};
 
 use crate::compress;
-use crate::config::{ChunkerConfig, RepositoryConfig, DEFAULT_UPLOAD_CONCURRENCY};
+use crate::config::{
+    default_max_pack_size, default_min_pack_size, ChunkerConfig, RepositoryConfig,
+    DEFAULT_UPLOAD_CONCURRENCY,
+};
 use crate::index::dedup_cache::{self, TieredDedupIndex};
 use crate::index::{
     ChunkIndex, DedupIndex, IndexDelta, PendingChunkEntry, PendingIndexJournal, RecoveredChunkEntry,
@@ -51,14 +54,6 @@ pub struct RepoConfig {
     pub min_pack_size: u32,
     #[serde(default = "default_max_pack_size")]
     pub max_pack_size: u32,
-}
-
-fn default_min_pack_size() -> u32 {
-    32 * 1024 * 1024
-}
-
-fn default_max_pack_size() -> u32 {
-    128 * 1024 * 1024
 }
 
 /// Maximum total weight (bytes) of cached blobs in the blob cache.
@@ -179,6 +174,10 @@ pub struct Repository {
     /// Chunks recovered from a previous interrupted session's `pending_index`.
     /// Promoted into the active dedup structure on dedup hit.
     recovered_chunks: StdHashMap<ChunkId, RecoveredChunkEntry>,
+    /// Number of distinct packs in the persisted index at load time.
+    persisted_pack_count: usize,
+    /// Number of packs flushed during the current session (data + tree).
+    session_packs_flushed: usize,
 }
 
 impl Repository {
@@ -350,6 +349,8 @@ impl Repository {
             pending_journal: PendingIndexJournal::new(),
             pending_journal_last_written: 0,
             recovered_chunks: StdHashMap::new(),
+            persisted_pack_count: 0,
+            session_packs_flushed: 0,
         })
     }
 
@@ -514,6 +515,8 @@ impl Repository {
             pending_journal: PendingIndexJournal::new(),
             pending_journal_last_written: 0,
             recovered_chunks: StdHashMap::new(),
+            persisted_pack_count: 0,
+            session_packs_flushed: 0,
         })
     }
 
@@ -522,14 +525,7 @@ impl Repository {
     /// Also recalculates the data pack writer target from the loaded index.
     pub fn load_chunk_index(&mut self) -> Result<()> {
         self.chunk_index = self.reload_full_index_cached()?;
-        let num_data_packs = self.chunk_index.count_distinct_packs();
-        let data_target = compute_data_pack_target(
-            num_data_packs,
-            self.config.min_pack_size,
-            self.config.max_pack_size,
-        );
-        self.data_pack_writer =
-            PackWriter::new_default(PackType::Data, data_target, self.repo_cache_dir());
+        self.rebase_pack_target_from_index();
         Ok(())
     }
 
@@ -538,15 +534,27 @@ impl Repository {
     /// in the remote repository.
     pub fn load_chunk_index_uncached(&mut self) -> Result<()> {
         self.chunk_index = self.reload_full_index()?;
-        let num_data_packs = self.chunk_index.count_distinct_packs();
+        self.rebase_pack_target_from_index();
+        Ok(())
+    }
+
+    /// Recompute pack-target state from `self.chunk_index`.
+    ///
+    /// Sets `persisted_pack_count` from the index, resets `session_packs_flushed`,
+    /// and updates the data pack writer's target size. Called after any operation
+    /// that brings `chunk_index` in sync with persisted storage (load or save).
+    // TODO: count_distinct_packs() includes tree packs. Should filter to data
+    // packs only for more accurate pack target sizing.
+    fn rebase_pack_target_from_index(&mut self) {
+        let num_packs = self.chunk_index.count_distinct_packs();
+        self.persisted_pack_count = num_packs;
+        self.session_packs_flushed = 0;
         let data_target = compute_data_pack_target(
-            num_data_packs,
+            num_packs,
             self.config.min_pack_size,
             self.config.max_pack_size,
         );
-        self.data_pack_writer =
-            PackWriter::new_default(PackType::Data, data_target, self.repo_cache_dir());
-        Ok(())
+        self.data_pack_writer.set_target_size(data_target);
     }
 
     /// Mark the manifest as needing persistence on the next `save_state()`.
@@ -595,6 +603,12 @@ impl Repository {
     /// Read-only access to the chunk index.
     pub fn chunk_index(&self) -> &ChunkIndex {
         &self.chunk_index
+    }
+
+    /// Current data pack target size in bytes (for testing).
+    #[cfg(test)]
+    pub(crate) fn data_pack_target(&self) -> usize {
+        self.data_pack_writer.target_size()
     }
 
     /// Mutable access to the chunk index. Automatically marks it dirty.
@@ -1002,6 +1016,10 @@ impl Repository {
         self.pending_journal_last_written = 0;
         self.recovered_chunks.clear();
 
+        // Rebase pack counters and target from the now-current chunk_index
+        // so a reused Repository doesn't double-count session packs.
+        self.rebase_pack_target_from_index();
+
         Ok(())
     }
 
@@ -1351,6 +1369,18 @@ impl Repository {
             PackType::Data => self.data_pack_writer.seal()?,
             PackType::Tree => self.tree_pack_writer.seal()?,
         };
+
+        // Recalculate data pack target after each data pack flush.
+        if pack_type == PackType::Data {
+            self.session_packs_flushed += 1;
+            let total = self.persisted_pack_count + self.session_packs_flushed;
+            let new_target = compute_data_pack_target(
+                total,
+                self.config.min_pack_size,
+                self.config.max_pack_size,
+            );
+            self.data_pack_writer.set_target_size(new_target);
+        }
 
         // Record journal entries before apply_sealed_entries consumes them.
         let journal_chunks: Vec<PendingChunkEntry> = entries
@@ -1714,4 +1744,5 @@ impl Repository {
 
         Some(entry.stored_size)
     }
+
 }

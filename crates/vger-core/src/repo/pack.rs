@@ -385,6 +385,11 @@ impl PackWriter {
         self.target_size
     }
 
+    /// Update the target pack size (e.g. after flushing a pack during backup).
+    pub(crate) fn set_target_size(&mut self, target: usize) {
+        self.target_size = target;
+    }
+
     /// Seal the pack: compute PackId, return a `SealedPack` that can be
     /// destructured for upload.
     pub fn seal(&mut self) -> Result<SealedPack> {
@@ -552,7 +557,7 @@ pub fn compute_data_pack_target(
 ) -> usize {
     let min = min_pack_size as f64;
     let max = max_pack_size as f64;
-    let target = min * (num_data_packs as f64 / 100.0).sqrt();
+    let target = min * (num_data_packs as f64 / 50.0).sqrt();
     target.clamp(min, max) as usize
 }
 
@@ -928,5 +933,54 @@ mod tests {
             msg.contains("short read from pack") && msg.contains("expected 100 bytes, got 99"),
             "expected short read error, got: {msg}"
         );
+    }
+
+    #[test]
+    fn compute_data_pack_target_scaling() {
+        let min = 32 * 1024 * 1024u32; // 32 MiB
+        let max = 192 * 1024 * 1024u32; // 192 MiB
+
+        // At 0 packs: clamped to min
+        assert_eq!(compute_data_pack_target(0, min, max), min as usize);
+
+        // At 50 packs: min * sqrt(50/50) = min * 1 = min
+        assert_eq!(compute_data_pack_target(50, min, max), min as usize);
+
+        // At 200 packs: min * sqrt(200/50) = min * 2 = 64 MiB
+        assert_eq!(compute_data_pack_target(200, min, max), 64 * 1024 * 1024);
+
+        // At 800 packs: min * sqrt(800/50) = min * 4 = 128 MiB
+        assert_eq!(compute_data_pack_target(800, min, max), 128 * 1024 * 1024);
+
+        // At 1800 packs: min * sqrt(1800/50) = min * 6 = 192 MiB (max)
+        assert_eq!(compute_data_pack_target(1800, min, max), 192 * 1024 * 1024);
+
+        // Beyond max: clamped
+        assert_eq!(compute_data_pack_target(10_000, min, max), max as usize);
+
+        // Monotonic increase
+        let mut prev = 0;
+        for n in [0, 10, 50, 100, 200, 400, 800, 1600, 3200] {
+            let t = compute_data_pack_target(n, min, max);
+            assert!(t >= prev, "target should be monotonically non-decreasing");
+            prev = t;
+        }
+    }
+
+    #[test]
+    fn set_target_size_after_seal() {
+        let mut w = PackWriter::new_default(PackType::Data, 100, None);
+        w.add_blob(dummy_chunk_id(0), vec![0u8; 120]).unwrap();
+        assert!(w.should_flush());
+
+        let _ = w.seal().unwrap();
+
+        // Update target to a larger size
+        w.set_target_size(10_000);
+        assert_eq!(w.target_size(), 10_000);
+
+        // Adding a small blob should no longer trigger flush
+        w.add_blob(dummy_chunk_id(1), vec![0u8; 50]).unwrap();
+        assert!(!w.should_flush());
     }
 }

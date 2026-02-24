@@ -703,3 +703,165 @@ fn open_rejects_oversized_max_pack_size() {
     let err = format!("{}", result.err().unwrap());
     assert!(err.contains("512 MiB"), "error should mention limit: {err}");
 }
+
+// ---------------------------------------------------------------------------
+// Dynamic pack target scaling tests
+// ---------------------------------------------------------------------------
+
+/// Helper: create a plaintext repo with tiny pack sizes for testing pack flushes.
+fn repo_with_small_packs(min_pack: u32, max_pack: u32) -> Repository {
+    use crate::config::{RepositoryConfig, RetryConfig};
+
+    crate::testutil::init_test_environment();
+
+    let small_config = RepositoryConfig {
+        url: String::new(),
+        region: None,
+        access_key_id: None,
+        secret_access_key: None,
+        sftp_key: None,
+        sftp_known_hosts: None,
+        sftp_max_connections: None,
+        access_token: None,
+        allow_insecure_http: false,
+        min_pack_size: min_pack,
+        max_pack_size: max_pack,
+        retry: RetryConfig::default(),
+    };
+    Repository::init(
+        Box::new(MemoryBackend::new()),
+        EncryptionMode::None,
+        ChunkerConfig::default(),
+        None,
+        Some(&small_config),
+        None,
+    )
+    .unwrap()
+}
+
+/// Store `count` unique ~1200-byte chunks into `repo`, each with a distinct
+/// 4-byte prefix derived from `start..start+count`.
+fn store_unique_chunks(repo: &mut Repository, start: u32, count: u32, pack_type: PackType) {
+    for i in start..start + count {
+        let mut data = vec![0xABu8; 1200];
+        data[..4].copy_from_slice(&i.to_le_bytes());
+        repo.store_chunk(&data, Compression::None, pack_type)
+            .unwrap();
+    }
+}
+
+#[test]
+fn data_pack_flush_grows_target() {
+    let mut repo = repo_with_small_packs(1024, 8192);
+
+    let initial_target = repo.data_pack_target();
+    assert_eq!(
+        initial_target, 1024,
+        "initial target should be min_pack_size"
+    );
+
+    // Each chunk is ~1200 bytes which exceeds the 1024 target after envelope overhead.
+    // With divisor=50, need >50 packs before target grows above min.
+    store_unique_chunks(&mut repo, 0, 60, PackType::Data);
+
+    let final_target = repo.data_pack_target();
+    assert!(
+        final_target > initial_target,
+        "target should grow after flushing packs: initial={initial_target}, final={final_target}"
+    );
+    assert!(
+        final_target <= 8192,
+        "target should not exceed max_pack_size: {final_target}"
+    );
+}
+
+#[test]
+fn tree_pack_flush_does_not_change_data_target() {
+    let mut repo = repo_with_small_packs(1024, 8192);
+
+    let target_before = repo.data_pack_target();
+
+    // Store a tree chunk large enough to trigger a tree pack flush.
+    let tree_data = vec![0xCDu8; 1200];
+    repo.store_chunk(&tree_data, Compression::None, PackType::Tree)
+        .unwrap();
+    repo.flush_packs().unwrap();
+
+    let target_after = repo.data_pack_target();
+    assert_eq!(
+        target_before, target_after,
+        "data pack target should not change after tree pack flush"
+    );
+}
+
+#[test]
+fn load_chunk_index_resets_session_counter() {
+    let mut repo = repo_with_small_packs(1024, 8192);
+
+    // With divisor=50, need >50 packs before target grows above min.
+    store_unique_chunks(&mut repo, 0, 60, PackType::Data);
+    assert!(repo.data_pack_target() > 1024);
+
+    // Save state to persist the index with current packs.
+    repo.mark_manifest_dirty();
+    repo.save_state().unwrap();
+
+    // Reload the index — session counter should reset to 0, so the target
+    // should be based only on persisted packs.
+    repo.load_chunk_index().unwrap();
+    let target_after_reload = repo.data_pack_target();
+
+    // Compute the expected target from the reloaded index's pack count.
+    let expected = crate::repo::pack::compute_data_pack_target(
+        repo.chunk_index().count_distinct_packs(),
+        1024,
+        8192,
+    );
+    assert_eq!(
+        target_after_reload, expected,
+        "after reload, target should equal compute_data_pack_target(persisted_packs)"
+    );
+}
+
+#[test]
+fn save_state_rebases_pack_counters() {
+    let mut repo = repo_with_small_packs(1024, 8192);
+
+    // First session: flush several packs.
+    store_unique_chunks(&mut repo, 0, 20, PackType::Data);
+    let target_before_save = repo.data_pack_target();
+    repo.mark_manifest_dirty();
+    repo.save_state().unwrap();
+
+    // Second session on the same Repository instance: flush more packs.
+    // Without rebasing, the session counter would double-count the first
+    // session's packs, inflating the target.
+    store_unique_chunks(&mut repo, 100, 20, PackType::Data);
+    let target_second_session = repo.data_pack_target();
+
+    assert!(
+        target_second_session >= target_before_save,
+        "target should not decrease: before_save={target_before_save}, second={target_second_session}"
+    );
+    assert!(
+        target_second_session <= 8192,
+        "target should not exceed max: {target_second_session}"
+    );
+
+    // Verify via reload: the target from a fresh index load should match
+    // what the reused instance computed.
+    repo.mark_manifest_dirty();
+    repo.save_state().unwrap();
+    repo.load_chunk_index().unwrap();
+    let target_after_reload = repo.data_pack_target();
+
+    // Allow a small delta because the reload computes from count_distinct_packs()
+    // which may differ slightly from our counter (tree packs, etc).
+    let diff = (target_second_session as i64 - target_after_reload as i64).unsigned_abs();
+    assert!(
+        diff <= target_after_reload as u64 / 4,
+        "reused instance target ({target_second_session}) diverged too far from \
+         reload target ({target_after_reload})"
+    );
+}
+

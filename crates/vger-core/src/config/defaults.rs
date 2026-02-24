@@ -26,12 +26,12 @@ pub(super) fn default_zstd_level() -> i32 {
     3
 }
 
-pub(super) fn default_min_pack_size() -> u32 {
+pub(crate) fn default_min_pack_size() -> u32 {
     32 * 1024 * 1024 // 32 MiB
 }
 
-pub(super) fn default_max_pack_size() -> u32 {
-    128 * 1024 * 1024 // 128 MiB
+pub(crate) fn default_max_pack_size() -> u32 {
+    192 * 1024 * 1024 // 192 MiB
 }
 
 pub(super) fn default_allow_insecure_http() -> bool {
