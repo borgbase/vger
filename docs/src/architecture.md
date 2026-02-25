@@ -117,6 +117,7 @@ The type tag identifies the object kind via the `ObjectType` enum:
 | 4 | ChunkIndex | Chunk-to-pack mapping |
 | 5 | PackHeader | Reserved legacy tag (current pack files have no trailing header object) |
 | 6 | FileCache | File-level cache (inode/mtime skip) |
+| 7 | PendingIndex | Transient crash-recovery journal |
 
 The type tag byte is always included in AAD (authenticated additional data). For identity-bound objects, AAD also includes a domain-separated object context, binding ciphertext to both object type and identity (for example, `ChunkData` to its `ChunkId`, `SnapshotMeta` to snapshot ID, and manifest/index to fixed context labels).
 
@@ -133,6 +134,7 @@ The type tag byte is always included in AAD (authenticated additional data). For
 |- manifest                  # Encrypted snapshot list
 |- index                     # Encrypted chunk index
 |- snapshots/<id>            # Encrypted snapshot metadata
+|- pending_index             # Transient journal for crash recovery (absent after clean backup)
 |- packs/<xx>/<pack-id>      # Pack files containing compressed+encrypted chunks (256 shard dirs)
 `- locks/                    # Advisory lock files
 ```
@@ -151,7 +153,7 @@ These files live under a per-repo local cache root. By default this is the platf
 
 All three index caches are validated against `manifest.index_generation`. A generation mismatch means "stale cache" and triggers safe fallback/rebuild paths.
 
-The same per-repo cache root is also used as the preferred temp location for mmap-backed data-pack assembly files.
+The same per-repo cache root is also used as the preferred temp location for intermediate files (e.g. cache rebuilds).
 
 ### Key Data Structures
 
@@ -237,10 +239,8 @@ Chunks are grouped into **pack files** (~32 MiB) instead of being stored as indi
 #### Data Packs vs Tree Packs
 
 Two separate `PackWriter` instances:
-- **Data packs** — file content chunks. Dynamic target size. Assembled in mmap-backed anonymous temp files by default (OS-paged memory behavior under pressure).
+- **Data packs** — file content chunks. Dynamic target size. Assembled in heap `Vec<u8>` buffers.
 - **Tree packs** — item-stream metadata. Fixed at `min(min_pack_size, 4 MiB)` and assembled in heap `Vec<u8>` buffers.
-
-If mmap temp-file allocation fails (or preferred temp location is low on space), data-pack assembly falls back to system temp, then to heap buffers.
 
 #### Dynamic Pack Sizing
 
@@ -250,26 +250,26 @@ Pack sizes grow with repository size. Config exposes floor and ceiling:
 repositories:
   - path: /backups/repo
     min_pack_size: 33554432     # 32 MiB (floor, default)
-    max_pack_size: 134217728    # 128 MiB (default)
+    max_pack_size: 201326592    # 192 MiB (default)
 ```
 
 Data pack sizing formula:
 ```text
-target = clamp(min_pack_size * sqrt(num_data_packs / 100), min_pack_size, max_pack_size)
+target = clamp(min_pack_size * sqrt(num_data_packs / 50), min_pack_size, max_pack_size)
 ```
 
 `max_pack_size` has a hard ceiling of **512 MiB**. Values above that are rejected at repository init/open.
 
 | Data packs in repo | Target pack size |
 |--------------------|------------------|
-| < 100              | 32 MiB (floor)   |
-| 1,000              | ~101 MiB         |
-| 10,000             | 128 MiB (default cap) |
-| 30,000+            | 128 MiB (default cap) |
+| < 50               | 32 MiB (floor)   |
+| 200                | 64 MiB           |
+| 800                | 128 MiB          |
+| 1,800+             | 192 MiB (default cap) |
 
 If you raise `max_pack_size`, target size can grow further, up to the 512 MiB hard ceiling.
 
-`num_data_packs` is computed at `open()` by counting distinct `pack_id` values in the ChunkIndex (zero extra I/O).
+`num_data_packs` is computed at `open()` by counting distinct `pack_id` values in the ChunkIndex (zero extra I/O). During a backup session, the target is recalculated after each data-pack flush, so the first large backup benefits from scaling immediately.
 
 ---
 
@@ -280,6 +280,7 @@ If you raise `max_pack_size`, target size can grow further, up to the 512 MiB ha
 ```text
 open repo (full index loaded once)
   → prune stale local file-cache entries
+  → recover pending_index if present (batch-verify packs via shard listing, promote into dedup structures)
   → enable tiered dedup mode (mmap cache + xor filter, fallback to dedup HashMap)
   → configure bounded upload concurrency + pipeline limits
   → walk sources with excludes + one_file_system + exclude_if_present
@@ -306,6 +307,13 @@ open repo (full index loaded once)
     → write dirty manifest/index only
     → rebuild local dedup/restore/full-index caches as needed
     → persist local file cache
+    → delete pending_index
+  → on VgerError::Interrupted (Ctrl-C):
+    → flush_on_abort(): seal partial packs, join upload threads, write final pending_index
+    → release advisory lock, exit code 130
+  → on soft file error (PermissionDenied / NotFound before commit):
+    → skip file, increment snapshot.stats.errors, continue
+    → exit code 3 (partial success) if any files were skipped
 ```
 
 ### Restore Pipeline
@@ -362,13 +370,21 @@ vger uses advisory locking to prevent concurrent mutating operations on the same
 
 When using a vger server, server-managed locks with TTL replace client-side advisory locks (see [Server Internals](server-internals.md)).
 
+### Signal Handling
+
+Two-stage signal handling applies to all commands:
+
+1. First SIGINT/SIGTERM sets a global shutdown flag; iterative loops (`backup`, `prune`, `compact`) check it and return `VgerError::Interrupted`
+2. Second signal restores the default handler (immediate kill)
+3. On backup abort: `flush_on_abort()` seals partial packs, joins upload threads, writes final `pending_index` for recovery
+4. Advisory lock is released before exit; CLI exits with code 130
+
 ### Daemon Mode
 
 `vger daemon` runs scheduled backup cycles as a foreground process (no cron dependency).
 
 - **Scheduling**: sleep-loop with configurable interval (`schedule.every` human-duration string, e.g. `"6h"`). Optional random jitter (`jitter_seconds`) spreads load across hosts.
 - **Cycle**: `backup → prune → compact → check` per repo, sequential. Shutdown flag checked between steps.
-- **Signal handling**: two-stage — first SIGTERM/SIGINT sets a shutdown flag (finishes current step, skips remaining); second signal kills immediately.
 - **Passphrase**: daemon validates at startup that all encrypted repos have a non-interactive passphrase source (`passcommand`, `passphrase`, or `VGER_PASSPHRASE` env). Cannot prompt interactively.
 
 Configuration:
@@ -390,6 +406,16 @@ Chunk refcounts track how many snapshots reference each chunk, driving the dedup
 4. **Compact** — rewrites packs to reclaim space from orphaned blobs
 
 This design means `delete` is fast (just index updates), while space reclamation is deferred to `compact`.
+
+### Crash Recovery
+
+If a backup is interrupted after packs have been flushed but before `save_state()` commits the manifest/index, those packs would be orphaned. The **pending index journal** prevents re-uploading their data on the next run:
+
+1. During backup, every 8 data-pack flushes, vger writes a `pending_index` blob to storage containing pack→chunk mappings for all flushed packs in this session
+2. On the next backup, if `pending_index` exists, packs are batch-verified by listing shard directories (avoiding per-pack HEAD requests on REST/S3 backends)
+3. Verified chunks are promoted into the dedup structures so subsequent dedup checks find them
+4. After a successful `save_state()`, the `pending_index` blob is deleted
+5. `flush_on_abort()` writes a final `pending_index` before exiting, maximizing recovery coverage
 
 ### Compact
 
@@ -464,7 +490,7 @@ limits:
 Deduplicating backup tools are often dominated by index memory and restore-planning overhead at large chunk counts. vger's implemented architecture addresses that class of bottlenecks with:
 
 - Tiered dedup lookups (session map + xor filter + mmap cache) instead of always materializing a full in-memory index during backup
-- mmap-backed data-pack assembly, so pack bytes are OS-paged instead of always heap-resident
+- Pending-index journal for crash recovery — interrupted backups resume without re-uploading flushed packs
 - Index-light restore planning (restore-cache-first, filtered-index fallback) for lower peak memory on restore
 - Explicitly bounded backup pipeline memory (`pipeline_buffer_mib`) and bounded in-flight uploads
 - Incremental index update paths that avoid rebuilding/uploading from a full in-memory index on every save
