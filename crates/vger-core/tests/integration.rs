@@ -32,7 +32,7 @@ fn init_test_environment() {
 fn init_local_repo(dir: &std::path::Path) -> Repository {
     init_test_environment();
     let storage = Box::new(LocalBackend::new(dir.to_str().unwrap()).unwrap());
-    Repository::init(
+    let mut repo = Repository::init(
         storage,
         EncryptionMode::None,
         ChunkerConfig::default(),
@@ -40,7 +40,9 @@ fn init_local_repo(dir: &std::path::Path) -> Repository {
         None,
         None,
     )
-    .unwrap()
+    .unwrap();
+    repo.begin_write_session().unwrap();
+    repo
 }
 
 fn open_local_repo(dir: &std::path::Path) -> Repository {

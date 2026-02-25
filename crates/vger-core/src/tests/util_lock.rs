@@ -170,7 +170,8 @@ fn with_repo_lock_flushes_pending_state_on_action_error() {
     .unwrap();
 
     let result: Result<()> = with_repo_lock(&mut repo, |repo| {
-        // Store enough to trigger a pack flush, then fail.
+        // Begin a write session, store enough to trigger a pack flush, then fail.
+        repo.begin_write_session()?;
         repo.store_chunk(&vec![0xABu8; 300], Compression::None, PackType::Data)?;
         Err(VgerError::Other("simulated backup failure".into()))
     });

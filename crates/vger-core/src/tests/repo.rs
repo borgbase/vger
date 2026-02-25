@@ -163,7 +163,7 @@ fn read_chunk_at_roundtrip() {
 fn repo_on_recording_backend() -> (Repository, PutLog) {
     crate::testutil::init_test_environment();
     let (backend, log) = RecordingBackend::new();
-    let repo = Repository::init(
+    let mut repo = Repository::init(
         Box::new(backend),
         EncryptionMode::None,
         ChunkerConfig::default(),
@@ -172,6 +172,8 @@ fn repo_on_recording_backend() -> (Repository, PutLog) {
         None,
     )
     .expect("failed to init test repo");
+    repo.begin_write_session()
+        .expect("failed to begin write session");
     (repo, log)
 }
 
@@ -250,7 +252,8 @@ fn dedup_mode_empty_delta_restores_index_without_write() {
     assert_eq!(repo.chunk_index().len(), 1);
     let entry_before = *repo.chunk_index().get(&id_a).unwrap();
 
-    // Enable dedup mode (drops full index)
+    // Start a new write session and enable dedup mode (drops full index)
+    repo.begin_write_session().unwrap();
     repo.enable_dedup_mode();
     assert!(
         repo.chunk_index().is_empty(),
@@ -290,7 +293,8 @@ fn dedup_mode_with_delta_writes_index() {
     repo.save_state().unwrap();
     assert_eq!(repo.chunk_index().len(), 1);
 
-    // Enable dedup mode
+    // Start a new write session and enable dedup mode
+    repo.begin_write_session().unwrap();
     repo.enable_dedup_mode();
     log.clear();
 
@@ -377,7 +381,8 @@ fn deferred_hydration_survives_file_cache_save_error() {
     repo.save_state().unwrap();
     assert_eq!(repo.chunk_index().len(), 1);
 
-    // Enable dedup mode (drops full index, activates deferred hydration path)
+    // Start a new write session and enable dedup mode (drops full index, activates deferred hydration path)
+    repo.begin_write_session().unwrap();
     repo.enable_dedup_mode();
     assert!(repo.chunk_index().is_empty());
 
@@ -518,6 +523,7 @@ fn flush_on_abort_writes_pending_index() {
         None,
     )
     .unwrap();
+    repo.begin_write_session().unwrap();
 
     // Store a chunk large enough to exceed the 256-byte pack target.
     // After encryption envelope overhead, this will trigger flush_writer_async.
@@ -654,6 +660,7 @@ fn flush_on_abort_survives_pack_upload_failure() {
         None,
     )
     .unwrap();
+    repo.begin_write_session().unwrap();
 
     // Store a chunk large enough to trigger flush_writer_async.
     // The background upload thread will fail (FailPackUploadsBackend rejects packs/).
@@ -728,7 +735,7 @@ fn repo_with_small_packs(min_pack: u32, max_pack: u32) -> Repository {
         max_pack_size: max_pack,
         retry: RetryConfig::default(),
     };
-    Repository::init(
+    let mut repo = Repository::init(
         Box::new(MemoryBackend::new()),
         EncryptionMode::None,
         ChunkerConfig::default(),
@@ -736,7 +743,9 @@ fn repo_with_small_packs(min_pack: u32, max_pack: u32) -> Repository {
         Some(&small_config),
         None,
     )
-    .unwrap()
+    .unwrap();
+    repo.begin_write_session().unwrap();
+    repo
 }
 
 /// Store `count` unique ~1200-byte chunks into `repo`, each with a distinct
@@ -809,6 +818,7 @@ fn load_chunk_index_resets_session_counter() {
     // Reload the index — session counter should reset to 0, so the target
     // should be based only on persisted packs.
     repo.load_chunk_index().unwrap();
+    repo.begin_write_session().unwrap();
     let target_after_reload = repo.data_pack_target();
 
     // Compute the expected target from the reloaded index's pack count.
@@ -836,6 +846,7 @@ fn save_state_rebases_pack_counters() {
     // Second session on the same Repository instance: flush more packs.
     // Without rebasing, the session counter would double-count the first
     // session's packs, inflating the target.
+    repo.begin_write_session().unwrap();
     store_unique_chunks(&mut repo, 100, 20, PackType::Data);
     let target_second_session = repo.data_pack_target();
 
@@ -853,10 +864,12 @@ fn save_state_rebases_pack_counters() {
     repo.mark_manifest_dirty();
     repo.save_state().unwrap();
     repo.load_chunk_index().unwrap();
+    repo.begin_write_session().unwrap();
     let target_after_reload = repo.data_pack_target();
 
-    // Allow a small delta because the reload computes from count_distinct_packs()
-    // which may differ slightly from our counter (tree packs, etc).
+    // The reload path uses count_distinct_packs() which includes tree packs,
+    // matching begin_write_session(). Both paths see the same (slightly inflated)
+    // count, so the targets should be close.
     let diff = (target_second_session as i64 - target_after_reload as i64).unsigned_abs();
     assert!(
         diff <= target_after_reload as u64 / 4,
@@ -865,3 +878,45 @@ fn save_state_rebases_pack_counters() {
     );
 }
 
+/// Verify that tree packs in the persisted index are included in the initial
+/// data pack target calculation. This is a known limitation: the persisted
+/// `ChunkIndex` does not distinguish data packs from tree packs, so
+/// `count_distinct_packs()` counts both. The effect is negligible because
+/// tree packs are a small fraction of total packs (~1-2 per backup) and the
+/// sqrt scaling dampens the inflation further.
+#[test]
+fn initial_session_seed_includes_tree_packs() {
+    let mut repo = repo_with_small_packs(1024, 8192);
+
+    // Flush several data packs.
+    store_unique_chunks(&mut repo, 0, 10, PackType::Data);
+
+    // Flush a tree pack.
+    let tree_data = vec![0xCDu8; 1200];
+    repo.store_chunk(&tree_data, Compression::None, PackType::Tree)
+        .unwrap();
+
+    // Persist everything and consume the session.
+    repo.mark_manifest_dirty();
+    repo.save_state().unwrap();
+
+    // Count all distinct packs in the index (data + tree).
+    let total_packs = repo.chunk_index().count_distinct_packs();
+    assert!(
+        total_packs > 10,
+        "should have data packs + at least 1 tree pack"
+    );
+
+    // Start a fresh session — initial seed uses count_distinct_packs().
+    repo.begin_write_session().unwrap();
+    let target = repo.data_pack_target();
+
+    // The target should match compute_data_pack_target(total_packs, ...) —
+    // i.e. it includes tree packs in the count. This documents the current
+    // behavior rather than asserting the ideal (data-only) behavior.
+    let expected = crate::repo::pack::compute_data_pack_target(total_packs, 1024, 8192);
+    assert_eq!(
+        target, expected,
+        "initial session target should be based on all packs (data + tree)"
+    );
+}

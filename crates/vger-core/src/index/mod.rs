@@ -123,8 +123,6 @@ impl ChunkIndex {
     }
 
     /// Count distinct pack IDs across all entries.
-    // TODO: This counts both data and tree packs. For data pack target sizing,
-    // callers should ideally filter to data packs only.
     pub fn count_distinct_packs(&self) -> usize {
         let packs: std::collections::HashSet<PackId> =
             self.entries.values().map(|e| e.pack_id).collect();

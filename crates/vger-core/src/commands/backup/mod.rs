@@ -219,6 +219,9 @@ pub fn run_with_progress(
             return Err(VgerError::SnapshotAlreadyExists(snapshot_name.into()));
         }
 
+        // Activate write session before any write-path operations.
+        repo.begin_write_session()?;
+
         // Recover chunk→pack mappings from a previous interrupted session.
         // Must happen before enable_tiered_dedup_mode() which drops the full
         // chunk index — recovered entries go into a separate map.

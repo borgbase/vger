@@ -105,7 +105,7 @@ impl StorageBackend for MemoryBackend {
 pub fn test_repo_plaintext() -> Repository {
     init_test_environment();
     let storage = Box::new(MemoryBackend::new());
-    Repository::init(
+    let mut repo = Repository::init(
         storage,
         EncryptionMode::None,
         ChunkerConfig::default(),
@@ -113,7 +113,10 @@ pub fn test_repo_plaintext() -> Repository {
         None,
         None,
     )
-    .expect("failed to init test repo")
+    .expect("failed to init test repo");
+    repo.begin_write_session()
+        .expect("failed to begin write session");
+    repo
 }
 
 /// Fixed chunk ID key for deterministic tests.
