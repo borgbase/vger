@@ -6943,7 +6943,7 @@ checksum = "0b928f33d975fc6ad9f86c8f283853ad26bdd5b10b7f1542aa2fa15e2289105a"
 
 [[package]]
 name = "vger-cli"
-version = "0.8.1"
+version = "0.9.0"
 dependencies = [
  "chrono",
  "clap",
@@ -6965,7 +6965,7 @@ dependencies = [
 
 [[package]]
 name = "vger-core"
-version = "0.8.1"
+version = "0.9.0"
 dependencies = [
  "blake2",
  "bytes",
@@ -7008,7 +7008,7 @@ dependencies = [
 
 [[package]]
 name = "vger-crypto"
-version = "0.8.1"
+version = "0.9.0"
 dependencies = [
  "aes-gcm",
  "argon2",
@@ -7024,7 +7024,7 @@ dependencies = [
 
 [[package]]
 name = "vger-gui"
-version = "0.8.1"
+version = "0.9.0"
 dependencies = [
  "chrono",
  "crossbeam-channel",
@@ -7042,7 +7042,7 @@ dependencies = [
 
 [[package]]
 name = "vger-protocol"
-version = "0.8.1"
+version = "0.9.0"
 dependencies = [
  "serde",
  "serde_json",
@@ -7050,7 +7050,7 @@ dependencies = [
 
 [[package]]
 name = "vger-server"
-version = "0.8.1"
+version = "0.9.0"
 dependencies = [
  "axum",
  "blake2",
@@ -7074,7 +7074,7 @@ dependencies = [
 
 [[package]]
 name = "vger-storage"
-version = "0.8.1"
+version = "0.9.0"
 dependencies = [
  "blake2",
  "hex",
@@ -7096,7 +7096,7 @@ dependencies = [
 
 [[package]]
 name = "vger-types"
-version = "0.8.1"
+version = "0.9.0"
 dependencies = [
  "blake2",
  "hex",
