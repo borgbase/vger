@@ -7,11 +7,11 @@
 	<key>CFBundleDisplayName</key>
 	<string>V'ger Backup</string>
 	<key>CFBundleIdentifier</key>
-	<string>com.vger.backup-gui</string>
+	<string>com.borgbase.vger</string>
 	<key>CFBundleVersion</key>
-	<string>0.8.0</string>
+	<string>0.9.0</string>
 	<key>CFBundleShortVersionString</key>
-	<string>0.8.0</string>
+	<string>0.9.0</string>
 	<key>CFBundleExecutable</key>
 	<string>vger-gui</string>
 	<key>CFBundleIconFile</key>

@@ -15,7 +15,7 @@ Run `make pre-commit` first to catch formatting, clippy, and test issues before 
 
 ### 2. Bump version
 
-Update the `version` field in **all** workspace crates:
+Update the `version` field in **all** workspace crates and the macOS Info.plist:
 
 - `crates/vger-types/Cargo.toml`
 - `crates/vger-crypto/Cargo.toml`
@@ -25,6 +25,7 @@ Update the `version` field in **all** workspace crates:
 - `crates/vger-cli/Cargo.toml`
 - `crates/vger-server/Cargo.toml`
 - `crates/vger-gui/Cargo.toml`
+- `crates/vger-gui/macos/Info.plist` (update both `CFBundleVersion` and `CFBundleShortVersionString`)
 
 Run `cargo check` to regenerate `Cargo.lock` with the new versions.
 
