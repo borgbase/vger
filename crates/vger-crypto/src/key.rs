@@ -417,6 +417,46 @@ mod tests {
     }
 
     #[test]
+    fn generate_produces_nonzero_keys() {
+        let key = MasterKey::generate();
+        assert_ne!(key.encryption_key, [0u8; 32]);
+        assert_ne!(key.chunk_id_key, [0u8; 32]);
+    }
+
+    #[test]
+    fn generate_produces_different_keys_each_time() {
+        let k1 = MasterKey::generate();
+        let k2 = MasterKey::generate();
+        assert_ne!(k1.encryption_key, k2.encryption_key);
+        assert_ne!(k1.chunk_id_key, k2.chunk_id_key);
+    }
+
+    #[test]
+    fn encryption_key_and_chunk_id_key_are_different() {
+        let key = MasterKey::generate();
+        assert_ne!(key.encryption_key, key.chunk_id_key);
+    }
+
+    #[test]
+    fn wrong_passphrase_fails_decrypt() {
+        let key = MasterKey::generate();
+        let encrypted = key.to_encrypted("correct").unwrap();
+        let result = MasterKey::from_encrypted(&encrypted, "wrong");
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn encrypted_key_serde_roundtrip() {
+        let key = MasterKey::generate();
+        let encrypted = key.to_encrypted("pass").unwrap();
+        let serialized = rmp_serde::to_vec(&encrypted).unwrap();
+        let deserialized: EncryptedKey = rmp_serde::from_slice(&serialized).unwrap();
+        let recovered = MasterKey::from_encrypted(&deserialized, "pass").unwrap();
+        assert_eq!(key.encryption_key, recovered.encryption_key);
+        assert_eq!(key.chunk_id_key, recovered.chunk_id_key);
+    }
+
+    #[test]
     fn test_aad_none_compat() {
         // Simulate a key encrypted with no AAD (pre-AAD repos)
         let key = MasterKey::generate();

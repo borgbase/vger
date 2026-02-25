@@ -7,7 +7,9 @@
       "Bash(test:*)",
       "Bash(mdbook build:*)",
       "Bash(bash:*)",
-      "Bash(make:*)"
+      "Bash(make:*)",
+      "Bash(fi)",
+      "Bash(done)"
     ]
   }
 }

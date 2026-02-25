@@ -1,10 +1,7 @@
 mod app_ops;
 mod check_command;
-mod chunk_id;
 mod chunker;
 mod compact;
-mod compress;
-mod crypto;
 mod delete;
 mod delete_repo;
 mod format;
@@ -12,7 +9,6 @@ mod helpers;
 mod index;
 mod info;
 mod item;
-mod key;
 mod lock;
 mod manifest;
 mod passphrase;

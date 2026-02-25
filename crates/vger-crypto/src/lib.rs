@@ -82,3 +82,43 @@ impl CryptoEngine for PlaintextEngine {
         &self.chunk_id_key
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn plaintext_encrypt_is_identity() {
+        let key = [0xAA; 32];
+        let engine = PlaintextEngine::new(&key);
+        let data = b"hello plaintext";
+        let encrypted = engine.encrypt(data, b"aad").unwrap();
+        assert_eq!(encrypted, data);
+    }
+
+    #[test]
+    fn plaintext_decrypt_is_identity() {
+        let key = [0xAA; 32];
+        let engine = PlaintextEngine::new(&key);
+        let data = b"hello plaintext";
+        let decrypted = engine.decrypt(data, b"aad").unwrap();
+        assert_eq!(decrypted, data);
+    }
+
+    #[test]
+    fn plaintext_chunk_id_key() {
+        let key = [0xBB; 32];
+        let engine = PlaintextEngine::new(&key);
+        assert_eq!(engine.chunk_id_key(), &key);
+    }
+
+    #[test]
+    fn plaintext_roundtrip_ignores_aad() {
+        let key = [0xCC; 32];
+        let engine = PlaintextEngine::new(&key);
+        let data = b"test data";
+        let encrypted = engine.encrypt(data, b"aad1").unwrap();
+        let decrypted = engine.decrypt(&encrypted, b"different_aad").unwrap();
+        assert_eq!(decrypted, data);
+    }
+}
