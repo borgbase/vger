@@ -379,7 +379,7 @@ impl FileTree {
 }
 
 slint::slint! {
-    import { VerticalBox, HorizontalBox, Button, LineEdit, ScrollView, TabWidget, ComboBox, StandardTableView, ListView, CheckBox, Palette, GroupBox } from "std-widgets.slint";
+    import { VerticalBox, HorizontalBox, Button, LineEdit, ScrollView, TabWidget, ComboBox, StandardTableView, ListView, CheckBox, Palette, GroupBox, TextEdit } from "std-widgets.slint";
 
     struct RepoInfo {
         name: string,
@@ -683,8 +683,17 @@ slint::slint! {
         in-out property <string> snapshots_repo_combo_value;
         in-out property <[[StandardListViewItem]]> snapshot_rows: [];
 
+        // Editor tab state
+        in-out property <string> editor_text: "";
+        in-out property <string> editor_baseline: "";
+        in-out property <string> editor_status: "";
+        in-out property <bool> editor_dirty: false;
+        in-out property <string> editor_font_family: "";
+
         callback open_config_clicked();
         callback switch_config_clicked();
+        callback save_and_apply_clicked();
+        callback discard_clicked();
         callback backup_all_clicked();
         callback find_files_clicked();
         callback reload_config_clicked();
@@ -732,7 +741,7 @@ slint::slint! {
                     Rectangle { horizontal-stretch: 1; }
                     Button {
                         text: "Reload";
-                        enabled: !root.operation_busy;
+                        enabled: !root.operation_busy && !root.editor_dirty;
                         clicked => { root.reload_config_clicked(); }
                     }
                     Button {
@@ -920,6 +929,51 @@ slint::slint! {
                         }
                     }
                 }
+
+                Tab {
+                    title: "Edit";
+                    VerticalBox {
+                        padding: 8px;
+                        spacing: 8px;
+                        Text {
+                            text: "You can edit V'Ger's YAML config below. This will be saved to disk and can also be used by the command line client. We plan on adding a prettier interface for editing the configuration in the future.";
+                            wrap: word-wrap;
+                            color: #888888;
+                            font-size: 12px;
+                        }
+                        TextEdit {
+                            vertical-stretch: 1;
+                            text <=> root.editor_text;
+                            font-size: 13px;
+                            font-family: root.editor_font_family;
+                            wrap: no-wrap;
+                            edited(new_text) => {
+                                root.editor_dirty = (new_text != root.editor_baseline);
+                                root.editor_status = "";
+                            }
+                        }
+                        if root.editor_status != "": Text {
+                            text: root.editor_status;
+                            color: #cc0000;
+                            wrap: word-wrap;
+                        }
+                        HorizontalBox {
+                            spacing: 8px;
+                            Rectangle { horizontal-stretch: 1; }
+                            Button {
+                                text: "Discard";
+                                enabled: root.editor_dirty;
+                                clicked => { root.discard_clicked(); }
+                            }
+                            Button {
+                                text: "Save and Apply";
+                                primary: true;
+                                enabled: root.editor_dirty && !root.operation_busy;
+                                clicked => { root.save_and_apply_clicked(); }
+                            }
+                        }
+                    }
+                }
             }
             }
 
@@ -987,6 +1041,9 @@ enum AppCommand {
     OpenConfigFile,
     ReloadConfig,
     SwitchConfig,
+    SaveAndApplyConfig {
+        yaml_text: String,
+    },
     CancelOperation,
     ShowWindow,
     Quit,
@@ -1062,6 +1119,8 @@ enum UiEvent {
     FindResultsData {
         rows: Vec<FindResultRow>,
     },
+    ConfigText(String),
+    ConfigSaveError(String),
     OperationStarted,
     OperationFinished,
     Quit,
@@ -1435,8 +1494,23 @@ fn log_backup_report(
     }
 }
 
+/// Load and fully validate a config file: parse YAML, check non-empty, validate schedule.
+/// Returns the parsed repos and schedule interval, or a human-readable error string.
+fn validate_config(
+    config_path: &std::path::Path,
+) -> Result<(Vec<config::ResolvedRepo>, Duration), String> {
+    let repos = app::load_runtime_config_from_path(config_path).map_err(|e| format!("{e}"))?;
+    if repos.is_empty() {
+        return Err("Config is empty (no repositories defined).".into());
+    }
+    let interval = vger_core::app::scheduler::schedule_interval(&repos[0].config.schedule)
+        .map_err(|e| format!("Invalid schedule.every: {e}"))?;
+    Ok((repos, interval))
+}
+
 /// Apply a (possibly new) config file: load, validate, update runtime state, and notify the UI.
 /// When `update_source` is true the runtime source path is switched to `config_path`.
+/// Returns `true` on success, `false` on failure.
 #[allow(clippy::too_many_arguments)]
 fn apply_config(
     config_path: PathBuf,
@@ -1448,65 +1522,56 @@ fn apply_config(
     schedule_paused: bool,
     ui_tx: &Sender<UiEvent>,
     app_tx: &Sender<AppCommand>,
-) {
-    match app::load_runtime_config_from_path(&config_path) {
-        Ok(repos) => {
-            if repos.is_empty() {
-                send_log(ui_tx, "Loaded config is empty; keeping previous state.");
-                return;
-            }
+) -> bool {
+    let (repos, interval) = match validate_config(&config_path) {
+        Ok(v) => v,
+        Err(msg) => {
+            send_log(ui_tx, format!("{msg} Keeping previous config."));
+            return false;
+        }
+    };
+    let schedule = repos[0].config.schedule.clone();
 
-            let schedule = repos[0].config.schedule.clone();
-            let interval = match vger_core::app::scheduler::schedule_interval(&schedule) {
-                Ok(v) => v,
-                Err(e) => {
-                    send_log(
-                        ui_tx,
-                        format!(
-                            "Config rejected due to invalid schedule.every: {e}. Keeping previous config."
-                        ),
-                    );
-                    return;
-                }
-            };
+    if update_source {
+        use vger_core::config::ConfigSource;
+        runtime.source = ConfigSource::SearchOrder {
+            path: config_path.clone(),
+            level: "user",
+        };
+    }
+    runtime.repos = repos;
+    passphrases.clear();
 
-            if update_source {
-                use vger_core::config::ConfigSource;
-                runtime.source = ConfigSource::SearchOrder {
-                    path: config_path.clone(),
-                    level: "user",
-                };
-            }
-            runtime.repos = repos;
-            passphrases.clear();
+    if let Ok(mut state) = scheduler.lock() {
+        state.enabled = schedule.enabled;
+        state.paused = schedule_paused;
+        state.every = interval;
+        state.jitter_seconds = schedule.jitter_seconds;
+        state.next_run = Some(Instant::now() + interval);
+    }
 
-            if let Ok(mut state) = scheduler.lock() {
-                state.enabled = schedule.enabled;
-                state.paused = schedule_paused;
-                state.every = interval;
-                state.jitter_seconds = schedule.jitter_seconds;
-                state.next_run = Some(Instant::now() + interval);
-            }
+    let canonical = std::fs::canonicalize(&config_path).unwrap_or_else(|_| config_path.clone());
+    *config_display_path = canonical.clone();
 
-            let canonical =
-                std::fs::canonicalize(&config_path).unwrap_or_else(|_| config_path.clone());
-            *config_display_path = canonical.clone();
+    let _ = ui_tx.send(UiEvent::ConfigInfo {
+        path: canonical.display().to_string(),
+        schedule: schedule_description(&schedule, schedule_paused),
+    });
+    send_structured_data(ui_tx, &runtime.repos);
+    let _ = app_tx.send(AppCommand::FetchAllRepoInfo);
+    send_log(ui_tx, "Configuration reloaded.");
 
-            let _ = ui_tx.send(UiEvent::ConfigInfo {
-                path: canonical.display().to_string(),
-                schedule: schedule_description(&schedule, schedule_paused),
-            });
-            send_structured_data(ui_tx, &runtime.repos);
-            let _ = app_tx.send(AppCommand::FetchAllRepoInfo);
-            send_log(ui_tx, "Configuration reloaded.");
+    // Send raw config text to populate the editor tab
+    match std::fs::read_to_string(&canonical) {
+        Ok(text) => {
+            let _ = ui_tx.send(UiEvent::ConfigText(text));
         }
         Err(e) => {
-            send_log(
-                ui_tx,
-                format!("Configuration load failed; keeping previous config: {e}"),
-            );
+            send_log(ui_tx, format!("Could not read config file for editor: {e}"));
         }
     }
+
+    true
 }
 
 // ── Worker thread ──
@@ -1544,6 +1609,11 @@ fn run_worker(
     });
 
     send_structured_data(&ui_tx, &runtime.repos);
+
+    // Populate the editor tab with the current config file contents
+    if let Ok(text) = std::fs::read_to_string(&config_display_path) {
+        let _ = ui_tx.send(UiEvent::ConfigText(text));
+    }
 
     // Auto-fetch repo info at startup
     let _ = app_tx.send(AppCommand::FetchAllRepoInfo);
@@ -2321,6 +2391,46 @@ fn run_worker(
                     );
                 }
             }
+            AppCommand::SaveAndApplyConfig { yaml_text } => {
+                let config_path = config_display_path.clone();
+                let tmp_path = config_path.with_extension("yaml.tmp");
+                if let Err(e) = std::fs::write(&tmp_path, &yaml_text) {
+                    let _ = ui_tx.send(UiEvent::ConfigSaveError(format!("Write failed: {e}")));
+                    continue;
+                }
+
+                if let Err(msg) = validate_config(&tmp_path) {
+                    let _ = std::fs::remove_file(&tmp_path);
+                    let _ = ui_tx.send(UiEvent::ConfigSaveError(msg));
+                    continue;
+                }
+
+                if let Err(e) = std::fs::rename(&tmp_path, &config_path) {
+                    let _ = std::fs::remove_file(&tmp_path);
+                    let _ = ui_tx.send(UiEvent::ConfigSaveError(format!("Rename failed: {e}")));
+                    continue;
+                }
+
+                // apply_config re-runs validate_config internally, which is
+                // redundant but harmless — it keeps the function self-contained.
+                if apply_config(
+                    config_path,
+                    false,
+                    &mut runtime,
+                    &mut config_display_path,
+                    &mut passphrases,
+                    &scheduler,
+                    schedule_paused,
+                    &ui_tx,
+                    &app_tx,
+                ) {
+                    send_log(&ui_tx, "Configuration saved and applied.");
+                } else {
+                    let _ = ui_tx.send(UiEvent::ConfigSaveError(
+                        "Config saved to disk but failed to apply. Check log for details.".into(),
+                    ));
+                }
+            }
             AppCommand::CancelOperation => {
                 cancel_requested.store(true, Ordering::SeqCst);
                 send_log(
@@ -2541,6 +2651,16 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
     ui.set_config_path("(loading...)".into());
     ui.set_schedule_text("(loading...)".into());
+    ui.set_editor_font_family(
+        if cfg!(target_os = "macos") {
+            "Menlo"
+        } else if cfg!(target_os = "windows") {
+            "Consolas"
+        } else {
+            "DejaVu Sans Mono"
+        }
+        .into(),
+    );
     ui.set_status_text("Idle".into());
 
     let restore_win = RestoreWindow::new()?;
@@ -2702,6 +2822,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                             fw.set_status_text(format!("{count} results found.").into());
                         }
                     }
+                    UiEvent::ConfigText(text) => {
+                        ui.set_editor_baseline(text.clone().into());
+                        ui.set_editor_text(text.into());
+                        ui.set_editor_dirty(false);
+                        ui.set_editor_status(SharedString::default());
+                    }
+                    UiEvent::ConfigSaveError(message) => {
+                        ui.set_editor_status(message.into());
+                    }
                     UiEvent::OperationStarted => {
                         ui.set_operation_busy(true);
                     }
@@ -2732,8 +2861,43 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     });
 
     let tx = app_tx.clone();
+    let ui_weak = ui.as_weak();
     ui.on_switch_config_clicked(move || {
+        if let Some(u) = ui_weak.upgrade() {
+            if u.get_editor_dirty() {
+                let proceed = tinyfiledialogs::message_box_yes_no(
+                    "Unsaved changes",
+                    "You have unsaved changes in the editor. Discard them and switch config?",
+                    tinyfiledialogs::MessageBoxIcon::Warning,
+                    tinyfiledialogs::YesNo::No,
+                );
+                if proceed == tinyfiledialogs::YesNo::No {
+                    return;
+                }
+            }
+        }
         let _ = tx.send(AppCommand::SwitchConfig);
+    });
+
+    // Save and Apply — send editor text to worker for validation + save
+    let tx = app_tx.clone();
+    let ui_weak = ui.as_weak();
+    ui.on_save_and_apply_clicked(move || {
+        if let Some(u) = ui_weak.upgrade() {
+            let yaml = u.get_editor_text().to_string();
+            let _ = tx.send(AppCommand::SaveAndApplyConfig { yaml_text: yaml });
+        }
+    });
+
+    // Discard — UI-local, no worker round-trip
+    let ui_weak = ui.as_weak();
+    ui.on_discard_clicked(move || {
+        if let Some(u) = ui_weak.upgrade() {
+            let baseline = u.get_editor_baseline();
+            u.set_editor_text(baseline);
+            u.set_editor_dirty(false);
+            u.set_editor_status(SharedString::default());
+        }
     });
 
     let tx = app_tx.clone();
