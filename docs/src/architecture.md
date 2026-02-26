@@ -134,7 +134,8 @@ The type tag byte is always included in AAD (authenticated additional data). For
 |- manifest                  # Encrypted snapshot list
 |- index                     # Encrypted chunk index
 |- snapshots/<id>            # Encrypted snapshot metadata
-|- pending_index             # Transient journal for crash recovery (absent after clean backup)
+|- sessions/<id>.json        # Session presence markers (concurrent backups)
+|- sessions/<id>.index       # Per-session crash-recovery journals (absent after clean backup)
 |- packs/<xx>/<pack-id>      # Pack files containing compressed+encrypted chunks (256 shard dirs)
 `- locks/                    # Advisory lock files
 ```
@@ -277,10 +278,17 @@ If you raise `max_pack_size`, target size can grow further, up to the 512 MiB ha
 
 ### Backup Pipeline
 
+The backup runs in two phases so multiple clients can upload concurrently (see [Concurrent Multi-Client Backups](#concurrent-multi-client-backups)).
+
 ```text
+── Phase 1: Upload (no exclusive lock) ──
+
+generate session_id (128-bit random hex)
+register_session() → write sessions/<session_id>.json, probe for active lock
 open repo (full index loaded once)
+begin_write_session(session_id) → journal key = sessions/<session_id>.index
   → prune stale local file-cache entries
-  → recover pending_index if present (batch-verify packs via shard listing, promote into dedup structures)
+  → recover own sessions/<session_id>.index if present (batch-verify packs, promote into dedup structures)
   → enable tiered dedup mode (mmap cache + xor filter, fallback to dedup HashMap)
   → configure bounded upload concurrency + pipeline limits
   → walk sources with excludes + one_file_system + exclude_if_present
@@ -299,18 +307,38 @@ open repo (full index loaded once)
         → ByteBudget enforces pipeline_buffer_mib as a hard in-flight memory cap
       → sequential fallback path (pipeline_depth == 0)
   → serialize items incrementally into item-stream chunks (tree packs)
-  → write SnapshotMeta
-  → mutate manifest
-  → save_state()
-    → flush packs/pending uploads (pack flush triggers: target size, 10,000 blobs, or 300s age)
-    → if dedup/tiered mode: apply IndexDelta (fast path = incremental full-index-cache merge; slow path = reload full index + merge)
-    → write dirty manifest/index only
-    → rebuild local dedup/restore/full-index caches as needed
-    → persist local file cache
-    → delete pending_index
+  → write SnapshotMeta at snapshots/<id>
+
+── Phase 2: Commit (exclusive lock, brief) ──
+
+acquire_lock_with_retry(10 attempts, 500ms base, exponential backoff + jitter)
+commit_concurrent_session():
+  → flush packs/pending uploads (pack flush triggers: target size, 10,000 blobs, or 300s age)
+  → record T0 generation from in-memory manifest
+  → reload fresh manifest from storage
+  → check snapshot name uniqueness against fresh manifest
+  → fast path (t0_generation == fresh manifest.index_generation):
+      → verify_delta_packs (confirm new pack files exist on storage)
+      → try_incremental_index_update (mmap cache merge)
+      → on cache miss: reload full index + apply delta
+  → slow path (generation mismatch — another client committed since T0):
+      → reload full index from storage
+      → delta.reconcile(fresh_index): new_entries already present → refcount bumps;
+        missing bump targets → Err(StaleChunksDuringCommit)
+      → verify_delta_packs on reconciled delta
+      → apply reconciled delta to fresh index
+  → persist index first, then manifest (index-first ordering)
+  → rebuild local dedup/restore/full-index caches as needed
+  → persist local file cache
+deregister_session() → delete sessions/<session_id>.json (while holding lock)
+release_lock()
+clear sessions/<session_id>.index
+
+── Error Paths ──
+
   → on VgerError::Interrupted (Ctrl-C):
-    → flush_on_abort(): seal partial packs, join upload threads, write final pending_index
-    → release advisory lock, exit code 130
+    → flush_on_abort(): seal partial packs, join upload threads, write final sessions/<id>.index
+    → deregister_session(), release advisory lock, exit code 130
   → on soft file error (PermissionDenied / NotFound before commit):
     → skip file, increment snapshot.stats.errors, continue
     → exit code 3 (partial success) if any files were skipped
@@ -357,16 +385,36 @@ When the mmap restore cache is valid, item-stream chunk lookups can avoid loadin
 
 ### Locking
 
-vger uses advisory locking to prevent concurrent mutating operations on the same repository.
+vger uses a two-tier locking model to allow concurrent backup uploads while serializing commits and maintenance.
+
+#### Session Markers (shared, non-exclusive)
+
+During the upload phase of a backup, a lightweight JSON marker is written to `sessions/<session_id>.json`. Multiple backup clients can coexist in this tier simultaneously — session markers do not block each other.
+
+Each marker contains: hostname, PID, `registered_at`, and `last_refresh`. On registration, the client probes for an active advisory lock (3 retries, 2 s base delay, exponential backoff + 25 % jitter). If the lock is held (maintenance in progress), the session marker is deleted and the backup aborts with `Locked`.
+
+Session markers are refreshed approximately every 15 minutes (`maybe_refresh_session()` called from the upload pipeline). Markers older than 72 hours are treated as stale.
+
+#### Advisory Lock (exclusive)
 
 - Preferred path: backend-native lock APIs (`acquire_advisory_lock` / `release_advisory_lock`) when the backend supports them (for example, vger-server)
 - Fallback path: lock files at `locks/<timestamp>-<uuid>.json`
 - Each lock contains: hostname, PID, and acquisition timestamp
 - **Oldest-key-wins**: after writing its lock, a client lists all locks — if its key isn't lexicographically first, it deletes its own lock and returns an error
 - **Stale cleanup**: locks older than 6 hours are automatically removed before each acquisition attempt
-- **Commands that lock**: `backup`, `delete`, `prune`, `compact`
-- **Read-only commands** (no lock): `list`, `restore`, `check`, `info`
 - **Recovery**: `vger break-lock` forcibly removes stale backend/object locks when interrupted processes leave lock conflicts
+
+The advisory lock is used for:
+- **Backup commit phase**: acquired with `acquire_lock_with_retry` (10 attempts, 500 ms base delay, exponential backoff + 25 % jitter). Held only for the brief commit — typically seconds.
+- **Maintenance commands** (`delete`, `prune`, `compact`): acquired via `with_maintenance_lock()`, which additionally cleans stale sessions (72 h), removes companion `.index` journal files and orphaned `.index` files, then checks for remaining active sessions. If any non-stale sessions exist, the lock is released and `VgerError::ActiveSessions` is returned — this prevents compaction from deleting packs that upload-phase backups depend on.
+
+#### Command Summary
+
+| Command | Upload phase | Commit/mutate phase |
+|---------|-------------|-------------------|
+| `backup` | Session marker only (shared) | Advisory lock (exclusive, brief) |
+| `delete`, `prune`, `compact` | — | Maintenance lock (exclusive + session check) |
+| `list`, `restore`, `check`, `info` | — | No lock (read-only) |
 
 When using a vger server, server-managed locks with TTL replace client-side advisory locks (see [Server Internals](server-internals.md)).
 
@@ -376,7 +424,7 @@ Two-stage signal handling applies to all commands:
 
 1. First SIGINT/SIGTERM sets a global shutdown flag; iterative loops (`backup`, `prune`, `compact`) check it and return `VgerError::Interrupted`
 2. Second signal restores the default handler (immediate kill)
-3. On backup abort: `flush_on_abort()` seals partial packs, joins upload threads, writes final `pending_index` for recovery
+3. On backup abort: `flush_on_abort()` seals partial packs, joins upload threads, writes final `sessions/<id>.index` journal for recovery
 4. Advisory lock is released before exit; CLI exits with code 130
 
 ### Daemon Mode
@@ -409,13 +457,43 @@ This design means `delete` is fast (just index updates), while space reclamation
 
 ### Crash Recovery
 
-If a backup is interrupted after packs have been flushed but before `save_state()` commits the manifest/index, those packs would be orphaned. The **pending index journal** prevents re-uploading their data on the next run:
+If a backup is interrupted after packs have been flushed but before commit, those packs would be orphaned. The **pending index journal** prevents re-uploading their data on the next run:
 
-1. During backup, every 8 data-pack flushes, vger writes a `pending_index` blob to storage containing pack→chunk mappings for all flushed packs in this session
-2. On the next backup, if `pending_index` exists, packs are batch-verified by listing shard directories (avoiding per-pack HEAD requests on REST/S3 backends)
+1. During backup, every 8 data-pack flushes, vger writes a `sessions/<session_id>.index` blob to storage containing pack→chunk mappings for all flushed packs in this session
+2. On the next backup with the same session ID, if the journal exists, packs are batch-verified by listing shard directories (avoiding per-pack HEAD requests on REST/S3 backends)
 3. Verified chunks are promoted into the dedup structures so subsequent dedup checks find them
-4. After a successful `save_state()`, the `pending_index` blob is deleted
-5. `flush_on_abort()` writes a final `pending_index` before exiting, maximizing recovery coverage
+4. After a successful commit, the `sessions/<session_id>.index` blob is deleted
+5. `flush_on_abort()` writes a final journal before exiting, maximizing recovery coverage
+
+If a backup process crashes or is killed without clean shutdown, its session marker (`sessions/<id>.json`) remains on storage. Maintenance commands (`compact`, `delete`, `prune`) will see it via `list_sessions()` and refuse to run until the marker ages out. `cleanup_stale_sessions()` removes markers older than 72 hours along with their companion `.index` journal files. Orphaned `.index` files whose `.json` marker no longer exists are also cleaned up.
+
+### Concurrent Multi-Client Backups
+
+Multiple machines or scheduled jobs can back up to the same repository concurrently. The expensive work (walking files, compressing, encrypting, uploading packs) runs in parallel across all clients without coordination. Only the brief index+manifest commit requires mutual exclusion.
+
+#### Session Lifecycle
+
+Each backup client registers a session marker at `sessions/<session_id>.json` before opening the repository. The marker is refreshed approximately every 15 minutes during upload (`maybe_refresh_session()` called from the upload pipeline). At commit time, the client acquires the exclusive advisory lock, commits its changes, deregisters the session (while still holding the lock), then releases the lock.
+
+Each session's crash-recovery journal is co-located at `sessions/<session_id>.index`, keeping all per-session state in a single directory.
+
+#### Why Sessions Block Maintenance but Not Each Other
+
+Two concurrent backups do not block each other during upload — each operates on a private `IndexDelta` and private `sessions/<id>.index` journal. Maintenance commands (`compact`, `delete`, `prune`) must block on active sessions because compaction can delete packs that upload-phase clients are still referencing. `with_maintenance_lock()` acquires the advisory lock, cleans stale sessions, then fails with `ActiveSessions` if any remain.
+
+#### IndexDelta Reconciliation
+
+Each backup session accumulates index mutations in an `IndexDelta`: `new_entries` (newly uploaded chunks) and `refcount_bumps` (dedup hits on existing chunks). At commit time, the delta is reconciled against the current on-storage index:
+
+- If the `manifest.index_generation` is unchanged since session open (T0), no concurrent commits occurred — the delta is applied directly via the fast path (incremental mmap cache merge, or full index reload + apply).
+- If the generation changed (slow path), the full index is reloaded from storage and the delta is reconciled:
+  - `new_entries` for chunks already present in the fresh index (another client uploaded the same chunk) are converted to `refcount_bumps`
+  - `refcount_bumps` referencing chunks no longer in the index (deleted by a concurrent maintenance operation) cause `StaleChunksDuringCommit` — the backup must be retried
+- Pack verification (`verify_delta_packs`) runs after reconciliation to avoid false negatives when chunks were absorbed as refcount bumps.
+
+#### Index-First Persistence
+
+The index is always written before the manifest. A crash between these two writes leaves orphan entries in the index (no snapshot references them) — harmless, cleaned up by the next `compact`. The reverse order would be unsafe: a manifest referencing chunks not yet in the index would cause restore failures.
 
 ### Compact
 
@@ -494,5 +572,6 @@ Deduplicating backup tools are often dominated by index memory and restore-plann
 - Index-light restore planning (restore-cache-first, filtered-index fallback) for lower peak memory on restore
 - Explicitly bounded backup pipeline memory (`pipeline_buffer_mib`) and bounded in-flight uploads
 - Incremental index update paths that avoid rebuilding/uploading from a full in-memory index on every save
+- Concurrent multi-client backup protocol where only the brief commit phase requires an exclusive lock — upload phases run in parallel across all clients
 
 These optimizations are implementation choices in current vger, not future roadmap items.

@@ -41,25 +41,35 @@ crates/
       chunker/mod.rs                    # FastCDC wrapper
       index/mod.rs                      # ChunkIndex — HashMap<ChunkId, ChunkIndexEntry>
       repo/
-        mod.rs                          # Repository struct — init, open, store_chunk, read_chunk, save_state
+        mod.rs                          # Repository struct — init, open, store_chunk, read_chunk, save_state, commit_concurrent_session
         file_cache.rs                   # FileCache — inode/mtime skip for unchanged files
         format.rs                       # RepoObj envelope — pack_object / unpack_object
         pack.rs                         # PackWriter, PackType, pack read/write helpers
         manifest.rs                     # Manifest — snapshot list
-        lock.rs                         # Advisory JSON lock files
+        lock.rs                         # Advisory locks, SessionEntry, session register/deregister/refresh, acquire_lock_with_retry
+        write_session.rs                # WriteSessionState — pack writers, upload queue, IndexDelta, session journal
       snapshot/
         mod.rs                          # SnapshotMeta, SnapshotStats
         item.rs                         # Item, ItemType, ChunkRef
       commands/
         mod.rs
         init.rs                         # vger init
-        backup.rs                       # vger backup (walk + chunk + dedup + compress + encrypt)
+        backup/                         # vger backup (two-phase: upload + commit)
+          mod.rs                        # run(), two-phase entry point, session lifecycle
+          pipeline.rs                   # parallel streaming pipeline (worker threads + ByteBudget)
+          sequential.rs                 # single-threaded/rayon fallback path
+          walk.rs                       # filesystem walk, Item construction, soft error handling
+          chunk_process.rs              # chunk preparation and worker classification
+          commit.rs                     # chunk commitment to repo (shared by pipeline/sequential)
+          command_dump.rs               # shell command execution and capture
+          concurrency.rs                # ByteBudget, PendingFiles work queue
         list.rs                         # vger list (snapshots or snapshot contents)
         restore.rs                      # vger restore (restore files)
         delete.rs                       # vger delete (remove snapshot, decrement refcounts)
         prune.rs                        # vger prune (retention policy)
         check.rs                        # vger check (integrity verification)
         compact.rs                      # vger compact (repack packs to reclaim space)
+        util.rs                         # open_repo variants, with_repo_lock, with_maintenance_lock
   vger-cli/                             # binary crate — thin CLI
     src/main.rs                         # clap CLI, passphrase handling, dispatches to vger-core commands
 ```
@@ -68,16 +78,27 @@ crates/
 
 ### Data flow (backup)
 
-1. Walk source dirs (walkdir) → apply exclude patterns (globset)
-2. For each file: check file cache (device, inode, mtime, ctime, size) → on hit, reuse cached `ChunkRef`s
-3. On cache miss: read → FastCDC chunk → for each chunk:
+Backup runs in two phases so multiple clients can upload concurrently.
+
+**Phase 1 — Upload (no exclusive lock):**
+
+1. Register session marker at `sessions/<id>.json`, probe for active maintenance lock
+2. Open repo, set per-session journal key (`sessions/<id>.index`)
+3. Walk source dirs (walkdir) → apply exclude patterns (globset)
+4. For each file: check file cache (device, inode, mtime, ctime, size) → on hit, reuse cached `ChunkRef`s
+5. On cache miss: read → FastCDC chunk → for each chunk:
    - Compute `ChunkId` = keyed BLAKE2b-256(chunk_id_key, data)
    - Check `ChunkIndex` + pending pack writers — if exists, skip (dedup hit)
    - Compress (LZ4/ZSTD) → encrypt (AES-256-GCM) → buffer into `PackWriter`
    - When pack reaches target size → flush to `packs/<shard>/<pack_id>`
-3. Serialize all `Item` structs → chunk the item stream → store item-stream chunks (tree packs)
-4. Build `SnapshotMeta` with `item_ptrs` → encrypt → store at `snapshots/<id>`
-5. Flush remaining packs → update manifest + chunk index → encrypt → store
+6. Serialize all `Item` structs → chunk the item stream → store item-stream chunks (tree packs)
+7. Build `SnapshotMeta` with `item_ptrs` → encrypt → store at `snapshots/<id>`
+
+**Phase 2 — Commit (exclusive lock, brief):**
+
+8. Acquire advisory lock with retry (10 attempts, exponential backoff)
+9. `commit_concurrent_session()`: reload fresh manifest+index, reconcile `IndexDelta` (fast path if no concurrent commits, slow path with full reload + reconcile), write index first then manifest
+10. Deregister session, release lock, delete `sessions/<id>.index`
 
 ### Repository on-disk layout
 
@@ -88,6 +109,8 @@ crates/
   manifest            # encrypted: Manifest (snapshot list)
   index               # encrypted: ChunkIndex (chunk_id → pack_id, offset, size, refcount)
   snapshots/<id>      # encrypted: SnapshotMeta per snapshot
+  sessions/<id>.json  # session presence markers (concurrent backups)
+  sessions/<id>.index # per-session crash-recovery journals
   packs/<xx>/<id>     # pack files containing compressed+encrypted chunks (256 shard dirs)
   locks/*.json        # advisory locks
 ```
@@ -108,6 +131,9 @@ The type tag byte is used as AAD (authenticated additional data) in AES-GCM.
 - `PackWriter` (repo/pack.rs) — buffers encrypted blobs and flushes them as pack files
 - `PackType` (repo/pack.rs) — `Data` (file content) or `Tree` (item-stream metadata)
 - `Repository` (repo/mod.rs) — central orchestrator, owns storage + crypto + manifest + index + pack writers
+- `WriteSessionState` (repo/write_session.rs) — transient backup-session state: pack writers, upload queue, `IndexDelta`, session journal
+- `IndexDelta` (index/mod.rs) — accumulated index mutations during backup: `new_entries` + `refcount_bumps`; `reconcile()` merges against fresh index at commit
+- `SessionEntry` (repo/lock.rs) — JSON marker at `sessions/<id>.json` for concurrent backup coordination
 - `Item` (snapshot/item.rs) — single filesystem entry (file/dir/symlink)
 - `Compression` enum (compress/mod.rs) — 1-byte tag prefix on compressed data
 
@@ -118,6 +144,10 @@ The type tag byte is used as AAD (authenticated additional data) in AES-GCM.
 - The `PlaintextEngine` still needs a `chunk_id_key` for deterministic dedup. For unencrypted repos, it's derived as `BLAKE2b(repo_id)`.
 - `store_chunk()` requires a `PackType` argument — use `PackType::Data` for file content and `PackType::Tree` for item-stream metadata.
 - `save_state()` takes `&mut self` (not `&self`) because it flushes pending pack writes before persisting manifest/index.
+- **Two-phase backup**: Phase 1 (no lock, session marker) handles upload; Phase 2 (exclusive lock, brief) handles commit via `commit_concurrent_session()`. Multiple clients can upload concurrently.
+- **Per-session crash-recovery journal** at `sessions/<id>.index`, co-located with the session marker at `sessions/<id>.json`.
+- **Index-first persistence**: in `commit_concurrent_session()`, the index is always written before the manifest. Crash between the two leaves harmless orphan index entries.
+- **Maintenance lock**: `with_maintenance_lock()` (compact/delete/prune) acquires the advisory lock, cleans stale sessions (72 h), then refuses to proceed if any active sessions remain (`VgerError::ActiveSessions`).
 
 ## Dependencies (key ones)
 
