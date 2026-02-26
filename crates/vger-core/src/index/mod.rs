@@ -183,6 +183,12 @@ impl DedupIndex {
         self.entries.insert(id, stored_size);
     }
 
+    /// Remove a session-local entry. The xor filter may still report false
+    /// positives for the removed chunk — safe because the precise lookup will miss.
+    pub fn remove(&mut self, id: &ChunkId) {
+        self.entries.remove(id);
+    }
+
     pub fn len(&self) -> usize {
         self.entries.len()
     }
@@ -233,6 +239,11 @@ impl PendingIndexJournal {
         self.packs.len()
     }
 
+    /// Remove a pack from the journal (used by dump rollback).
+    pub fn remove_pack(&mut self, pack_id: &PackId) {
+        self.packs.remove(pack_id);
+    }
+
     /// Record a pack and its chunk entries. Replaces any previous entry for
     /// the same `pack_id` (idempotent for recovery seeding).
     pub fn record_pack(&mut self, pack_id: PackId, chunks: Vec<PendingChunkEntry>) {
@@ -260,6 +271,23 @@ pub struct RecoveredChunkEntry {
     pub stored_size: u32,
     pub pack_id: PackId,
     pub pack_offset: u64,
+}
+
+/// Snapshot of `IndexDelta` state for checkpoint/rollback (used by dump streaming).
+#[derive(Debug)]
+pub struct IndexDeltaCheckpoint {
+    new_entries_len: usize,
+    refcount_bumps: HashMap<ChunkId, u32>,
+}
+
+impl IndexDeltaCheckpoint {
+    /// Create an empty checkpoint (for repos not using dedup mode).
+    pub fn empty() -> Self {
+        Self {
+            new_entries_len: 0,
+            refcount_bumps: HashMap::new(),
+        }
+    }
 }
 
 /// Records all index mutations that happen while in dedup-only mode.
@@ -291,6 +319,21 @@ impl IndexDelta {
     /// Returns true if this delta contains no mutations.
     pub fn is_empty(&self) -> bool {
         self.new_entries.is_empty() && self.refcount_bumps.is_empty()
+    }
+
+    /// Capture a checkpoint of the current delta state for later rollback.
+    pub fn checkpoint(&self) -> IndexDeltaCheckpoint {
+        IndexDeltaCheckpoint {
+            new_entries_len: self.new_entries.len(),
+            refcount_bumps: self.refcount_bumps.clone(),
+        }
+    }
+
+    /// Restore the delta to a previous checkpoint, discarding all mutations
+    /// that occurred after it was taken.
+    pub fn rollback(&mut self, cp: IndexDeltaCheckpoint) {
+        self.new_entries.truncate(cp.new_entries_len);
+        self.refcount_bumps = cp.refcount_bumps;
     }
 
     /// Record a refcount bump for an existing chunk.
@@ -534,5 +577,98 @@ mod tests {
         assert_eq!(reconciled.new_entries.len(), 1);
         assert_eq!(reconciled.new_entries[0].chunk_id, chunk_b);
         assert_eq!(reconciled.refcount_bumps.get(&chunk_a), Some(&2));
+    }
+
+    // --- IndexDelta checkpoint/rollback tests ---
+
+    #[test]
+    fn index_delta_checkpoint_rollback() {
+        let mut delta = IndexDelta::new();
+        let chunk_a = make_chunk_id(1);
+        let chunk_b = make_chunk_id(2);
+        let chunk_c = make_chunk_id(3);
+        let pack = make_pack_id(10);
+
+        // Add initial state
+        delta.add_new_entry(chunk_a, 100, pack, 0, 1);
+        delta.bump_refcount(&chunk_b);
+
+        // Checkpoint
+        let cp = delta.checkpoint();
+        assert_eq!(delta.new_entries.len(), 1);
+
+        // Add more mutations after checkpoint
+        delta.add_new_entry(chunk_c, 200, pack, 100, 1);
+        delta.bump_refcount(&chunk_a);
+        assert_eq!(delta.new_entries.len(), 2);
+        assert_eq!(delta.refcount_bumps.get(&chunk_a), Some(&1));
+
+        // Rollback
+        delta.rollback(cp);
+        assert_eq!(delta.new_entries.len(), 1);
+        assert_eq!(delta.new_entries[0].chunk_id, chunk_a);
+        assert_eq!(delta.refcount_bumps.get(&chunk_b), Some(&1));
+        assert!(!delta.refcount_bumps.contains_key(&chunk_a));
+    }
+
+    #[test]
+    fn index_delta_checkpoint_empty() {
+        let cp = IndexDeltaCheckpoint::empty();
+        let mut delta = IndexDelta::new();
+        delta.add_new_entry(make_chunk_id(1), 100, make_pack_id(1), 0, 1);
+        delta.rollback(cp);
+        assert!(delta.new_entries.is_empty());
+        assert!(delta.refcount_bumps.is_empty());
+    }
+
+    // --- PendingIndexJournal::remove_pack tests ---
+
+    #[test]
+    fn pending_journal_remove_pack() {
+        let mut journal = PendingIndexJournal::new();
+        let pack1 = make_pack_id(1);
+        let pack2 = make_pack_id(2);
+        let pack3 = make_pack_id(3);
+
+        journal.record_pack(
+            pack1,
+            vec![PendingChunkEntry {
+                chunk_id: make_chunk_id(10),
+                stored_size: 100,
+                pack_offset: 0,
+            }],
+        );
+        journal.record_pack(
+            pack2,
+            vec![PendingChunkEntry {
+                chunk_id: make_chunk_id(20),
+                stored_size: 200,
+                pack_offset: 0,
+            }],
+        );
+        journal.record_pack(
+            pack3,
+            vec![PendingChunkEntry {
+                chunk_id: make_chunk_id(30),
+                stored_size: 300,
+                pack_offset: 0,
+            }],
+        );
+        assert_eq!(journal.len(), 3);
+
+        // Remove the middle pack
+        journal.remove_pack(&pack2);
+        assert_eq!(journal.len(), 2);
+
+        // Verify remaining packs
+        let wire = journal.to_wire();
+        let pack_ids: Vec<PackId> = wire.iter().map(|e| e.pack_id).collect();
+        assert!(pack_ids.contains(&pack1));
+        assert!(!pack_ids.contains(&pack2));
+        assert!(pack_ids.contains(&pack3));
+
+        // Remove non-existent pack — no-op
+        journal.remove_pack(&make_pack_id(99));
+        assert_eq!(journal.len(), 2);
     }
 }

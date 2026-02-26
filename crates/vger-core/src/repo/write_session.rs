@@ -5,7 +5,10 @@ use tracing::{debug, warn};
 
 use crate::compress;
 use crate::index::dedup_cache::TieredDedupIndex;
-use crate::index::{ChunkIndex, DedupIndex, IndexDelta, PendingIndexJournal, RecoveredChunkEntry};
+use crate::index::{
+    ChunkIndex, DedupIndex, IndexDelta, IndexDeltaCheckpoint, PendingIndexJournal,
+    RecoveredChunkEntry,
+};
 use vger_crypto::CryptoEngine;
 use vger_storage::StorageBackend;
 use vger_types::chunk_id::ChunkId;
@@ -24,6 +27,21 @@ const JOURNAL_WRITE_INTERVAL: usize = 8;
 
 const DEFAULT_SESSION_ID: &str = "default";
 const PENDING_INDEX_OBJECT_CONTEXT: &[u8] = b"pending_index";
+
+/// Tracks index mutations during a streaming command dump so they can be
+/// rolled back if the dump command fails mid-stream.
+pub(crate) struct DumpRollbackTracker {
+    /// Truncation point for IndexDelta.
+    pub delta_checkpoint: IndexDeltaCheckpoint,
+    /// ChunkIds inserted into tiered_dedup or dedup_index during this dump.
+    pub dedup_inserts: Vec<ChunkId>,
+    /// Entries promoted out of recovered_chunks — saved to re-insert on rollback.
+    pub promoted_recovered: Vec<(ChunkId, RecoveredChunkEntry)>,
+    /// PackIds added to PendingIndexJournal during this dump.
+    pub journal_pack_ids: Vec<PackId>,
+    /// Data pack writer target size at checkpoint time (for reset on rollback).
+    pub data_pack_target_size: usize,
+}
 
 /// Write-path state that is active during a backup session.
 ///
@@ -62,6 +80,8 @@ pub(crate) struct WriteSessionState {
     pub(crate) session_id: String,
     /// Wall-clock time of last session marker refresh (for throttling).
     pub(crate) last_session_refresh: std::time::Instant,
+    /// Active dump rollback tracker (set during streaming command dumps).
+    pub(crate) dump_tracker: Option<DumpRollbackTracker>,
 }
 
 impl WriteSessionState {
@@ -86,6 +106,7 @@ impl WriteSessionState {
             session_packs_flushed: 0,
             session_id: DEFAULT_SESSION_ID.to_string(),
             last_session_refresh: std::time::Instant::now(),
+            dump_tracker: None,
         }
     }
 
@@ -264,6 +285,9 @@ impl WriteSessionState {
                 if let Some(ref mut delta) = self.index_delta {
                     delta.add_new_entry(chunk_id, stored_size, pack_id, offset, refcount);
                 }
+                if let Some(ref mut tracker) = self.dump_tracker {
+                    tracker.dedup_inserts.push(chunk_id);
+                }
             }
             false
         } else if self.dedup_index.is_some() {
@@ -274,6 +298,9 @@ impl WriteSessionState {
                 if let Some(ref mut delta) = self.index_delta {
                     delta.add_new_entry(chunk_id, stored_size, pack_id, offset, refcount);
                 }
+                if let Some(ref mut tracker) = self.dump_tracker {
+                    tracker.dedup_inserts.push(chunk_id);
+                }
             }
             false
         } else {
@@ -281,6 +308,9 @@ impl WriteSessionState {
                 chunk_index.add(chunk_id, stored_size, pack_id, offset);
                 for _ in 1..refcount {
                     chunk_index.increment_refcount(&chunk_id);
+                }
+                if let Some(ref mut tracker) = self.dump_tracker {
+                    tracker.dedup_inserts.push(chunk_id);
                 }
             }
             true
@@ -428,6 +458,16 @@ impl WriteSessionState {
         chunk_id: &ChunkId,
         chunk_index: &mut ChunkIndex,
     ) -> Option<(u32, bool)> {
+        // Record for dump rollback before removing from recovered_chunks.
+        if let Some(ref mut tracker) = self.dump_tracker {
+            if let Some(recovered) = self.recovered_chunks.get(chunk_id) {
+                tracker
+                    .promoted_recovered
+                    .push((*chunk_id, recovered.clone()));
+                tracker.dedup_inserts.push(*chunk_id);
+            }
+        }
+
         let entry = self.recovered_chunks.remove(chunk_id)?;
 
         // Promote into active dedup structure.

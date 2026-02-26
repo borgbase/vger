@@ -362,6 +362,13 @@ impl TieredDedupIndex {
         self.session_new.insert(id, stored_size);
     }
 
+    /// Remove a session-local entry. The mmap and xor filter tiers are
+    /// read-only; false positives from the xor filter are safe because the
+    /// precise lookup in `session_new` will miss.
+    pub fn remove(&mut self, id: &ChunkId) {
+        self.session_new.remove(id);
+    }
+
     /// Number of entries in the session-new HashMap.
     pub fn session_new_len(&self) -> usize {
         self.session_new.len()

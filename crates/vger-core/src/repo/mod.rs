@@ -37,7 +37,8 @@ use self::format::{
 };
 use self::manifest::Manifest;
 use self::pack::{
-    compute_data_pack_target, compute_tree_pack_target, read_blob_from_pack, PackType, SealedPack,
+    compute_data_pack_target, compute_tree_pack_target, read_blob_from_pack, PackType, PackWriter,
+    SealedPack,
 };
 
 /// Persisted (unencrypted) at the `config` key.
@@ -1552,6 +1553,11 @@ impl Repository {
             .collect();
         ws.pending_journal.record_pack(pack_id, journal_chunks);
 
+        // Record pack ID for dump rollback tracking.
+        if let Some(ref mut tracker) = ws.dump_tracker {
+            tracker.journal_pack_ids.push(pack_id);
+        }
+
         // Release ws borrow before apply_sealed_entries (which needs &mut self).
 
         self.apply_sealed_entries(pack_id, entries);
@@ -1745,6 +1751,112 @@ impl Repository {
     /// Called from the backup command after `save_state()` succeeds.
     pub fn clear_pending_index(&self, session_id: &str) {
         WriteSessionState::clear_pending_index(&*self.storage, session_id);
+    }
+
+    // --- Dump checkpoint/rollback API ---
+
+    /// Begin a dump checkpoint: flush any pending data pack, snapshot the
+    /// current `IndexDelta` state, and arm the rollback tracker so all
+    /// subsequent mutations can be undone if the dump command fails.
+    pub(crate) fn begin_dump_checkpoint(&mut self) -> Result<()> {
+        // Force-flush the data pack writer to isolate dump data.
+        let has_pending = self
+            .write_session
+            .as_ref()
+            .expect("no active write session")
+            .data_pack_writer
+            .has_pending();
+        if has_pending {
+            self.flush_writer_async(PackType::Data)?;
+        }
+
+        let ws = self
+            .write_session
+            .as_mut()
+            .expect("no active write session");
+        let delta_checkpoint = ws
+            .index_delta
+            .as_ref()
+            .map(|d| d.checkpoint())
+            .unwrap_or_else(crate::index::IndexDeltaCheckpoint::empty);
+        let data_pack_target_size = ws.data_pack_writer.target_size();
+        ws.dump_tracker = Some(write_session::DumpRollbackTracker {
+            delta_checkpoint,
+            dedup_inserts: Vec::new(),
+            promoted_recovered: Vec::new(),
+            journal_pack_ids: Vec::new(),
+            data_pack_target_size,
+        });
+        Ok(())
+    }
+
+    /// Commit a dump checkpoint: discard the rollback tracker (dump succeeded).
+    pub(crate) fn commit_dump_checkpoint(&mut self) {
+        if let Some(ws) = self.write_session.as_mut() {
+            ws.dump_tracker = None;
+        }
+    }
+
+    /// Roll back a dump checkpoint: undo all index mutations that occurred
+    /// since `begin_dump_checkpoint()`. Packs already uploaded to storage
+    /// become orphans cleaned by compact.
+    pub(crate) fn rollback_dump_checkpoint(&mut self) {
+        // Destructure tracker outside the ws borrow scope so we can use
+        // dedup_inserts for chunk_index rollback in non-dedup mode.
+        let (tracker_fields, in_tiered, in_dedup) = {
+            let ws = self
+                .write_session
+                .as_mut()
+                .expect("no active write session");
+            let Some(tracker) = ws.dump_tracker.take() else {
+                return;
+            };
+            let in_tiered = ws.tiered_dedup.is_some();
+            let in_dedup = ws.dedup_index.is_some();
+
+            // 1. Rollback IndexDelta
+            if let Some(ref mut delta) = ws.index_delta {
+                delta.rollback(tracker.delta_checkpoint);
+            }
+
+            // 2. Remove dedup inserts from the active dedup structure
+            if in_tiered {
+                for chunk_id in &tracker.dedup_inserts {
+                    if let Some(ref mut tiered) = ws.tiered_dedup {
+                        tiered.remove(chunk_id);
+                    }
+                }
+            } else if in_dedup {
+                for chunk_id in &tracker.dedup_inserts {
+                    if let Some(ref mut dedup) = ws.dedup_index {
+                        dedup.remove(chunk_id);
+                    }
+                }
+            }
+
+            // 3. Re-insert promoted recovered chunks
+            for (chunk_id, entry) in tracker.promoted_recovered {
+                ws.recovered_chunks.insert(chunk_id, entry);
+            }
+
+            // 4. Remove tracked pack IDs from pending journal
+            for pack_id in &tracker.journal_pack_ids {
+                ws.pending_journal.remove_pack(pack_id);
+            }
+
+            // 5. Reset data pack writer (discards any partial pack buffer)
+            ws.data_pack_writer = PackWriter::new(PackType::Data, tracker.data_pack_target_size);
+
+            (tracker.dedup_inserts, in_tiered, in_dedup)
+        };
+
+        // 6. Non-dedup mode: entries went directly into chunk_index.
+        //    Must happen after dropping the ws borrow above.
+        if !in_tiered && !in_dedup {
+            for chunk_id in &tracker_fields {
+                self.chunk_index.decrement(chunk_id);
+            }
+        }
     }
 
     /// Promote a recovered chunk into the active dedup structure and index delta.

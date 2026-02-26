@@ -1,3 +1,9 @@
+use std::io;
+use std::process::Child;
+use std::sync::mpsc;
+use std::thread::JoinHandle;
+use std::time::Duration;
+
 use chrono::Utc;
 use tracing::{info, warn};
 
@@ -15,36 +21,216 @@ use vger_types::error::{Result, VgerError};
 use super::{append_item_to_stream, emit_stats_progress, BackupProgressEvent};
 
 /// Default timeout for command_dump execution (1 hour).
-pub(super) const COMMAND_DUMP_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(3600);
+pub(super) const COMMAND_DUMP_TIMEOUT: Duration = Duration::from_secs(3600);
 
-/// Execute a shell command and capture its stdout.
-pub(super) fn execute_dump_command(dump: &CommandDump) -> Result<Vec<u8>> {
-    let output =
-        shell::run_script_with_timeout(&dump.command, COMMAND_DUMP_TIMEOUT).map_err(|e| {
-            VgerError::Other(format!(
-                "failed to execute command_dump '{}': {}",
-                dump.name, e
-            ))
-        })?;
+/// Maximum stderr we keep in memory (1 MiB).
+const MAX_STDERR: usize = 1 << 20;
 
-    if !output.status.success() {
-        let code = output
-            .status
-            .code()
-            .map(|c| c.to_string())
-            .unwrap_or_else(|| "unknown".to_string());
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        return Err(VgerError::Other(format!(
-            "command_dump '{}' failed (exit code {code}): {stderr}",
-            dump.name
-        )));
+/// RAII guard for a dump child process, its watchdog thread, and stderr reader.
+/// On drop, kills the child and joins all threads. Never panics.
+struct DumpProcessGuard {
+    cancel_tx: Option<mpsc::Sender<()>>,
+    watchdog: Option<JoinHandle<bool>>,
+    child: Option<Child>,
+    stderr_thread: Option<JoinHandle<io::Result<Vec<u8>>>>,
+}
+
+impl DumpProcessGuard {
+    /// Happy-path completion: wait for child, cancel watchdog, collect stderr.
+    fn finish(&mut self) -> Result<(std::process::ExitStatus, Vec<u8>, bool)> {
+        // Wait for child to exit (if watchdog fires while we wait, it kills the
+        // child, which unblocks wait()).
+        let status = self
+            .child
+            .as_mut()
+            .expect("child already taken")
+            .wait()
+            .map_err(|e| VgerError::Other(format!("failed to wait on child: {e}")))?;
+
+        // Drop cancel_tx → watchdog wakes via Disconnected and returns false.
+        self.cancel_tx.take();
+
+        let timed_out = self
+            .watchdog
+            .take()
+            .map(|h| h.join().unwrap_or(false))
+            .unwrap_or(false);
+
+        let stderr = self
+            .stderr_thread
+            .take()
+            .map(|h| h.join().unwrap_or(Ok(Vec::new())))
+            .unwrap_or(Ok(Vec::new()))
+            .unwrap_or_default();
+
+        self.child.take();
+
+        Ok((status, stderr, timed_out))
     }
+}
 
-    if output.stdout.is_empty() {
-        warn!(name = %dump.name, "command_dump produced empty output");
+impl Drop for DumpProcessGuard {
+    fn drop(&mut self) {
+        // Cancel watchdog (instant wake via Disconnected).
+        self.cancel_tx.take();
+
+        // Kill child if still alive.
+        if let Some(ref mut child) = self.child {
+            shell::terminate_process_group(child.id());
+            let _ = child.wait();
+        }
+        self.child.take();
+
+        // Join threads.
+        if let Some(h) = self.watchdog.take() {
+            let _ = h.join();
+        }
+        if let Some(h) = self.stderr_thread.take() {
+            let _ = h.join();
+        }
     }
+}
 
-    Ok(output.stdout)
+/// Stream a single command dump through the chunker with checkpoint/rollback.
+fn stream_dump_command(
+    repo: &mut Repository,
+    dump: &CommandDump,
+    compression: Compression,
+    stats: &mut SnapshotStats,
+    timeout: Duration,
+) -> Result<(Vec<ChunkRef>, u64)> {
+    repo.begin_dump_checkpoint()?;
+
+    let dump_result = (|| -> Result<(Vec<ChunkRef>, u64)> {
+        // Spawn child with piped stdout and stderr.
+        let mut cmd = shell::command_for_script(&dump.command);
+        let mut child = cmd
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .spawn()
+            .map_err(|e| {
+                VgerError::Other(format!(
+                    "failed to spawn command_dump '{}': {}",
+                    dump.name, e
+                ))
+            })?;
+
+        let child_id = child.id();
+        let stdout = child.stdout.take();
+        let stderr_handle = child.stderr.take();
+
+        // Watchdog thread: recv_timeout-based, no polling.
+        let (cancel_tx, cancel_rx) = mpsc::channel::<()>();
+        let watchdog = std::thread::spawn(move || {
+            match cancel_rx.recv_timeout(timeout) {
+                Err(mpsc::RecvTimeoutError::Timeout) => {
+                    shell::terminate_process_group(child_id);
+                    true // timed out
+                }
+                _ => false, // cancelled (Disconnected) or spurious Ok
+            }
+        });
+
+        // Stderr reader with hard cap.
+        let stderr_thread = std::thread::spawn(move || -> io::Result<Vec<u8>> {
+            let mut buf = Vec::new();
+            if let Some(mut r) = stderr_handle {
+                io::Read::read_to_end(&mut io::Read::take(&mut r, MAX_STDERR as u64), &mut buf)?;
+                io::copy(&mut r, &mut io::sink())?;
+            }
+            Ok(buf)
+        });
+
+        let mut guard = DumpProcessGuard {
+            cancel_tx: Some(cancel_tx),
+            watchdog: Some(watchdog),
+            child: Some(child),
+            stderr_thread: Some(stderr_thread),
+        };
+
+        // Stream stdout through chunker.
+        let chunk_id_key = *repo.crypto.chunk_id_key();
+        let chunk_stream = chunker::chunk_stream(
+            stdout.expect("stdout was piped"),
+            &repo.config.chunker_params,
+        );
+
+        let mut chunk_refs = Vec::new();
+        let mut total_size: u64 = 0;
+
+        for chunk_result in chunk_stream {
+            let chunk = chunk_result.map_err(|e| {
+                VgerError::Other(format!(
+                    "chunking failed for command_dump '{}': {e}",
+                    dump.name
+                ))
+            })?;
+
+            let size = chunk.data.len() as u32;
+            total_size += size as u64;
+            let chunk_id = ChunkId::compute(&chunk_id_key, &chunk.data);
+
+            if let Some(csize) = repo.bump_ref_if_exists(&chunk_id) {
+                stats.original_size += size as u64;
+                stats.compressed_size += csize as u64;
+                chunk_refs.push(ChunkRef {
+                    id: chunk_id,
+                    size,
+                    csize,
+                });
+            } else {
+                let csize =
+                    repo.commit_chunk_inline(chunk_id, &chunk.data, compression, PackType::Data)?;
+                stats.original_size += size as u64;
+                stats.compressed_size += csize as u64;
+                stats.deduplicated_size += csize as u64;
+                chunk_refs.push(ChunkRef {
+                    id: chunk_id,
+                    size,
+                    csize,
+                });
+            }
+        }
+
+        let (status, stderr, timed_out) = guard.finish()?;
+
+        if timed_out {
+            return Err(VgerError::Other(format!(
+                "command_dump '{}' timed out after {} seconds",
+                dump.name,
+                timeout.as_secs()
+            )));
+        }
+
+        if !status.success() {
+            let code = status
+                .code()
+                .map(|c| c.to_string())
+                .unwrap_or_else(|| "unknown".to_string());
+            let stderr_str = String::from_utf8_lossy(&stderr);
+            return Err(VgerError::Other(format!(
+                "command_dump '{}' failed (exit code {code}): {stderr_str}",
+                dump.name
+            )));
+        }
+
+        if chunk_refs.is_empty() {
+            warn!(name = %dump.name, "command_dump produced empty output");
+        }
+
+        Ok((chunk_refs, total_size))
+    })();
+
+    match dump_result {
+        Ok(result) => {
+            repo.commit_dump_checkpoint();
+            Ok(result)
+        }
+        Err(e) => {
+            repo.rollback_dump_checkpoint();
+            Err(e)
+        }
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -92,41 +278,11 @@ pub(super) fn process_command_dumps(
         info!(
             name = %dump.name,
             command = %dump.command,
-            "executing command dump"
+            "executing command dump (streaming)"
         );
-        let data = execute_dump_command(dump)?;
-        let data_len = data.len() as u64;
 
-        let chunk_ranges = chunker::chunk_data(&data, &repo.config.chunker_params);
-        let chunk_id_key = *repo.crypto.chunk_id_key();
-
-        let mut chunk_refs = Vec::new();
-        for (offset, length) in chunk_ranges {
-            let chunk_data = &data[offset..offset + length];
-            let chunk_id = ChunkId::compute(&chunk_id_key, chunk_data);
-            let size = length as u32;
-
-            if let Some(csize) = repo.bump_ref_if_exists(&chunk_id) {
-                stats.original_size += size as u64;
-                stats.compressed_size += csize as u64;
-                chunk_refs.push(ChunkRef {
-                    id: chunk_id,
-                    size,
-                    csize,
-                });
-            } else {
-                let (chunk_id, csize, _is_new) =
-                    repo.store_chunk(chunk_data, compression, PackType::Data)?;
-                stats.original_size += size as u64;
-                stats.compressed_size += csize as u64;
-                stats.deduplicated_size += csize as u64;
-                chunk_refs.push(ChunkRef {
-                    id: chunk_id,
-                    size,
-                    csize,
-                });
-            }
-        }
+        let (chunk_refs, total_size) =
+            stream_dump_command(repo, dump, compression, stats, COMMAND_DUMP_TIMEOUT)?;
 
         stats.nfiles += 1;
 
@@ -141,7 +297,7 @@ pub(super) fn process_command_dumps(
             mtime: time_start.timestamp_nanos_opt().unwrap_or(0),
             atime: None,
             ctime: None,
-            size: data_len,
+            size: total_size,
             chunks: chunk_refs,
             link_target: None,
             xattrs: None,
@@ -196,36 +352,142 @@ mod tests {
         "true"
     }
 
+    /// Helper: set up a repo for streaming dump tests.
+    fn setup_test_repo() -> Repository {
+        crate::testutil::test_repo_plaintext()
+    }
+
     #[test]
-    fn execute_dump_command_captures_stdout() {
+    fn streaming_dump_captures_stdout() {
+        let mut repo = setup_test_repo();
         let dump = CommandDump {
             name: "test.txt".to_string(),
             command: shell_echo_hello().to_string(),
         };
-        let result = execute_dump_command(&dump).unwrap();
-        let text = String::from_utf8(result).unwrap();
-        assert_eq!(text.trim_end(), "hello");
+        let mut stats = SnapshotStats::default();
+        let (refs, total_size) = stream_dump_command(
+            &mut repo,
+            &dump,
+            Compression::None,
+            &mut stats,
+            Duration::from_secs(10),
+        )
+        .unwrap();
+        assert!(!refs.is_empty());
+        assert!(total_size > 0);
     }
 
     #[test]
-    fn execute_dump_command_fails_on_nonzero_exit() {
+    fn streaming_dump_fails_on_nonzero_exit() {
+        let mut repo = setup_test_repo();
         let dump = CommandDump {
             name: "fail.txt".to_string(),
             command: shell_fail().to_string(),
         };
-        let result = execute_dump_command(&dump);
+        let mut stats = SnapshotStats::default();
+        let result = stream_dump_command(
+            &mut repo,
+            &dump,
+            Compression::None,
+            &mut stats,
+            Duration::from_secs(10),
+        );
         assert!(result.is_err());
         let err = result.unwrap_err().to_string();
-        assert!(err.contains("command_dump 'fail.txt' failed"));
+        assert!(
+            err.contains("command_dump 'fail.txt' failed"),
+            "unexpected error: {err}"
+        );
     }
 
     #[test]
-    fn execute_dump_command_empty_stdout_succeeds() {
+    fn streaming_dump_empty_stdout_succeeds() {
+        let mut repo = setup_test_repo();
         let dump = CommandDump {
             name: "empty.txt".to_string(),
             command: shell_success_no_output().to_string(),
         };
-        let result = execute_dump_command(&dump).unwrap();
-        assert!(result.is_empty());
+        let mut stats = SnapshotStats::default();
+        let (refs, total_size) = stream_dump_command(
+            &mut repo,
+            &dump,
+            Compression::None,
+            &mut stats,
+            Duration::from_secs(10),
+        )
+        .unwrap();
+        assert!(refs.is_empty());
+        assert_eq!(total_size, 0);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn streaming_dump_timeout_kills_child() {
+        let mut repo = setup_test_repo();
+        let dump = CommandDump {
+            name: "hang.txt".to_string(),
+            command: "sleep 60".to_string(),
+        };
+        let mut stats = SnapshotStats::default();
+        let result = stream_dump_command(
+            &mut repo,
+            &dump,
+            Compression::None,
+            &mut stats,
+            Duration::from_millis(500),
+        );
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(
+            err.contains("timed out"),
+            "expected timeout error, got: {err}"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn streaming_dump_fail_after_large_output() {
+        let mut repo = setup_test_repo();
+        let dump = CommandDump {
+            name: "big_fail.txt".to_string(),
+            command: "head -c 1000000 /dev/urandom; exit 1".to_string(),
+        };
+        let mut stats = SnapshotStats::default();
+        let result = stream_dump_command(
+            &mut repo,
+            &dump,
+            Compression::None,
+            &mut stats,
+            Duration::from_secs(30),
+        );
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(
+            err.contains("command_dump 'big_fail.txt' failed"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn streaming_dump_stderr_capped() {
+        let mut repo = setup_test_repo();
+        // Write 2 MiB to stderr, nothing to stdout
+        let dump = CommandDump {
+            name: "stderr_test.txt".to_string(),
+            command: "head -c 2097152 /dev/urandom >&2; exit 1".to_string(),
+        };
+        let mut stats = SnapshotStats::default();
+        let result = stream_dump_command(
+            &mut repo,
+            &dump,
+            Compression::None,
+            &mut stats,
+            Duration::from_secs(30),
+        );
+        assert!(result.is_err());
+        // The error message will contain stderr, verify we didn't OOM
+        let err = result.unwrap_err().to_string();
+        assert!(err.contains("command_dump 'stderr_test.txt' failed"));
     }
 }

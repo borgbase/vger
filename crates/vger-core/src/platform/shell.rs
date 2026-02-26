@@ -150,22 +150,38 @@ pub fn run_script_status_with_timeout(
     run_command_status_with_timeout(&mut cmd, timeout)
 }
 
-/// Terminate a child process and its process group.
+/// Terminate a process group by PID.
 ///
 /// On Unix: sends SIGTERM to the process group, waits 200ms, then SIGKILL.
-/// On Windows: just kills the direct child (grandchild limitation documented).
-fn terminate_child(child: &mut std::process::Child) {
+/// On Windows: this is a no-op (use `terminate_child` instead).
+pub fn terminate_process_group(pid: u32) {
     #[cfg(unix)]
     {
         use nix::sys::signal::{killpg, Signal};
         use nix::unistd::Pid;
 
-        let pid = Pid::from_raw(child.id() as i32);
+        let pgid = Pid::from_raw(pid as i32);
         // Try graceful termination of the entire process group first.
-        let _ = killpg(pid, Signal::SIGTERM);
+        let _ = killpg(pgid, Signal::SIGTERM);
         std::thread::sleep(Duration::from_millis(200));
         // Force kill the process group.
-        let _ = killpg(pid, Signal::SIGKILL);
+        let _ = killpg(pgid, Signal::SIGKILL);
+    }
+
+    #[cfg(windows)]
+    {
+        let _ = pid;
+    }
+}
+
+/// Terminate a child process and its process group.
+///
+/// On Unix: delegates to `terminate_process_group` for SIGTERM→SIGKILL.
+/// On Windows: just kills the direct child (grandchild limitation documented).
+fn terminate_child(child: &mut std::process::Child) {
+    #[cfg(unix)]
+    {
+        terminate_process_group(child.id());
     }
 
     #[cfg(windows)]
