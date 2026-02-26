@@ -259,14 +259,16 @@ impl StorageBackend for S3Backend {
         let range_header = format!("bytes={offset}-{end}");
 
         let mut action = self.bucket.get_object(Some(&self.credentials), &full_key);
-        action.headers_mut().insert("Range", &range_header);
+        // SigV4 canonicalizes signed header names as lowercase.
+        // Use lowercase here so the presigned SignedHeaders list is compliant.
+        action.headers_mut().insert("range", &range_header);
         let url = action.sign(PRESIGN_DURATION);
 
         self.retry_call_body(&format!("GET_RANGE {key}"), || {
             match self
                 .agent
                 .get(url.as_str())
-                .set("Range", &range_header)
+                .set("range", &range_header)
                 .call()
             {
                 Ok(resp) => {

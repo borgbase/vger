@@ -24,7 +24,7 @@ Options:
 
 Environment overrides (via env vars or scripts/lib/defaults.sh):
   CORPUS_LOCAL, REPO_URL, REST_URL, REST_TOKEN, VGER_REST_TOKEN, VGER_TOKEN,
-  REST_DATA_DIR,
+  REST_DATA_DIR, ALLOW_INSECURE_HTTP,
   S3_REGION, S3_ACCESS_KEY, S3_SECRET_KEY,
   MINIO_SERVICE, MINIO_DATA_DIR, MINIO_HEALTH_URL, STRESS_ROOT
 USAGE
@@ -71,6 +71,11 @@ TIME_CMD="/usr/bin/time"
 if [[ "$TIME_V" == "1" ]]; then
   [[ -x "$TIME_CMD" ]] || die "/usr/bin/time is required when --time-v is enabled"
 fi
+
+# Explicit HTTP opt-in for local testing (required by newer clients).
+# Set ALLOW_INSECURE_HTTP=0 to strip this field from generated configs.
+ALLOW_INSECURE_HTTP="${ALLOW_INSECURE_HTTP:-1}"
+[[ "$ALLOW_INSECURE_HTTP" =~ ^(0|1)$ ]] || die "ALLOW_INSECURE_HTTP must be 0 or 1"
 
 # --- Resolve repo URL ---
 
@@ -169,6 +174,39 @@ maybe_drop_caches() {
   drop_caches
 }
 
+ensure_insecure_http_opt_in() {
+  local config_path="$1"
+  local repo_url="$2"
+
+  [[ "$repo_url" == http://* || "$repo_url" == s3+http://* ]] || return 0
+
+  if [[ "$ALLOW_INSECURE_HTTP" == "0" ]]; then
+    local tmp_remove
+    tmp_remove="$(mktemp)"
+    awk '
+      $0 ~ /^[[:space:]]*allow_insecure_http:[[:space:]]*true([[:space:]]*)$/ { next }
+      { print }
+    ' "$config_path" >"$tmp_remove"
+    mv "$tmp_remove" "$config_path"
+    return 0
+  fi
+
+  local tmp
+  tmp="$(mktemp)"
+  awk '
+    $0 ~ /^[[:space:]]*allow_insecure_http:[[:space:]]*true([[:space:]]*)$/ { next }
+    !done && $0 ~ /^[[:space:]]+url:[[:space:]]/ {
+      print
+      print "    allow_insecure_http: true"
+      done = 1
+      next
+    }
+    { print }
+  ' "$config_path" >"$tmp"
+  mv "$tmp" "$config_path"
+  log "Enabled repository.allow_insecure_http=true for $repo_url"
+}
+
 # --- Cleanup / exit handler ---
 
 cleanup() {
@@ -226,6 +264,7 @@ main() {
   [[ "$BACKEND" == "s3" ]] && ensure_s3_bucket "$REPO_URL_RESOLVED"
 
   write_vger_config "$CONFIG_PATH" "$REPO_LABEL" "$REPO_URL_RESOLVED" "$BACKEND" "$CORPUS_DIR"
+  ensure_insecure_http_opt_in "$CONFIG_PATH" "$REPO_URL_RESOLVED"
 
   log "Stress backend=$BACKEND repo_url=$REPO_URL_RESOLVED"
 
