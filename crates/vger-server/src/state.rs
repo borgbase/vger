@@ -303,14 +303,18 @@ fn is_valid_storage_key(key: &str) -> bool {
     {
         return false;
     }
+    // Check directory prefixes first.
+    match parts[0] {
+        "keys" | "snapshots" | "locks" | "sessions" | "pending_index" => {
+            return (1..=2).contains(&parts.len());
+        }
+        "packs" => return is_valid_packs_key(&parts),
+        _ => {}
+    }
     if vger_protocol::KNOWN_ROOT_FILES.contains(&parts[0]) {
         return parts.len() == 1;
     }
-    match parts[0] {
-        "keys" | "snapshots" | "locks" => (1..=2).contains(&parts.len()),
-        "packs" => is_valid_packs_key(&parts),
-        _ => false,
-    }
+    false
 }
 
 fn is_valid_packs_key(parts: &[&str]) -> bool {
@@ -357,12 +361,19 @@ mod tests {
         assert!(is_valid_storage_key("config"));
         assert!(is_valid_storage_key("manifest"));
         assert!(is_valid_storage_key("index"));
-        assert!(is_valid_storage_key("pending_index"));
+    }
+
+    #[test]
+    fn valid_directory_keys() {
+        assert!(is_valid_storage_key("sessions/abc123.json"));
+        // Per-session pending index journal (co-located with session marker)
+        assert!(is_valid_storage_key("sessions/abc123.index"));
+        // Legacy pending_index directory (backward compat)
+        assert!(is_valid_storage_key("pending_index/session123"));
     }
 
     #[test]
     fn rejects_unknown_top_level_keys() {
         assert!(!is_valid_storage_key("unknown"));
-        assert!(!is_valid_storage_key("pending_index/sub"));
     }
 }

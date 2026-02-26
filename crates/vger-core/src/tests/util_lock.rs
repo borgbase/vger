@@ -179,8 +179,8 @@ fn with_repo_lock_flushes_pending_state_on_action_error() {
     assert!(result.is_err());
     // flush_on_abort should have written pending_index before releasing the lock.
     assert!(
-        repo.storage.exists("pending_index").unwrap(),
-        "pending_index should exist after with_repo_lock error path"
+        repo.storage.exists("sessions/default.index").unwrap(),
+        "sessions/default.index should exist after with_repo_lock error path"
     );
     assert_eq!(backend.release_calls(), 1, "lock should still be released");
 }

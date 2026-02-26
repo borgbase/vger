@@ -1,4 +1,4 @@
-use crate::repo::lock::{acquire_lock, break_lock, release_lock};
+use crate::repo::lock::{acquire_lock, break_lock, cleanup_stale_sessions, release_lock};
 use crate::testutil::{LockableMemoryBackend, MemoryBackend};
 use chrono::{Duration, Utc};
 use vger_storage::StorageBackend;
@@ -118,4 +118,97 @@ fn break_lock_returns_zero_when_no_backend_lock_held() {
     let storage = LockableMemoryBackend::new();
     let removed = break_lock(&storage).unwrap();
     assert_eq!(removed, 0);
+}
+
+// --- cleanup_stale_sessions tests ---
+
+/// Helper: write a session marker with the given last_refresh timestamp.
+fn write_session_marker(storage: &MemoryBackend, session_id: &str, last_refresh: &str) {
+    let key = format!("sessions/{session_id}.json");
+    let entry = crate::repo::lock::SessionEntry {
+        hostname: "test".to_string(),
+        pid: 1,
+        registered_at: last_refresh.to_string(),
+        last_refresh: last_refresh.to_string(),
+    };
+    let data = serde_json::to_vec(&entry).unwrap();
+    storage.put(&key, &data).unwrap();
+}
+
+#[test]
+fn cleanup_stale_sessions_preserves_active_index() {
+    let storage = MemoryBackend::new();
+    let now = Utc::now().to_rfc3339();
+
+    // Active session with a companion .index file.
+    write_session_marker(&storage, "sess1", &now);
+    storage
+        .put("sessions/sess1.index", b"journal-data")
+        .unwrap();
+
+    let cleaned = cleanup_stale_sessions(&storage, Duration::hours(72)).unwrap();
+    assert!(cleaned.is_empty());
+    assert!(storage.exists("sessions/sess1.json").unwrap());
+    assert!(
+        storage.exists("sessions/sess1.index").unwrap(),
+        ".index should be preserved for active session"
+    );
+}
+
+#[test]
+fn cleanup_stale_sessions_removes_stale_marker_and_index() {
+    let storage = MemoryBackend::new();
+    let old = (Utc::now() - Duration::hours(100)).to_rfc3339();
+
+    // Stale session with companion .index.
+    write_session_marker(&storage, "sess2", &old);
+    storage
+        .put("sessions/sess2.index", b"journal-data")
+        .unwrap();
+
+    let cleaned = cleanup_stale_sessions(&storage, Duration::hours(72)).unwrap();
+    assert_eq!(cleaned, vec!["sess2"]);
+    assert!(!storage.exists("sessions/sess2.json").unwrap());
+    assert!(
+        !storage.exists("sessions/sess2.index").unwrap(),
+        ".index should be deleted with stale session"
+    );
+}
+
+#[test]
+fn cleanup_stale_sessions_removes_orphaned_index() {
+    let storage = MemoryBackend::new();
+
+    // Orphaned .index with no companion .json marker.
+    storage
+        .put("sessions/orphan.index", b"journal-data")
+        .unwrap();
+
+    let cleaned = cleanup_stale_sessions(&storage, Duration::hours(72)).unwrap();
+    assert!(cleaned.is_empty(), "no .json marker to report as cleaned");
+    assert!(
+        !storage.exists("sessions/orphan.index").unwrap(),
+        "orphaned .index should be deleted"
+    );
+}
+
+#[test]
+fn cleanup_stale_sessions_skips_non_json_files() {
+    let storage = MemoryBackend::new();
+    let now = Utc::now().to_rfc3339();
+
+    // Active session.
+    write_session_marker(&storage, "active", &now);
+    // An .index file that is NOT json — should not be parsed and deleted
+    // as "unparseable".
+    storage
+        .put("sessions/active.index", b"\x00binary-journal")
+        .unwrap();
+
+    let cleaned = cleanup_stale_sessions(&storage, Duration::hours(72)).unwrap();
+    assert!(cleaned.is_empty());
+    assert!(
+        storage.exists("sessions/active.index").unwrap(),
+        ".index should not be treated as unparseable .json"
+    );
 }

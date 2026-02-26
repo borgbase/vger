@@ -534,8 +534,8 @@ fn flush_on_abort_writes_pending_index() {
     // The journal debounce interval is 8 packs, so after 1 pack the
     // pending_index should NOT have been written to storage yet.
     assert!(
-        !repo.storage.exists("pending_index").unwrap(),
-        "pending_index should not exist yet (debounce hasn't triggered)"
+        !repo.storage.exists("sessions/default.index").unwrap(),
+        "sessions/default.index should not exist yet (debounce hasn't triggered)"
     );
 
     // Store another small chunk that stays in the pack writer buffer.
@@ -549,12 +549,12 @@ fn flush_on_abort_writes_pending_index() {
 
     // Verify pending_index now exists.
     assert!(
-        repo.storage.exists("pending_index").unwrap(),
-        "pending_index should exist after flush_on_abort"
+        repo.storage.exists("sessions/default.index").unwrap(),
+        "sessions/default.index should exist after flush_on_abort"
     );
 
     // Decrypt and deserialize to verify contents.
-    let raw = repo.storage.get("pending_index").unwrap().unwrap();
+    let raw = repo.storage.get("sessions/default.index").unwrap().unwrap();
     let compressed = unpack_object_expect_with_context(
         &raw,
         ObjectType::PendingIndex,
@@ -672,10 +672,10 @@ fn flush_on_abort_survives_pack_upload_failure() {
     // It should still attempt to write pending_index (which targets a non-pack key).
     repo.flush_on_abort();
 
-    // pending_index should exist because put("pending_index", ..) succeeds.
+    // sessions/default.index should exist because put("sessions/default.index", ..) succeeds.
     assert!(
-        repo.storage.exists("pending_index").unwrap(),
-        "pending_index should be written even when pack uploads fail"
+        repo.storage.exists("sessions/default.index").unwrap(),
+        "sessions/default.index should be written even when pack uploads fail"
     );
 }
 

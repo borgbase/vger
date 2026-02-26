@@ -11,15 +11,16 @@ pub(crate) use chunk_process::WorkerChunk;
 use std::sync::atomic::AtomicBool;
 
 use chrono::Utc;
-use tracing::{info, warn};
+use tracing::{debug, info, warn};
 
-use super::util::{check_interrupted, with_repo_lock};
+use super::util::check_interrupted;
 use crate::compress::Compression;
 use crate::config::{ChunkerConfig, CommandDump, VgerConfig};
 use crate::limits::{self, ByteRateLimiter};
 use crate::platform::fs;
 use crate::repo::file_cache::FileCache;
 use crate::repo::format::{pack_object_with_context, ObjectType};
+use crate::repo::lock;
 use crate::repo::manifest::SnapshotEntry;
 use crate::repo::pack::PackType;
 use crate::repo::Repository;
@@ -207,24 +208,45 @@ pub fn run_with_progress(
     let backend = storage::backend_from_config(&config.repository)?;
     let backend =
         limits::wrap_backup_storage_backend(backend, &config.repository.url, &config.limits)?;
-    let mut repo = Repository::open(
+
+    // Generate a unique session ID for this backup.
+    let session_id = format!("{:032x}", rand::random::<u128>());
+
+    // ── Phase 1: Register session and upload (no lock) ──────────────────
+
+    // Register session marker and probe for maintenance lock.
+    lock::register_session(backend.as_ref(), &session_id)?;
+    debug!(session_id, "backup session registered");
+
+    // Open repo after session registration (minimizes T0→commit window).
+    // If open fails, deregister the session so it doesn't block maintenance for 72h.
+    let mut repo = match Repository::open(
         backend,
         passphrase,
         super::util::cache_dir_from_config(config),
-    )?;
+    ) {
+        Ok(r) => r,
+        Err(e) => {
+            // Create a fresh backend just for deregistration (the original was consumed by open).
+            if let Ok(cleanup_backend) = storage::backend_from_config(&config.repository) {
+                lock::deregister_session(cleanup_backend.as_ref(), &session_id);
+            }
+            return Err(e);
+        }
+    };
 
-    with_repo_lock(&mut repo, |repo| {
-        // Check snapshot name is unique while holding the lock.
+    // Wrap Phase 1 in a closure that deregisters the session on error.
+    let phase1_result = (|| -> Result<(SnapshotEntry, FileCache, SnapshotStats)> {
+        // Check snapshot name is unique (best-effort, re-checked at commit).
         if repo.manifest().find_snapshot(snapshot_name).is_some() {
             return Err(VgerError::SnapshotAlreadyExists(snapshot_name.into()));
         }
 
-        // Activate write session before any write-path operations.
+        // Activate write session with per-session pending_index.
         repo.begin_write_session()?;
+        repo.set_write_session_id(session_id.clone());
 
         // Recover chunk→pack mappings from a previous interrupted session.
-        // Must happen before enable_tiered_dedup_mode() which drops the full
-        // chunk index — recovered entries go into a separate map.
         match repo.recover_pending_index() {
             Ok(0) => {}
             Ok(n) => {
@@ -240,12 +262,7 @@ pub fn run_with_progress(
 
         // Pre-sanitize stale file-cache entries whose chunks were pruned by
         // delete+compact. Must happen before enable_dedup_mode() which drops
-        // the full chunk index. We temporarily take the cache to avoid
-        // simultaneous mutable + immutable borrows of `repo`.
-        //
-        // INVARIANT: After this step, all remaining cache entries reference only
-        // chunks present in the index. Cache-hit paths rely on this and skip
-        // per-file existence checks for throughput.
+        // the full chunk index.
         {
             let mut cache = repo.take_file_cache();
             let pruned = cache.prune_stale_entries(&|id| repo.chunk_exists(id));
@@ -259,9 +276,6 @@ pub fn run_with_progress(
         }
 
         // Switch to tiered dedup mode to minimize memory during backup.
-        // Uses mmap'd cache + xor filter when available, falls back to
-        // DedupIndex HashMap on first backup or after index changes.
-        // The full index is reloaded and updated at save_state time.
         repo.enable_tiered_dedup_mode();
         let dedup_filter = repo.dedup_filter();
 
@@ -272,9 +286,9 @@ pub fn run_with_progress(
         let items_config = items_chunker_config();
         let mut new_file_cache = FileCache::with_capacity(repo.file_cache().len());
 
-        // Execute command dumps before walking filesystem
+        // Execute command dumps before walking filesystem.
         command_dump::process_command_dumps(
-            repo,
+            &mut repo,
             command_dumps,
             compression,
             &items_config,
@@ -291,8 +305,6 @@ pub fn run_with_progress(
         let pipeline_buffer_bytes = config.limits.cpu.pipeline_buffer_bytes();
 
         if pipeline_depth > 0 && !source_paths.is_empty() {
-            // Parallel pipeline: walk → parallel_map (read+chunk+hash+compress+encrypt)
-            // → readahead → sequential consumer (dedup + pack commit).
             let file_cache_snapshot = repo.take_file_cache();
             let crypto = std::sync::Arc::clone(&repo.crypto);
             let configured_segment = config.limits.cpu.segment_size_bytes();
@@ -306,7 +318,7 @@ pub fn run_with_progress(
             }
 
             pipeline::run_parallel_pipeline(
-                repo,
+                &mut repo,
                 source_paths,
                 multi_path,
                 exclude_patterns,
@@ -332,11 +344,11 @@ pub fn run_with_progress(
                 shutdown,
             )?;
         } else {
-            // Sequential fallback (pipeline_depth == 0 or no source paths).
             for source_path in source_paths {
                 check_interrupted(shutdown)?;
+
                 sequential::process_source_path(
-                    repo,
+                    &mut repo,
                     source_path,
                     multi_path,
                     exclude_patterns,
@@ -363,11 +375,11 @@ pub fn run_with_progress(
         // Bail before committing if shutdown was requested during the walk.
         check_interrupted(shutdown)?;
 
-        flush_item_stream_chunk(repo, &mut item_stream, &mut item_ptrs, compression)?;
+        flush_item_stream_chunk(&mut repo, &mut item_stream, &mut item_ptrs, compression)?;
 
         let time_end = Utc::now();
 
-        // Build snapshot metadata
+        // Build snapshot metadata.
         let hostname = crate::platform::hostname();
         let username = std::env::var("USER").unwrap_or_else(|_| "unknown".into());
 
@@ -386,9 +398,8 @@ pub fn run_with_progress(
             label: String::new(),
         };
 
-        // Generate snapshot ID and store
+        // Generate snapshot ID and store snapshot metadata.
         let snapshot_id = SnapshotId::generate();
-
         let meta_bytes = rmp_serde::to_vec(&snapshot_meta)?;
         let meta_packed = pack_object_with_context(
             ObjectType::SnapshotMeta,
@@ -398,49 +409,88 @@ pub fn run_with_progress(
         )?;
         repo.storage.put(&snapshot_id.storage_key(), &meta_packed)?;
 
-        // Update manifest
-        repo.manifest_mut().timestamp = Utc::now();
-        repo.manifest_mut().snapshots.push(SnapshotEntry {
+        let snapshot_entry = SnapshotEntry {
             name: snapshot_name.to_string(),
             id: snapshot_id,
             time: time_start,
             source_label: source_label.to_string(),
             label: String::new(),
             source_paths: source_paths.to_vec(),
-        });
+        };
 
-        // Replace file cache with the freshly-built one (drops stale entries).
-        repo.set_file_cache(new_file_cache);
+        Ok((snapshot_entry, new_file_cache, stats))
+    })();
 
-        // Save manifest, index, and file cache
-        repo.save_state()?;
+    // On Phase 1 error: best-effort cleanup then deregister session.
+    let (snapshot_entry, new_file_cache, stats) = match phase1_result {
+        Ok(result) => result,
+        Err(e) => {
+            repo.flush_on_abort();
+            lock::deregister_session(repo.storage.as_ref(), &session_id);
+            return Err(e);
+        }
+    };
+
+    // ── Phase 2: Commit (exclusive lock) ────────────────────────────────
+
+    let commit_result = (|| -> Result<()> {
+        let guard = lock::acquire_lock_with_retry(repo.storage.as_ref(), 10, 500)?;
+
+        let result = repo.commit_concurrent_session(snapshot_entry, new_file_cache);
+
+        if result.is_err() {
+            repo.flush_on_abort();
+        }
+
+        // Deregister session while holding the lock.
+        lock::deregister_session(repo.storage.as_ref(), &session_id);
+
+        match lock::release_lock(repo.storage.as_ref(), guard) {
+            Ok(()) => {}
+            Err(release_err) => {
+                warn!("failed to release repository lock: {release_err}");
+                if result.is_ok() {
+                    return Err(release_err);
+                }
+            }
+        }
+
+        result?;
 
         // Clean up the pending_index now that all entries are in the persisted
         // index. Best-effort — a stale pending_index is harmless.
-        repo.clear_pending_index();
+        repo.clear_pending_index(&session_id);
 
-        if stats.errors > 0 {
-            info!(
-                "Snapshot '{}' created: {} files, {} errors, {} original, {} compressed, {} deduplicated",
-                snapshot_name,
-                stats.nfiles,
-                stats.errors,
-                stats.original_size,
-                stats.compressed_size,
-                stats.deduplicated_size
-            );
-        } else {
-            info!(
-                "Snapshot '{}' created: {} files, {} original, {} compressed, {} deduplicated",
-                snapshot_name,
-                stats.nfiles,
-                stats.original_size,
-                stats.compressed_size,
-                stats.deduplicated_size
-            );
-        }
+        Ok(())
+    })();
 
-        let is_partial = stats.errors > 0;
-        Ok(BackupOutcome { stats, is_partial })
-    })
+    // If commit fails, deregister session as a safety net (may already be done).
+    if commit_result.is_err() {
+        lock::deregister_session(repo.storage.as_ref(), &session_id);
+    }
+    commit_result?;
+
+    if stats.errors > 0 {
+        info!(
+            "Snapshot '{}' created: {} files, {} errors, {} original, {} compressed, {} deduplicated",
+            snapshot_name,
+            stats.nfiles,
+            stats.errors,
+            stats.original_size,
+            stats.compressed_size,
+            stats.deduplicated_size
+        );
+    } else {
+        info!(
+            "Snapshot '{}' created: {} files, {} original, {} compressed, {} deduplicated",
+            snapshot_name,
+            stats.nfiles,
+            stats.original_size,
+            stats.compressed_size,
+            stats.deduplicated_size
+        );
+    }
+
+    let is_partial = stats.errors > 0;
+    Ok(BackupOutcome { stats, is_partial })
 }

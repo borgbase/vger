@@ -156,10 +156,17 @@ pub struct VerifyPacksResponse {
 // ── Repository layout ─────────────────────────────────────────────────────
 
 /// Top-level file entries that can appear in a vger repository root.
-pub const KNOWN_ROOT_FILES: &[&str] = &["config", "manifest", "index", "pending_index"];
+pub const KNOWN_ROOT_FILES: &[&str] = &["config", "manifest", "index"];
 
 /// Top-level directory entries that can appear in a vger repository root.
-pub const KNOWN_ROOT_DIRS: &[&str] = &["keys", "snapshots", "packs", "locks"];
+pub const KNOWN_ROOT_DIRS: &[&str] = &[
+    "keys",
+    "snapshots",
+    "packs",
+    "locks",
+    "sessions",
+    "pending_index",
+];
 
 /// Returns true if `name` matches the server temp-file naming convention
 /// (`.tmp.{target}.{unique_id}`), used for atomic writes.
@@ -355,6 +362,8 @@ mod tests {
         assert!(is_known_repo_key("snapshots/abc123"));
         assert!(is_known_repo_key("packs/ab/deadbeef"));
         assert!(is_known_repo_key("locks/lock.json"));
+        assert!(is_known_repo_key("sessions/abc123.json"));
+        assert!(is_known_repo_key("pending_index/session123"));
     }
 
     #[test]

@@ -66,7 +66,14 @@ pub fn run(config: &VgerConfig) -> Result<DeleteRepoStats> {
         for i in 0..=0xFFu32 {
             let _ = std::fs::remove_dir(repo_path.join(format!("packs/{:02x}", i)));
         }
-        for dir in &["packs", "keys", "snapshots", "locks"] {
+        for dir in &[
+            "packs",
+            "keys",
+            "snapshots",
+            "locks",
+            "sessions",
+            "pending_index",
+        ] {
             let _ = std::fs::remove_dir(repo_path.join(dir));
         }
 

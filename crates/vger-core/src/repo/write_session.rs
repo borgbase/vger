@@ -13,6 +13,7 @@ use vger_types::error::{Result, VgerError};
 use vger_types::pack_id::PackId;
 
 use super::format::{pack_object_with_context, unpack_object_expect_with_context, ObjectType};
+use super::lock::session_index_key;
 use super::pack::{PackType, PackWriter, PackedChunkEntry};
 
 /// Extra upload handles allowed beyond `max_in_flight_uploads` before blocking.
@@ -21,7 +22,7 @@ const UPLOAD_QUEUE_HEADROOM: usize = 2;
 /// Number of new packs between debounced `pending_index` writes.
 const JOURNAL_WRITE_INTERVAL: usize = 8;
 
-const PENDING_INDEX_KEY: &str = "pending_index";
+const DEFAULT_SESSION_ID: &str = "default";
 const PENDING_INDEX_OBJECT_CONTEXT: &[u8] = b"pending_index";
 
 /// Write-path state that is active during a backup session.
@@ -56,6 +57,11 @@ pub(crate) struct WriteSessionState {
     pub(crate) persisted_pack_count: usize,
     /// Number of data packs flushed during the current session.
     pub(crate) session_packs_flushed: usize,
+    /// Session ID for per-session pending_index files.
+    /// Defaults to `"default"` for non-backup callers/tests.
+    pub(crate) session_id: String,
+    /// Wall-clock time of last session marker refresh (for throttling).
+    pub(crate) last_session_refresh: std::time::Instant,
 }
 
 impl WriteSessionState {
@@ -78,7 +84,26 @@ impl WriteSessionState {
             recovered_chunks: StdHashMap::new(),
             persisted_pack_count: 0,
             session_packs_flushed: 0,
+            session_id: DEFAULT_SESSION_ID.to_string(),
+            last_session_refresh: std::time::Instant::now(),
         }
+    }
+
+    /// Refresh the session marker if enough time has passed (~15 min).
+    /// No-op when session_id is the default (non-backup callers don't register sessions).
+    pub(crate) fn maybe_refresh_session(&mut self, storage: &dyn StorageBackend) {
+        const REFRESH_INTERVAL: std::time::Duration = std::time::Duration::from_secs(15 * 60);
+        if self.session_id != DEFAULT_SESSION_ID
+            && self.last_session_refresh.elapsed() >= REFRESH_INTERVAL
+        {
+            crate::repo::lock::refresh_session(storage, &self.session_id);
+            self.last_session_refresh = std::time::Instant::now();
+        }
+    }
+
+    /// Return the storage key for this session's pending_index.
+    fn pending_index_key(&self) -> String {
+        session_index_key(&self.session_id)
     }
 
     // --- Upload management ---
@@ -133,12 +158,16 @@ impl WriteSessionState {
     }
 
     /// Apply backpressure to keep the number of in-flight uploads bounded.
+    /// Also refreshes the session marker if enough time has passed.
     pub(crate) fn cap_pending_uploads(
         &mut self,
         storage: &dyn StorageBackend,
         crypto: &dyn CryptoEngine,
     ) -> Result<()> {
         self.drain_finished_uploads(storage, crypto)?;
+        // Refresh session marker (throttled, ~15 min). Placed here so both
+        // sequential and pipeline modes benefit (both call cap_pending_uploads).
+        self.maybe_refresh_session(storage);
         if self.pending_uploads.len()
             >= self
                 .max_in_flight_uploads
@@ -203,10 +232,12 @@ impl WriteSessionState {
             &compressed,
             crypto,
         )?;
-        storage.put(PENDING_INDEX_KEY, &packed)?;
+        let key = self.pending_index_key();
+        storage.put(&key, &packed)?;
         debug!(
             packs = wire.len(),
             bytes = packed.len(),
+            key = %key,
             "wrote pending_index to storage"
         );
         Ok(())
@@ -269,7 +300,8 @@ impl WriteSessionState {
         crypto: &dyn CryptoEngine,
         chunk_index: &ChunkIndex,
     ) -> Result<usize> {
-        let data = match storage.get(PENDING_INDEX_KEY)? {
+        let key = self.pending_index_key();
+        let data = match storage.get(&key)? {
             Some(d) => d,
             None => return Ok(0),
         };
@@ -373,14 +405,15 @@ impl WriteSessionState {
         Ok(recovered)
     }
 
-    /// Best-effort delete of the `pending_index` file from storage.
-    pub(crate) fn clear_pending_index(storage: &dyn StorageBackend) {
-        match storage.delete(PENDING_INDEX_KEY) {
+    /// Best-effort delete of the session's pending index file from storage.
+    pub(crate) fn clear_pending_index(storage: &dyn StorageBackend, session_id: &str) {
+        let key = session_index_key(session_id);
+        match storage.delete(&key) {
             Ok(()) => {
-                debug!("cleared pending_index from storage");
+                debug!(key = %key, "cleared pending_index from storage");
             }
             Err(e) => {
-                warn!("failed to clear pending_index: {e}");
+                warn!(key = %key, "failed to clear pending_index: {e}");
             }
         }
     }

@@ -4,7 +4,7 @@ use vger_types::error::Result;
 
 use super::list::{load_snapshot_item_stream, load_snapshot_meta};
 use super::snapshot_ops::{count_snapshot_chunk_impact, decrement_snapshot_chunk_refs};
-use super::util::with_open_repo_lock;
+use super::util::with_open_repo_maintenance_lock;
 
 pub struct DeleteStats {
     pub snapshot_name: String,
@@ -19,7 +19,7 @@ pub fn run(
     dry_run: bool,
     _shutdown: Option<&std::sync::atomic::AtomicBool>,
 ) -> Result<DeleteStats> {
-    with_open_repo_lock(config, passphrase, |repo| {
+    with_open_repo_maintenance_lock(config, passphrase, |repo| {
         // Verify snapshot exists
         let entry = repo
             .manifest()

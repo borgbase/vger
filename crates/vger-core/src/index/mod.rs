@@ -316,6 +316,37 @@ impl IndexDelta {
         });
     }
 
+    /// Reconcile this delta against a fresh index loaded at commit time.
+    ///
+    /// - `new_entries` already present in `fresh_index` → converted to refcount bumps
+    ///   (another client uploaded the same chunk concurrently).
+    /// - For each `refcount_bumps` key: verify the chunk still exists in `fresh_index`.
+    ///   If missing → `Err(StaleChunksDuringCommit)` (chunk was deleted since session started).
+    pub fn reconcile(mut self, fresh_index: &ChunkIndex) -> vger_types::error::Result<Self> {
+        // Partition new_entries: those already in fresh_index become refcount bumps.
+        let mut still_new = Vec::new();
+        for entry in self.new_entries {
+            if fresh_index.contains(&entry.chunk_id) {
+                // Another client already committed this chunk — convert to bumps.
+                *self.refcount_bumps.entry(entry.chunk_id).or_insert(0) += entry.refcount;
+            } else {
+                still_new.push(entry);
+            }
+        }
+        self.new_entries = still_new;
+
+        // Verify all bump targets still exist.
+        for chunk_id in self.refcount_bumps.keys() {
+            if !fresh_index.contains(chunk_id)
+                && !self.new_entries.iter().any(|e| e.chunk_id == *chunk_id)
+            {
+                return Err(vger_types::error::VgerError::StaleChunksDuringCommit);
+            }
+        }
+
+        Ok(self)
+    }
+
     /// Apply this delta to a full `ChunkIndex`.
     pub fn apply_to(self, index: &mut ChunkIndex) {
         // Apply new entries first
@@ -432,5 +463,76 @@ mod tests {
 
         let wire = journal.to_wire();
         assert_eq!(wire.len(), 1);
+    }
+
+    // --- IndexDelta::reconcile tests ---
+
+    #[test]
+    fn reconcile_new_entry_already_in_fresh_index_becomes_bump() {
+        let mut fresh = ChunkIndex::new();
+        let chunk_a = make_chunk_id(1);
+        let pack_a = make_pack_id(10);
+        fresh.add(chunk_a, 100, pack_a, 0);
+
+        let mut delta = IndexDelta::new();
+        delta.add_new_entry(chunk_a, 100, make_pack_id(20), 0, 1);
+
+        let reconciled = delta.reconcile(&fresh).unwrap();
+        // new_entries should be empty (converted to bump)
+        assert!(reconciled.new_entries.is_empty());
+        // refcount_bumps should have chunk_a with count=1
+        assert_eq!(reconciled.refcount_bumps.get(&chunk_a), Some(&1));
+    }
+
+    #[test]
+    fn reconcile_bump_target_missing_returns_error() {
+        let fresh = ChunkIndex::new(); // empty index
+
+        let mut delta = IndexDelta::new();
+        let chunk_a = make_chunk_id(1);
+        delta.bump_refcount(&chunk_a); // bump for a chunk not in index
+
+        let result = delta.reconcile(&fresh);
+        assert!(result.is_err());
+        assert!(matches!(
+            result.unwrap_err(),
+            vger_types::error::VgerError::StaleChunksDuringCommit
+        ));
+    }
+
+    #[test]
+    fn reconcile_bump_target_exists_succeeds() {
+        let mut fresh = ChunkIndex::new();
+        let chunk_a = make_chunk_id(1);
+        let pack_a = make_pack_id(10);
+        fresh.add(chunk_a, 100, pack_a, 0);
+
+        let mut delta = IndexDelta::new();
+        delta.bump_refcount(&chunk_a);
+
+        let reconciled = delta.reconcile(&fresh).unwrap();
+        assert!(reconciled.new_entries.is_empty());
+        assert_eq!(reconciled.refcount_bumps.get(&chunk_a), Some(&1));
+    }
+
+    #[test]
+    fn reconcile_mixed_new_and_existing() {
+        let mut fresh = ChunkIndex::new();
+        let chunk_a = make_chunk_id(1);
+        let chunk_b = make_chunk_id(2);
+        let pack_a = make_pack_id(10);
+        fresh.add(chunk_a, 100, pack_a, 0);
+        // chunk_b is NOT in fresh index
+
+        let mut delta = IndexDelta::new();
+        // chunk_a already exists in fresh → becomes bump
+        delta.add_new_entry(chunk_a, 100, make_pack_id(20), 0, 2);
+        // chunk_b is truly new
+        delta.add_new_entry(chunk_b, 200, make_pack_id(30), 0, 1);
+
+        let reconciled = delta.reconcile(&fresh).unwrap();
+        assert_eq!(reconciled.new_entries.len(), 1);
+        assert_eq!(reconciled.new_entries[0].chunk_id, chunk_b);
+        assert_eq!(reconciled.refcount_bumps.get(&chunk_a), Some(&2));
     }
 }

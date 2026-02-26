@@ -4,7 +4,7 @@ use std::sync::Mutex;
 
 use tracing::{info, warn};
 
-use super::util::{check_interrupted, open_repo, with_repo_lock};
+use super::util::{check_interrupted, open_repo, with_maintenance_lock};
 use crate::config::VgerConfig;
 use crate::repo::pack::{
     PackType, PackWriter, PACK_HEADER_SIZE, PACK_MAGIC, PACK_VERSION_MAX, PACK_VERSION_MIN,
@@ -76,7 +76,7 @@ pub fn run(
             | vger_storage::ParsedUrl::Sftp { .. })
     );
 
-    with_repo_lock(&mut repo, |repo| {
+    with_maintenance_lock(&mut repo, |repo| {
         compact_repo(
             repo,
             threshold,

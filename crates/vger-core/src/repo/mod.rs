@@ -491,6 +491,13 @@ impl Repository {
         Ok(())
     }
 
+    /// Set the session ID on the active write session (for per-session pending_index).
+    pub fn set_write_session_id(&mut self, session_id: String) {
+        if let Some(ws) = self.write_session.as_mut() {
+            ws.session_id = session_id;
+        }
+    }
+
     /// Recompute pack-target state from `self.chunk_index`.
     ///
     /// Sets `persisted_pack_count` from the index, resets `session_packs_flushed`,
@@ -860,35 +867,15 @@ impl Repository {
             self.manifest_dirty = true;
         }
 
-        if self.manifest_dirty {
-            let manifest_bytes = rmp_serde::to_vec(&self.manifest)?;
-            let manifest_packed = pack_object_with_context(
-                ObjectType::Manifest,
-                MANIFEST_OBJECT_CONTEXT,
-                &manifest_bytes,
-                self.crypto.as_ref(),
-            )?;
-            self.storage.put("manifest", &manifest_packed)?;
-            self.manifest_dirty = false;
+        // Index-first persistence: readers never see manifest referencing
+        // missing data. Crash between index and manifest write leaves
+        // harmless orphan entries in the index.
+        if self.index_dirty {
+            self.persist_index()?;
         }
 
-        if self.index_dirty {
-            let estimated_msgpack = self.chunk_index.len().saturating_mul(80);
-            let estimated = 1 + zstd::zstd_safe::compress_bound(estimated_msgpack);
-            let index_packed = pack_object_streaming_with_context(
-                ObjectType::ChunkIndex,
-                INDEX_OBJECT_CONTEXT,
-                estimated,
-                self.crypto.as_ref(),
-                |buf| {
-                    compress::compress_stream_zstd(buf, 3, |encoder| {
-                        rmp_serde::encode::write(encoder, &self.chunk_index)?;
-                        Ok(())
-                    })
-                },
-            )?;
-            self.storage.put("index", &index_packed)?;
-            self.index_dirty = false;
+        if self.manifest_dirty {
+            self.persist_manifest()?;
         }
 
         // Rebuild the local dedup cache for next backup so tiered mode can
@@ -963,6 +950,214 @@ impl Repository {
         // clear_pending_index() from the backup command.
         self.write_session = None;
 
+        Ok(())
+    }
+
+    /// Commit a concurrent backup session. Called while holding the exclusive lock.
+    ///
+    /// 1. Flush packs and join uploads.
+    /// 2. Take the delta from the write session.
+    /// 3. Reload fresh manifest from storage.
+    /// 4. Check snapshot name uniqueness against the fresh manifest.
+    /// 5. Verify all new_entries pack_ids exist on storage.
+    /// 6. Fast/slow path for index update based on generation match.
+    /// 7. Persist index (first) then manifest (second).
+    /// 8. Save file cache and consume write session.
+    pub fn commit_concurrent_session(
+        &mut self,
+        snapshot_entry: manifest::SnapshotEntry,
+        new_file_cache: file_cache::FileCache,
+    ) -> Result<()> {
+        // 1. Flush all pending packs and wait for uploads.
+        self.flush_packs()?;
+
+        // 2. Drop tiered dedup, take delta from write session.
+        let ws = self
+            .write_session
+            .as_mut()
+            .expect("no active write session");
+        ws.tiered_dedup.take();
+        let delta = ws.index_delta.take();
+        if delta.is_some() {
+            ws.dedup_index = None;
+        }
+
+        // 3. Record T0 generation and reload fresh manifest.
+        let t0_generation = self.manifest.index_generation;
+        self.reload_manifest()?;
+
+        // 4. Check snapshot name uniqueness against fresh manifest.
+        if self.manifest.find_snapshot(&snapshot_entry.name).is_some() {
+            return Err(VgerError::SnapshotAlreadyExists(
+                snapshot_entry.name.clone(),
+            ));
+        }
+
+        if let Some(delta) = delta {
+            if !delta.is_empty() {
+                if t0_generation == self.manifest.index_generation {
+                    // FAST PATH: No concurrent commits happened.
+                    // Verify packs before applying (no reconciliation needed).
+                    self.verify_delta_packs(&delta)?;
+
+                    let fast_ok = self
+                        .try_incremental_index_update(&delta)
+                        .unwrap_or_else(|e| {
+                            warn!("incremental index update failed during concurrent commit: {e}");
+                            false
+                        });
+
+                    if fast_ok {
+                        // Index uploaded, caches rebuilt, manifest.index_generation set.
+                        self.rebuild_dedup_cache = false;
+                    } else {
+                        // Fall through to slow path.
+                        let mut full_index = self.reload_full_index()?;
+                        delta.apply_to(&mut full_index);
+                        self.chunk_index = full_index;
+                        self.index_dirty = true;
+                        self.manifest.index_generation = rand::thread_rng().next_u64();
+                        self.persist_index()?;
+                    }
+                } else {
+                    // SLOW PATH: Another client committed since T0. Must reconcile.
+                    // Reconcile first — some new_entries may become refcount bumps
+                    // and no longer require their original packs.
+                    let fresh_index = self.reload_full_index()?;
+                    let reconciled = delta.reconcile(&fresh_index)?;
+                    // Verify packs only for entries that remain after reconciliation.
+                    self.verify_delta_packs(&reconciled)?;
+                    let mut fresh_index = fresh_index;
+                    reconciled.apply_to(&mut fresh_index);
+                    self.chunk_index = fresh_index;
+                    self.index_dirty = true;
+                    self.manifest.index_generation = rand::thread_rng().next_u64();
+                    self.persist_index()?;
+                }
+            }
+        }
+
+        // Add snapshot entry to manifest and persist.
+        self.manifest.timestamp = Utc::now();
+        self.manifest.snapshots.push(snapshot_entry);
+        self.manifest_dirty = true;
+        self.persist_manifest()?;
+
+        // Save file cache.
+        self.file_cache = new_file_cache;
+        self.file_cache_dirty = true;
+        if let Err(e) = self.file_cache.save(
+            &self.config.id,
+            self.crypto.as_ref(),
+            self.cache_dir_override.as_deref(),
+        ) {
+            warn!("failed to save file cache after concurrent commit: {e}");
+        } else {
+            self.file_cache_dirty = false;
+        }
+
+        // Rebuild dedup caches if needed.
+        if self.rebuild_dedup_cache {
+            let cd = self.cache_dir_override.as_deref();
+            if let Err(e) = dedup_cache::build_dedup_cache(
+                &self.chunk_index,
+                self.manifest.index_generation,
+                &self.config.id,
+                cd,
+            ) {
+                warn!("failed to rebuild dedup cache: {e}");
+            }
+            if let Err(e) = dedup_cache::build_restore_cache(
+                &self.chunk_index,
+                self.manifest.index_generation,
+                &self.config.id,
+                cd,
+            ) {
+                warn!("failed to rebuild restore cache: {e}");
+            }
+            if let Err(e) = dedup_cache::build_full_index_cache(
+                &self.chunk_index,
+                self.manifest.index_generation,
+                &self.config.id,
+                cd,
+            ) {
+                warn!("failed to build full index cache: {e}");
+            }
+            self.rebuild_dedup_cache = false;
+        }
+
+        // Consume write session.
+        self.write_session = None;
+
+        Ok(())
+    }
+
+    /// Verify that all pack_ids referenced by new_entries in a delta actually
+    /// exist on storage. Returns an error if any are missing.
+    fn verify_delta_packs(&self, delta: &IndexDelta) -> Result<()> {
+        let pack_ids: std::collections::HashSet<PackId> =
+            delta.new_entries.iter().map(|e| e.pack_id).collect();
+        for pack_id in &pack_ids {
+            let key = pack_id.storage_key();
+            if !self.storage.exists(&key)? {
+                return Err(VgerError::Other(format!(
+                    "commit failed: pack {} missing from storage (stale session or concurrent deletion)",
+                    pack_id
+                )));
+            }
+        }
+        Ok(())
+    }
+
+    /// Serialize, encrypt, and write the chunk index to storage.
+    fn persist_index(&mut self) -> Result<()> {
+        let estimated_msgpack = self.chunk_index.len().saturating_mul(80);
+        let estimated = 1 + zstd::zstd_safe::compress_bound(estimated_msgpack);
+        let index_packed = pack_object_streaming_with_context(
+            ObjectType::ChunkIndex,
+            INDEX_OBJECT_CONTEXT,
+            estimated,
+            self.crypto.as_ref(),
+            |buf| {
+                compress::compress_stream_zstd(buf, 3, |encoder| {
+                    rmp_serde::encode::write(encoder, &self.chunk_index)?;
+                    Ok(())
+                })
+            },
+        )?;
+        self.storage.put("index", &index_packed)?;
+        self.index_dirty = false;
+        Ok(())
+    }
+
+    /// Serialize, encrypt, and write the manifest to storage.
+    fn persist_manifest(&mut self) -> Result<()> {
+        let manifest_bytes = rmp_serde::to_vec(&self.manifest)?;
+        let manifest_packed = pack_object_with_context(
+            ObjectType::Manifest,
+            MANIFEST_OBJECT_CONTEXT,
+            &manifest_bytes,
+            self.crypto.as_ref(),
+        )?;
+        self.storage.put("manifest", &manifest_packed)?;
+        self.manifest_dirty = false;
+        Ok(())
+    }
+
+    /// Reload the manifest from storage (for concurrent session commit).
+    pub fn reload_manifest(&mut self) -> Result<()> {
+        let manifest_data = self
+            .storage
+            .get("manifest")?
+            .ok_or_else(|| VgerError::Other("manifest not found on reload".into()))?;
+        let compressed = unpack_object_expect_with_context(
+            &manifest_data,
+            ObjectType::Manifest,
+            MANIFEST_OBJECT_CONTEXT,
+            self.crypto.as_ref(),
+        )?;
+        self.manifest = rmp_serde::from_slice(&compressed)?;
+        self.manifest_dirty = false;
         Ok(())
     }
 
@@ -1548,8 +1743,8 @@ impl Repository {
 
     /// Best-effort delete of the `pending_index` file from storage.
     /// Called from the backup command after `save_state()` succeeds.
-    pub fn clear_pending_index(&self) {
-        WriteSessionState::clear_pending_index(&*self.storage);
+    pub fn clear_pending_index(&self, session_id: &str) {
+        WriteSessionState::clear_pending_index(&*self.storage, session_id);
     }
 
     /// Promote a recovered chunk into the active dedup structure and index delta.

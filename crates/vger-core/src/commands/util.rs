@@ -1,6 +1,8 @@
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 
+use tracing::info;
+
 use crate::config::VgerConfig;
 use crate::repo::lock;
 use crate::repo::Repository;
@@ -65,6 +67,83 @@ pub fn with_repo_lock<T>(
     action: impl FnOnce(&mut Repository) -> Result<T>,
 ) -> Result<T> {
     let guard = lock::acquire_lock(repo.storage.as_ref())?;
+    let result = action(repo);
+
+    if result.is_err() {
+        repo.flush_on_abort();
+    }
+
+    match lock::release_lock(repo.storage.as_ref(), guard) {
+        Ok(()) => result,
+        Err(release_err) => {
+            if result.is_err() {
+                tracing::warn!("failed to release repository lock: {release_err}");
+                result
+            } else {
+                Err(release_err)
+            }
+        }
+    }
+}
+
+/// Open a repository and execute a maintenance operation while holding the lock.
+///
+/// Unlike `with_open_repo_lock`, this first cleans up stale sessions and
+/// refuses to proceed if active (non-stale) backup sessions exist.
+pub fn with_open_repo_maintenance_lock<T>(
+    config: &VgerConfig,
+    passphrase: Option<&str>,
+    action: impl FnOnce(&mut Repository) -> Result<T>,
+) -> Result<T> {
+    let mut repo = open_repo(config, passphrase)?;
+    with_maintenance_lock(&mut repo, action)
+}
+
+/// Execute a maintenance operation while holding an advisory lock.
+///
+/// Acquires the lock, cleans up stale sessions (>72h), then refuses to run
+/// if any non-stale sessions remain. This prevents maintenance from deleting
+/// packs that active backups depend on.
+pub fn with_maintenance_lock<T>(
+    repo: &mut Repository,
+    action: impl FnOnce(&mut Repository) -> Result<T>,
+) -> Result<T> {
+    let guard = lock::acquire_lock(repo.storage.as_ref())?;
+
+    // Clean up stale sessions before checking for active ones.
+    let stale_threshold = lock::default_stale_session_duration();
+    match lock::cleanup_stale_sessions(repo.storage.as_ref(), stale_threshold) {
+        Ok(cleaned) => {
+            if !cleaned.is_empty() {
+                info!(
+                    count = cleaned.len(),
+                    sessions = ?cleaned,
+                    "cleaned up stale backup sessions"
+                );
+            }
+        }
+        Err(e) => {
+            tracing::warn!("failed to clean up stale sessions: {e}");
+        }
+    }
+
+    // Check for active (non-stale) sessions. Fail-closed: if we can't
+    // list sessions, refuse to run rather than risk deleting active packs.
+    match lock::list_sessions(repo.storage.as_ref()) {
+        Ok(sessions) if !sessions.is_empty() => {
+            let _ = lock::release_lock(repo.storage.as_ref(), guard);
+            return Err(VgerError::ActiveSessions(sessions));
+        }
+        Err(e) => {
+            let _ = lock::release_lock(repo.storage.as_ref(), guard);
+            return Err(VgerError::Other(format!(
+                "cannot verify no active backup sessions (storage error: {e}); \
+                 refusing maintenance to avoid data loss"
+            )));
+        }
+        _ => {}
+    }
+
     let result = action(repo);
 
     if result.is_err() {

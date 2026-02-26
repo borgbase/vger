@@ -10,7 +10,7 @@ use vger_types::error::{Result, VgerError};
 
 use super::list::{load_snapshot_item_stream, load_snapshot_meta};
 use super::snapshot_ops::decrement_snapshot_chunk_refs;
-use super::util::{check_interrupted, with_open_repo_lock};
+use super::util::{check_interrupted, with_open_repo_maintenance_lock};
 
 pub struct PruneStats {
     pub kept: usize,
@@ -35,7 +35,7 @@ pub fn run(
     source_filter: &[String],
     shutdown: Option<&AtomicBool>,
 ) -> Result<(PruneStats, Vec<PruneListEntry>)> {
-    with_open_repo_lock(config, passphrase, |repo| {
+    with_open_repo_maintenance_lock(config, passphrase, |repo| {
         let now = Utc::now();
 
         // When --source is given, restrict to matching snapshots only
