@@ -38,7 +38,8 @@ sudo mount /dev/<test_partition> /mnt/btrfs-test
 
 1. Create source path and snapshot parent:
    ```bash
-   sudo mkdir -p /mnt/btrfs-test/data /mnt/btrfs-test/.snapshots
+   sudo mkdir -p /mnt/btrfs-test/.snapshots
+   sudo btrfs subvolume create /mnt/btrfs-test/data
    ```
 2. Seed representative files (200 files):
    ```bash
@@ -70,7 +71,7 @@ Use `sudo vger` since the source path is root-owned.
 
 1. `vger backup` exits 0
 2. `vger list` shows new snapshot for `btrfs-data`
-3. `vger snapshot -R <repo> list <id>` includes seeded files
+3. `vger --config <config> snapshot list -R <repo> <id>` includes seeded files
 4. Hook cleanup verified:
    ```bash
    test ! -d /mnt/btrfs-test/.snapshots/data-backup

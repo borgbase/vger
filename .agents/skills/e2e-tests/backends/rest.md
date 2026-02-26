@@ -21,59 +21,64 @@ Validate vger backup and restore correctness over the REST backend using a local
    ```bash
    systemctl --user enable --now vger-server.service
    systemctl --user is-active vger-server.service
-   curl -fsS http://127.0.0.1:8484/health
+   curl -fsS http://127.0.0.1:8585/health
    ```
 2. Create config from `~/vger.sample.yaml` with REST repo definition:
-   - `url: "http://127.0.0.1:8484/<repo-name>"`
+   - `url: "http://127.0.0.1:8585"` (single-repo mode)
    - `label: "rest"`
    - `access_token: "<token>"`
+   - `allow_insecure_http: true`
 3. `export VGER_PASSPHRASE=123`
 
 ## Local REST Cleanup (before each run)
 
-Use a unique REST repo name per run (recommended), or delete previous server-side repo data directory before reruns.
+Single-repo mode reuses one server-side repository. Reset server data directory between reruns (sandbox default):
+```bash
+rm -rf /mnt/repos/bench-vger/vger-server-data/*
+```
 
 ## Test Procedure
 
 1. Delete REST repo from previous runs (best effort):
    ```bash
-   vger -c <config> delete -R rest --yes-delete-this-repo || true
+   vger --config <config> delete -R rest --yes-delete-this-repo || true
    ```
+   In single-repo mode this may return HTTP 400/404; treat as non-fatal.
 2. Initialize REST repo:
    ```bash
-   vger -c <config> init -R rest
+   vger --config <config> init -R rest
    ```
 3. Run backup:
    ```bash
-   vger -c <config> backup -R rest -l rest-corpus ~/corpus-remote
+   vger --config <config> backup -R rest -l rest-corpus ~/corpus-remote
    ```
 4. Confirm snapshot:
    ```bash
-   vger -c <config> list -R rest
+   vger --config <config> list -R rest
    ```
 5. Capture latest snapshot ID.
 6. Restore to empty temp directory:
    ```bash
-   vger -c <config> restore -R rest <snapshot_id> <restore_dir>
+   vger --config <config> restore -R rest <snapshot_id> <restore_dir>
    ```
 7. Integrity check:
    ```bash
-   vger -c <config> check -R rest
+   vger --config <config> check -R rest
    ```
 8. Delete the tested snapshot:
    ```bash
-   vger -c <config> snapshot -R rest delete <snapshot_id>
+   vger --config <config> snapshot delete -R rest <snapshot_id>
    ```
 9. Compact repository packs:
    ```bash
-   vger -c <config> compact -R rest
+   vger --config <config> compact -R rest
    ```
 
 ## Validation
 
 1. Snapshot exists for label `rest-corpus`
 2. Restore completes successfully
-3. `diff -qr ~/corpus-remote <restore_dir>` reports no differences
+3. `diff -qr --no-dereference ~/corpus-remote <restore_dir>` reports no differences
 4. `vger snapshot ... delete <snapshot_id>` exits 0
 5. `vger compact` exits 0
 6. Optional: SHA256 manifest comparison

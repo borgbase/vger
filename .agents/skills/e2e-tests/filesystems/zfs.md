@@ -79,13 +79,16 @@ Use `sudo vger` since the source path is root-owned.
 
 1. `vger backup` exits 0
 2. `vger list` shows new snapshot for `zfs-data`
-3. `vger snapshot -R <repo> list <id>` includes seeded files
+3. `vger --config <config> snapshot list -R <repo> <id>` includes seeded files
 4. Hook cleanup verified:
    ```bash
    sudo zfs list -t snapshot | grep 'vgerpool/data@vger-tmp'
    # Should return no match
    ```
-5. Restore to temp dir and verify file count matches
+5. Restore to temp dir and verify content matches, ignoring the virtual `.zfs` path:
+   ```bash
+   diff -qr --no-dereference --exclude='.zfs' /vgerpool/data <restore_dir>
+   ```
 
 ## Failure Cases to Explicitly Test
 
@@ -99,6 +102,7 @@ Use `sudo vger` since the source path is root-owned.
 - **Always** verify `snapdir=visible` before running backups — without it, the snapshot path is invisible
 - Keep explicit snapshot existence checks after each run
 - Isolate SFTP failures from local/rest/s3 results
+- The live dataset contains a virtual `.zfs` directory that should be excluded from restore diffs
 - After `zpool destroy`, partition may still show `zfs_member` — next FS test can safely overwrite
 
 ## Cleanup

@@ -52,7 +52,7 @@ command_dumps:
   - name: pg.dump
     command: sudo docker exec <pg_container> pg_dump -U postgres -Fc <db>
   - name: maria.sql
-    command: sudo docker exec <maria_container> mariadb-dump -u root -p"$MYSQL_ROOT_PASSWORD" <db>
+    command: sudo docker exec <maria_container> mariadb-dump --protocol=socket --socket=/run/mysqld/mysqld.sock -u <maria_user> -p"<maria_pass>" <db>
   - name: mongo.archive.gz
     command: sudo docker exec <mongo_container> sh -lc 'mongodump --archive --gzip --db <db>'
 ```
@@ -73,6 +73,7 @@ Run at least one Docker scenario per backend:
 - `rclone purge` may return `directory not found` — treat as non-fatal
 - Keep SFTP failures isolated — do NOT rerun local/rest/s3 if only SFTP probe failed
 - MariaDB images use `mariadb-dump` (not `mysqldump`)
+- For MariaDB dumps, prefer a dedicated DB user over root to avoid auth-plugin drift across image versions
 
 ## Cleanup
 

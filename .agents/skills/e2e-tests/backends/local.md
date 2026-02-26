@@ -29,43 +29,43 @@ Validate vger filesystem backup and restore correctness on the local backend usi
    ```
 2. Delete repo from previous runs (best effort):
    ```bash
-   vger -c <config> delete -R local --yes-delete-this-repo || true
+   vger --config <config> delete -R local --yes-delete-this-repo || true
    ```
 3. Initialize repo:
    ```bash
-   vger -c <config> init -R local
+   vger --config <config> init -R local
    ```
 4. Run backup:
    ```bash
-   vger -c <config> backup -R local -l local-corpus ~/corpus-local
+   vger --config <config> backup -R local -l local-corpus ~/corpus-local
    ```
 5. Confirm snapshot:
    ```bash
-   vger -c <config> list -R local --last 3
+   vger --config <config> list -R local --last 3
    ```
 6. Capture latest snapshot ID from output.
 7. Restore into empty temp directory:
    ```bash
-   vger -c <config> restore -R local <snapshot_id> <restore_dir>
+   vger --config <config> restore -R local <snapshot_id> <restore_dir>
    ```
 8. Integrity check:
    ```bash
-   vger -c <config> check -R local
+   vger --config <config> check -R local
    ```
 9. Delete the tested snapshot:
    ```bash
-   vger -c <config> snapshot -R local delete <snapshot_id>
+   vger --config <config> snapshot delete -R local <snapshot_id>
    ```
 10. Compact repository packs:
    ```bash
-   vger -c <config> compact -R local
+   vger --config <config> compact -R local
    ```
 
 ## Validation
 
 1. Snapshot exists for label `local-corpus`
 2. Restore command exits 0
-3. `diff -qr ~/corpus-local <restore_dir>` produces no differences
+3. `diff -qr --no-dereference ~/corpus-local <restore_dir>` produces no differences
 4. `vger snapshot ... delete <snapshot_id>` exits 0
 5. `vger compact` exits 0
 6. Optional: compare sorted SHA256 manifests from both trees

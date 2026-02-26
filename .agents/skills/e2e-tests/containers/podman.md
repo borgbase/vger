@@ -53,7 +53,7 @@ command_dumps:
   - name: pg.dump
     command: sudo podman exec <pg_container> pg_dump -U postgres -Fc <db>
   - name: maria.sql
-    command: sudo podman exec <maria_container> mariadb-dump -u root -p"$MYSQL_ROOT_PASSWORD" <db>
+    command: sudo podman exec <maria_container> mariadb-dump --protocol=socket --socket=/run/mysqld/mysqld.sock -u <maria_user> -p"<maria_pass>" <db>
   - name: mongo.archive.gz
     command: sudo podman exec <mongo_container> sh -lc 'mongodump --archive --gzip --db <db>'
 ```
@@ -74,6 +74,7 @@ Run at least one Podman scenario per backend:
 - Rootless Podman may not work without `newuidmap` — fallback to `sudo podman`
 - `rclone purge` may return `directory not found` — treat as non-fatal
 - Keep SFTP failures isolated from local/rest/s3 results
+- For MariaDB dumps, prefer a dedicated DB user over root to avoid auth-plugin drift across image versions
 
 ## Cleanup
 

@@ -73,23 +73,27 @@ export VGER_PASSPHRASE=123    # non-interactive passphrase
 2. Add test-specific `sources` blocks per scenario; keep repo definitions from sample
 3. Keep each scenario in a separate config file to avoid source overlap
 4. Reference repos by label: `-R local`, `-R rest`, `-R s3`, `-R sftp`
+5. For local REST server mode, use a single repository URL root (e.g. `http://127.0.0.1:8585`) with:
+   - `access_token: "<token>"`
+   - `allow_insecure_http: true`
+   - do not append `/<repo-name>` in single-repo mode
 
 ### Validation Standard
 Every test must verify:
 1. `vger backup` exits 0
 2. `vger list` shows new snapshot for expected source label
-3. `vger snapshot -R <repo> list <snapshot_id>` confirms expected files or artifacts
+3. `vger --config <config> snapshot list -R <repo> <snapshot_id>` confirms expected files or artifacts
 4. Restore into temp directory and verify:
-   - Corpus tests: `diff -qr <source> <restore_dir>` reports no differences
+   - Corpus tests: `diff -qr --no-dereference <source> <restore_dir>` reports no differences
    - Database tests: restore dump, verify row/document counts match seeded data
 5. Optional: SHA256 manifest comparison for stronger content verification
 
 ### Cleanup Standard
-1. **Reset repo before reruns**: run `vger -c <config> delete -R <repo> --yes-delete-this-repo` before `init`
+1. **Reset repo before reruns**: run `vger --config <config> delete -R <repo> --yes-delete-this-repo` before `init`
    - Treat `not found`/missing repo as non-fatal
-   - REST backends may return `404` on delete; if so, continue with `init`/`backup` and record it
+   - REST single-repo servers may reject `delete` (for example `400/404`); if so, continue with `init`/`backup` and record it
 2. **Local**: remove temporary directories (dumps, restores, configs)
-3. **Local REST server data**: remove test repos from server data directory between runs when reusing repo names
+3. **Local REST server data**: if using single-repo mode, wipe server data dir between reruns (for this sandbox: `/mnt/repos/bench-vger/vger-server-data/*`)
 4. **Remote storage**: `rclone delete --rmdirs <remote:path>` between runs
    - Do NOT use `rclone purge` (may fail with 403 on restricted buckets)
    - Treat `directory not found` from rclone as non-fatal
@@ -120,8 +124,17 @@ Each sub-skill should produce:
 
 - Mixing `sudo vger` and regular `vger` creates root-owned repo files — use `sudo rm -rf` for cleanup
 - Command dump artifacts appear under `.vger-dumps/` in snapshot listings
-- `vger snapshot` CLI: the `-R <repo>` flag belongs to `snapshot`, not to the `list` subcommand
+- Prefer `vger --config <config> ...` in automation; keep `--config` explicit in all commands
+- `vger snapshot` CLI forms:
+  - `vger --config <config> snapshot list -R <repo> <snapshot_id>`
+  - `vger --config <config> snapshot delete -R <repo> <snapshot_id>`
+- REST local server may run in single-repo mode (`http://127.0.0.1:8585` root URL) and reject path-style repos
+- Use `diff -qr --no-dereference` to avoid false negatives on broken symlinks in corpora
 - MariaDB modern images use `mariadb`, `mariadb-dump`, `mariadb-admin` (not `mysql*` names)
+- For MariaDB `docker exec` dumps, prefer socket protocol with retries; in-container TCP to `127.0.0.1` can be intermittently unreliable on this sandbox
+- For high-entropy MariaDB seed data, use `scripts/mariadb-generate-random-data.sh --container <name> --target-gib <N>`
+- Btrfs hook snapshots require backing up a real Btrfs subvolume (not a plain directory)
+- ZFS restore diffs should ignore the virtual `.zfs` directory
 - MongoDB host tools may be missing — use `docker exec` or `podman exec` as fallback
 - Pre-pull container images before timed runs to avoid skewing measurements
 - Sample config repo paths may need adjustment for the sandbox — verify and update before first run

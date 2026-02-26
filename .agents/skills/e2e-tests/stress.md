@@ -68,8 +68,8 @@ bash "$REPO_ROOT/scripts/stress.sh" \
 
 ## Outputs and Artifacts
 
-- Working artifacts: `~/runtime/stress/work/`
-- Per-command logs: `~/runtime/stress/work/logs/`
+- Working artifacts: `~/runtime/stress/<backend>/work/`
+- Per-command logs: `~/runtime/stress/<backend>/work/logs/`
 
 On success, transient work artifacts are removed automatically. On failure, artifacts are preserved and failure context is printed with pointers to relevant logs.
 
@@ -78,7 +78,7 @@ On success, transient work artifacts are removed automatically. On failure, arti
 1. `backup` succeeds every iteration.
 2. Snapshot appears in `list` output.
 3. `restore` completes for the newly created snapshot.
-4. `diff -qr <source> <restore_dir>` reports no differences.
+4. `diff -qr --no-dereference <source> <restore_dir>` reports no differences.
 5. `snapshot delete`, `compact`, and `prune` complete without stale lock files.
 6. Optional `check` operations pass when enabled.
 
@@ -87,6 +87,6 @@ On success, transient work artifacts are removed automatically. On failure, arti
 When the harness fails, capture:
 
 1. Failure context printed to stderr (iteration, step, snapshot, log paths).
-2. Relevant logs under `~/runtime/stress/work/logs/`.
+2. Relevant logs under `~/runtime/stress/<backend>/work/logs/`.
 3. Diff output path when restore verification fails.
-4. Any stale lock files under `~/runtime/stress/work/repository/locks/`.
+4. Any stale lock files under `~/runtime/stress/<backend>/work/repository/locks/`.

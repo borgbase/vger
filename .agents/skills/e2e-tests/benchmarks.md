@@ -1,19 +1,19 @@
 ---
 name: benchmarks
-description: "Compare vger performance against restic, rustic, and borg on local backend"
+description: "Compare vger performance against restic, rustic, borg, and kopia on local backend"
 ---
 
 # Performance Benchmarks
 
 ## Goal
 
-Compare vger against three established backup tools — restic, rustic, and borg — on a local backend. Measure wall-clock time, peak memory usage, and CPU usage across common backup operations.
+Compare vger against established backup tools — restic, rustic, borg, and kopia — on a local backend. Measure wall-clock time, peak memory usage, and CPU usage across common backup operations.
 
 ## Scope
 
 - **Backend**: local only (eliminates network variability)
 - **Source dataset**: default `~/corpus-remote` (smaller, faster iteration). Optionally `~/corpus-local` for stress.
-- **Tools under test**: `vger`, `restic`, `rustic`, `borg`
+- **Tools under test**: `vger`, `restic`, `rustic`, `borg`, `kopia`
 
 Dataset layout expected by the harness:
 - `<dataset>/snapshot-1` (untimed seed snapshot)
@@ -33,6 +33,7 @@ Dataset layout expected by the harness:
    restic version
    rustic --version
    borg --version
+   kopia --help
    ```
 3. Ensure `/usr/bin/time` exists (not the shell builtin `time`).
 
@@ -135,9 +136,9 @@ Test each tool through four phases:
 ### vger
 ```bash
 export VGER_PASSPHRASE=123
-vger init -c <config> -R local
-vger backup -c <config> -R local -l bench ~/corpus-local
-vger restore -c <config> -R local <snapshot_id> <restore_dir>
+vger --config <config> init -R local
+vger --config <config> backup -R local -l bench ~/corpus-local
+vger --config <config> restore -R local <snapshot_id> <restore_dir>
 ```
 
 ### restic
@@ -166,6 +167,14 @@ mkdir -p <restore_dir>
 (cd <restore_dir> && borg extract ::bench-1)
 ```
 
+### kopia
+```bash
+export KOPIA_PASSWORD=123
+kopia repository create filesystem --path ~/runtime/repos/kopia-bench
+kopia snapshot create ~/corpus-local
+kopia snapshot restore latest --target <restore_dir>
+```
+
 Adjust command syntax as needed — consult each tool's `--help` for exact flags.
 
 ## Metrics to Capture
@@ -187,14 +196,14 @@ From `perf stat` (optional):
 
 Produce a comparison table:
 
-| Phase | Metric | vger | restic | rustic | borg |
-|-------|--------|------|--------|--------|------|
-| Init | Wall time | ... | ... | ... | ... |
-| First backup | Wall time | ... | ... | ... | ... |
-| First backup | Peak RSS | ... | ... | ... | ... |
-| Second backup | Wall time | ... | ... | ... | ... |
-| Restore | Wall time | ... | ... | ... | ... |
-| Restore | Peak RSS | ... | ... | ... | ... |
+| Phase | Metric | vger | restic | rustic | borg | kopia |
+|-------|--------|------|--------|--------|------|-------|
+| Init | Wall time | ... | ... | ... | ... | ... |
+| First backup | Wall time | ... | ... | ... | ... | ... |
+| First backup | Peak RSS | ... | ... | ... | ... | ... |
+| Second backup | Wall time | ... | ... | ... | ... | ... |
+| Restore | Wall time | ... | ... | ... | ... | ... |
+| Restore | Peak RSS | ... | ... | ... | ... | ... |
 
 Also note:
 - Repository size on disk after first backup
@@ -205,7 +214,7 @@ Also note:
 
 1. Remove all benchmark repositories:
    ```bash
-   rm -rf ~/runtime/repos/restic-bench ~/runtime/repos/rustic-bench ~/runtime/repos/borg-bench
+   rm -rf ~/runtime/repos/restic-bench ~/runtime/repos/rustic-bench ~/runtime/repos/borg-bench ~/runtime/repos/kopia-bench
    ```
 2. Remove restore directories
 3. Keep timing logs under `~/runtime/logs/`

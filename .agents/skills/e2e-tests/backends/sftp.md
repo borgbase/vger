@@ -41,43 +41,43 @@ timeout 180 rclone delete <sftp_remote:path> --rmdirs
 
 1. Delete repo from previous runs (best effort):
    ```bash
-   timeout 180 vger -c <config> delete -R sftp --yes-delete-this-repo || true
+   timeout 180 vger --config <config> delete -R sftp --yes-delete-this-repo || true
    ```
 2. Initialize repo:
    ```bash
-   timeout 120 vger -c <config> init -R sftp
+   timeout 120 vger --config <config> init -R sftp
    ```
 3. Run backup:
    ```bash
-   timeout 3600 vger -c <config> backup -R sftp -l remote-corpus ~/corpus-remote
+   timeout 3600 vger --config <config> backup -R sftp -l remote-corpus ~/corpus-remote
    ```
 4. Confirm snapshot:
    ```bash
-   timeout 120 vger -c <config> list -R sftp --last 3
+   timeout 120 vger --config <config> list -R sftp --last 3
    ```
 5. Capture latest snapshot ID.
 6. Restore to empty temp directory:
    ```bash
-   timeout 3600 vger -c <config> restore -R sftp <snapshot_id> <restore_dir>
+   timeout 3600 vger --config <config> restore -R sftp <snapshot_id> <restore_dir>
    ```
 7. Integrity check:
    ```bash
-   timeout 300 vger -c <config> check -R sftp
+   timeout 300 vger --config <config> check -R sftp
    ```
 8. Delete the tested snapshot:
    ```bash
-   timeout 300 vger -c <config> snapshot -R sftp delete <snapshot_id>
+   timeout 300 vger --config <config> snapshot delete -R sftp <snapshot_id>
    ```
 9. Compact repository packs:
    ```bash
-   timeout 300 vger -c <config> compact -R sftp
+   timeout 300 vger --config <config> compact -R sftp
    ```
 
 ## Validation
 
 1. Snapshot exists for label `remote-corpus`
 2. Restore exits 0 (not timeout 124)
-3. `diff -qr ~/corpus-remote <restore_dir>` reports no differences
+3. `diff -qr --no-dereference ~/corpus-remote <restore_dir>` reports no differences
 4. `vger snapshot ... delete <snapshot_id>` exits 0 (not timeout 124)
 5. `vger compact` exits 0 (not timeout 124)
 6. Optional: SHA256 manifest comparison
@@ -96,4 +96,4 @@ timeout 180 rclone delete <sftp_remote:path> --rmdirs
 1. Remove restore temp directory
 2. Clean SFTP path with `rclone delete --rmdirs` between reruns
 3. Preserve timeout logs for troubleshooting
-4. Ensure no stuck `vger` process remains after aborted steps
+4. Ensure no stuck `vger` process remains after aborted steps (`pkill -f '^vger( |$)'` if needed)
