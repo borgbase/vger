@@ -34,6 +34,9 @@ pub struct SnapshotEntry {
     /// Actual source paths that were backed up.
     #[serde(default)]
     pub source_paths: Vec<String>,
+    /// Hostname of the machine that created this snapshot.
+    #[serde(default)]
+    pub hostname: String,
 }
 
 impl Manifest {

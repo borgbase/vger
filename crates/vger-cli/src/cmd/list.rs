@@ -35,9 +35,14 @@ pub(crate) fn run_list(
     }
 
     let theme = CliTableTheme::detect();
-    let mut table = theme.new_data_table(&["ID", "Source", "Label", "Date"]);
+    let mut table = theme.new_data_table(&["ID", "Host", "Source", "Label", "Date"]);
 
     for entry in &snapshots {
+        let host_col = if entry.hostname.is_empty() {
+            "-".to_string()
+        } else {
+            entry.hostname.clone()
+        };
         let source_col = if !entry.source_paths.is_empty() {
             entry.source_paths.join("\n")
         } else if !entry.source_label.is_empty() {
@@ -54,6 +59,7 @@ pub(crate) fn run_list(
         };
         table.add_row(vec![
             Cell::new(entry.name.clone()),
+            Cell::new(host_col),
             Cell::new(source_col),
             Cell::new(label_col),
             Cell::new(entry.time.format("%Y-%m-%d %H:%M:%S").to_string()),

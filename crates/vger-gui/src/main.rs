@@ -884,6 +884,7 @@ slint::slint! {
                             vertical-stretch: 1;
                             columns: [
                                 { title: "ID" },
+                                { title: "Host" },
                                 { title: "Time" },
                                 { title: "Source" },
                                 { title: "Label" },
@@ -1061,6 +1062,7 @@ struct RepoInfoData {
 #[derive(Debug, Clone)]
 struct SnapshotRowData {
     id: String,
+    hostname: String,
     time_str: String,
     source: String,
     label: String,
@@ -1299,14 +1301,15 @@ fn sort_snapshot_table(
         return;
     };
 
-    // Columns: 0=ID, 1=Time, 2=Source, 3=Label, 4=Files, 5=Size
+    // Columns: 0=ID, 1=Host, 2=Time, 3=Source, 4=Label, 5=Files, 6=Size
     match col_idx {
         0 => data.sort_by(|a, b| a.id.cmp(&b.id)),
-        1 => data.sort_by(|a, b| a.time_epoch.cmp(&b.time_epoch)),
-        2 => data.sort_by(|a, b| a.source.cmp(&b.source)),
-        3 => data.sort_by(|a, b| a.label.cmp(&b.label)),
-        4 => data.sort_by(|a, b| a.nfiles.cmp(&b.nfiles)),
-        5 => data.sort_by(|a, b| a.size_bytes.cmp(&b.size_bytes)),
+        1 => data.sort_by(|a, b| a.hostname.cmp(&b.hostname)),
+        2 => data.sort_by(|a, b| a.time_epoch.cmp(&b.time_epoch)),
+        3 => data.sort_by(|a, b| a.source.cmp(&b.source)),
+        4 => data.sort_by(|a, b| a.label.cmp(&b.label)),
+        5 => data.sort_by(|a, b| a.nfiles.cmp(&b.nfiles)),
+        6 => data.sort_by(|a, b| a.size_bytes.cmp(&b.size_bytes)),
         _ => return,
     }
     if !ascending {
@@ -1325,6 +1328,7 @@ fn sort_snapshot_table(
         .map(|d| {
             vec![
                 d.id.clone(),
+                d.hostname.clone(),
                 d.time_str.clone(),
                 d.source.clone(),
                 d.label.clone(),
@@ -1954,8 +1958,14 @@ fn run_worker(
                                 } else {
                                     s.source_label.clone()
                                 };
+                                let hostname = if s.hostname.is_empty() {
+                                    "-".to_string()
+                                } else {
+                                    s.hostname.clone()
+                                };
                                 data.push(SnapshotRowData {
                                     id: s.name.clone(),
+                                    hostname,
                                     time_str: ts.format("%Y-%m-%d %H:%M:%S").to_string(),
                                     source: sources,
                                     label,
@@ -2780,6 +2790,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                             .map(|d| {
                                 vec![
                                     d.id.clone(),
+                                    d.hostname.clone(),
                                     d.time_str.clone(),
                                     d.source.clone(),
                                     d.label.clone(),

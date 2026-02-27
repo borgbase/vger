@@ -151,6 +151,7 @@ fn manifest_survives_reopen() {
             source_label: String::new(),
             label: String::new(),
             source_paths: Vec::new(),
+            hostname: String::new(),
         });
         repo.save_state().unwrap();
     }

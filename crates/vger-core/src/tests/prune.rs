@@ -47,6 +47,7 @@ fn make_snapshots(count: usize) -> Vec<SnapshotEntry> {
             source_label: String::new(),
             label: String::new(),
             source_paths: Vec::new(),
+            hostname: String::new(),
         })
         .collect()
 }

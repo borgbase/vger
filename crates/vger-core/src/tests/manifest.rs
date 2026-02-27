@@ -11,6 +11,7 @@ fn make_entry(name: &str) -> SnapshotEntry {
         source_label: String::new(),
         label: String::new(),
         source_paths: Vec::new(),
+        hostname: String::new(),
     }
 }
 
@@ -22,6 +23,7 @@ fn make_entry_at(name: &str, offset_secs: i64) -> SnapshotEntry {
         source_label: String::new(),
         label: String::new(),
         source_paths: Vec::new(),
+        hostname: String::new(),
     }
 }
 

@@ -385,7 +385,7 @@ pub fn run_with_progress(
 
         let snapshot_meta = SnapshotMeta {
             name: snapshot_name.to_string(),
-            hostname,
+            hostname: hostname.clone(),
             username,
             time: time_start,
             time_end,
@@ -416,6 +416,7 @@ pub fn run_with_progress(
             source_label: source_label.to_string(),
             label: String::new(),
             source_paths: source_paths.to_vec(),
+            hostname,
         };
 
         Ok((snapshot_entry, new_file_cache, stats))
