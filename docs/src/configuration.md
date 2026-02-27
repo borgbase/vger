@@ -67,6 +67,46 @@ repositories:
 
 For S3-compatible HTTP endpoints, use `s3+http://...` URLs with `allow_insecure_http: true`.
 
+### Multiple repositories
+
+Add more entries to `repositories:` to back up to multiple destinations. Top-level settings serve as defaults; each entry can override `encryption`, `compression`, `retention`, and `limits`.
+
+```yaml
+repositories:
+  - label: "local"
+    url: "/backups/local"
+
+  - label: "remote"
+    url: "s3://s3.us-east-1.amazonaws.com/bucket/remote"
+    region: "us-east-1"
+    access_key_id: "AKIA..."
+    secret_access_key: "..."
+    encryption:
+      passcommand: "pass show vger-remote"
+    compression:
+      algorithm: "zstd"             # Better ratio for remote
+    retention:
+      keep_daily: 30                 # Keep more on remote
+    limits:
+      cpu:
+        max_threads: 2
+      network:
+        write_mib_per_sec: 25
+```
+
+When `limits` is set on a repository entry, it replaces top-level `limits` for that repository.
+
+By default, commands operate on all repositories. Use `--repo` / `-R` to target a single one:
+
+```bash
+vger list --repo local
+vger list -R /backups/local
+```
+
+### 3-2-1 backup strategy
+
+> **Tip:** Configuring both a local and a remote repository gives you a [3-2-1 backup](https://en.wikipedia.org/wiki/Backup#3-2-1_rule) setup: three copies of your data (the original files, the local backup, and the remote backup), on two different media types, with one copy offsite. The example above already achieves this.
+
 ## Sources
 
 Sources can be a simple list of paths (auto-labeled from directory name) or rich entries with per-source options.
@@ -110,6 +150,34 @@ sources:
 ```
 
 These directories are backed up together as one snapshot. You cannot use both `path` and `paths` on the same entry.
+
+### Per-source overrides
+
+Each source entry in rich form can override global settings. This lets you tailor backup behavior per directory:
+
+```yaml
+sources:
+  - path: "/home/user/documents"
+    label: "docs"
+    exclude: ["*.tmp"]
+    xattrs:
+      enabled: false                 # Override top-level xattrs setting for this source
+    repos: ["local"]                 # Only back up to the "local" repo
+    retention:
+      keep_daily: 7
+      keep_weekly: 4
+
+  - path: "/home/user/photos"
+    label: "photos"
+    repos: ["local", "remote"]       # Back up to both repos
+    retention:
+      keep_daily: 30
+      keep_monthly: 12
+    hooks:
+      after: "echo photos backed up"
+```
+
+Per-source fields that override globals: `exclude`, `exclude_if_present`, `one_file_system`, `git_ignore`, `repos`, `retention`, `hooks`, `command_dumps`.
 
 ## Encryption
 
@@ -336,67 +404,3 @@ Notes:
 - Variable names must match `[A-Za-z_][A-Za-z0-9_]*`.
 - Malformed placeholders fail config loading.
 - No escape syntax is supported for literal `${...}`.
-
-## Multiple sources
-
-Each source entry in rich form can override global settings. This lets you tailor backup behavior per directory:
-
-```yaml
-sources:
-  - path: "/home/user/documents"
-    label: "docs"
-    exclude: ["*.tmp"]
-    xattrs:
-      enabled: false                 # Override top-level xattrs setting for this source
-    repos: ["local"]                 # Only back up to the "local" repo
-    retention:
-      keep_daily: 7
-      keep_weekly: 4
-
-  - path: "/home/user/photos"
-    label: "photos"
-    repos: ["local", "remote"]       # Back up to both repos
-    retention:
-      keep_daily: 30
-      keep_monthly: 12
-    hooks:
-      after: "echo photos backed up"
-```
-
-Per-source fields that override globals: `exclude`, `exclude_if_present`, `one_file_system`, `git_ignore`, `repos`, `retention`, `hooks`, `command_dumps`.
-
-## Multiple repositories
-
-Add more entries to `repositories:` to back up to multiple destinations. Top-level settings serve as defaults; each entry can override `encryption`, `compression`, `retention`, and `limits`.
-
-```yaml
-repositories:
-  - label: "local"
-    url: "/backups/local"
-
-  - label: "remote"
-    url: "s3://s3.us-east-1.amazonaws.com/bucket/remote"
-    region: "us-east-1"
-    access_key_id: "AKIA..."
-    secret_access_key: "..."
-    encryption:
-      passcommand: "pass show vger-remote"
-    compression:
-      algorithm: "zstd"             # Better ratio for remote
-    retention:
-      keep_daily: 30                 # Keep more on remote
-    limits:
-      cpu:
-        max_threads: 2
-      network:
-        write_mib_per_sec: 25
-```
-
-When `limits` is set on a repository entry, it replaces top-level `limits` for that repository.
-
-By default, commands operate on all repositories. Use `--repo` / `-R` to target a single one:
-
-```bash
-vger list --repo local
-vger list -R /backups/local
-```

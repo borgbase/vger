@@ -567,7 +567,7 @@ pub fn load_config(path: &Path) -> vger_types::error::Result<VgerConfig> {
 pub fn minimal_config_template() -> &'static str {
     r#"# vger configuration file
 # Minimal required configuration.
-# For advanced examples, see docs and vger.example.yaml.
+# Full reference: https://vger.borgbase.com/configuration
 
 repositories:
   - url: /path/to/repo
