@@ -82,6 +82,10 @@ schedule:
   passphrase_prompt_timeout_seconds: 300
 ```
 
+## Security
+
+To report a security vulnerability, please email [hello@borgbase.com](mailto:hello@borgbase.com).
+
 ## License
 
 GNU General Public License v3.0
