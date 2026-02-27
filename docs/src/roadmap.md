@@ -1,5 +1,17 @@
 # Roadmap
 
+## Planned
+
+| Feature | Description | Priority |
+|---------|-------------|----------|
+| **GUI Config Editing** | Structured editing of the config in the GUI, currently only via YAML | High |
+| **Linux GUI packaging** | Native `.deb`/`.rpm` packages and a repository for streamlined installation | High |
+| **Windows GUI packaging** | MSI installer and/or winget package for first-class Windows support | High |
+| **Snapshot filtering** | By host, tag, path, date ranges | Medium |
+| **Async I/O** | Non-blocking storage operations | Medium |
+| **JSON output mode** | Structured JSON output for all CLI commands to enable scripting and integration with monitoring tools | Medium |
+| **Per-token permissions** | Expand permissions from full/append-only to also limit reading and maintenance | Medium |
+
 ## Implemented
 
 | Feature | Description |
@@ -28,13 +40,3 @@
 | **Upload integrity** | REST `PUT` includes `X-Content-BLAKE2b` header; server verifies during streaming write |
 | **vger-protocol crate** | Shared wire-format types and pack/protocol version constants between client and server |
 | **Type-safe SnapshotId** | Newtype for snapshot identifiers with `storage_key()` (ManifestId dropped — manifest is a singleton) |
-
-## Planned / Not Yet Implemented
-
-| Feature | Description | Priority |
-|---------|-------------|----------|
-| **GUI Config Editing** | Allow editing the YAML config in the GUI | High |
-| **GUI Packaging** | Packing app per-OS | High |
-| **Snapshot filtering** | By host, tag, path, date ranges | Medium |
-| **Async I/O** | Non-blocking storage operations | Medium |
-| **Metrics** | Prometheus/OpenTelemetry | Low |
