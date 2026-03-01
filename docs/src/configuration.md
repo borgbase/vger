@@ -179,6 +179,44 @@ sources:
 
 Per-source fields that override globals: `exclude`, `exclude_if_present`, `one_file_system`, `git_ignore`, `repos`, `retention`, `hooks`, `command_dumps`.
 
+## Command Dumps
+
+Capture the stdout of shell commands directly into your backup. Useful for database dumps, API exports, or any generated data that doesn't live as a regular file on disk.
+
+```yaml
+sources:
+  - path: /var/www/myapp
+    label: myapp
+    command_dumps:
+      - name: postgres.sql
+        command: pg_dump -U myuser mydb
+      - name: redis.rdb
+        command: redis-cli --rdb -
+```
+
+Each entry has two required fields:
+
+| Field     | Description                                           |
+|-----------|-------------------------------------------------------|
+| `name`    | Virtual filename (e.g. `mydb.sql`). Must not contain `/` or `\`. No duplicates within a source. |
+| `command` | Shell command whose stdout is captured (run via `sh -c`). |
+
+Output is stored as virtual files under `.vger-dumps/` in the snapshot. On restore they appear as regular files (e.g. `.vger-dumps/postgres.sql`).
+
+You can also create **dump-only sources** with no filesystem paths — an explicit `label` is required:
+
+```yaml
+sources:
+  - label: databases
+    command_dumps:
+      - name: all-databases.sql
+        command: pg_dumpall -U postgres
+```
+
+If a dump command exits with non-zero status, the backup is aborted. Any chunks already uploaded to packs remain on disk but are not added to the index; they are reclaimed on the next `vger compact` run.
+
+See [Backup — Command dumps](backup.md#command-dumps) for more details and [Recipes](recipes.md) for PostgreSQL, MySQL, MongoDB, and Docker examples.
+
 ## Encryption
 
 Encryption is enabled by default (`auto` mode with Argon2id key derivation). You only need an `encryption` section to supply a passcommand, force a specific algorithm, or disable encryption:
