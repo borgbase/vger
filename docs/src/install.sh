@@ -10,9 +10,9 @@ TMPDIR_CLEANUP=""
 
 # Minimum glibc required by the GNU build.
 # Bump this when the CI runner changes (pinned in .github/workflows/release.yml).
-# Current: Ubuntu 22.04 ships glibc 2.35.
+# Current: Ubuntu 24.04 ships glibc 2.39.
 MIN_GLIBC_MAJOR=2
-MIN_GLIBC_MINOR=35
+MIN_GLIBC_MINOR=39
 
 # --- Utilities -----------------------------------------------------------
 
@@ -218,12 +218,10 @@ install_binary() {
     if [ -w "$INSTALL_DIR" ]; then
         cp "$EXTRACTED" "$dest"
         chmod 755 "$dest"
-        USED_SUDO=false
     else
         log "Installing to ${INSTALL_DIR} requires elevated permissions. Using sudo..."
         sudo cp "$EXTRACTED" "$dest"
         sudo chmod 755 "$dest"
-        USED_SUDO=true
     fi
 
     log ""
@@ -257,9 +255,7 @@ main() {
     install_binary
     log ""
 
-    if [ "$USED_SUDO" = false ]; then
-        prompt_config
-    fi
+    prompt_config
 
     log ""
     log "Done. Run 'vger --help' to get started."
