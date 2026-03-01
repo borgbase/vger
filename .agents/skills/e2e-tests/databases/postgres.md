@@ -17,11 +17,17 @@ Test PostgreSQL backups using both recipe patterns from [vger docs](https://vger
    ```bash
    sudo docker run -d --name vger-pg -e POSTGRES_PASSWORD=testpass -p 5432:5432 postgres:16
    ```
-2. Create test database `vger_pg_test`
-3. Seed dummy data:
-   - Table `users` — 10 rows
-   - Table `orders` — 50 rows
-4. Verify seeded counts before backup
+2. Generate realistic large data (default baseline: ~10 GiB):
+   ```bash
+   REPO_ROOT="$(git rev-parse --show-toplevel)"
+   bash "$REPO_ROOT/scripts/postgres-generate-random-data.sh" \
+     --container vger-pg \
+     --target-gib 10
+   ```
+3. Verify generator output includes:
+   - `final_bytes` around 10 GiB
+   - Multiple populated tables (`customers`, `products`, `orders`, `order_events`)
+4. Save generator output to scenario log (required)
 
 ## Variant A: Hooks Dump to Temporary Directory
 
@@ -58,8 +64,13 @@ Clean remote storage with `rclone delete --rmdirs` between backend runs.
 1. Restore dump artifact from snapshot into temp directory
 2. Create fresh database `vger_pg_restore_test`
 3. `pg_restore` the dump into the fresh database
-4. Verify row counts match: `users=10`, `orders=50`
-5. Ensure Postgres client/server major versions are compatible
+4. Verify restored counts match seeded source counts for:
+   - `customers`
+   - `products`
+   - `orders`
+   - `order_events`
+5. Verify at least one sampled restored row contains non-trivial randomized content
+6. Ensure Postgres client/server major versions are compatible
 
 ## Common Issues
 
@@ -67,6 +78,7 @@ Clean remote storage with `rclone delete --rmdirs` between backend runs.
 - Command dump artifacts appear under `.vger-dumps/` in snapshot listings
 - Client/server version mismatches can cause `pg_restore` config parameter errors
 - Use `sudo docker` if user lacks Docker socket access
+- Large dumps can run for a long time; use generous command timeouts for remote backends
 
 ## Cleanup
 

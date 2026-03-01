@@ -33,10 +33,10 @@ Run each sub-skill to execute a specific test area. Results go to `~/runtime/`.
 - **`e2e-tests:backends:s3`** — Backup/restore with small corpus on S3 backend
 - **`e2e-tests:backends:sftp`** — Backup/restore with small corpus on SFTP backend (timeout-bounded)
 
-### Databases — Hooks and command_dumps patterns
-- **`e2e-tests:databases:postgres`** — PostgreSQL with hooks dump and command_dumps variants
-- **`e2e-tests:databases:mariadb`** — MariaDB with hooks dump and command_dumps variants
-- **`e2e-tests:databases:mongodb`** — MongoDB with command_dumps (mongodump --archive)
+### Databases — Hooks and command_dumps patterns (large realistic data)
+- **`e2e-tests:databases:postgres`** — PostgreSQL with hooks dump and command_dumps variants on ~10 GiB randomized schema
+- **`e2e-tests:databases:mariadb`** — MariaDB with hooks dump and command_dumps variants on ~10 GiB randomized schema
+- **`e2e-tests:databases:mongodb`** — MongoDB with command_dumps (mongodump --archive) on ~2.5 GiB randomized collections
 
 ### Containers — Volume backups and container integration
 - **`e2e-tests:containers:docker`** — Static volumes, downtime hooks, DB exec dumps via Docker
@@ -53,7 +53,7 @@ Run each sub-skill to execute a specific test area. Results go to `~/runtime/`.
 ## Recommended Execution Order
 
 1. **Backends** first (establishes corpus validation baseline)
-2. **Databases** (lighter, container-based tests)
+2. **Databases** (large-data, container-based tests)
 3. **Containers** (reuses DB patterns with volume workflows)
 4. **Filesystems** (requires disk/partition setup)
 5. **Stress** next (long-loop correctness/locking pressure on local backend)
@@ -67,6 +67,18 @@ export VGER_PASSPHRASE=123    # non-interactive passphrase
 ```
 - Use `sudo` for package installs and root-owned paths
 - Working directory for all test artifacts: `~/runtime/`
+
+### Database Data Volume Baseline
+- Database scenarios are **not** small-smoke tests by default.
+- Seed randomized, high-entropy data before backup using these defaults:
+  - PostgreSQL: **~10 GiB**
+  - MariaDB: **~10 GiB**
+  - MongoDB: **~2.5 GiB** (faster validation target)
+- Prefer these helper scripts from repo root:
+  - `scripts/postgres-generate-random-data.sh --container <name> --target-gib 10`
+  - `scripts/mariadb-generate-random-data.sh --container <name> --target-gib 10`
+  - `scripts/mongodb-generate-random-data.sh --container <name> --target-gib 2.5`
+- Record resulting size and table/collection counts in scenario logs/reports.
 
 ### Config Strategy
 1. Copy `~/vger.sample.yaml` to a scenario-specific config (e.g., `config.postgres.yaml`)
@@ -85,7 +97,7 @@ Every test must verify:
 3. `vger --config <config> snapshot list -R <repo> <snapshot_id>` confirms expected files or artifacts
 4. Restore into temp directory and verify:
    - Corpus tests: `diff -qr --no-dereference <source> <restore_dir>` reports no differences
-   - Database tests: restore dump, verify row/document counts match seeded data
+   - Database tests: restore dump, verify row/document counts and sampled content match seeded large dataset
 5. Optional: SHA256 manifest comparison for stronger content verification
 
 ### Cleanup Standard
@@ -132,7 +144,9 @@ Each sub-skill should produce:
 - Use `diff -qr --no-dereference` to avoid false negatives on broken symlinks in corpora
 - MariaDB modern images use `mariadb`, `mariadb-dump`, `mariadb-admin` (not `mysql*` names)
 - For MariaDB `docker exec` dumps, prefer socket protocol with retries; in-container TCP to `127.0.0.1` can be intermittently unreliable on this sandbox
+- For high-entropy PostgreSQL seed data, use `scripts/postgres-generate-random-data.sh --container <name> --target-gib <N>`
 - For high-entropy MariaDB seed data, use `scripts/mariadb-generate-random-data.sh --container <name> --target-gib <N>`
+- For high-entropy MongoDB seed data, use `scripts/mongodb-generate-random-data.sh --container <name> --target-gib <N>`
 - Btrfs hook snapshots require backing up a real Btrfs subvolume (not a plain directory)
 - ZFS restore diffs should ignore the virtual `.zfs` directory
 - MongoDB host tools may be missing — use `docker exec` or `podman exec` as fallback

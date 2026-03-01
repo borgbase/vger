@@ -16,11 +16,18 @@ Test MongoDB backup workflow using `command_dumps` with `mongodump --archive --g
    ```bash
    sudo docker run -d --name vger-mongo -p 27017:27017 mongo:7
    ```
-3. Create test database `vger_mongo_test`
-4. Insert dummy data:
-   - Collection `profiles` — 10 documents
-   - Collection `events` — 100 documents
-5. Verify seeded counts before backup
+3. Generate realistic large data (default baseline: ~2.5 GiB):
+   ```bash
+   REPO_ROOT="$(git rev-parse --show-toplevel)"
+   bash "$REPO_ROOT/scripts/mongodb-generate-random-data.sh" \
+     --container vger-mongo \
+     --target-gib 2.5 \
+     --db vger_mongo_test
+   ```
+4. Verify generator output includes:
+   - `final_db_bytes` around 2.5 GiB
+   - Populated collections (`customers`, `products`, `orders`, `order_events`)
+5. Save generator output to scenario log (required)
 
 ## Backup Variant: command_dumps
 
@@ -55,7 +62,12 @@ Additional run capturing all databases:
    ```bash
    mongorestore --archive=<artifact> --gzip --nsFrom='vger_mongo_test.*' --nsTo='vger_mongo_restore_test.*'
    ```
-3. Verify document counts: `profiles=10`, `events=100`
+3. Verify restored document counts match seeded source counts for:
+   - `customers`
+   - `products`
+   - `orders`
+   - `order_events`
+4. Verify sampled restored document content is randomized/high-entropy
 
 If host lacks `mongorestore`, use `docker exec` approach.
 
@@ -63,6 +75,7 @@ If host lacks `mongorestore`, use `docker exec` approach.
 
 - Host may not have MongoDB client tools — `docker exec` is a reliable fallback
 - Command dump artifacts appear under `.vger-dumps/` in snapshot listings
+- Large archives can take substantial time; use generous timeouts for slower backends
 
 ## Cleanup
 

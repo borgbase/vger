@@ -24,10 +24,18 @@ Test MariaDB backups using both recipe patterns:
    - host: `localhost`
    - password: `vgerpass`
    - grants: full privileges on `vger_maria_test.*`
-5. Seed dummy data:
-   - Table `customers` — 10 rows
-   - Table `invoices` — 50 rows
-6. Verify seeded counts before backup
+5. Generate realistic large data (default baseline: ~10 GiB):
+   ```bash
+   REPO_ROOT="$(git rev-parse --show-toplevel)"
+   bash "$REPO_ROOT/scripts/mariadb-generate-random-data.sh" \
+     --container vger-maria \
+     --target-gib 10 \
+     --db vger_maria_test
+   ```
+6. Verify generator output includes:
+   - `final_bytes` around 10 GiB
+   - Populated tables (`customers`, `products`, `orders`, `order_events`)
+7. Save generator output to scenario log (required)
 
 ## Variant A: Hooks Dump to Temporary Directory
 
@@ -61,20 +69,23 @@ Run backup and validate artifact exists and is non-empty.
 
 1. Restore SQL artifact from snapshot
 2. Import into fresh database `vger_maria_restore_test`
-3. Verify row counts: `customers=10`, `invoices=50`
+3. Verify restored counts match seeded source counts for:
+   - `customers`
+   - `products`
+   - `orders`
+   - `order_events`
+4. Verify sampled restored row content is randomized (not fixed or all-zero payloads)
 
-## Large-Volume Variant (about 30 GiB)
+## Higher-Volume Variant (optional, >10 GiB)
 
-Use this only when stress-testing `command_dumps` behavior:
+Use this when stress-testing `command_dumps` at larger scales:
 
-1. Seed a `large_payload` table in batches until `information_schema.tables` reports at least `30 * 1024^3` bytes
-   - Preferred helper for high-entropy rows:
-     - `scripts/mariadb-generate-random-data.sh --container <maria_container> --target-gib 30`
-   - Default behavior truncates the target table before refill
+1. Re-run generator with a higher target:
+   - `scripts/mariadb-generate-random-data.sh --container <maria_container> --target-gib 30`
 2. Keep the dump command socket-based with retries:
    - `mariadb-dump --quick --ssl=0 --protocol=socket --socket=/run/mysqld/mysqld.sock -u vger -pvgerpass vger_maria_test`
 3. Enforce generous backup/restore timeouts (`timeout 10800`)
-4. Validate restored SQL artifact size (expect tens of GiB)
+4. Validate restored SQL artifact size (expect many GiB)
 
 ## Common Issues
 
@@ -83,8 +94,8 @@ Use this only when stress-testing `command_dumps` behavior:
 - Root authentication mode can vary across images; a dedicated dump user is more reliable than root for `command_dumps`
 - Some runs intermittently fail with socket/auth errors (`2002`/`1045`); add bounded retry around dump/backup when validating stability
 - In this sandbox, host TCP to a mapped port can work while in-container `--protocol=tcp -h 127.0.0.1` fails intermittently; prefer in-container socket dumps for `docker exec` workflows
-- Large `command_dumps` (for example 30+ GiB SQL) can drive very high `vger` RSS during capture; if memory pressure appears, prefer hook-based dump-to-file workflows for realistic large-data tests
-- Synthetic payloads like `REPEAT('x', ...)` are useful for volume-path validation but compress unrealistically well; use higher-entropy sample generation when benchmarking storage efficiency
+- Large `command_dumps` can drive high `vger` RSS during capture; if memory pressure appears, prefer hook-based dump-to-file workflows for realistic large-data tests
+- Avoid low-entropy fillers (`REPEAT('x', ...)`) for baseline tests; high-entropy random data is required
 - Command dump artifacts appear under `.vger-dumps/` in snapshot listings
 - Use `sudo docker` if user lacks Docker socket access
 
