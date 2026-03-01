@@ -168,9 +168,6 @@ prompt_config() {
             [nN]*) ;;
             *)     "${INSTALL_DIR}/${BINARY_NAME}" config ;;
         esac
-    else
-        log ""
-        log "Run 'vger config' to create a starter configuration."
     fi
 }
 
@@ -258,7 +255,7 @@ main() {
     prompt_config
 
     log ""
-    log "Done. Run 'vger --help' to get started."
+    log "Done. Run 'vger config' to create a starter configuration."
 }
 
 main
