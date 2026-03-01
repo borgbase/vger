@@ -235,7 +235,7 @@ pub(crate) enum SnapshotCommand {
         /// Select repository by label or path
         #[arg(short = 'R', long = "repo")]
         repo: Option<String>,
-        /// Snapshot to inspect
+        /// Snapshot to inspect (name or "latest")
         snapshot: String,
         /// Show only files under this subtree
         #[arg(long)]
@@ -252,7 +252,7 @@ pub(crate) enum SnapshotCommand {
         /// Select repository by label or path
         #[arg(short = 'R', long = "repo")]
         repo: Option<String>,
-        /// Snapshot to inspect
+        /// Snapshot to inspect (name or "latest")
         snapshot: String,
     },
     /// Delete a specific snapshot

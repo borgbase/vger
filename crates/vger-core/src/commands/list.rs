@@ -28,9 +28,16 @@ pub fn list_snapshot_items(
 ) -> Result<Vec<Item>> {
     let mut repo = open_repo_without_index(config, passphrase)?;
 
+    // Resolve "latest" or exact snapshot name
+    let resolved_name = repo
+        .manifest()
+        .resolve_snapshot(snapshot_name)?
+        .name
+        .clone();
+
     // Try restore cache first (avoids loading the full index entirely)
     if let Some(ref cache) = repo.open_restore_cache() {
-        match load_snapshot_items_via_lookup(&mut repo, snapshot_name, |id| cache.lookup(id)) {
+        match load_snapshot_items_via_lookup(&mut repo, &resolved_name, |id| cache.lookup(id)) {
             Ok(items) => return Ok(items),
             Err(VgerError::ChunkNotInIndex(_)) => {
                 // Restore cache incomplete — fall through to full index
@@ -41,7 +48,7 @@ pub fn list_snapshot_items(
 
     // Fall back to full index load (benefits from blob cache)
     repo.load_chunk_index()?;
-    load_snapshot_items(&mut repo, snapshot_name)
+    load_snapshot_items(&mut repo, &resolved_name)
 }
 
 /// List all snapshots with their stats (loaded from snapshot metadata).
@@ -69,7 +76,12 @@ pub fn get_snapshot_meta(
     snapshot_name: &str,
 ) -> Result<SnapshotMeta> {
     let repo = open_repo_without_index(config, passphrase)?;
-    load_snapshot_meta(&repo, snapshot_name)
+    let resolved_name = repo
+        .manifest()
+        .resolve_snapshot(snapshot_name)?
+        .name
+        .clone();
+    load_snapshot_meta(&repo, &resolved_name)
 }
 
 /// Load the SnapshotMeta for a snapshot by name.

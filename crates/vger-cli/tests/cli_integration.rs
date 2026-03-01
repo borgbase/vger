@@ -487,6 +487,77 @@ fn cli_restore_missing_dest_fails() {
     );
 }
 
+#[test]
+fn cli_snapshot_list_latest_alias() {
+    let fx = CliFixture::new();
+    write_plain_config(&fx.config_path, &fx.repo_dir);
+
+    let cfg = fx.config_path.to_string_lossy().to_string();
+    let source = fx.source_a.to_string_lossy().to_string();
+
+    fx.run_ok(&["--config", &cfg, "init"]);
+
+    // Snapshot 1: only old.txt
+    std::fs::write(fx.source_a.join("old.txt"), b"old\n").unwrap();
+    fx.run_ok(&["--config", &cfg, "backup", &source]);
+
+    // Snapshot 2: add unique.txt (old.txt still present)
+    std::fs::write(fx.source_a.join("unique.txt"), b"unique\n").unwrap();
+    fx.run_ok(&["--config", &cfg, "backup", &source]);
+
+    let out = fx.run_ok(&["--config", &cfg, "snapshot", "list", "latest"]);
+    assert!(
+        out.contains("unique.txt"),
+        "expected snapshot list latest to show content from newest snapshot, got:\n{out}"
+    );
+}
+
+#[test]
+fn cli_snapshot_info_latest_alias() {
+    let fx = CliFixture::new();
+    write_plain_config(&fx.config_path, &fx.repo_dir);
+    std::fs::write(fx.source_a.join("info.txt"), b"info\n").unwrap();
+
+    let cfg = fx.config_path.to_string_lossy().to_string();
+    let source = fx.source_a.to_string_lossy().to_string();
+
+    fx.run_ok(&["--config", &cfg, "init"]);
+
+    // Snapshot 1
+    fx.run_ok(&["--config", &cfg, "backup", &source]);
+
+    // Snapshot 2 — this should be the one "latest" resolves to
+    std::fs::write(fx.source_a.join("extra.txt"), b"extra\n").unwrap();
+    let backup2_out = fx.run_ok(&["--config", &cfg, "backup", &source]);
+    let snap2_name = parse_snapshot_name(&backup2_out);
+
+    let out = fx.run_ok(&["--config", &cfg, "snapshot", "info", "latest"]);
+    assert!(
+        out.contains(&snap2_name),
+        "expected snapshot info latest to report second snapshot '{snap2_name}', got:\n{out}"
+    );
+}
+
+#[test]
+fn cli_snapshot_delete_latest_rejects_alias() {
+    let fx = CliFixture::new();
+    write_plain_config(&fx.config_path, &fx.repo_dir);
+    std::fs::write(fx.source_a.join("del.txt"), b"del\n").unwrap();
+
+    let cfg = fx.config_path.to_string_lossy().to_string();
+    let source = fx.source_a.to_string_lossy().to_string();
+
+    fx.run_ok(&["--config", &cfg, "init"]);
+    fx.run_ok(&["--config", &cfg, "backup", &source]);
+
+    let (stdout, stderr) = fx.run_err(&["--config", &cfg, "snapshot", "delete", "latest"]);
+    let combined = format!("{stdout}{stderr}");
+    assert!(
+        combined.contains("not found") || combined.contains("Not found"),
+        "expected snapshot delete latest to fail with not-found, got:\nstdout: {stdout}\nstderr: {stderr}"
+    );
+}
+
 // ── Daemon tests ────────────────────────────────────────────────────────────
 
 #[test]
