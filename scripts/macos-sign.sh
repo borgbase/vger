@@ -44,8 +44,13 @@ done
 
 # --- Notarize (single submission for all items) ---
 ZIP_PATH="$(mktemp -t vger-notarize-XXXXXX).zip"
+STAGE_DIR="$(mktemp -d -t vger-notarize-stage-XXXXXX)"
 echo "==> Creating zip for notarization..."
-ditto -c -k --keepParent "$@" "$ZIP_PATH"
+for item in "$@"; do
+    cp -R "$item" "$STAGE_DIR/"
+done
+ditto -c -k --keepParent "$STAGE_DIR" "$ZIP_PATH"
+rm -rf "$STAGE_DIR"
 
 echo "==> Submitting for notarization..."
 xcrun notarytool submit "$ZIP_PATH" \
