@@ -18,7 +18,7 @@ use crate::snapshot::SnapshotStats;
 use vger_types::chunk_id::ChunkId;
 use vger_types::error::{Result, VgerError};
 
-use super::{append_item_to_stream, emit_stats_progress, BackupProgressEvent};
+use super::{append_item_to_stream, emit_progress, emit_stats_progress, BackupProgressEvent};
 
 /// Default timeout for command_dump execution (1 hour).
 pub(super) const COMMAND_DUMP_TIMEOUT: Duration = Duration::from_secs(3600);
@@ -98,6 +98,7 @@ fn stream_dump_command(
     compression: Compression,
     stats: &mut SnapshotStats,
     timeout: Duration,
+    progress: &mut Option<&mut dyn FnMut(BackupProgressEvent)>,
 ) -> Result<(Vec<ChunkRef>, u64)> {
     repo.begin_dump_checkpoint()?;
 
@@ -157,6 +158,8 @@ fn stream_dump_command(
 
         let mut chunk_refs = Vec::new();
         let mut total_size: u64 = 0;
+        const PROGRESS_INTERVAL_BYTES: u64 = 4 * 1024 * 1024;
+        let mut bytes_since_progress: u64 = 0;
 
         for chunk_result in chunk_stream {
             let chunk = chunk_result.map_err(|e| {
@@ -189,6 +192,12 @@ fn stream_dump_command(
                     size,
                     csize,
                 });
+            }
+
+            bytes_since_progress += size as u64;
+            if bytes_since_progress >= PROGRESS_INTERVAL_BYTES {
+                emit_stats_progress(progress, stats, None);
+                bytes_since_progress = 0;
             }
         }
 
@@ -281,8 +290,21 @@ pub(super) fn process_command_dumps(
             "executing command dump (streaming)"
         );
 
-        let (chunk_refs, total_size) =
-            stream_dump_command(repo, dump, compression, stats, COMMAND_DUMP_TIMEOUT)?;
+        emit_progress(
+            progress,
+            BackupProgressEvent::FileStarted {
+                path: format!(".vger-dumps/{}", dump.name),
+            },
+        );
+
+        let (chunk_refs, total_size) = stream_dump_command(
+            repo,
+            dump,
+            compression,
+            stats,
+            COMMAND_DUMP_TIMEOUT,
+            progress,
+        )?;
 
         stats.nfiles += 1;
 
@@ -371,6 +393,7 @@ mod tests {
             Compression::None,
             &mut stats,
             Duration::from_secs(10),
+            &mut None,
         )
         .unwrap();
         assert!(!refs.is_empty());
@@ -391,6 +414,7 @@ mod tests {
             Compression::None,
             &mut stats,
             Duration::from_secs(10),
+            &mut None,
         );
         assert!(result.is_err());
         let err = result.unwrap_err().to_string();
@@ -414,6 +438,7 @@ mod tests {
             Compression::None,
             &mut stats,
             Duration::from_secs(10),
+            &mut None,
         )
         .unwrap();
         assert!(refs.is_empty());
@@ -435,6 +460,7 @@ mod tests {
             Compression::None,
             &mut stats,
             Duration::from_millis(500),
+            &mut None,
         );
         assert!(result.is_err());
         let err = result.unwrap_err().to_string();
@@ -459,6 +485,7 @@ mod tests {
             Compression::None,
             &mut stats,
             Duration::from_secs(30),
+            &mut None,
         );
         assert!(result.is_err());
         let err = result.unwrap_err().to_string();
@@ -484,6 +511,7 @@ mod tests {
             Compression::None,
             &mut stats,
             Duration::from_secs(30),
+            &mut None,
         );
         assert!(result.is_err());
         // The error message will contain stderr, verify we didn't OOM

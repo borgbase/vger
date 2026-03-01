@@ -1558,3 +1558,202 @@ fn backup_emits_intermediate_progress_during_large_file() {
         );
     }
 }
+
+#[cfg(unix)]
+#[test]
+fn command_dump_emits_progress_events() {
+    let tmp = tempfile::tempdir().unwrap();
+    let repo_dir = tmp.path().join("repo");
+    let source_dir = tmp.path().join("source");
+    std::fs::create_dir_all(&repo_dir).unwrap();
+    std::fs::create_dir_all(&source_dir).unwrap();
+
+    let mut config = make_test_config(&repo_dir);
+    // Use small chunker params so 10 MiB produces many chunks, ensuring
+    // multiple intermediate progress events at the 4 MiB threshold even
+    // with content-defined boundary variance.
+    config.chunker = ChunkerConfig {
+        min_size: 1024,
+        avg_size: 4096,
+        max_size: 16384,
+    };
+
+    commands::init::run(&config, None).unwrap();
+
+    // 10 MiB dump — with small chunks this produces ~600+ chunks,
+    // guaranteeing multiple 4 MiB progress emissions.
+    let dumps = vec![vger_core::config::CommandDump {
+        name: "big_dump.bin".to_string(),
+        command: "head -c 10485760 /dev/urandom".to_string(),
+    }];
+
+    let source_paths = vec![source_dir.to_string_lossy().to_string()];
+    let exclude_if_present: Vec<String> = Vec::new();
+    let exclude_patterns: Vec<String> = Vec::new();
+
+    let mut events = Vec::new();
+    let mut on_progress = |event| events.push(event);
+
+    commands::backup::run_with_progress(
+        &config,
+        commands::backup::BackupRequest {
+            snapshot_name: "snap-dump-progress",
+            passphrase: None,
+            source_paths: &source_paths,
+            source_label: "source",
+            exclude_patterns: &exclude_patterns,
+            exclude_if_present: &exclude_if_present,
+            one_file_system: true,
+            git_ignore: false,
+            xattrs_enabled: false,
+            compression: Compression::None,
+            command_dumps: &dumps,
+        },
+        Some(&mut on_progress),
+        None,
+    )
+    .unwrap();
+
+    // 1. Must have a FileStarted for the dump.
+    let dump_start = events
+        .iter()
+        .position(|e| {
+            matches!(e, commands::backup::BackupProgressEvent::FileStarted { path } if path == ".vger-dumps/big_dump.bin")
+        })
+        .expect("expected FileStarted for .vger-dumps/big_dump.bin");
+
+    // 2. Find the final StatsUpdated with current_file identifying the dump.
+    let dump_end = events
+        .iter()
+        .rposition(|e| {
+            matches!(e, commands::backup::BackupProgressEvent::StatsUpdated { current_file: Some(f), .. } if f == ".vger-dumps/big_dump.bin")
+        })
+        .expect("expected final StatsUpdated for .vger-dumps/big_dump.bin");
+
+    // 3. Collect StatsUpdated events in the window.
+    let dump_stats: Vec<_> = events[dump_start..=dump_end]
+        .iter()
+        .filter_map(|e| match e {
+            commands::backup::BackupProgressEvent::StatsUpdated {
+                original_size,
+                current_file,
+                ..
+            } => Some((*original_size, current_file.clone())),
+            _ => None,
+        })
+        .collect();
+
+    // At least 2 events: >=1 intermediate (None) + 1 final (Some).
+    assert!(
+        dump_stats.len() >= 2,
+        "expected at least 2 StatsUpdated events for big_dump.bin, got {}",
+        dump_stats.len()
+    );
+
+    // 4. Intermediate events have current_file: None; final has Some.
+    for (i, (_size, file)) in dump_stats.iter().take(dump_stats.len() - 1).enumerate() {
+        assert!(
+            file.is_none(),
+            "intermediate StatsUpdated[{i}] should have current_file: None, got {file:?}"
+        );
+    }
+
+    let (_, last_file) = dump_stats.last().unwrap();
+    assert!(
+        last_file
+            .as_ref()
+            .is_some_and(|f| f == ".vger-dumps/big_dump.bin"),
+        "final StatsUpdated should reference big_dump.bin, got {last_file:?}"
+    );
+
+    // 5. original_size increases monotonically.
+    for window in dump_stats.windows(2) {
+        assert!(
+            window[1].0 >= window[0].0,
+            "original_size should increase: {} -> {}",
+            window[0].0,
+            window[1].0
+        );
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn command_dump_mixed_progress_events() {
+    let tmp = tempfile::tempdir().unwrap();
+    let repo_dir = tmp.path().join("repo");
+    let source_dir = tmp.path().join("source");
+    std::fs::create_dir_all(&repo_dir).unwrap();
+    std::fs::create_dir_all(&source_dir).unwrap();
+
+    // Create a regular file.
+    std::fs::write(source_dir.join("hello.txt"), "hello world\n").unwrap();
+
+    let config = make_test_config(&repo_dir);
+
+    commands::init::run(&config, None).unwrap();
+
+    let dumps = vec![vger_core::config::CommandDump {
+        name: "mixed_dump.txt".to_string(),
+        command: "echo dump content".to_string(),
+    }];
+
+    let source_paths = vec![source_dir.to_string_lossy().to_string()];
+    let exclude_if_present: Vec<String> = Vec::new();
+    let exclude_patterns: Vec<String> = Vec::new();
+
+    let mut events = Vec::new();
+    let mut on_progress = |event| events.push(event);
+
+    commands::backup::run_with_progress(
+        &config,
+        commands::backup::BackupRequest {
+            snapshot_name: "snap-mixed-progress",
+            passphrase: None,
+            source_paths: &source_paths,
+            source_label: "source",
+            exclude_patterns: &exclude_patterns,
+            exclude_if_present: &exclude_if_present,
+            one_file_system: true,
+            git_ignore: false,
+            xattrs_enabled: false,
+            compression: Compression::None,
+            command_dumps: &dumps,
+        },
+        Some(&mut on_progress),
+        None,
+    )
+    .unwrap();
+
+    // FileStarted events should appear for both the regular file and the dump.
+    let file_started_paths: Vec<_> = events
+        .iter()
+        .filter_map(|e| match e {
+            commands::backup::BackupProgressEvent::FileStarted { path } => Some(path.clone()),
+            _ => None,
+        })
+        .collect();
+
+    assert!(
+        file_started_paths.iter().any(|p| p.ends_with("hello.txt")),
+        "expected FileStarted for hello.txt, got: {file_started_paths:?}"
+    );
+    assert!(
+        file_started_paths
+            .iter()
+            .any(|p| p == ".vger-dumps/mixed_dump.txt"),
+        "expected FileStarted for .vger-dumps/mixed_dump.txt, got: {file_started_paths:?}"
+    );
+
+    // StatsUpdated events should cover both (final nfiles == 2).
+    let final_stats = events
+        .iter()
+        .rev()
+        .find_map(|e| match e {
+            commands::backup::BackupProgressEvent::StatsUpdated { nfiles, .. } => Some(*nfiles),
+            _ => None,
+        })
+        .expect("expected at least one StatsUpdated");
+
+    assert_eq!(final_stats, 2, "final nfiles should be 2 (file + dump)");
+}
