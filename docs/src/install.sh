@@ -6,6 +6,13 @@ GITHUB_API="https://api.github.com/repos/${REPO}/releases/latest"
 GITHUB_DOWNLOAD="https://github.com/${REPO}/releases/download"
 DEFAULT_INSTALL_DIR="/usr/local/bin"
 BINARY_NAME="vger"
+TMPDIR_CLEANUP=""
+
+# Minimum glibc required by the GNU build.
+# Bump this when the CI runner changes (pinned in .github/workflows/release.yml).
+# Current: Ubuntu 22.04 ships glibc 2.35.
+MIN_GLIBC_MAJOR=2
+MIN_GLIBC_MINOR=35
 
 # --- Utilities -----------------------------------------------------------
 
@@ -38,6 +45,56 @@ sha256_of() {
     esac
 }
 
+# --- Libc detection (Linux only) ------------------------------------------
+
+detect_linux_libc() {
+    # Default to gnu; downgrade to musl if needed.
+    LIBC="gnu"
+
+    # 1. Detect musl-based systems (Alpine, Void, etc.)
+    #    ldd may not exist (busybox-only), so guard the check.
+    if command -v ldd >/dev/null 2>&1; then
+        case "$(ldd --version 2>&1 || true)" in
+            *musl*)
+                LIBC="musl"
+                log "Detected musl libc, using musl build"
+                return
+                ;;
+        esac
+    fi
+
+    # 2. Probe glibc version — two methods, both guarded.
+    glibc_ver=""
+    if command -v ldd >/dev/null 2>&1; then
+        glibc_ver=$(ldd --version 2>&1 | head -1 | grep -oE '[0-9]+\.[0-9]+$' || true)
+    fi
+    if [ -z "$glibc_ver" ]; then
+        glibc_ver=$(getconf GNU_LIBC_VERSION 2>/dev/null | awk '{print $2}' || true)
+    fi
+
+    # 3. Compare with integer arithmetic (POSIX-safe, no lexical traps).
+    if [ -n "$glibc_ver" ]; then
+        maj=$(echo "$glibc_ver" | cut -d. -f1)
+        min=$(echo "$glibc_ver" | cut -d. -f2)
+
+        if [ "$maj" -ge 0 ] 2>/dev/null && [ "$min" -ge 0 ] 2>/dev/null; then
+            if [ "$maj" -gt "$MIN_GLIBC_MAJOR" ] || \
+               { [ "$maj" -eq "$MIN_GLIBC_MAJOR" ] && [ "$min" -ge "$MIN_GLIBC_MINOR" ]; }; then
+                log "Detected glibc ${glibc_ver} (>= ${MIN_GLIBC_MAJOR}.${MIN_GLIBC_MINOR}), using GNU build"
+                return
+            else
+                LIBC="musl"
+                log "Detected glibc ${glibc_ver} (< ${MIN_GLIBC_MAJOR}.${MIN_GLIBC_MINOR}), using statically-linked musl build"
+                return
+            fi
+        fi
+    fi
+
+    # 4. Could not determine version — safe fallback.
+    LIBC="musl"
+    log "Could not detect glibc version, using statically-linked musl build"
+}
+
 # --- Platform detection ---------------------------------------------------
 
 detect_platform() {
@@ -48,7 +105,10 @@ detect_platform() {
     case "$os" in
         Linux)
             case "$arch" in
-                x86_64)  TARGET="x86_64-unknown-linux-gnu" ;;
+                x86_64)
+                    detect_linux_libc
+                    TARGET="x86_64-unknown-linux-${LIBC}"
+                    ;;
                 *)       die "unsupported Linux architecture: $arch (only x86_64 builds are available)" ;;
             esac
             ;;
@@ -117,11 +177,12 @@ prompt_config() {
 # --- Download & verify ----------------------------------------------------
 
 download_and_verify() {
-    local archive checksum_file tmpdir expected actual
+    local archive checksum_file expected actual
 
     archive="vger-${VERSION}-${TARGET}.tar.gz"
-    tmpdir="$(mktemp -d)"
-    trap 'rm -rf "$tmpdir"' EXIT
+    TMPDIR_CLEANUP="$(mktemp -d)"
+    tmpdir="$TMPDIR_CLEANUP"
+    trap 'rm -rf "$TMPDIR_CLEANUP"' EXIT
 
     log "Downloading ${archive}..."
     curl -fSL -o "${tmpdir}/${archive}" \
@@ -157,10 +218,12 @@ install_binary() {
     if [ -w "$INSTALL_DIR" ]; then
         cp "$EXTRACTED" "$dest"
         chmod 755 "$dest"
+        USED_SUDO=false
     else
-        log "Installing to ${INSTALL_DIR} requires elevated permissions."
+        log "Installing to ${INSTALL_DIR} requires elevated permissions. Using sudo..."
         sudo cp "$EXTRACTED" "$dest"
         sudo chmod 755 "$dest"
+        USED_SUDO=true
     fi
 
     log ""
@@ -194,7 +257,9 @@ main() {
     install_binary
     log ""
 
-    prompt_config
+    if [ "$USED_SUDO" = false ]; then
+        prompt_config
+    fi
 
     log ""
     log "Done. Run 'vger --help' to get started."
