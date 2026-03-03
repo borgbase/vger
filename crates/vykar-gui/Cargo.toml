@@ -4,6 +4,8 @@ version = "0.11.1"
 edition = "2021"
 license = "GPL-3.0-only"
 
+build = "build.rs"
+
 [[bin]]
 name = "vykar-gui"
 path = "src/main.rs"
@@ -24,3 +26,6 @@ zeroize.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 image = { version = "0.25", default-features = false, features = ["png"] }
+
+[build-dependencies]
+winresource = "0.1"
