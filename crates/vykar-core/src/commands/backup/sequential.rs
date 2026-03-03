@@ -439,6 +439,7 @@ pub(super) fn process_source_path(
             .unwrap_or(entry.path())
             .to_string_lossy()
             .to_string();
+        let rel_path = super::normalize_rel_path(rel_path);
 
         // Skip root directory itself.
         if rel_path.is_empty() {

@@ -1300,6 +1300,16 @@ mod tests {
     }
 
     #[test]
+    fn path_matches_selection_ancestors() {
+        let mut selected = HashSet::new();
+        selected.insert("docs/notes".to_string());
+        assert!(path_matches_selection("docs/notes/todo.txt", &selected));
+        assert!(path_matches_selection("docs/notes", &selected));
+        assert!(!path_matches_selection("docs/other", &selected));
+        assert!(!path_matches_selection("documents", &selected));
+    }
+
+    #[test]
     fn sanitize_rejects_parent_dir_traversal() {
         let err = sanitize_item_path("../etc/passwd").unwrap_err().to_string();
         assert!(err.contains("unsafe path"));

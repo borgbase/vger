@@ -438,6 +438,7 @@ fn walk_source<'a>(
                 .unwrap_or(entry.path())
                 .to_string_lossy()
                 .to_string();
+            let rel_path = super::normalize_rel_path(rel_path);
 
             if rel_path.is_empty() {
                 return WalkItems::Empty;
@@ -692,5 +693,25 @@ mod tests {
 
         assert_eq!(it.size_hint(), (0, Some(0)));
         assert!(it.next().is_none());
+    }
+
+    #[test]
+    fn normalize_rel_path_replaces_backslashes() {
+        // Simulates what Windows `to_string_lossy()` would produce.
+        let win_path = r"folder\sub\file.txt".to_string();
+        let normalized = super::super::normalize_rel_path(win_path);
+        if cfg!(windows) {
+            assert_eq!(normalized, "folder/sub/file.txt");
+        } else {
+            // On Unix the function is a no-op — backslash is a valid filename char.
+            assert_eq!(normalized, r"folder\sub\file.txt");
+        }
+    }
+
+    #[test]
+    fn normalize_rel_path_no_op_for_forward_slashes() {
+        let unix_path = "folder/sub/file.txt".to_string();
+        let normalized = super::super::normalize_rel_path(unix_path);
+        assert_eq!(normalized, "folder/sub/file.txt");
     }
 }

@@ -33,6 +33,21 @@ use vykar_types::snapshot_id::SnapshotId;
 
 use walk::items_chunker_config;
 
+/// Normalize a relative path to always use `/` as the separator.
+///
+/// On Windows, `Path::to_string_lossy()` produces backslash-separated paths,
+/// but the repository format uses `/` exclusively. This function is a no-op
+/// on Unix (the compiler elides it), but always compiled so it can be tested
+/// on any platform.
+#[inline]
+pub(crate) fn normalize_rel_path(path: String) -> String {
+    if cfg!(windows) {
+        path.replace('\\', "/")
+    } else {
+        path
+    }
+}
+
 pub(crate) fn flush_item_stream_chunk(
     repo: &mut Repository,
     item_stream: &mut Vec<u8>,
