@@ -2759,11 +2759,19 @@ fn capture_gui_state(
     if win_size.width == 0 || win_size.height == 0 {
         return None;
     }
+    if !scale.is_finite() || scale <= 0.0 {
+        return None;
+    }
+    let w = win_size.width as f32 / scale;
+    let h = win_size.height as f32 / scale;
+    if !w.is_finite() || !h.is_finite() || w <= 0.0 || h <= 0.0 {
+        return None;
+    }
     let config_path = active_config_path.lock().ok().map(|cp| cp.clone());
     Some(state::GuiState {
         config_path,
-        window_width: Some(win_size.width as f32 / scale),
-        window_height: Some(win_size.height as f32 / scale),
+        window_width: Some(w),
+        window_height: Some(h),
     })
 }
 
@@ -2880,6 +2888,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         }
                         ui.set_config_path(path.into());
                         ui.set_schedule_text(schedule.into());
+                        // Eagerly persist so Cmd-Q keeps the config path.
+                        if let Some(s) = capture_gui_state(&ui, &active_config_path) {
+                            state::save(&s);
+                            if let Ok(mut last) = last_gui_state.lock() {
+                                *last = Some(s);
+                            }
+                        }
                     }
                     UiEvent::RepoNames(names) => {
                         let first = names.first().cloned().unwrap_or_default();
@@ -3441,6 +3456,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         move || {
             if let Some(ui) = ui_weak.upgrade() {
                 if let Some(s) = capture_gui_state(&ui, &active_config_path) {
+                    state::save(&s);
                     if let Ok(mut last) = last_gui_state.lock() {
                         *last = Some(s);
                     }
@@ -3450,6 +3466,42 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             slint::CloseRequestResponse::HideWindow
         }
     });
+
+    // ── Periodic resize-save timer ──
+    // Flush GUI state to disk when the window size changes so Cmd-Q (which
+    // bypasses on_close_requested) doesn't lose the latest dimensions.
+    let _resize_save_timer = {
+        let ui_weak = ui.as_weak();
+        let active_config_path = active_config_path.clone();
+        let last_gui_state = last_gui_state.clone();
+        let mut last_saved_size: Option<(u32, u32)> = None;
+        let timer = slint::Timer::default();
+        timer.start(
+            slint::TimerMode::Repeated,
+            Duration::from_secs(2),
+            move || {
+                let Some(ui) = ui_weak.upgrade() else {
+                    return;
+                };
+                let sz = ui.window().size();
+                let current = (sz.width, sz.height);
+                if current.0 == 0 || current.1 == 0 {
+                    return;
+                }
+                if last_saved_size == Some(current) {
+                    return;
+                }
+                if let Some(s) = capture_gui_state(&ui, &active_config_path) {
+                    state::save(&s);
+                    if let Ok(mut last) = last_gui_state.lock() {
+                        *last = Some(s);
+                    }
+                    last_saved_size = Some(current);
+                }
+            },
+        );
+        timer
+    };
 
     // ── Tray icon ──
 
@@ -3528,10 +3580,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     ui.run()?;
 
-    // Save the last captured GUI state. This covers both explicit tray-Quit
-    // (captured in UiEvent::Quit) and Cmd-Q / SIGTERM (captured in the most
-    // recent on_close_requested, i.e. the last time the window was hidden).
-    if let Some(s) = last_gui_state.lock().ok().and_then(|g| g.clone()) {
+    // Persist GUI state. Eager saves (config change, resize timer, window hide)
+    // cover most paths; this final capture handles Cmd-Q on macOS where the
+    // event loop exits without triggering on_close_requested.
+    let final_state = capture_gui_state(&ui, &active_config_path)
+        .or_else(|| last_gui_state.lock().ok().and_then(|g| g.clone()));
+    if let Some(s) = final_state {
         state::save(&s);
     }
 
