@@ -242,7 +242,10 @@ impl SftpBackend {
                 );
             }
         }
-        tracing::debug!(sftp_timeout_secs = effective_timeout, "SFTP session timeout");
+        tracing::debug!(
+            sftp_timeout_secs = effective_timeout,
+            "SFTP session timeout"
+        );
 
         Ok(Self {
             params: SftpConnectParams {
@@ -1007,7 +1010,7 @@ mod tests {
     #[test]
     fn test_io_retry_error_other_is_retryable() {
         // russh-sftp wraps all SFTP errors as ErrorKind::Other
-        let err = std::io::Error::new(std::io::ErrorKind::Other, "Timeout");
+        let err = std::io::Error::other("Timeout");
         let retry = io_retry_error("write", "/test/path", err);
         assert!(retry.retryable, "ErrorKind::Other should be retryable");
     }

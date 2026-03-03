@@ -562,9 +562,11 @@ pub fn resolve_config_path(cli_config: Option<&str>) -> Option<ConfigSource> {
 )]
 pub fn load_config(path: &Path) -> vykar_types::error::Result<VykarConfig> {
     let repos = load_and_resolve(path)?;
-    repos.into_iter().next().map(|r| r.config).ok_or_else(|| {
-        vykar_types::error::VykarError::Config("no repositories configured".into())
-    })
+    repos
+        .into_iter()
+        .next()
+        .map(|r| r.config)
+        .ok_or_else(|| vykar_types::error::VykarError::Config("no repositories configured".into()))
 }
 
 /// Returns a minimal YAML config template suitable for bootstrapping.
@@ -907,11 +909,7 @@ sources:
             Some(8),
             "sftp_max_connections should be parsed"
         );
-        assert_eq!(
-            repo.sftp_timeout,
-            Some(60),
-            "sftp_timeout should be parsed"
-        );
+        assert_eq!(repo.sftp_timeout, Some(60), "sftp_timeout should be parsed");
     }
 
     #[test]
@@ -1104,7 +1102,10 @@ encryption:
         fs::write(&path, yaml).unwrap();
 
         let result = load_and_resolve(&path).unwrap();
-        assert!(result.is_empty(), "expected empty vec when repositories key is missing");
+        assert!(
+            result.is_empty(),
+            "expected empty vec when repositories key is missing"
+        );
     }
 
     #[test]
