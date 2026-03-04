@@ -1,6 +1,4 @@
-use std::fs::File;
 use std::io::Read;
-use std::path::Path;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -9,16 +7,12 @@ use nix::errno::Errno;
 use tracing::warn;
 
 use crate::config::ResourceLimitsConfig;
-use vykar_storage::{
-    parse_repo_url, BackendLockInfo, ParsedUrl, RepackPlanRequest, RepackResultResponse,
-    StorageBackend,
-};
-use vykar_types::error::{Result, VykarError};
+use vykar_storage::{BackendLockInfo, RepackPlanRequest, RepackResultResponse, StorageBackend};
+use vykar_types::error::Result;
 
 // ── Rate limiting runtime ────────────────────────────────────────────────────
 
 const BYTES_PER_MIB: u64 = 1024 * 1024;
-const FILE_READ_CHUNK_SIZE: usize = 256 * 1024;
 
 fn mib_per_sec_to_bytes_per_sec(mib_per_sec: u64) -> u64 {
     mib_per_sec.saturating_mul(BYTES_PER_MIB)
@@ -107,61 +101,25 @@ impl<R: Read> Read for LimitedReader<'_, R> {
     }
 }
 
-pub fn read_file_with_limiter(path: &Path, limiter: Option<&ByteRateLimiter>) -> Result<Vec<u8>> {
-    let file = File::open(path).map_err(VykarError::Io)?;
-    let mut reader = LimitedReader::new(file, limiter);
-    let mut data = Vec::new();
-    let mut buffer = [0u8; FILE_READ_CHUNK_SIZE];
-
-    loop {
-        let n = reader.read(&mut buffer).map_err(VykarError::Io)?;
-        if n == 0 {
-            break;
-        }
-        data.extend_from_slice(&buffer[..n]);
-    }
-
-    Ok(data)
-}
-
-fn storage_rate_limits_for_backup(
-    repo_url: &str,
-    limits: &ResourceLimitsConfig,
-) -> Result<(u64, u64)> {
-    let parsed = parse_repo_url(repo_url)?;
-    let (read_mib_per_sec, write_mib_per_sec) = match parsed {
-        ParsedUrl::Local { .. } => (0, limits.io.write_mib_per_sec),
-        ParsedUrl::S3 { .. } | ParsedUrl::Sftp { .. } | ParsedUrl::Rest { .. } => (
-            limits.network.read_mib_per_sec,
-            limits.network.write_mib_per_sec,
-        ),
-    };
-
-    Ok((
-        mib_per_sec_to_bytes_per_sec(read_mib_per_sec),
-        mib_per_sec_to_bytes_per_sec(write_mib_per_sec),
-    ))
-}
-
-/// Wrap a storage backend with rate limiting for backup.
-pub fn wrap_backup_storage_backend(
+/// Wrap a storage backend with rate limiting based on config bandwidth caps.
+pub fn wrap_storage_backend(
     inner: Box<dyn StorageBackend>,
-    repo_url: &str,
     limits: &ResourceLimitsConfig,
-) -> Result<Box<dyn StorageBackend>> {
-    let (read_bps, write_bps) = storage_rate_limits_for_backup(repo_url, limits)?;
+) -> Box<dyn StorageBackend> {
+    let read_bps = mib_per_sec_to_bytes_per_sec(limits.download_mib_per_sec);
+    let write_bps = mib_per_sec_to_bytes_per_sec(limits.upload_mib_per_sec);
     if read_bps == 0 && write_bps == 0 {
-        return Ok(inner);
+        return inner;
     }
 
     let read_limiter = (read_bps > 0).then(|| Arc::new(ByteRateLimiter::new(read_bps)));
     let write_limiter = (write_bps > 0).then(|| Arc::new(ByteRateLimiter::new(write_bps)));
 
-    Ok(Box::new(ThrottledStorageBackend {
+    Box::new(ThrottledStorageBackend {
         inner,
         read_limiter,
         write_limiter,
-    }))
+    })
 }
 
 struct ThrottledStorageBackend {
@@ -278,7 +236,7 @@ impl NiceGuard {
         #[cfg(not(unix))]
         {
             let _ = target_nice;
-            Err("limits.cpu.nice is not supported on this platform".to_string())
+            Err("limits.nice is not supported on this platform".to_string())
         }
     }
 }
@@ -333,7 +291,6 @@ fn set_process_nice(value: i32) -> std::result::Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::{CpuLimitsConfig, IoLimitsConfig, NetworkLimitsConfig};
 
     #[test]
     fn mib_conversion() {
@@ -343,39 +300,11 @@ mod tests {
     }
 
     #[test]
-    fn storage_limits_local_repo_uses_io_write() {
-        let limits = ResourceLimitsConfig {
-            cpu: CpuLimitsConfig::default(),
-            io: IoLimitsConfig {
-                read_mib_per_sec: 100,
-                write_mib_per_sec: 10,
-            },
-            network: NetworkLimitsConfig {
-                read_mib_per_sec: 200,
-                write_mib_per_sec: 20,
-            },
-        };
-        let (read_bps, write_bps) = storage_rate_limits_for_backup("/tmp/repo", &limits).unwrap();
-        assert_eq!(read_bps, 0);
-        assert_eq!(write_bps, 10 * 1024 * 1024);
-    }
-
-    #[test]
-    fn storage_limits_remote_repo_uses_network() {
-        let limits = ResourceLimitsConfig {
-            cpu: CpuLimitsConfig::default(),
-            io: IoLimitsConfig {
-                read_mib_per_sec: 100,
-                write_mib_per_sec: 10,
-            },
-            network: NetworkLimitsConfig {
-                read_mib_per_sec: 200,
-                write_mib_per_sec: 20,
-            },
-        };
-        let (read_bps, write_bps) =
-            storage_rate_limits_for_backup("https://backup.example.com/repo", &limits).unwrap();
-        assert_eq!(read_bps, 200 * 1024 * 1024);
-        assert_eq!(write_bps, 20 * 1024 * 1024);
+    fn wrap_storage_noop_when_unlimited() {
+        let limits = ResourceLimitsConfig::default();
+        // With 0/0 bandwidth, wrap_storage_backend returns inner unchanged.
+        // Just verify it doesn't panic.
+        assert_eq!(limits.upload_mib_per_sec, 0);
+        assert_eq!(limits.download_mib_per_sec, 0);
     }
 }

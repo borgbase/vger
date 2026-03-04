@@ -19,25 +19,15 @@ fn storage_config_from_repo(cfg: &RepositoryConfig) -> StorageConfig {
     }
 }
 
-/// Build a storage backend from the repository configuration.
-///
-/// Convenience wrapper around [`vykar_storage::backend_from_config`] that
-/// accepts a [`RepositoryConfig`] directly.
-pub fn backend_from_config(
-    cfg: &RepositoryConfig,
-) -> Result<Box<dyn vykar_storage::StorageBackend>> {
-    vykar_storage::backend_from_config(&storage_config_from_repo(cfg))
-}
-
 /// Build a storage backend with a specific connection pool size.
 ///
-/// Used by backup to size the SFTP pool to match `upload_concurrency`,
-/// avoiding wasted connections.
-pub fn backend_from_config_with_pool(
+/// The `connections` parameter sizes the SFTP pool and controls parallelism
+/// for all storage operations.
+pub fn backend_from_config(
     cfg: &RepositoryConfig,
-    pool_size: usize,
+    connections: usize,
 ) -> Result<Box<dyn vykar_storage::StorageBackend>> {
     let mut sc = storage_config_from_repo(cfg);
-    sc.max_connections = Some(pool_size);
+    sc.max_connections = Some(connections);
     vykar_storage::backend_from_config(&sc)
 }

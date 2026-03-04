@@ -13,7 +13,7 @@ Vykar is a fast, encrypted, deduplicated backup tool written in Rust. It's cente
 - **REST server** with append-only enforcement, quotas, and server-side compaction
 - **Concurrent multi-client backups** -- multiple machines back up to the same repository simultaneously; only the brief commit phase is serialized
 - **Built-in scheduling** via `vykar daemon` -- runs backup cycles on a configurable interval (no cron needed)
-- **Rate limiting** for CPU, disk I/O, and network bandwidth
+- **Resource limits** for worker threads, backend connections, and upload/download bandwidth
 - **Cross-platform** -- Linux, macOS, and Windows
 
 
@@ -34,7 +34,7 @@ Vykar is the fastest tool for both backup and restore, with the lowest CPU cost,
 | Browse snapshots | FUSE mount | FUSE mount | FUSE mount | Built-in WebDAV + web UI |
 | Command dumps | Via Borgmatic (database-specific) | None | None | Native (generic command capture) |
 | Hooks | Via Borgmatic | Via ResticProfile | Native | Native (per-command before/after) |
-| Rate limiting | None | Upload/download bandwidth | -- | CPU, disk I/O, and network bandwidth |
+| Rate limiting | None | Upload/download bandwidth | -- | Threads, backend connections, upload/download bandwidth |
 | Dedicated server | SSH (`borg serve`) | rest-server (append-only) | rustic_server | REST server with append-only, quotas, server-side compaction |
 | Desktop GUI | Vorta (third-party) | Third-party (Backrest) | None | Built-in |
 | Scheduling | Via Borgmatic | Via ResticProfile | External (cron/systemd) | Built-in |

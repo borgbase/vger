@@ -309,7 +309,7 @@ main() {
     log "[$i/$ITERATIONS] backup"
     CURRENT_STEP="backup"
     if [[ "$BACKEND" == "rest" ]]; then
-      backup_log="$(run_vykar "$i" backup backup -R "$REPO_LABEL" --upload-concurrency 6)"
+      backup_log="$(run_vykar "$i" backup backup -R "$REPO_LABEL" --connections 6)"
     else
       backup_log="$(run_vykar "$i" backup backup -R "$REPO_LABEL")"
     fi

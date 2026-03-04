@@ -136,10 +136,8 @@ compression:
 #       keep_daily: 30
 #
 #     limits:
-#       cpu:
-#         max_threads: 2
-#       network:
-#         write_mib_per_sec: 25
+#       connections: 2
+#       upload_mib_per_sec: 25
 #
 #     hooks:
 #       before:
@@ -197,22 +195,14 @@ compression:
 #   passphrase_prompt_timeout_seconds: 300
 
 # Optional resource limits for backup.
-# All values are MiB/s unless noted; 0 means unlimited/no change.
+# Bandwidth values are MiB/s (0 = unlimited).
+# threads=0 means auto mode: min(available CPU cores, 12).
 #
 # limits:
-#   cpu:
-#     max_threads: 0
-#     nice: 0                      # Unix niceness target (-20..19)
-#     max_upload_concurrency: 4
-#     transform_batch_mib: 32
-#     transform_batch_chunks: 8192
-#     pipeline_depth: 4
-#     pipeline_buffer_mib: 256
-#   io:
-#     read_mib_per_sec: 0
-#     write_mib_per_sec: 0
-#   network:
-#     read_mib_per_sec: 0
-#     write_mib_per_sec: 0
+#   connections: 2                 # Parallel backend ops (1-16)
+#   threads: 0                     # Backup transform workers (0 = auto: min(cores,12), 1 = sequential)
+#   nice: 0                        # Unix niceness target (-20..19)
+#   upload_mib_per_sec: 0          # Upload bandwidth cap
+#   download_mib_per_sec: 0        # Download bandwidth cap
 
 # See docs/src/configuration.md for full option reference.

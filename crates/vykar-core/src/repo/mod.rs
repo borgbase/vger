@@ -19,7 +19,6 @@ use self::write_session::WriteSessionState;
 use crate::compress;
 use crate::config::{
     default_max_pack_size, default_min_pack_size, ChunkerConfig, RepositoryConfig,
-    DEFAULT_UPLOAD_CONCURRENCY,
 };
 use crate::index::dedup_cache::{self, TieredDedupIndex};
 use crate::index::{ChunkIndex, DedupIndex, IndexDelta, PendingChunkEntry};
@@ -486,7 +485,7 @@ impl Repository {
             self.config.max_pack_size,
         );
         let tree_target = compute_tree_pack_target(self.config.min_pack_size);
-        let mut ws = WriteSessionState::new(data_target, tree_target, DEFAULT_UPLOAD_CONCURRENCY);
+        let mut ws = WriteSessionState::new(data_target, tree_target, 2);
         ws.persisted_pack_count = num_packs;
         self.write_session = Some(ws);
         Ok(())

@@ -62,7 +62,7 @@ All data is encrypted and authenticated before it leaves the client. The optiona
 
 ## Performance through Rust
 
-No GIL bottleneck, no garbage collection pauses, predictable memory usage. FastCDC chunking, parallel compression, and streaming uploads keep the pipeline saturated. Built-in rate limiting for CPU, disk I/O, and network lets Vykar run during business hours.
+No GIL bottleneck, no garbage collection pauses, predictable memory usage. FastCDC chunking, parallel compression, and streaming uploads keep the pipeline saturated. Built-in resource limits for threads, backend connections, and upload/download bandwidth let Vykar run during business hours.
 
 
 ## Discoverability in the CLI

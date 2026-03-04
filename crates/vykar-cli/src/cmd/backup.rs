@@ -37,16 +37,16 @@ pub(crate) fn run_backup(
     label: Option<&str>,
     user_label: Option<String>,
     compression_override: Option<String>,
-    upload_concurrency: Option<usize>,
+    connections: Option<usize>,
     paths: Vec<String>,
     sources: &[SourceEntry],
     source_filter: &[String],
     shutdown: Option<&AtomicBool>,
 ) -> Result<bool, Box<dyn std::error::Error>> {
-    // Apply upload concurrency override before opening the repo
-    let config = if let Some(uc) = upload_concurrency {
+    // Apply connections override before opening the repo
+    let config = if let Some(c) = connections {
         let mut cfg = config.clone();
-        cfg.limits.cpu.max_upload_concurrency = Some(uc);
+        cfg.limits.connections = c;
         cfg
     } else {
         config.clone()

@@ -16,7 +16,7 @@ use tracing::{debug, info, warn};
 use super::util::check_interrupted;
 use crate::compress::Compression;
 use crate::config::{ChunkerConfig, CommandDump, VykarConfig};
-use crate::limits::{self, ByteRateLimiter};
+use crate::limits;
 use crate::platform::fs;
 use crate::repo::file_cache::FileCache;
 use crate::repo::format::{pack_object_with_context, ObjectType};
@@ -187,42 +187,33 @@ pub fn run_with_progress(
 
     let multi_path = source_paths.len() > 1;
 
-    let _nice_guard = match limits::NiceGuard::apply(config.limits.cpu.nice) {
+    let _nice_guard = match limits::NiceGuard::apply(config.limits.nice) {
         Ok(guard) => guard,
         Err(e) => {
-            warn!(
-                "could not apply limits.cpu.nice={}: {e}",
-                config.limits.cpu.nice
-            );
+            warn!("could not apply limits.nice={}: {e}", config.limits.nice);
             None
         }
     };
-    let read_limiter = ByteRateLimiter::from_mib_per_sec(config.limits.io.read_mib_per_sec);
-    let max_pending_transform_bytes = config.limits.cpu.transform_batch_bytes();
-    let max_pending_file_actions = config.limits.cpu.max_pending_actions();
-    let upload_concurrency = config.limits.cpu.upload_concurrency();
-    let pipeline_depth = config.limits.cpu.effective_pipeline_depth();
+    let max_pending_transform_bytes = config.limits.transform_batch_bytes();
+    let max_pending_file_actions = config.limits.max_pending_actions();
+    let upload_concurrency = config.limits.upload_concurrency();
 
     // Resolve effective worker count before building the rayon pool so we
     // can right-size it in pipeline mode (avoids 2× thread oversubscription).
-    let num_workers = if config.limits.cpu.max_threads == 0 {
-        std::thread::available_parallelism()
-            .map(|n| n.get())
-            .unwrap_or(2)
-    } else {
-        config.limits.cpu.max_threads
-    };
+    let num_workers = config.limits.effective_threads();
 
-    let transform_pool = if pipeline_depth > 0 {
+    // Pipeline mode when we have more than 1 worker thread.
+    let use_pipeline = num_workers > 1;
+
+    let transform_pool = if use_pipeline {
         // Pipeline mode doesn't need a rayon pool (no inline large-file processing).
         None
     } else {
-        sequential::build_transform_pool(config.limits.cpu.max_threads)?
+        sequential::build_transform_pool(config.limits.threads)?
     };
 
-    let backend = storage::backend_from_config_with_pool(&config.repository, upload_concurrency)?;
-    let backend =
-        limits::wrap_backup_storage_backend(backend, &config.repository.url, &config.limits)?;
+    let backend = storage::backend_from_config(&config.repository, upload_concurrency)?;
+    let backend = limits::wrap_storage_backend(backend, &config.limits);
 
     // Generate a unique session ID for this backup.
     let session_id = format!("{:032x}", rand::random::<u128>());
@@ -244,7 +235,7 @@ pub fn run_with_progress(
         Err(e) => {
             let e = super::util::enrich_repo_not_found(e, &config.repository.url);
             // Create a fresh backend just for deregistration (the original was consumed by open).
-            if let Ok(cleanup_backend) = storage::backend_from_config(&config.repository) {
+            if let Ok(cleanup_backend) = storage::backend_from_config(&config.repository, 1) {
                 lock::deregister_session(cleanup_backend.as_ref(), &session_id);
             }
             return Err(e);
@@ -318,20 +309,16 @@ pub fn run_with_progress(
         // Apply configurable upload concurrency.
         repo.set_max_in_flight_uploads(upload_concurrency);
 
-        let pipeline_buffer_bytes = config.limits.cpu.pipeline_buffer_bytes();
+        let pipeline_depth = config.limits.effective_pipeline_depth();
+        let pipeline_buffer_bytes = config.limits.pipeline_buffer_bytes();
 
-        if pipeline_depth > 0 && !source_paths.is_empty() {
+        if use_pipeline && !source_paths.is_empty() {
             let file_cache_snapshot = repo.take_file_cache();
             let crypto = std::sync::Arc::clone(&repo.crypto);
-            let configured_segment = config.limits.cpu.segment_size_bytes();
-            let segment_size = configured_segment.min(pipeline_buffer_bytes) as u64;
-            if configured_segment > segment_size as usize {
-                warn!(
-                    configured = configured_segment,
-                    clamped_to = %segment_size,
-                    "segment_size clamped to pipeline_buffer_bytes"
-                );
-            }
+            let segment_size = config
+                .limits
+                .segment_size_bytes()
+                .min(pipeline_buffer_bytes) as u64;
 
             pipeline::run_parallel_pipeline(
                 &mut repo,
@@ -345,7 +332,7 @@ pub fn run_with_progress(
                 &file_cache_snapshot,
                 &crypto,
                 compression,
-                read_limiter.as_deref(),
+                None, // no source-file read limiter
                 num_workers,
                 pipeline_depth,
                 segment_size,
@@ -380,7 +367,7 @@ pub fn run_with_progress(
                     &mut new_file_cache,
                     max_pending_transform_bytes,
                     max_pending_file_actions,
-                    read_limiter.as_deref(),
+                    None, // no source-file read limiter
                     transform_pool.as_ref(),
                     &mut progress,
                     dedup_filter.as_deref(),

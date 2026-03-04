@@ -2,9 +2,9 @@ use chrono::Utc;
 use vykar_core::commands;
 use vykar_core::compress::Compression;
 use vykar_core::config::{
-    ChunkerConfig, CompactConfig, CompressionConfig, CpuLimitsConfig, EncryptionConfig,
-    EncryptionModeConfig, RepositoryConfig, ResourceLimitsConfig, RetentionConfig, RetryConfig,
-    ScheduleConfig, VykarConfig, XattrsConfig,
+    ChunkerConfig, CompactConfig, CompressionConfig, EncryptionConfig, EncryptionModeConfig,
+    RepositoryConfig, ResourceLimitsConfig, RetentionConfig, RetryConfig, ScheduleConfig,
+    VykarConfig, XattrsConfig,
 };
 use vykar_core::repo::manifest::SnapshotEntry;
 use vykar_core::repo::pack::PackType;
@@ -1133,10 +1133,9 @@ fn backup_many_small_files_plus_large_file_roundtrip() {
         large_payload
     );
 
-    // Second backup (sequential path — pipeline_depth=0).
+    // Second backup (sequential path — single thread).
     let mut seq_config = make_test_config(&repo_dir);
-    seq_config.limits.cpu.max_threads = 1;
-    seq_config.limits.cpu.pipeline_depth = Some(0);
+    seq_config.limits.threads = 1;
 
     let stats2 = commands::backup::run(
         &seq_config,
@@ -1218,11 +1217,8 @@ fn backup_pipeline_threshold_splitting_roundtrip() {
     std::fs::write(source_dir.join("small.bin"), &small_payload).unwrap();
 
     let mut config = make_test_config(&repo_dir);
-    // pipeline_buffer_mib=32, max_threads=2 → threshold ≈ 8 MiB.
-    config.limits.cpu.pipeline_buffer_mib = Some(32);
-    config.limits.cpu.max_threads = 2;
-    // Ensure pipeline is active.
-    config.limits.cpu.pipeline_depth = Some(4);
+    // Use 2 threads to trigger pipeline mode.
+    config.limits.threads = 2;
 
     commands::init::run(&config, None).unwrap();
 
@@ -1299,10 +1295,8 @@ fn backup_pipeline_preserves_walk_order_with_mixed_file_sizes() {
     std::fs::write(source_dir.join("dir").join("d-small.bin"), &d_small).unwrap();
 
     let mut config = make_test_config(&repo_dir);
-    // pipeline_buffer_mib=32, max_threads=2 => large_file_threshold ~= 8 MiB.
-    config.limits.cpu.pipeline_buffer_mib = Some(32);
-    config.limits.cpu.max_threads = 2;
-    config.limits.cpu.pipeline_depth = Some(4);
+    // Use 2 threads to trigger pipeline mode.
+    config.limits.threads = 2;
 
     commands::init::run(&config, None).unwrap();
 
@@ -1356,10 +1350,8 @@ fn backup_pipeline_mixed_cache_hit_processed_and_large_roundtrip() {
     std::fs::write(source_dir.join("keep-large.bin"), &keep_large).unwrap();
 
     let mut config = make_test_config(&repo_dir);
-    // Keep threshold around 8 MiB so 2 MiB is buffered and 12 MiB is streamed.
-    config.limits.cpu.pipeline_buffer_mib = Some(32);
-    config.limits.cpu.max_threads = 2;
-    config.limits.cpu.pipeline_depth = Some(4);
+    // Use 2 threads to trigger pipeline mode.
+    config.limits.threads = 2;
 
     commands::init::run(&config, None).unwrap();
 
@@ -1451,25 +1443,14 @@ fn backup_emits_intermediate_progress_during_large_file() {
     std::fs::create_dir_all(&source_dir).unwrap();
 
     // Write a file large enough to trigger multiple batch flushes.
-    // With small chunker params (min=1KiB, avg=4KiB, max=16KiB) and
-    // transform_batch_chunks=64, the flush fires every 64 chunks.
-    // 3 MiB of uniform data → ~192 chunks (at max_size=16KiB) → 3 loop flushes.
-    let big_data = vec![0xABu8; 3 * 1024 * 1024];
+    // With fixed transform_batch_bytes = 32 MiB, a 70 MiB file triggers
+    // at least 2 intermediate flushes + 1 final flush = 3 StatsUpdated events.
+    let big_data = vec![0xABu8; 70 * 1024 * 1024];
     std::fs::write(source_dir.join("big.bin"), &big_data).unwrap();
 
     let mut config = make_test_config(&repo_dir);
-    config.chunker = ChunkerConfig {
-        min_size: 1024,
-        avg_size: 4096,
-        max_size: 16384,
-    };
-    // Force sequential path (no pipeline) and frequent batch flushes.
-    config.limits.cpu = CpuLimitsConfig {
-        max_threads: 1,
-        pipeline_depth: Some(0),
-        transform_batch_chunks: Some(64),
-        ..Default::default()
-    };
+    // Force sequential path (single thread).
+    config.limits.threads = 1;
 
     commands::init::run(&config, None).unwrap();
 

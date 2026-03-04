@@ -213,7 +213,7 @@ pub(crate) fn dispatch_command(
         Commands::Backup {
             label: user_label,
             compression,
-            upload_concurrency,
+            connections,
             source,
             paths,
             ..
@@ -222,7 +222,7 @@ pub(crate) fn dispatch_command(
             label,
             user_label.clone(),
             compression.clone(),
-            upload_concurrency.map(|v| v as usize),
+            connections.map(|v| v as usize),
             paths.clone(),
             sources,
             source,

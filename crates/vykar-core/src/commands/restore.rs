@@ -38,9 +38,7 @@ const MAX_COALESCE_GAP: u64 = 256 * 1024; // 256 KiB
 /// Maximum size of a single coalesced range read.
 const MAX_READ_SIZE: u64 = 16 * 1024 * 1024; // 16 MiB
 
-/// Number of parallel reader threads for downloading pack data.
-/// Kept high for throughput while reducing peak memory versus 8 workers.
-const MAX_READER_THREADS: usize = 6;
+// MAX_READER_THREADS removed — uses config.limits.restore_concurrency() instead.
 
 /// Maximum number of simultaneously open output files per restore worker.
 /// Caps fd usage while still avoiding per-chunk open/close churn.
@@ -312,6 +310,7 @@ where
             &repo.storage,
             repo.crypto.as_ref(),
             &temp_root,
+            config.limits.restore_concurrency(),
         )
         .map_err(&cleanup)?;
 
@@ -784,12 +783,13 @@ fn execute_parallel_restore(
     storage: &Arc<dyn StorageBackend>,
     crypto: &dyn CryptoEngine,
     root: &Path,
+    restore_concurrency: usize,
 ) -> Result<u64> {
     if groups.is_empty() {
         return Ok(0);
     }
 
-    let num_threads = MAX_READER_THREADS.min(groups.len());
+    let num_threads = restore_concurrency.min(groups.len());
     let buckets = partition_groups(groups, num_threads);
 
     let bytes_written = AtomicU64::new(0);

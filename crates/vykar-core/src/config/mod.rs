@@ -10,10 +10,7 @@ mod util;
 // Re-export config schema types
 pub use self::hooks::HOOK_COMMANDS;
 pub use self::hooks::{HooksConfig, SourceHooksConfig};
-pub use self::limits::{
-    CpuLimitsConfig, IoLimitsConfig, NetworkLimitsConfig, ResourceLimitsConfig,
-    DEFAULT_UPLOAD_CONCURRENCY,
-};
+pub use self::limits::ResourceLimitsConfig;
 
 // Re-export from submodules
 pub use self::defaults::parse_human_duration;

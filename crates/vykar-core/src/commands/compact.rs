@@ -15,11 +15,6 @@ use vykar_types::chunk_id::ChunkId;
 use vykar_types::error::{Result, VykarError};
 use vykar_types::pack_id::PackId;
 
-/// Concurrency for remote (REST/S3/SFTP) backends.
-const REMOTE_CONCURRENCY: usize = 16;
-/// Concurrency for local filesystem backends.
-const LOCAL_CONCURRENCY: usize = 4;
-
 /// Statistics returned by the compact command.
 #[derive(Debug, Default)]
 pub struct CompactStats {
@@ -75,6 +70,7 @@ pub fn run(
             | vykar_storage::ParsedUrl::S3 { .. }
             | vykar_storage::ParsedUrl::Sftp { .. })
     );
+    let concurrency = config.limits.listing_concurrency(is_remote);
 
     with_maintenance_lock(&mut repo, |repo| {
         compact_repo(
@@ -82,7 +78,7 @@ pub fn run(
             threshold,
             max_repack_size,
             dry_run,
-            is_remote,
+            concurrency,
             shutdown,
         )
     })
@@ -94,16 +90,10 @@ pub fn compact_repo(
     threshold: f64,
     max_repack_size: Option<u64>,
     dry_run: bool,
-    is_remote: bool,
+    concurrency: usize,
     shutdown: Option<&AtomicBool>,
 ) -> Result<CompactStats> {
     let mut stats = CompactStats::default();
-
-    let concurrency = if is_remote {
-        REMOTE_CONCURRENCY
-    } else {
-        LOCAL_CONCURRENCY
-    };
 
     // Phase 1: Analyze live/dead space using the chunk index + pack sizes.
     //

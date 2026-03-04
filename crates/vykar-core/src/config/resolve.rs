@@ -991,15 +991,11 @@ repositories:
     fn test_limits_inherit_and_repo_override() {
         let yaml = r#"
 limits:
-  cpu:
-    max_threads: 4
-    nice: 5
-  io:
-    read_mib_per_sec: 100
-    write_mib_per_sec: 50
-  network:
-    read_mib_per_sec: 80
-    write_mib_per_sec: 40
+  threads: 4
+  nice: 5
+  connections: 3
+  upload_mib_per_sec: 50
+  download_mib_per_sec: 80
 
 repositories:
   - url: /backups/local
@@ -1007,8 +1003,7 @@ repositories:
   - url: /backups/remote
     label: remote
     limits:
-      cpu:
-        max_threads: 2
+      threads: 2
 sources:
   - /home/user
 "#;
@@ -1020,28 +1015,25 @@ sources:
         assert_eq!(repos.len(), 2);
 
         let local = &repos[0].config.limits;
-        assert_eq!(local.cpu.max_threads, 4);
-        assert_eq!(local.cpu.nice, 5);
-        assert_eq!(local.io.read_mib_per_sec, 100);
-        assert_eq!(local.io.write_mib_per_sec, 50);
-        assert_eq!(local.network.read_mib_per_sec, 80);
-        assert_eq!(local.network.write_mib_per_sec, 40);
+        assert_eq!(local.threads, 4);
+        assert_eq!(local.nice, 5);
+        assert_eq!(local.connections, 3);
+        assert_eq!(local.upload_mib_per_sec, 50);
+        assert_eq!(local.download_mib_per_sec, 80);
 
         let remote = &repos[1].config.limits;
-        assert_eq!(remote.cpu.max_threads, 2);
-        assert_eq!(remote.cpu.nice, 0);
-        assert_eq!(remote.io.read_mib_per_sec, 0);
-        assert_eq!(remote.io.write_mib_per_sec, 0);
-        assert_eq!(remote.network.read_mib_per_sec, 0);
-        assert_eq!(remote.network.write_mib_per_sec, 0);
+        assert_eq!(remote.threads, 2);
+        assert_eq!(remote.nice, 0);
+        assert_eq!(remote.connections, 2); // default
+        assert_eq!(remote.upload_mib_per_sec, 0);
+        assert_eq!(remote.download_mib_per_sec, 0);
     }
 
     #[test]
     fn test_limits_invalid_nice_rejected() {
         let yaml = r#"
 limits:
-  cpu:
-    nice: 25
+  nice: 25
 repositories:
   - url: /backups/local
 sources:
@@ -1053,7 +1045,7 @@ sources:
 
         let err = load_and_resolve(&path).unwrap_err();
         assert!(
-            err.to_string().contains("limits.cpu.nice"),
+            err.to_string().contains("limits.nice"),
             "unexpected error: {err}"
         );
     }

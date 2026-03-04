@@ -4,8 +4,9 @@ pub(crate) fn run_break_lock(
     config: &VykarConfig,
     _label: Option<&str>,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let storage = vykar_core::storage::backend_from_config(&config.repository)
-        .map_err(|e| -> Box<dyn std::error::Error> { Box::new(e) })?;
+    let storage =
+        vykar_core::storage::backend_from_config(&config.repository, config.limits.connections)
+            .map_err(|e| -> Box<dyn std::error::Error> { Box::new(e) })?;
     let removed = vykar_core::repo::lock::break_lock(storage.as_ref())
         .map_err(|e| -> Box<dyn std::error::Error> { Box::new(e) })?;
 

@@ -17,7 +17,7 @@ Inspired by [BorgBackup](https://github.com/borgbackup/borg/), [Borgmatic](https
 - **REST server** with append-only enforcement, quotas, and server-side compaction
 - **Concurrent multi-client backups** — multiple machines back up to the same repository simultaneously; only the brief commit phase is serialized
 - **Built-in scheduling** via `vykar daemon` — runs backup cycles on a configurable interval (no cron needed)
-- **Rate limiting** for CPU, disk I/O, and network bandwidth
+- **Resource limits** for worker threads, backend connections, and upload/download bandwidth
 - **Cross-platform** — Linux, macOS, and Windows
 
 

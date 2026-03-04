@@ -102,11 +102,6 @@ CFG
     sftp_known_hosts: "$(yaml_escape "$SFTP_KNOWN_HOSTS")"
 CFG
     fi
-    if [[ -n "${SFTP_MAX_CONNECTIONS:-}" ]]; then
-      cat >>"$out" <<CFG
-    sftp_max_connections: ${SFTP_MAX_CONNECTIONS}
-CFG
-    fi
   fi
 
   cat >>"$out" <<CFG
@@ -121,6 +116,16 @@ retention:
 git_ignore: false
 xattrs:
   enabled: false
+CFG
+
+  if [[ "$backend" == "sftp" && -n "${SFTP_MAX_CONNECTIONS:-}" ]]; then
+    cat >>"$out" <<CFG
+limits:
+  connections: ${SFTP_MAX_CONNECTIONS}
+CFG
+  fi
+
+  cat >>"$out" <<CFG
 sources:
   - path: "$src_q"
     label: $src_label

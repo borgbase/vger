@@ -28,7 +28,7 @@
 | **Tiered dedup index** | Backup dedup via session map + xor filter + mmap dedup cache, with safe fallback to HashMap dedup mode |
 | **Restore mmap cache** | Index-light restore planning via local restore cache; fallback to filtered full-index loading when needed |
 | **Incremental index update** | `save_state()` fast path merges `IndexDelta` into local full-index cache and serializes index from cache |
-| **Bounded parallel pipeline** | Byte-budgeted pipeline (`pipeline_buffer_mib`) with bounded worker/upload concurrency |
+| **Bounded parallel pipeline** | Byte-budgeted pipeline with bounded worker/upload concurrency derived from `limits.threads` and `limits.connections` |
 | **mmap-backed pack assembly** | Data-pack assembly uses mmap-backed temp files (with fallback chain) to reduce heap residency under memory pressure |
 | **cache_dir override** | Configurable root for file cache, dedup/restore/full-index caches, and preferred mmap temp-file location |
 | **Parallel transforms** | rayon-backed compression/encryption within the bounded pipeline |

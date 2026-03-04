@@ -45,8 +45,9 @@ pub(crate) fn run_delete_repo(
 ) -> Result<(), Box<dyn std::error::Error>> {
     // Verify the repo exists before prompting — use list + is_known_repo_key
     // so we detect partially-deleted repos (e.g. config gone but packs remain).
-    let backend = vykar_core::storage::backend_from_config(&config.repository)
-        .map_err(|e| -> Box<dyn std::error::Error> { Box::new(e) })?;
+    let backend =
+        vykar_core::storage::backend_from_config(&config.repository, config.limits.connections)
+            .map_err(|e| -> Box<dyn std::error::Error> { Box::new(e) })?;
     let all_keys = backend
         .list("")
         .map_err(|e| -> Box<dyn std::error::Error> { Box::new(e) })?;

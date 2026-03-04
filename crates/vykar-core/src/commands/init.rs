@@ -6,7 +6,7 @@ use vykar_types::error::Result;
 
 /// Run `vykar init`.
 pub fn run(config: &VykarConfig, passphrase: Option<&str>) -> Result<Repository> {
-    let backend = storage::backend_from_config(&config.repository)?;
+    let backend = storage::backend_from_config(&config.repository, config.limits.connections)?;
 
     let encryption = match config.encryption.mode {
         EncryptionModeConfig::None => EncryptionMode::None,

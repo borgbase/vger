@@ -35,7 +35,7 @@ fn compact_clean_repo_no_repacking() {
     // Store chunks — all live, no dead blobs
     store_two_chunks(&mut repo);
 
-    let stats = compact_repo(&mut repo, 10.0, None, false, false, None).unwrap();
+    let stats = compact_repo(&mut repo, 10.0, None, false, 4, None).unwrap();
     assert_eq!(stats.packs_repacked, 0);
     assert_eq!(stats.packs_deleted_empty, 0);
     assert_eq!(stats.space_freed, 0);
@@ -51,7 +51,7 @@ fn compact_after_delete_repacks() {
     repo.save_state().unwrap();
 
     // Compact should detect the dead blob and repack
-    let stats = compact_repo(&mut repo, 1.0, None, false, false, None).unwrap();
+    let stats = compact_repo(&mut repo, 1.0, None, false, 4, None).unwrap();
 
     // Should have repacked (or deleted) at least one pack
     assert!(
@@ -85,7 +85,7 @@ fn compact_threshold_filters() {
     repo.save_state().unwrap();
 
     // With a very high threshold (90%), nothing should be repacked
-    let stats = compact_repo(&mut repo, 90.0, None, false, false, None).unwrap();
+    let stats = compact_repo(&mut repo, 90.0, None, false, 4, None).unwrap();
     assert_eq!(stats.packs_repacked, 0);
     assert_eq!(stats.packs_deleted_empty, 0);
 }
@@ -102,7 +102,7 @@ fn compact_dry_run_does_not_modify() {
     // Count packs before
     let packs_before = count_all_packs(&repo);
 
-    let stats = compact_repo(&mut repo, 1.0, None, true, false, None).unwrap();
+    let stats = compact_repo(&mut repo, 1.0, None, true, 4, None).unwrap();
 
     // Dry run should report activity
     assert!(stats.packs_repacked > 0 || stats.packs_deleted_empty > 0 || stats.space_freed > 0);
@@ -135,7 +135,7 @@ fn compact_empty_pack_deleted() {
     repo.chunk_index_mut().decrement(&id_a);
     repo.save_state().unwrap();
 
-    let stats = compact_repo(&mut repo, 1.0, None, false, false, None).unwrap();
+    let stats = compact_repo(&mut repo, 1.0, None, false, 4, None).unwrap();
 
     assert_eq!(stats.packs_deleted_empty, 1);
     assert_eq!(stats.packs_repacked, 0);

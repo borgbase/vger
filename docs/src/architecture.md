@@ -290,22 +290,23 @@ begin_write_session(session_id) → journal key = sessions/<session_id>.index
   → prune stale local file-cache entries
   → recover own sessions/<session_id>.index if present (batch-verify packs, promote into dedup structures)
   → enable tiered dedup mode (mmap cache + xor filter, fallback to dedup HashMap)
-  → configure bounded upload concurrency + pipeline limits
+  → derive upload/pipeline limits from `limits.connections` + `limits.threads`
   → walk sources with excludes + one_file_system + exclude_if_present
     → cache-hit path: reuse cached ChunkRefs and bump refs
     → cache-miss path:
-      → pipeline path (if pipeline_depth > 0):
+      → pipeline path (if effective worker threads > 1):
         → walk emits regular files and segmented large files
-          (segmentation applies when file_size > segment_size;
-           effective segment size is clamped to min(segment_size_mib, pipeline_buffer_mib))
+          (segmentation applies when file_size > 64 MiB;
+           segment size is min(64 MiB, pipeline_buffer_bytes))
         → worker threads read/chunk/hash and classify each chunk:
           - xor prefilter says "maybe present" → hash-only chunk
           - xor prefilter miss (or no filter) → compress + encrypt prepacked chunk
         → sequential consumer validates segment order, performs dedup checks
           (persistent dedup tier + pending pack writers), commits new chunks,
           and handles xor false positives via inline transform
-        → ByteBudget enforces pipeline_buffer_mib as a hard in-flight memory cap
-      → sequential fallback path (pipeline_depth == 0)
+        → ByteBudget enforces pipeline_buffer_bytes as a hard in-flight memory cap
+          (64 MiB × effective threads, clamped to 64 MiB..1 GiB)
+      → sequential fallback path (effective worker threads == 1)
   → serialize items incrementally into item-stream chunks (tree packs)
   → write SnapshotMeta at snapshots/<id>
 
@@ -361,7 +362,7 @@ open repository without index (`open_without_index`)
     → fallback: load full index and retain only snapshot-needed chunks
   → parallel coalesced range reads by pack/offset
     (merge when gap <= 256 KiB and merged range <= 16 MiB)
-    → 6 reader workers fetch groups, decrypt + decompress-with-size-hint chunks
+    → `limits.connections` reader workers fetch groups, decrypt + decompress-with-size-hint chunks
     → validate plaintext size and write to all targets (max 16 open files per worker)
   → restore file metadata (mode, mtime, optional xattrs)
 ```
@@ -503,7 +504,7 @@ After `delete` or `prune`, chunk refcounts are decremented and entries with refc
 
 **Phase 1 — Analysis (read-only, no pack downloads):**
 1. Enumerate all pack files across 256 shard dirs (`packs/00/` through `packs/ff/`)
-2. Query each pack's size via metadata-only calls (`HEAD`/stat), parallelized (16 threads remote, 4 local)
+2. Query each pack's size via metadata-only calls (`HEAD`/stat), parallelized from `limits.connections` (remote: `min(connections*3, 24)`, local: `min(connections, 8)`)
 3. Compute live bytes per pack from the `ChunkIndex`: `live_bytes = Σ(4 + stored_size)` for each indexed blob in that pack
 4. Derive `dead_bytes = (pack_size - PACK_HEADER_SIZE) - live_bytes`; packs where `live_bytes > pack_payload` are marked corrupt
 5. Compute `unused_ratio = dead_bytes / pack_size` per pack
@@ -538,28 +539,28 @@ Backup uses a bounded pipeline:
 
 1. Sequential walk stage emits file work
 2. Parallel workers in a crossbeam-channel pipeline read/chunk/hash files and classify chunks (hash-only vs prepacked)
-3. A `ByteBudget` enforces a hard cap on in-flight pipeline bytes (`pipeline_buffer_mib`)
+3. A `ByteBudget` enforces a hard cap on in-flight pipeline bytes (derived from `limits.threads`)
 4. Consumer stage commits chunks and updates dedup/index state sequentially (including segment-order validation for large files)
 5. Pack uploads run in background with bounded in-flight upload concurrency
 
-Large files are split into fixed-size segments and processed through the same worker pool. Segmentation applies only when `file_size > segment_size`, and the effective segment size is clamped to `pipeline_buffer_mib`.
+Large files are split into fixed-size 64 MiB segments and processed through the same worker pool. Segmentation applies only when `file_size > 64 MiB`, and the effective segment size is clamped to the derived pipeline byte budget.
 
 **Configuration:**
 
 ```yaml
 limits:
-  cpu:
-    max_threads: 4                 # worker budget (0 = all cores)
-    nice: 10                       # Unix nice value
-    max_upload_concurrency: 2      # default max in-flight background pack uploads
-    transform_batch_mib: 32        # flush threshold for pending transforms
-    transform_batch_chunks: 8192   # flush threshold by action count
-    pipeline_depth: 4              # 0 disables pipeline, >0 enables bounded pipeline
-    pipeline_buffer_mib: 256       # hard cap for in-flight pipeline bytes
-    segment_size_mib: 64           # large-file split threshold (16..=256), clamped by pipeline_buffer_mib
-  io:
-    read_mib_per_sec: 100          # disk read rate limit (0 = unlimited)
+  threads: 4                       # backup transform workers (0 = auto: min(cores,12))
+  connections: 2                   # backend/upload/restore concurrency (1-16)
+  nice: 10                         # Unix nice value
+  upload_mib_per_sec: 100          # upload bandwidth cap (MiB/s, 0 = unlimited)
+  download_mib_per_sec: 0          # download bandwidth cap (MiB/s, 0 = unlimited)
 ```
+
+Internal backup pipeline knobs are derived automatically:
+- `threads_effective = threads == 0 ? min(available_cores, 12) : threads`
+- `pipeline_depth = max(connections, 2)`
+- `pipeline_buffer_bytes = clamp(threads_effective * 64 MiB, 64 MiB..1 GiB)`
+- `segment_size = 64 MiB`, `transform_batch = 32 MiB`, `max_pending_actions = 8192`
 
 ---
 
@@ -570,7 +571,7 @@ Deduplicating backup tools are often dominated by index memory and restore-plann
 - Tiered dedup lookups (session map + xor filter + mmap cache) instead of always materializing a full in-memory index during backup
 - Pending-index journal for crash recovery — interrupted backups resume without re-uploading flushed packs
 - Index-light restore planning (restore-cache-first, filtered-index fallback) for lower peak memory on restore
-- Explicitly bounded backup pipeline memory (`pipeline_buffer_mib`) and bounded in-flight uploads
+- Explicitly bounded backup pipeline memory and bounded in-flight uploads derived from a small public limits surface
 - Incremental index update paths that avoid rebuilding/uploading from a full in-memory index on every save
 - Concurrent multi-client backup protocol where only the brief commit phase requires an exclusive lock — upload phases run in parallel across all clients
 

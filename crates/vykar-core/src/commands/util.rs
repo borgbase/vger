@@ -4,6 +4,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use tracing::info;
 
 use crate::config::VykarConfig;
+use crate::limits;
 use crate::repo::lock;
 use crate::repo::Repository;
 use crate::storage;
@@ -24,7 +25,9 @@ pub(crate) fn enrich_repo_not_found(err: VykarError, url: &str) -> VykarError {
 
 /// Open a repository from config using the standard backend resolver.
 pub fn open_repo(config: &VykarConfig, passphrase: Option<&str>) -> Result<Repository> {
-    let backend = storage::backend_from_config(&config.repository)?;
+    let connections = config.limits.connections;
+    let backend = storage::backend_from_config(&config.repository, connections)?;
+    let backend = limits::wrap_storage_backend(backend, &config.limits);
     Repository::open(backend, passphrase, cache_dir_from_config(config))
         .map_err(|e| enrich_repo_not_found(e, &config.repository.url))
 }
@@ -35,7 +38,9 @@ pub fn open_repo_without_index(
     config: &VykarConfig,
     passphrase: Option<&str>,
 ) -> Result<Repository> {
-    let backend = storage::backend_from_config(&config.repository)?;
+    let connections = config.limits.connections;
+    let backend = storage::backend_from_config(&config.repository, connections)?;
+    let backend = limits::wrap_storage_backend(backend, &config.limits);
     Repository::open_without_index(backend, passphrase, cache_dir_from_config(config))
         .map_err(|e| enrich_repo_not_found(e, &config.repository.url))
 }
@@ -46,7 +51,9 @@ pub fn open_repo_without_index_or_cache(
     config: &VykarConfig,
     passphrase: Option<&str>,
 ) -> Result<Repository> {
-    let backend = storage::backend_from_config(&config.repository)?;
+    let connections = config.limits.connections;
+    let backend = storage::backend_from_config(&config.repository, connections)?;
+    let backend = limits::wrap_storage_backend(backend, &config.limits);
     Repository::open_without_index_or_cache(backend, passphrase, cache_dir_from_config(config))
         .map_err(|e| enrich_repo_not_found(e, &config.repository.url))
 }

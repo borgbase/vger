@@ -88,10 +88,8 @@ repositories:
     retention:
       keep_daily: 30                 # Keep more on remote
     limits:
-      cpu:
-        max_threads: 2
-      network:
-        write_mib_per_sec: 25
+      connections: 2
+      upload_mib_per_sec: 25
 ```
 
 When `limits` is set on a repository entry, it replaces top-level `limits` for that repository.
@@ -293,17 +291,14 @@ compact:
 
 ```yaml
 limits:                              # Optional backup resource limits
-  cpu:
-    max_threads: 0                   # 0 = default rayon behavior
-    nice: 0                          # Unix niceness target (-20..19), ignored on Windows
-    max_upload_concurrency: 2        # In-flight pack uploads to remote backends (1-16)
-  io:
-    read_mib_per_sec: 0              # Source file reads during backup
-    write_mib_per_sec: 0             # Local repository writes during backup
-  network:
-    read_mib_per_sec: 0              # Remote backend reads during backup
-    write_mib_per_sec: 0             # Remote backend writes during backup
+  connections: 2                     # Parallel backend ops (1-16); also drives upload/restore concurrency
+  threads: 0                         # Backup transform workers (0 = auto: min(cores,12), 1 = mostly sequential)
+  nice: 0                            # Unix niceness target (-20..19), ignored on Windows
+  upload_mib_per_sec: 0              # Upload bandwidth cap (MiB/s, 0 = unlimited)
+  download_mib_per_sec: 0            # Download bandwidth cap (MiB/s, 0 = unlimited)
 ```
+
+`limits.connections` also controls SFTP connection pool size, backup in-flight uploads, and restore reader concurrency. Internal pipeline knobs are now derived automatically from `connections` and `threads`.
 
 ## Hooks
 

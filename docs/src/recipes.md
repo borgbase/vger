@@ -322,26 +322,18 @@ compression:
   algorithm: lz4
 
 limits:
-  cpu:
-    max_threads: 1
-    nice: 19
-    max_upload_concurrency: 1
-    pipeline_depth: 0
-    transform_batch_mib: 4
-    transform_batch_chunks: 256
-  io:
-    read_mib_per_sec: 8
-    write_mib_per_sec: 4
-  network:
-    read_mib_per_sec: 4
-    write_mib_per_sec: 2
+  threads: 1
+  nice: 19
+  connections: 1
+  upload_mib_per_sec: 2
+  download_mib_per_sec: 4
 ```
 
-- `max_threads: 1` and `pipeline_depth: 0` keep backup processing mostly sequential.
+- `threads: 1` keeps backup transforms mostly sequential.
 - `nice: 19` lowers CPU scheduling priority on Unix; it is ignored on Windows.
-- `max_upload_concurrency: 1` avoids bursts from parallel uploads.
-- `io.*` and `network.*` cap throughput in MiB/s; lower values reduce impact further.
-- If this is too slow, increase `io.read_mib_per_sec` and `network.write_mib_per_sec` first.
+- `connections: 1` minimizes backend parallelism (SFTP pool, upload concurrency, restore readers).
+- `upload_mib_per_sec` and `download_mib_per_sec` cap backend throughput in MiB/s.
+- If this is too slow, raise `upload_mib_per_sec` first, then increase `connections`.
 
 
 ## Monitoring

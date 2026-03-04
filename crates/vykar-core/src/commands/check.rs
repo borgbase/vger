@@ -22,16 +22,9 @@ use vykar_types::pack_id::PackId;
 use super::list::{for_each_decoded_item, load_snapshot_item_stream, load_snapshot_meta};
 use super::util::open_repo_without_index;
 
-/// Concurrency for remote (REST/S3/SFTP) backends.
-const REMOTE_CONCURRENCY: usize = 16;
-/// Concurrency for local filesystem backends.
-const LOCAL_CONCURRENCY: usize = 4;
 /// Number of chunks in a pack before we download the full pack instead of
 /// issuing individual range reads.
 const BATCH_THRESHOLD: usize = 3;
-/// Maximum concurrent threads for data verification (phase 3).
-/// Caps in-flight pack buffers: 4 × max_pack_size (128 MiB) ≈ 512 MiB worst case.
-const VERIFY_DATA_CONCURRENCY: usize = 4;
 /// Maximum packs per server-side verify-packs request.
 /// Guards against huge fanout on repos with many tiny packs.
 const SERVER_VERIFY_BATCH_SIZE: usize = 100;
@@ -149,11 +142,7 @@ pub fn run_with_progress(
             | vykar_storage::ParsedUrl::S3 { .. }
             | vykar_storage::ParsedUrl::Sftp { .. })
     );
-    let concurrency = if is_remote {
-        REMOTE_CONCURRENCY
-    } else {
-        LOCAL_CONCURRENCY
-    };
+    let concurrency = config.limits.listing_concurrency(is_remote);
 
     // Phase 1: Check each snapshot in manifest
     let snapshot_entries = repo.manifest().snapshots.clone();
@@ -318,7 +307,7 @@ pub fn run_with_progress(
                 &repo.crypto,
                 repo.crypto.chunk_id_key(),
                 &packs_vec,
-                concurrency.min(VERIFY_DATA_CONCURRENCY),
+                config.limits.verify_data_concurrency(),
                 BATCH_THRESHOLD,
             );
             chunks_data_verified += data_count;

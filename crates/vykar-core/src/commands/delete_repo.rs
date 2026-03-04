@@ -18,7 +18,7 @@ pub struct DeleteRepoStats {
 }
 
 pub fn run(config: &VykarConfig) -> Result<DeleteRepoStats> {
-    let backend = backend_from_config(&config.repository)?;
+    let backend = backend_from_config(&config.repository, config.limits.connections)?;
 
     // List all keys in the repo (recursive on all backends)
     let all_keys = backend.list("")?;
