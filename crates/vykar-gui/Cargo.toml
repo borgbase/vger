@@ -28,5 +28,8 @@ serde_json.workspace = true
 image = { version = "0.25", default-features = false, features = ["png"] }
 dunce = "1"
 
+[target.'cfg(target_os = "linux")'.dependencies]
+gtk = "0.18"
+
 [build-dependencies]
 winresource = "0.1"

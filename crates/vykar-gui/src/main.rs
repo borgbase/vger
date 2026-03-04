@@ -2776,6 +2776,11 @@ fn capture_gui_state(
 }
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
+    // tray-icon uses GTK widgets internally on Linux; GTK must be
+    // initialised before any Menu / MenuItem is created.
+    #[cfg(target_os = "linux")]
+    gtk::init().expect("Failed to initialize GTK");
+
     let gui_state = state::load();
     let runtime = resolve_or_create_config(gui_state.config_path.as_deref())?;
 

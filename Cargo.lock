@@ -7094,6 +7094,7 @@ dependencies = [
  "chrono",
  "crossbeam-channel",
  "dunce",
+ "gtk",
  "image",
  "notify",
  "serde",
