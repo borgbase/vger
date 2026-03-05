@@ -6,6 +6,7 @@
 # Usage
 
 - [Installing](install.md)
+- [Desktop GUI](gui.md)
 - [Initialize and Set Up a Repository](init-setup.md)
 - [Storage Backends](backends.md)
 - [Make a Backup](backup.md)
