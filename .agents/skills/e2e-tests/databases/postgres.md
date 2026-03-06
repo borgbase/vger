@@ -49,6 +49,8 @@ Configure source in vykar config:
 
 Run backup and validate artifact exists under `.vykar-dumps/` in snapshot listing.
 
+Use `vykar --config <config> backup -R <repo>` for these variants. Do not pass `-l/--label` when the source and `command_dumps` are already defined in config.
+
 ## Run Matrix
 
 Run both variants against each backend:

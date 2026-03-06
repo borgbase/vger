@@ -59,6 +59,8 @@ command_dumps:
 
 Run backup and verify each artifact is present and labeled correctly.
 
+If these sources are already in config, run `vykar --config <config> backup -R <repo>` without `-l/--label`.
+
 ## Run Matrix
 
 Run at least one Docker scenario per backend:

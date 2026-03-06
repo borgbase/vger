@@ -29,9 +29,11 @@ Run each sub-skill to execute a specific test area. Results go to `~/runtime/`.
 
 ### Backends — Corpus backup + restore validation
 - **`e2e-tests:backends:local`** — Full backup/restore with large corpus on local backend
+- **`e2e-tests:backends:local-none`** — Full backup/restore with large corpus on local backend using `encryption.mode: none`
 - **`e2e-tests:backends:rest`** — Backup/restore against local `vykar-server` REST backend
 - **`e2e-tests:backends:s3`** — Backup/restore with small corpus on S3 backend
 - **`e2e-tests:backends:sftp`** — Backup/restore with small corpus on SFTP backend (timeout-bounded)
+- **`e2e-tests:backends:interrupt-minimal`** — Interrupt `backup` mid-run and verify resume + restore integrity across `local`, `rest`, `s3` (local MinIO), and `sftp`
 
 ### Databases — Hooks and command_dumps patterns (large realistic data)
 - **`e2e-tests:databases:postgres`** — PostgreSQL with hooks dump and command_dumps variants on ~10 GiB randomized schema
@@ -95,10 +97,21 @@ export VYKAR_PASSPHRASE=123    # non-interactive passphrase
 2. Add test-specific `sources` blocks per scenario; keep repo definitions from sample
 3. Keep each scenario in a separate config file to avoid source overlap
 4. Reference repos by label: `-R local`, `-R rest`, `-R s3`, `-R sftp`
-5. For local REST server mode, use a single repository URL root (e.g. `http://127.0.0.1:8585`) with:
+5. Include one dedicated local-backend scenario with `encryption.mode: none`; treat it as a required backend validation, not an optional smoke test
+6. For the `e2e-tests:backends:local-none` scenario, set:
+   - `encryption.mode: none`
+   - omit `encryption.passphrase` / `VYKAR_PASSPHRASE`
+   - keep the same backup/list/restore/diff validation standard as encrypted local runs
+7. For local REST server mode, use a single repository URL root (e.g. `http://127.0.0.1:8585`) with:
    - `access_token: "<token>"`
    - `allow_insecure_http: true`
    - do not append `/<repo-name>` in single-repo mode
+8. For `e2e-tests:backends:interrupt-minimal`, use a dedicated config file and point S3 to local MinIO:
+   - `url: "s3+http://127.0.0.1:9000/vykar-stress/<run-id>"`
+   - `allow_insecure_http: true`
+   - `region: "us-east-1"`
+   - `access_key_id: "minioadmin"`
+   - `secret_access_key: "minioadmin"`
 
 ### Validation Standard
 Every test must verify:
@@ -108,6 +121,7 @@ Every test must verify:
 4. Restore into temp directory and verify:
    - Corpus tests: `diff -qr --no-dereference <source> <restore_dir>` reports no differences
    - Database tests: restore dump, verify row/document counts and sampled content match seeded large dataset
+   - After verification, immediately remove restored files: `rm -rf <restore_dir>`
 5. Optional: SHA256 manifest comparison for stronger content verification
 
 ### Cleanup Standard
@@ -115,6 +129,7 @@ Every test must verify:
    - Treat `not found`/missing repo as non-fatal
    - REST single-repo servers may reject `delete` (for example `400/404`); if so, continue with `init`/`backup` and record it
 2. **Local**: remove temporary directories (dumps, restores, configs)
+   - Do not keep restore trees after `diff`/integrity checks unless actively debugging
 3. **Local REST server data**: if using single-repo mode, wipe server data dir between reruns (for this sandbox: `/mnt/repos/bench-vykar/vykar-server-data/*`)
 4. **Remote storage**: `rclone delete --rmdirs <remote:path>` between runs
    - Do NOT use `rclone purge` (may fail with 403 on restricted buckets)
@@ -136,17 +151,63 @@ SFTP can be intermittent even when rclone works fine against the same server:
 - Do NOT rerun the entire test suite if only SFTP failed — isolate SFTP results
 - Ensure no stuck `vykar` process remains after aborted SFTP steps
 
+### Interruption Minimal Test (All Backends)
+Run order:
+1. `local`
+2. `rest`
+3. `s3` (local MinIO only)
+4. `sftp`
+
+Source mapping:
+- `local` -> `~/corpus-local/snapshot-1`
+- `rest` -> `~/corpus-remote/snapshot-1`
+- `s3` (local MinIO) -> `~/corpus-remote/snapshot-1`
+- `sftp` -> `~/corpus-remote/snapshot-1`
+
+Interrupt method (backup only):
+1. Start backup in background:
+   ```bash
+   vykar --config <config> backup -R <repo> <src> > <backup_log> 2>&1 &
+   pid=$!
+   ```
+2. Sleep briefly (`1-5s`, backend-specific), then send SIGTERM:
+   ```bash
+   kill -TERM "$pid"
+   ```
+3. If still running after 2 seconds, send SIGKILL:
+   ```bash
+   kill -KILL "$pid"
+   ```
+4. Wait and record interrupt exit code (`interrupt_rc`).
+
+Resume + validation sequence:
+1. Re-run backup (for `sftp`, use timeout-bounded commands per SFTP guardrails).
+2. Parse latest `snapshot_id` from `Snapshot created: <id>` in resume backup log.
+3. `vykar --config <config> list -R <repo> --last 5` and confirm snapshot appears.
+4. `vykar --config <config> snapshot list -R <repo> <snapshot_id>`.
+5. Restore into empty directory.
+6. Validate with `diff -qr --no-dereference <src> <restore_dir>`.
+7. Run `vykar --config <config> check -R <repo>`.
+
+Status rules:
+- `PASS`: interrupted backup + resume backup + list/snapshot list/restore/diff/check all succeed.
+- `FAIL`: non-timeout command failure or diff mismatch.
+- `BLOCKED`: timeout (`rc=124`) on timeout-bounded steps.
+
 ### Deliverables
 Each sub-skill should produce:
 1. Scenario-specific config file saved under `~/runtime/`
 2. Log file under `~/runtime/logs/`
 3. Pass/fail summary report under `~/runtime/reports/`
+4. For interruption scenarios, include per-backend result fields:
+   - `backend,status,reason,interrupt_rc,resume_rc,snapshot_id,log_dir,report_path`
 
 ## Common Gotchas
 
 - Mixing `sudo vykar` and regular `vykar` creates root-owned repo files — use `sudo rm -rf` for cleanup
 - Command dump artifacts appear under `.vykar-dumps/` in snapshot listings
 - Prefer `vykar --config <config> ...` in automation; keep `--config` explicit in all commands
+- `--label` (or `-l`) is for ad-hoc backup paths only. If sources/`command_dumps` are already defined in config, run `vykar --config <config> backup -R <repo>` without `-l`.
 - `vykar snapshot` CLI forms:
   - `vykar --config <config> snapshot list -R <repo> <snapshot_id>`
   - `vykar --config <config> snapshot delete -R <repo> <snapshot_id>`
@@ -164,3 +225,4 @@ Each sub-skill should produce:
 - MongoDB host tools may be missing — use `docker exec` or `podman exec` as fallback
 - Pre-pull container images before timed runs to avoid skewing measurements
 - Sample config repo paths may need adjustment for the sandbox — verify and update before first run
+- In interruption tests, `interrupt_rc=0` usually means the backup finished before the signal landed. Re-run with shorter sle

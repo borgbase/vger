@@ -57,6 +57,8 @@ Configure source in vykar config:
 
 Run backup and validate artifact exists and is non-empty.
 
+Use `vykar --config <config> backup -R <repo>` for these variants. Do not pass `-l/--label` when the source and `command_dumps` are already defined in config.
+
 ## Run Matrix
 
 1. Initialize local repo, run both variants + restore check

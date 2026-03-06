@@ -60,6 +60,8 @@ command_dumps:
 
 Validate artifact naming and size.
 
+If these sources are already in config, run `vykar --config <config> backup -R <repo>` without `-l/--label`.
+
 ## Run Matrix
 
 Run at least one Podman scenario per backend:

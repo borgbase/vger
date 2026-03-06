@@ -16,7 +16,7 @@ PASSPHRASE="${PASSPHRASE:-123}"
 
 # REST backend
 REST_URL="${REST_URL:-http://127.0.0.1:8585}"
-REST_TOKEN="${REST_TOKEN:-${VYKAR_REST_TOKEN:-${VYKAR_TOKEN:-vykar-e2e-local-token}}}"
+REST_TOKEN="${REST_TOKEN:-${VYKAR_REST_TOKEN:-${VYKAR_TOKEN:-${VGER_TOKEN:-vger-e2e-local-token}}}}"
 REST_DATA_DIR="${REST_DATA_DIR:-/mnt/repos/bench-vykar/vykar-server-data}"
 
 # S3 / MinIO
