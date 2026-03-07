@@ -22,6 +22,8 @@ sources:
   - /home/user/photos
 ```
 
+When you use multiple simple string entries, vykar groups them into one source and creates one snapshot for that grouped source. If you want separate snapshots per path, use rich entries with explicit labels.
+
 For more complex situations you can add overrides to source groups. Each "rich" source in your config produces its own snapshot. When you use the rich source form, the `label` field gives each source a short name you can reference from the CLI:
 
 ```yaml
@@ -77,7 +79,7 @@ vykar list --last 5
 # List snapshots for a specific source
 vykar list --source docs
 
-# List files inside a snapshot
+# List files inside a snapshot by ID
 vykar snapshot list a1b2c3d4
 
 # Find recent SQL dumps across recent snapshots

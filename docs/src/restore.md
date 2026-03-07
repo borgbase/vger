@@ -15,6 +15,8 @@ vykar list --source docs
 
 ## Inspect snapshot contents
 
+Snapshot-oriented commands take an exact snapshot ID, or `latest`.
+
 ```bash
 # List files inside a snapshot
 vykar snapshot list a1b2c3d4
@@ -69,9 +71,9 @@ vykar restore latest /tmp/restored
 
 Restore applies extended attributes (`xattrs`) by default. Control this with the top-level `xattrs.enabled` config setting.
 
-## Browse via WebDAV (mount)
+## Browse via WebDAV and browser UI (mount)
 
-Browse snapshot contents via a local WebDAV server.
+Browse snapshot contents via a local read-only WebDAV server. The same endpoint also serves a built-in HTML browser UI.
 
 ```bash
 # Serve all snapshots (default: http://127.0.0.1:8080)

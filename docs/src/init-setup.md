@@ -48,6 +48,12 @@ vykar init
 
 This creates the repository structure at the configured URL. For encrypted repositories, you will be prompted to enter a passphrase.
 
+If your config has multiple repositories, use `--repo` / `-R` to initialize one entry at a time:
+
+```bash
+vykar init --repo main
+```
+
 ## Validate
 
 Confirm the repository was created:

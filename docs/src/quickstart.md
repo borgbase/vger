@@ -47,7 +47,7 @@ List all snapshots:
 vykar list
 ```
 
-List files inside a snapshot (use the hex ID from `vykar list`):
+List files inside a snapshot (use the snapshot ID shown by `vykar list`, or `latest`):
 
 ```bash
 vykar snapshot list a1b2c3d4

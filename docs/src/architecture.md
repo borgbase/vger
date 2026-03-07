@@ -249,7 +249,7 @@ Pack sizes grow with repository size. Config exposes floor and ceiling:
 
 ```yaml
 repositories:
-  - path: /backups/repo
+  - url: /backups/repo
     min_pack_size: 33554432     # 32 MiB (floor, default)
     max_pack_size: 201326592    # 192 MiB (default)
 ```
@@ -398,12 +398,11 @@ Session markers are refreshed approximately every 15 minutes (`maybe_refresh_ses
 
 #### Advisory Lock (exclusive)
 
-- Preferred path: backend-native lock APIs (`acquire_advisory_lock` / `release_advisory_lock`) when the backend supports them (for example, vykar-server)
-- Fallback path: lock files at `locks/<timestamp>-<uuid>.json`
+- Lock files at `locks/<timestamp>-<uuid>.json`
 - Each lock contains: hostname, PID, and acquisition timestamp
 - **Oldest-key-wins**: after writing its lock, a client lists all locks — if its key isn't lexicographically first, it deletes its own lock and returns an error
 - **Stale cleanup**: locks older than 6 hours are automatically removed before each acquisition attempt
-- **Recovery**: `vykar break-lock` forcibly removes stale backend/object locks when interrupted processes leave lock conflicts
+- **Recovery**: `vykar break-lock` forcibly removes stale lock objects when interrupted processes leave lock conflicts
 
 The advisory lock is used for:
 - **Backup commit phase**: acquired with `acquire_lock_with_retry` (10 attempts, 500 ms base delay, exponential backoff + 25 % jitter). Held only for the brief commit — typically seconds.
@@ -417,7 +416,7 @@ The advisory lock is used for:
 | `delete`, `prune`, `compact` | — | Maintenance lock (exclusive + session check) |
 | `list`, `restore`, `check`, `info` | — | No lock (read-only) |
 
-When using a vykar server, server-managed locks with TTL replace client-side advisory locks (see [Server Internals](server-internals.md)).
+When using `vykar-server`, the same lock and session objects are stored through the REST backend under `locks/*` and `sessions/*`; there is no separate lock-specific server API.
 
 ### Signal Handling
 

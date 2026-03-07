@@ -23,13 +23,13 @@
 | **check command** | Structural integrity + optional `--verify-data` for full content verification |
 | **Type-safe PackId** | Newtype for pack file identifiers with `storage_key()` |
 | **compact command** | Rewrite packs to reclaim space from orphaned blobs after delete/prune |
-| **REST server** | axum-based backup server with auth, append-only, quotas, freshness tracking, lock TTL, server-side compaction |
+| **REST server** | axum-based backup server with auth, append-only enforcement, quotas, freshness tracking, and server-side compaction |
 | **REST backend** | `StorageBackend` over HTTP with range-read support |
 | **Tiered dedup index** | Backup dedup via session map + xor filter + mmap dedup cache, with safe fallback to HashMap dedup mode |
 | **Restore mmap cache** | Index-light restore planning via local restore cache; fallback to filtered full-index loading when needed |
 | **Incremental index update** | `save_state()` fast path merges `IndexDelta` into local full-index cache and serializes index from cache |
 | **Bounded parallel pipeline** | Byte-budgeted pipeline with bounded worker/upload concurrency derived from `limits.threads` and `limits.connections` |
-| **mmap-backed pack assembly** | Data-pack assembly uses mmap-backed temp files (with fallback chain) to reduce heap residency under memory pressure |
+| **Heap-backed pack assembly** | Pack writers use heap-backed buffers after the mmap path was removed for reliability on some systems |
 | **cache_dir override** | Configurable root for file cache, dedup/restore/full-index caches, and preferred mmap temp-file location |
 | **Parallel transforms** | rayon-backed compression/encryption within the bounded pipeline |
 | **break-lock command** | Forced stale-lock cleanup for backend/object lock recovery |

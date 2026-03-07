@@ -7,7 +7,7 @@ Vykar is a fast, encrypted, deduplicated backup tool written in Rust. It's cente
 - **Storage backends** -- local filesystem, S3 (any compatible provider), SFTP, dedicated REST server
 - **Encryption** with AES-256-GCM or ChaCha20-Poly1305 (auto-selected) and Argon2id key derivation
 - **YAML-based configuration** with multiple repositories, hooks, and command dumps for monitoring and database backups
-- **Deduplication** via FastCDC content-defined chunking with a memory-optimized engine (tiered dedup index + mmap-backed pack assembly)
+- **Deduplication** via FastCDC content-defined chunking with a memory-optimized engine (tiered dedup index plus local mmap-backed lookup caches)
 - **Compression** with LZ4 or Zstandard
 - **Built-in WebDAV and desktop GUI** to browse and restore snapshots
 - **REST server** with append-only enforcement, quotas, and server-side compaction

@@ -8,7 +8,7 @@ The repository URL in your config determines which backend is used.
 | S3 / S3-compatible (HTTPS) | `s3://endpoint[:port]/bucket/prefix` |
 | S3 / S3-compatible (HTTP, unsafe) | `s3+http://endpoint[:port]/bucket/prefix` |
 | SFTP | `sftp://host/path` |
-| REST (vykar-server) | `https://host/repo` |
+| REST (vykar-server) | `https://host` |
 
 ## Transport security
 
@@ -20,7 +20,7 @@ HTTP transport is blocked by default for remote backends.
 ```yaml
 repositories:
   - label: "dev-only"
-    url: "http://localhost:8484/myrepo"
+    url: "http://localhost:8484"
     allow_insecure_http: true
 ```
 
@@ -120,7 +120,7 @@ Store backups on a dedicated [vykar-server](server-setup.md) instance via HTTP/H
 ```yaml
 repositories:
   - label: "server"
-    url: "https://backup.example.com/myrepo"
+    url: "https://backup.example.com"
     access_token: "my-secret-token"          # Bearer token for authentication
 ```
 
