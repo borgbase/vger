@@ -342,6 +342,7 @@ pub struct StorageConfig {
 
 /// Retry configuration for remote storage backends (S3, SFTP, REST).
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct RetryConfig {
     /// Maximum number of retry attempts (0 = no retries).
     #[serde(default = "RetryConfig::default_max_retries")]

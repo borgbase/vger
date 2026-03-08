@@ -82,7 +82,9 @@ impl MasterKey {
     }
 
     /// Encrypt the master key with a passphrase using Argon2id + AES-256-GCM.
-    pub fn to_encrypted(&self, passphrase: &str) -> Result<EncryptedKey> {
+    pub fn to_encrypted<P: AsRef<[u8]>>(&self, passphrase: P) -> Result<EncryptedKey> {
+        let passphrase = passphrase.as_ref();
+
         // Generate salt using OS entropy
         let mut salt = vec![0u8; 32];
         rand::rngs::OsRng.fill_bytes(&mut salt);
@@ -110,7 +112,7 @@ impl MasterKey {
         let cipher = Aes256Gcm::new_from_slice(wrapping_key.as_ref())
             .map_err(|e| VykarError::KeyDerivation(format!("cipher init: {e}")))?;
         let mut nonce_bytes = [0u8; 12];
-        rand::thread_rng().fill_bytes(&mut nonce_bytes);
+        rand::rngs::OsRng.fill_bytes(&mut nonce_bytes);
         let nonce = Nonce::from_slice(&nonce_bytes);
         let ciphertext = cipher
             .encrypt(
@@ -135,7 +137,9 @@ impl MasterKey {
     /// 1. v1 AAD (stable manual encoding)
     /// 2. Legacy msgpack AAD (pre-v1 repos)
     /// 3. No AAD (pre-AAD repos)
-    pub fn from_encrypted(encrypted: &EncryptedKey, passphrase: &str) -> Result<Self> {
+    pub fn from_encrypted<P: AsRef<[u8]>>(encrypted: &EncryptedKey, passphrase: P) -> Result<Self> {
+        let passphrase = passphrase.as_ref();
+
         // Validate nonce length to avoid panic in Nonce::from_slice
         if encrypted.nonce.len() != 12 {
             return Err(VykarError::DecryptionFailed);
@@ -253,14 +257,17 @@ fn kdf_params_aad_legacy(kdf: &KdfParams) -> Result<Vec<u8>> {
 }
 
 /// Derive a 32-byte key from a passphrase using Argon2id.
-fn derive_key_from_passphrase(passphrase: &str, kdf: &KdfParams) -> Result<Zeroizing<[u8; 32]>> {
+fn derive_key_from_passphrase(
+    passphrase: impl AsRef<[u8]>,
+    kdf: &KdfParams,
+) -> Result<Zeroizing<[u8; 32]>> {
     let params = argon2::Params::new(kdf.memory_cost, kdf.time_cost, kdf.parallelism, Some(32))
         .map_err(|e| VykarError::KeyDerivation(format!("argon2 params: {e}")))?;
     let argon2 = Argon2::new(argon2::Algorithm::Argon2id, argon2::Version::V0x13, params);
 
     let mut output = Zeroizing::new([0u8; 32]);
     argon2
-        .hash_password_into(passphrase.as_bytes(), &kdf.salt, output.as_mut())
+        .hash_password_into(passphrase.as_ref(), &kdf.salt, output.as_mut())
         .map_err(|e| VykarError::KeyDerivation(format!("argon2 hash: {e}")))?;
     Ok(output)
 }
@@ -455,6 +462,18 @@ mod tests {
         let recovered = MasterKey::from_encrypted(&deserialized, "pass").unwrap();
         assert_eq!(key.encryption_key, recovered.encryption_key);
         assert_eq!(key.chunk_id_key, recovered.chunk_id_key);
+    }
+
+    #[test]
+    fn byte_buffer_passphrase_roundtrip() {
+        let key = MasterKey::generate();
+        let passphrase = Zeroizing::new(TEST_PASSPHRASE.as_bytes().to_vec());
+
+        let encrypted = key.to_encrypted(passphrase.clone()).unwrap();
+        let decrypted = MasterKey::from_encrypted(&encrypted, passphrase).unwrap();
+
+        assert_eq!(key.encryption_key, decrypted.encryption_key);
+        assert_eq!(key.chunk_id_key, decrypted.chunk_id_key);
     }
 
     #[test]

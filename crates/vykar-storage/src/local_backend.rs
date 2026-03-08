@@ -65,7 +65,21 @@ impl LocalBackend {
         let dir = path.parent().unwrap_or(&self.root);
         let mut tmp = tempfile::NamedTempFile::new_in(dir)?;
         tmp.write_all(data)?;
-        tmp.persist(path).map_err(|e| e.error)?;
+        tmp.as_file_mut().sync_all()?;
+        let persisted = tmp.persist(path).map_err(|e| e.error)?;
+        drop(persisted);
+        Self::sync_directory(dir)?;
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    fn sync_directory(dir: &Path) -> Result<()> {
+        fs::File::open(dir)?.sync_all()?;
+        Ok(())
+    }
+
+    #[cfg(not(unix))]
+    fn sync_directory(_dir: &Path) -> Result<()> {
         Ok(())
     }
 }

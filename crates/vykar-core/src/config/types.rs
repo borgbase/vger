@@ -1,5 +1,6 @@
 use std::time::Duration;
 
+use fastcdc::v2020::{AVERAGE_MAX, AVERAGE_MIN, MAXIMUM_MIN, MINIMUM_MAX, MINIMUM_MIN};
 use serde::{Deserialize, Serialize};
 
 use super::defaults::*;
@@ -43,6 +44,7 @@ pub struct VykarConfig {
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct RetentionConfig {
     /// Keep all snapshots within this time interval (e.g. "2d", "48h", "1w")
     #[serde(default, deserialize_with = "deserialize_optional_duration_string")]
@@ -70,6 +72,7 @@ impl RetentionConfig {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct XattrsConfig {
     #[serde(default = "default_xattrs_enabled")]
     pub enabled: bool,
@@ -84,6 +87,7 @@ impl Default for XattrsConfig {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ScheduleConfig {
     #[serde(default)]
     pub enabled: bool,
@@ -150,6 +154,7 @@ impl ScheduleConfig {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct RepositoryConfig {
     /// Repository URL: bare path, `file://`, `s3://`, `s3+http://`, `sftp://`, or `http(s)://`.
     pub url: String,
@@ -180,6 +185,7 @@ pub struct RepositoryConfig {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct EncryptionConfig {
     #[serde(default = "default_encryption_mode")]
     pub mode: EncryptionModeConfig,
@@ -257,7 +263,9 @@ impl Default for ChunkerConfig {
 impl ChunkerConfig {
     /// Clamp `max_size` to `CHUNK_MAX_SIZE_HARD_CAP` with a warning if it
     /// was configured above the cap.
-    pub fn validate(&mut self) {
+    pub fn validate(&mut self) -> vykar_types::error::Result<()> {
+        use vykar_types::error::VykarError;
+
         if self.max_size > CHUNK_MAX_SIZE_HARD_CAP {
             tracing::warn!(
                 configured = self.max_size,
@@ -266,10 +274,48 @@ impl ChunkerConfig {
             );
             self.max_size = CHUNK_MAX_SIZE_HARD_CAP;
         }
+
+        if !(MINIMUM_MIN..=MINIMUM_MAX).contains(&self.min_size) {
+            return Err(VykarError::Config(format!(
+                "chunker.min_size must be in [{MINIMUM_MIN}, {MINIMUM_MAX}], got {}",
+                self.min_size
+            )));
+        }
+
+        if !(AVERAGE_MIN..=AVERAGE_MAX).contains(&self.avg_size) {
+            return Err(VykarError::Config(format!(
+                "chunker.avg_size must be in [{AVERAGE_MIN}, {AVERAGE_MAX}], got {}",
+                self.avg_size
+            )));
+        }
+
+        if !(MAXIMUM_MIN..=CHUNK_MAX_SIZE_HARD_CAP).contains(&self.max_size) {
+            return Err(VykarError::Config(format!(
+                "chunker.max_size must be in [{MAXIMUM_MIN}, {CHUNK_MAX_SIZE_HARD_CAP}], got {}",
+                self.max_size
+            )));
+        }
+
+        if self.min_size > self.avg_size {
+            return Err(VykarError::Config(format!(
+                "chunker must satisfy min_size <= avg_size, got {} > {}",
+                self.min_size, self.avg_size
+            )));
+        }
+
+        if self.avg_size > self.max_size {
+            return Err(VykarError::Config(format!(
+                "chunker must satisfy avg_size <= max_size, got {} > {}",
+                self.avg_size, self.max_size
+            )));
+        }
+
+        Ok(())
     }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct CompressionConfig {
     #[serde(default = "default_algorithm")]
     pub algorithm: CompressionAlgorithm,
@@ -311,6 +357,7 @@ impl Default for CompressionConfig {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct CompactConfig {
     #[serde(default = "default_compact_threshold")]
     pub threshold: f64,
@@ -396,5 +443,49 @@ mod tests {
             .unwrap_err();
         let msg = err.to_string();
         assert!(msg.contains("expected 5 fields"), "got: {msg}");
+    }
+
+    #[test]
+    fn chunker_validate_accepts_defaults() {
+        let mut config = ChunkerConfig::default();
+        assert!(config.validate().is_ok());
+    }
+
+    #[test]
+    fn chunker_validate_clamps_hard_cap() {
+        let mut config = ChunkerConfig {
+            min_size: 256,
+            avg_size: 1024,
+            max_size: CHUNK_MAX_SIZE_HARD_CAP + 1,
+        };
+
+        config.validate().unwrap();
+        assert_eq!(config.max_size, CHUNK_MAX_SIZE_HARD_CAP);
+    }
+
+    #[test]
+    fn chunker_validate_rejects_fastcdc_bounds() {
+        let mut config = ChunkerConfig {
+            min_size: MINIMUM_MIN - 1,
+            avg_size: 1024,
+            max_size: 4096,
+        };
+
+        let err = config.validate().unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("chunker.min_size"), "got: {msg}");
+    }
+
+    #[test]
+    fn chunker_validate_rejects_invalid_ordering() {
+        let mut config = ChunkerConfig {
+            min_size: 4096,
+            avg_size: 1024,
+            max_size: 8192,
+        };
+
+        let err = config.validate().unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("min_size <= avg_size"), "got: {msg}");
     }
 }

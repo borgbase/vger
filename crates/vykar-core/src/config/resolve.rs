@@ -83,6 +83,36 @@ impl RepositoryEntry {
     }
 }
 
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct StrictChunkerConfig {
+    #[serde(default = "default_min_size")]
+    min_size: u32,
+    #[serde(default = "default_avg_size")]
+    avg_size: u32,
+    #[serde(default = "default_max_size")]
+    max_size: u32,
+}
+
+impl From<StrictChunkerConfig> for ChunkerConfig {
+    fn from(value: StrictChunkerConfig) -> Self {
+        Self {
+            min_size: value.min_size,
+            avg_size: value.avg_size,
+            max_size: value.max_size,
+        }
+    }
+}
+
+// ChunkerConfig is serialized in snapshot metadata, so we keep the wire type
+// forward-compatible and enforce strict YAML config parsing here instead.
+fn deserialize_strict_chunker_config<'de, D>(deserializer: D) -> Result<ChunkerConfig, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    StrictChunkerConfig::deserialize(deserializer).map(Into::into)
+}
+
 /// Intermediate deserialization struct for the YAML config file.
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -103,7 +133,7 @@ struct ConfigDocument {
     git_ignore: bool,
     #[serde(default)]
     xattrs: XattrsConfig,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_strict_chunker_config")]
     chunker: ChunkerConfig,
     #[serde(default)]
     compression: CompressionConfig,
@@ -302,7 +332,7 @@ fn resolve_document(mut raw: ConfigDocument) -> vykar_types::error::Result<Vec<R
     raw.hooks.validate()?;
     raw.schedule.validate()?;
     raw.limits.validate()?;
-    raw.chunker.validate();
+    raw.chunker.validate()?;
     raw.compact.validate();
 
     // Validate per-repo hooks
@@ -1737,6 +1767,48 @@ sources:
                 || msg.contains("unknown field")
                 || msg.contains("did not match"),
             "expected deserialization error for unknown hook key, got: {msg}"
+        );
+    }
+
+    #[test]
+    fn test_chunker_rejects_unknown_keys() {
+        let yaml = r#"
+repositories:
+  - url: /tmp/repo
+chunker:
+  avg_size: 1024
+  unexpected: 1
+"#;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.yaml");
+        fs::write(&path, yaml).unwrap();
+
+        let err = load_and_resolve(&path).unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            msg.contains("unexpected") || msg.contains("unknown field"),
+            "expected unknown-field error, got: {msg}"
+        );
+    }
+
+    #[test]
+    fn test_compression_rejects_unknown_keys() {
+        let yaml = r#"
+repositories:
+  - url: /tmp/repo
+compression:
+  algorithm: zstd
+  levelz: 3
+"#;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.yaml");
+        fs::write(&path, yaml).unwrap();
+
+        let err = load_and_resolve(&path).unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            msg.contains("levelz") || msg.contains("unknown field"),
+            "expected unknown-field error, got: {msg}"
         );
     }
 

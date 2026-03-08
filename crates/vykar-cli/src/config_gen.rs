@@ -1,3 +1,5 @@
+use std::io::Write;
+
 use vykar_core::config;
 
 pub(crate) fn run_config_generate(dest: Option<&str>) -> Result<(), Box<dyn std::error::Error>> {
@@ -6,20 +8,48 @@ pub(crate) fn run_config_generate(dest: Option<&str>) -> Result<(), Box<dyn std:
         None => pick_config_location()?,
     };
 
-    if path.exists() {
-        return Err(format!("file already exists: {}", path.display()).into());
-    }
-
     if let Some(parent) = path.parent() {
         if !parent.as_os_str().is_empty() && !parent.exists() {
             std::fs::create_dir_all(parent)?;
         }
     }
 
-    std::fs::write(&path, config::minimal_config_template())?;
+    if let Err(err) = write_config_file(&path) {
+        if err.kind() == std::io::ErrorKind::AlreadyExists {
+            return Err(format!("file already exists: {}", path.display()).into());
+        }
+        return Err(err.into());
+    }
+
     println!("Config written to: {}", path.display());
     println!("Edit it to set your repository path and source directories.");
     Ok(())
+}
+
+fn write_config_file(path: &std::path::Path) -> std::io::Result<()> {
+    let mut file = new_config_file(path)?;
+    file.write_all(config::minimal_config_template().as_bytes())?;
+    file.sync_all()?;
+    Ok(())
+}
+
+#[cfg(unix)]
+fn new_config_file(path: &std::path::Path) -> std::io::Result<std::fs::File> {
+    use std::os::unix::fs::OpenOptionsExt;
+
+    std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(0o600)
+        .open(path)
+}
+
+#[cfg(not(unix))]
+fn new_config_file(path: &std::path::Path) -> std::io::Result<std::fs::File> {
+    std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(path)
 }
 
 fn pick_config_location() -> Result<std::path::PathBuf, Box<dyn std::error::Error>> {
@@ -63,4 +93,38 @@ fn pick_config_location() -> Result<std::path::PathBuf, Box<dyn std::error::Erro
     };
 
     Ok(search_paths[selection].0.clone())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn generates_template_at_requested_path() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("vykar.yaml");
+
+        run_config_generate(Some(path.to_str().unwrap())).unwrap();
+
+        let written = std::fs::read_to_string(&path).unwrap();
+        assert_eq!(written, config::minimal_config_template());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn generated_config_is_not_group_or_world_readable() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("vykar.yaml");
+
+        run_config_generate(Some(path.to_str().unwrap())).unwrap();
+
+        let mode = std::fs::metadata(&path).unwrap().permissions().mode() & 0o777;
+        assert_eq!(
+            mode & 0o077,
+            0,
+            "expected no group/world access, got {mode:o}"
+        );
+    }
 }
