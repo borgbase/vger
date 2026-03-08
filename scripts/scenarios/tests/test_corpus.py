@@ -2,11 +2,57 @@ import os
 import random
 import tempfile
 import unittest
+from unittest import mock
 
 from scenario_runner import corpus
 
 
 class CorpusTests(unittest.TestCase):
+    def test_validate_corpus_mix_accepts_builtin_types(self) -> None:
+        corpus.validate_corpus_mix(
+            {"mix": [{"type": "bin", "weight": 1, "file_size": "1kb"}]}
+        )
+
+    def test_validate_corpus_mix_rejects_unknown_type(self) -> None:
+        with self.assertRaisesRegex(ValueError, "unknown corpus file type"):
+            corpus.validate_corpus_mix(
+                {"mix": [{"type": "made-up", "weight": 1, "file_size": "1kb"}]}
+            )
+
+    def test_validate_corpus_mix_raises_when_optional_provider_missing(self) -> None:
+        with mock.patch.dict(corpus._OPTIONAL_PROVIDERS, {"docx": None}, clear=False):
+            with self.assertRaisesRegex(corpus.CorpusDependencyError, "corpus type 'docx' is unavailable"):
+                corpus.validate_corpus_mix(
+                    {"mix": [{"type": "docx", "weight": 1, "file_size": "1kb"}]}
+                )
+
+    def test_validate_corpus_mix_raises_when_optional_probe_fails(self) -> None:
+        with mock.patch(
+            "scenario_runner.corpus._probe_optional_type",
+            side_effect=corpus.CorpusDependencyError("corpus type 'docx' is unavailable: sample generation failed"),
+        ):
+            with self.assertRaisesRegex(corpus.CorpusDependencyError, "sample generation failed"):
+                corpus.validate_corpus_mix(
+                    {"mix": [{"type": "docx", "weight": 1, "file_size": "1kb"}]}
+                )
+
+    def test_generate_one_wraps_faker_runtime_failures(self) -> None:
+        fake = mock.Mock()
+        fake.docx_file.side_effect = FileNotFoundError("default.docx")
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            with self.assertRaisesRegex(corpus.CorpusDependencyError, "corpus type 'docx' is unavailable"):
+                corpus._generate_one(
+                    "docx",
+                    tmpdir,
+                    1024,
+                    {},
+                    random.Random(1),
+                    "text",
+                    fake,
+                    [0],
+                )
+
     def test_apply_churn_defaults_to_two_x_growth_cap(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             with open(os.path.join(tmpdir, "seed.bin"), "wb") as f:

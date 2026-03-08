@@ -10,8 +10,8 @@ import json
 import os
 import random
 import re
-import sys
 import tarfile
+import tempfile
 import zipfile
 
 from faker import Faker
@@ -57,6 +57,24 @@ _FAST_TYPES = {"bin", "txt", "csv", "json", "xml", "zip", "tar"}
 
 # Types that need faker-file providers.
 _FAKER_TYPES = {"docx", "xlsx", "png"}
+_ALL_TYPES = _FAST_TYPES | _FAKER_TYPES
+_VALIDATED_OPTIONAL_TYPES: set[str] = set()
+
+
+class CorpusDependencyError(RuntimeError):
+    """Raised when a requested corpus file type cannot be generated."""
+
+
+def _raise_optional_type_error(file_type: str, message: str, exc: Exception | None = None) -> None:
+    details = (
+        f"corpus type '{file_type}' is unavailable: {message}. "
+        f"Reinstall compatible dependencies or remove '{file_type}' from the scenario mix."
+    )
+    if exc is not None:
+        raise CorpusDependencyError(
+            f"{details} ({exc.__class__.__name__}: {exc})"
+        ) from exc
+    raise CorpusDependencyError(details)
 
 
 def _make_subdirs(root: str, max_depth: int, rng: random.Random) -> list[str]:
@@ -101,6 +119,55 @@ def _make_faker(rng: random.Random) -> Faker:
         if prov is not None:
             fake.add_provider(prov)
     return fake
+
+
+def _probe_optional_type(file_type: str) -> None:
+    if file_type in _VALIDATED_OPTIONAL_TYPES:
+        return
+
+    provider = _OPTIONAL_PROVIDERS.get(file_type)
+    if provider is None:
+        _raise_optional_type_error(file_type, "optional provider is not installed")
+
+    rng = random.Random(0)
+    text_block = _generate_text_block(rng)
+    fake = _make_faker(rng)
+
+    options = {}
+    if file_type == "png":
+        options["size"] = [8, 8]
+
+    try:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            path = _generate_one(
+                file_type,
+                tmpdir,
+                1024,
+                options,
+                rng,
+                text_block,
+                fake,
+                [0],
+            )
+            if not path or not os.path.exists(path):
+                _raise_optional_type_error(file_type, "sample generation produced no file")
+    except CorpusDependencyError:
+        raise
+    except Exception as exc:
+        _raise_optional_type_error(file_type, "sample generation failed", exc)
+
+    _VALIDATED_OPTIONAL_TYPES.add(file_type)
+
+
+def validate_corpus_mix(corpus_config: dict) -> None:
+    mix = corpus_config.get("mix", [{"type": "bin", "weight": 1}])
+
+    for entry in mix:
+        file_type = entry["type"]
+        if file_type not in _ALL_TYPES:
+            raise ValueError(f"unknown corpus file type: {file_type!r}")
+        if file_type in _FAKER_TYPES:
+            _probe_optional_type(file_type)
 
 
 def _generate_one(file_type: str, dest_dir: str, file_size_bytes: int,
@@ -202,21 +269,26 @@ def _generate_one(file_type: str, dest_dir: str, file_size_bytes: int,
 
     # Faker-file types: docx, xlsx, png
     if fake is None:
-        return ""
+        _raise_optional_type_error(file_type, "faker-backed generator was not initialized")
 
     from faker_file.storages.filesystem import FileSystemStorage
     storage = FileSystemStorage(root_path=dest_dir, rel_path="")
 
-    if file_type == "docx":
-        result = fake.docx_file(storage=storage, max_nb_chars=file_size_bytes)
-    elif file_type == "xlsx":
-        rows = max(1, file_size_bytes // 100)
-        result = fake.xlsx_file(storage=storage, num_rows=rows)
-    elif file_type == "png":
-        size = options.get("size", [256, 256])
-        result = fake.png_file(storage=storage, size=tuple(size))
-    else:
-        return ""
+    try:
+        if file_type == "docx":
+            result = fake.docx_file(storage=storage, max_nb_chars=file_size_bytes)
+        elif file_type == "xlsx":
+            rows = max(1, file_size_bytes // 100)
+            result = fake.xlsx_file(storage=storage, num_rows=rows)
+        elif file_type == "png":
+            size = options.get("size", [256, 256])
+            result = fake.png_file(storage=storage, size=tuple(size))
+        else:
+            raise ValueError(f"unknown corpus file type: {file_type!r}")
+    except CorpusDependencyError:
+        raise
+    except Exception as exc:
+        _raise_optional_type_error(file_type, "sample generation failed", exc)
 
     return os.path.join(storage.root_path, str(result)) if result else ""
 
@@ -231,25 +303,12 @@ def generate_corpus(target_dir: str, corpus_config: dict, rng: random.Random | N
 
     os.makedirs(target_dir, exist_ok=True)
 
+    validate_corpus_mix(corpus_config)
+
     target_bytes = int(corpus_config.get("size_gib", 0.1) * 1024 ** 3)
-    mix = corpus_config.get("mix", [{"type": "bin", "weight": 1}])
     max_depth = corpus_config.get("max_depth", 2)
 
-    # Build weighted type list
-    types = []
-    weights = []
-    file_sizes = {}
-    file_options = {}
-    for entry in mix:
-        t = entry["type"]
-        if t in _OPTIONAL_PROVIDERS and _OPTIONAL_PROVIDERS[t] is None:
-            print(f"[corpus] skipping type '{t}': optional dependency not installed",
-                  file=sys.stderr)
-            continue
-        types.append(t)
-        weights.append(entry.get("weight", 1))
-        file_sizes[t] = parse_size(entry["file_size"]) if "file_size" in entry else _DEFAULT_FILE_SIZE
-        file_options[t] = entry.get("options", {})
+    types, weights, file_sizes, file_options = _resolve_mix_config(corpus_config)
 
     # Pre-generate text block for txt files
     text_block = _generate_text_block(rng)
@@ -313,6 +372,7 @@ def dir_size_bytes(target_dir: str) -> int:
 
 
 def _resolve_mix_config(corpus_config: dict) -> tuple[list[str], list[int], dict[str, int], dict[str, dict]]:
+    validate_corpus_mix(corpus_config)
     mix = corpus_config.get("mix", [{"type": "bin", "weight": 1}])
     types = []
     weights = []
@@ -320,8 +380,6 @@ def _resolve_mix_config(corpus_config: dict) -> tuple[list[str], list[int], dict
     file_options = {}
     for entry in mix:
         t = entry["type"]
-        if t in _OPTIONAL_PROVIDERS and _OPTIONAL_PROVIDERS[t] is None:
-            continue
         types.append(t)
         weights.append(entry.get("weight", 1))
         file_sizes[t] = parse_size(entry["file_size"]) if "file_size" in entry else _DEFAULT_FILE_SIZE

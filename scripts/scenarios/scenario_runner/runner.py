@@ -145,6 +145,8 @@ def run_scenario(scenario: dict, *, backend: str, runs: int,
     corpus_dir = os.path.join(work_dir, "corpus")
     config_path = os.path.join(work_dir, "config.yaml")
 
+    corpus.validate_corpus_mix(corpus_config)
+
     _log("Preparing corpus")
     if os.path.exists(corpus_dir):
         shutil.rmtree(corpus_dir)

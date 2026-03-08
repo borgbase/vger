@@ -1,4 +1,3 @@
-#!/usr/bin/env python3
 from __future__ import annotations
 
 import argparse
@@ -8,7 +7,6 @@ import math
 import os
 import pathlib
 import re
-import shutil
 import statistics
 import subprocess
 import sys
@@ -666,7 +664,6 @@ def generate_chart_with_deps(
     root: pathlib.Path,
     out_file: pathlib.Path,
     records: List[dict],
-    no_uv_bootstrap: bool = False,
     backfill_roots: List[str] | None = None,
     backfill_mode: str = "nonselected",
     selected_tool: str = "",
@@ -678,35 +675,8 @@ def generate_chart_with_deps(
         from matplotlib.patches import Patch
         from matplotlib.ticker import FuncFormatter
     except ModuleNotFoundError as e:
-        if no_uv_bootstrap:
-            print(f"chart dependencies missing: {e}", file=sys.stderr)
-            return 2
-        uv = shutil.which("uv")
-        if not uv:
-            print("chart dependencies missing and 'uv' is not installed", file=sys.stderr)
-            return 2
-        cmd = [
-            uv,
-            "run",
-            "--with",
-            "numpy>=2.0,<3",
-            "--with",
-            "matplotlib>=3.9,<4",
-            "python3",
-            str(pathlib.Path(__file__).resolve()),
-            "chart",
-            str(root),
-            "--chart-file",
-            str(out_file),
-            "--no-uv-bootstrap",
-        ]
-        for backfill_root in backfill_roots or []:
-            cmd.extend(["--backfill-root", backfill_root])
-        if backfill_roots:
-            cmd.extend(["--backfill-mode", backfill_mode])
-            if selected_tool:
-                cmd.extend(["--selected-tool", selected_tool])
-        return subprocess.call(cmd)
+        print(f"chart dependencies missing: {e}", file=sys.stderr)
+        return 2
 
     tools_display = ["Vykar", "Restic", "Rustic", "Borg", "Kopia"]
     duration = _chart_values(records, "duration_s")
@@ -1158,7 +1128,6 @@ def cmd_chart(args: argparse.Namespace) -> int:
         root,
         out_file,
         records,
-        no_uv_bootstrap=args.no_uv_bootstrap,
         backfill_roots=args.backfill_root,
         backfill_mode=args.backfill_mode,
         selected_tool=args.selected_tool,
@@ -1197,7 +1166,6 @@ def cmd_all(args: argparse.Namespace) -> int:
         root,
         chart_file,
         records,
-        no_uv_bootstrap=False,
         backfill_roots=args.backfill_root,
         backfill_mode=args.backfill_mode,
         selected_tool=args.selected_tool,
@@ -1238,7 +1206,6 @@ def build_parser() -> argparse.ArgumentParser:
         help="record backfill policy",
     )
     pc.add_argument("--selected-tool", default="", help="tool selected in current run")
-    pc.add_argument("--no-uv-bootstrap", action="store_true", help=argparse.SUPPRESS)
     pc.set_defaults(func=cmd_chart)
 
     pa = sub.add_parser("all", help="summary + chart")

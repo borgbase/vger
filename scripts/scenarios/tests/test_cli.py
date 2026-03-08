@@ -5,6 +5,7 @@ from contextlib import redirect_stderr
 from unittest import mock
 
 from scenario_runner import cli
+from scenario_runner import corpus
 
 
 class CliTests(unittest.TestCase):
@@ -85,6 +86,26 @@ class CliTests(unittest.TestCase):
 
                 self.assertEqual(exc.exception.code, 2)
                 self.assertIn("--corpus-gb must be greater than 0", stderr.getvalue())
+
+    def test_corpus_dependency_error_is_reported_without_traceback(self) -> None:
+        scenario_path = self._write_scenario("name: test\n")
+        stderr = io.StringIO()
+
+        with mock.patch("scenario_runner.cli.shutil.which", return_value="/usr/bin/vykar"), \
+                mock.patch(
+                    "scenario_runner.cli.run_scenario",
+                    side_effect=corpus.CorpusDependencyError("corpus type 'docx' is unavailable"),
+                ) as run_scenario, \
+                mock.patch("sys.argv", ["scenario-runner", scenario_path]), \
+                redirect_stderr(stderr):
+            with self.assertRaises(SystemExit) as exc:
+                cli.main()
+
+        self.assertEqual(exc.exception.code, 1)
+        self.assertEqual(run_scenario.call_count, 1)
+        output = stderr.getvalue()
+        self.assertIn("error: corpus type 'docx' is unavailable", output)
+        self.assertNotIn("Traceback", output)
 
 
 if __name__ == "__main__":

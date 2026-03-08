@@ -3,6 +3,7 @@ import tempfile
 import unittest
 from unittest import mock
 
+from scenario_runner import corpus
 from scenario_runner import runner
 
 
@@ -45,6 +46,8 @@ class RunnerTests(unittest.TestCase):
 
         with tempfile.TemporaryDirectory() as output_dir:
             with mock.patch(
+                "scenario_runner.runner.corpus.validate_corpus_mix"
+            ) as validate_corpus_mix, mock.patch(
                 "scenario_runner.runner.corpus.generate_corpus",
                 return_value={"file_count": 1, "total_bytes": 1024},
             ) as generate_corpus, mock.patch(
@@ -74,9 +77,43 @@ class RunnerTests(unittest.TestCase):
                 )
 
         self.assertTrue(passed)
+        validate_corpus_mix.assert_called_once_with({"size_gib": 0.1})
         self.assertEqual(generate_corpus.call_count, 1)
         self.assertEqual(write_config.call_count, 1)
         ensure_backend_ready.assert_called_once_with("local", "/mnt/repos/scenario-repo")
+
+    def test_run_scenario_validates_corpus_before_setup(self) -> None:
+        scenario = {
+            "name": "broken-docx",
+            "corpus": {"mix": [{"type": "docx", "weight": 1, "file_size": "1kb"}]},
+            "phases": [{"action": "init"}],
+        }
+
+        with tempfile.TemporaryDirectory() as output_dir:
+            with mock.patch(
+                "scenario_runner.runner.corpus.validate_corpus_mix",
+                side_effect=corpus.CorpusDependencyError("corpus type 'docx' is unavailable"),
+            ) as validate_corpus_mix, mock.patch(
+                "scenario_runner.runner.corpus.generate_corpus"
+            ) as generate_corpus, mock.patch(
+                "scenario_runner.runner.cfg.write_vykar_config"
+            ) as write_config, mock.patch(
+                "scenario_runner.runner.cfg.ensure_backend_ready"
+            ) as ensure_backend_ready:
+                with self.assertRaisesRegex(corpus.CorpusDependencyError, "docx"):
+                    runner.run_scenario(
+                        scenario,
+                        backend="local",
+                        runs=1,
+                        output_dir=output_dir,
+                        vykar_bin="vykar",
+                        seed=123,
+                    )
+
+        validate_corpus_mix.assert_called_once_with(scenario["corpus"])
+        generate_corpus.assert_not_called()
+        write_config.assert_not_called()
+        ensure_backend_ready.assert_not_called()
 
     def test_churn_phase_reports_cap_stats(self) -> None:
         ctx = {
