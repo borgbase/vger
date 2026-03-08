@@ -6,7 +6,6 @@ use crate::commands::check::{
     process_verify_response, try_server_verify, verify_pack_full, CheckError, ServerVerifyOutcome,
 };
 use crate::index::ChunkIndexEntry;
-use crate::repo::Repository;
 use vykar_storage::local_backend::LocalBackend;
 use vykar_storage::{
     StorageBackend, VerifyPackResult, VerifyPacksPlanRequest, VerifyPacksResponse,
@@ -15,7 +14,7 @@ use vykar_types::chunk_id::ChunkId;
 use vykar_types::error::{Result, VykarError};
 use vykar_types::pack_id::PackId;
 
-use super::helpers::{backup_single_source, init_repo, init_test_environment};
+use super::helpers::{backup_single_source, init_repo, init_test_environment, open_local_repo};
 
 /// Mock storage backend that returns a transient error from server_verify_packs.
 struct TransientFailBackend;
@@ -45,12 +44,6 @@ impl StorageBackend for TransientFailBackend {
     fn server_verify_packs(&self, _plan: &VerifyPacksPlanRequest) -> Result<VerifyPacksResponse> {
         Err(VykarError::Other("transient failure".into()))
     }
-}
-
-fn open_local_repo(repo_dir: &std::path::Path) -> Repository {
-    init_test_environment();
-    let storage = Box::new(LocalBackend::new(repo_dir.to_str().unwrap()).unwrap());
-    Repository::open(storage, None, None).unwrap()
 }
 
 #[test]

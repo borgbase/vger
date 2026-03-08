@@ -1,15 +1,7 @@
 use crate::commands;
-use crate::repo::Repository;
-use vykar_storage::local_backend::LocalBackend;
 use vykar_types::error::VykarError;
 
-use super::helpers::{backup_single_source, init_repo, init_test_environment};
-
-fn open_local_repo(repo_dir: &std::path::Path) -> Repository {
-    init_test_environment();
-    let storage = Box::new(LocalBackend::new(repo_dir.to_str().unwrap()).unwrap());
-    Repository::open(storage, None, None).unwrap()
-}
+use super::helpers::{backup_single_source, init_repo, open_local_repo};
 
 #[test]
 fn delete_missing_snapshot_returns_snapshot_not_found() {

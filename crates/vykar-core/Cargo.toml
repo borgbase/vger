@@ -79,6 +79,7 @@ mount = ["dav-server", "tokio/rt-multi-thread", "tokio/macros", "tokio/signal", 
 
 [dev-dependencies]
 proptest = { workspace = true }
+test-case = { workspace = true }
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"

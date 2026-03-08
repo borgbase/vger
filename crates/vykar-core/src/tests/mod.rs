@@ -2,6 +2,7 @@ mod app_ops;
 mod check_command;
 mod chunker;
 mod compact;
+mod corruption;
 mod delete;
 mod delete_repo;
 mod error_messages;

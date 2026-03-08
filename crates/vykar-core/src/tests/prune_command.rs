@@ -2,19 +2,11 @@ use std::time::Duration;
 
 use crate::commands;
 use crate::config::RetentionConfig;
-use crate::repo::Repository;
-use vykar_storage::local_backend::LocalBackend;
 use vykar_types::error::VykarError;
 
 use super::helpers::{
-    backup_single_source, init_repo, init_test_environment, make_test_config, source_entry,
+    backup_single_source, init_repo, make_test_config, open_local_repo, source_entry,
 };
-
-fn open_local_repo(repo_dir: &std::path::Path) -> Repository {
-    init_test_environment();
-    let storage = Box::new(LocalBackend::new(repo_dir.to_str().unwrap()).unwrap());
-    Repository::open(storage, None, None).unwrap()
-}
 
 #[test]
 fn prune_errors_when_no_retention_rules_are_configured() {

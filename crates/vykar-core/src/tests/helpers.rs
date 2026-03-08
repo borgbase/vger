@@ -8,6 +8,7 @@ use crate::config::{
     RepositoryConfig, ResourceLimitsConfig, RetentionConfig, RetryConfig, ScheduleConfig,
     SourceEntry, SourceHooksConfig, VykarConfig, XattrsConfig,
 };
+use crate::repo::Repository;
 use crate::snapshot::SnapshotStats;
 
 static TEST_ENV_INIT: Once = Once::new();
@@ -85,6 +86,14 @@ pub fn source_entry(path: &Path, label: &str) -> SourceEntry {
         repos: Vec::new(),
         command_dumps: Vec::new(),
     }
+}
+
+pub fn open_local_repo(repo_dir: &Path) -> Repository {
+    init_test_environment();
+    let storage = Box::new(
+        vykar_storage::local_backend::LocalBackend::new(repo_dir.to_str().unwrap()).unwrap(),
+    );
+    Repository::open(storage, None, None).unwrap()
 }
 
 pub fn backup_single_source(

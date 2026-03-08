@@ -39,6 +39,7 @@ pub struct CheckError {
 }
 
 /// Summary of a check run.
+#[derive(Debug)]
 pub struct CheckResult {
     pub snapshots_checked: usize,
     pub items_checked: usize,
