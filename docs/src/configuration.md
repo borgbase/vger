@@ -107,7 +107,7 @@ vykar list -R /backups/local
 
 ## Sources
 
-Sources can be a simple list of paths or rich entries with per-source options.
+Sources can be a simple list of paths or rich entries with per-source options. Each source entry produces one snapshot per backup run.
 
 **Simple form:**
 
@@ -135,6 +135,8 @@ sources:
     hooks:
       before: "echo starting docs backup"
 ```
+
+Each `path:` entry produces its own snapshot. To group multiple directories into a single snapshot, use `paths:` (plural) instead — see below.
 
 **Rich form (multiple paths):**
 
