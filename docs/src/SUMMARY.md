@@ -13,6 +13,7 @@
 - [Restore a Backup](restore.md)
 - [Maintenance](maintenance.md)
 - [Backup Recipes](recipes.md)
+- [Daemon Mode](daemon.md)
 
 # Reference
 

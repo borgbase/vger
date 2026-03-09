@@ -526,27 +526,9 @@ Two-stage signal handling applies to all commands:
 
 1. First SIGINT/SIGTERM sets a global shutdown flag; iterative loops (`backup`, `prune`, `compact`) check it and return `VykarError::Interrupted`
 2. Second signal restores the default handler (immediate kill)
-3. On backup abort: `flush_on_abort()` seals partial packs, joins upload threads, writes final `sessions/<id>.index` journal for recovery
-4. Advisory lock is released before exit; CLI exits with code 130
-
-### Daemon Mode
-
-`vykar daemon` runs scheduled backup cycles as a foreground process.
-
-- **Scheduling**: sleep-loop with configurable interval (`schedule.every`, e.g. `"6h"`) or cron expression (`schedule.cron`, e.g. `"0 3 * * *"`). Optional random jitter (`jitter_seconds`) spreads load across hosts.
-- **Cycle**: `backup → prune → compact → check` per repo, sequential. Shutdown flag checked between steps.
-- **Passphrase**: daemon validates at startup that all encrypted repos have a non-interactive passphrase source (`passcommand`, `passphrase`, or `VYKAR_PASSPHRASE` env). Cannot prompt interactively.
-- **Scheduler lock**: daemon and GUI share a process-wide scheduler lock under the local config directory so only one scheduler is active at a time. On Unix this uses `flock(2)` and is released automatically on process exit; on Windows the current implementation fails open if file locking is unavailable.
-
-Configuration:
-```yaml
-schedule:
-  enabled: true
-  every: "6h"                  # fixed interval
-  # cron: "0 3 * * *"         # OR 5-field cron (mutually exclusive with every)
-  on_startup: false
-  jitter_seconds: 0
-```
+3. SIGHUP (daemon only): sets a reload flag; the daemon re-reads the config file between backup cycles. Invalid config is logged and ignored — the daemon continues with the previous config.
+4. On backup abort: `flush_on_abort()` seals partial packs, joins upload threads, writes final `sessions/<id>.index` journal for recovery
+5. Advisory lock is released before exit; CLI exits with code 130
 
 ### Refcount Lifecycle
 

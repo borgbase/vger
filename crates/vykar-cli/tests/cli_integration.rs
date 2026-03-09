@@ -979,3 +979,392 @@ fn cli_check_repair_yes_clean_repo() {
         "expected 'Rebuild chunk refcounts' in stdout, got:\n{out}"
     );
 }
+
+// ── SIGHUP daemon reload tests ──────────────────────────────────────────────
+
+/// Shared log collector: a background thread reads stderr and appends to a
+/// shared buffer. The collector lives for the lifetime of the child process
+/// (reads until EOF), so it never blocks the test and never consumes the
+/// ChildStderr out from under wait_with_output.
+#[cfg(unix)]
+struct LogCollector {
+    buf: std::sync::Arc<std::sync::Mutex<String>>,
+    _handle: std::thread::JoinHandle<()>,
+}
+
+#[cfg(unix)]
+impl LogCollector {
+    fn spawn(mut stderr: std::process::ChildStderr) -> Self {
+        use std::io::Read;
+
+        let buf = std::sync::Arc::new(std::sync::Mutex::new(String::new()));
+        let buf_clone = buf.clone();
+        let handle = std::thread::spawn(move || {
+            let mut tmp = [0u8; 1024];
+            loop {
+                match stderr.read(&mut tmp) {
+                    Ok(0) | Err(_) => break,
+                    Ok(n) => {
+                        let chunk = String::from_utf8_lossy(&tmp[..n]);
+                        buf_clone.lock().unwrap().push_str(&chunk);
+                    }
+                }
+            }
+        });
+        Self {
+            buf,
+            _handle: handle,
+        }
+    }
+
+    /// Block until the collected stderr contains `marker` or `timeout` elapses.
+    /// Returns true if the marker was found.
+    fn wait_for(&self, marker: &str, timeout: Duration) -> bool {
+        let deadline = std::time::Instant::now() + timeout;
+        loop {
+            if self.snapshot().contains(marker) {
+                return true;
+            }
+            if std::time::Instant::now() > deadline {
+                return false;
+            }
+            std::thread::sleep(Duration::from_millis(100));
+        }
+    }
+
+    fn snapshot(&self) -> String {
+        self.buf.lock().unwrap().clone()
+    }
+}
+
+/// Helper: spawn a daemon process with piped stderr/stdout.
+#[cfg(unix)]
+fn spawn_daemon(fx: &CliFixture, cfg: &str) -> (std::process::Child, LogCollector) {
+    use std::process::Stdio;
+
+    let mut child = Command::new(vykar_binary_path())
+        .args(["--config", cfg, "daemon"])
+        .env("HOME", &fx.home_dir)
+        .env("XDG_CACHE_HOME", &fx.cache_dir)
+        .env("XDG_CONFIG_HOME", &fx.config_home)
+        .env("NO_COLOR", "1")
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+
+    let collector = LogCollector::spawn(child.stderr.take().unwrap());
+    (child, collector)
+}
+
+/// Helper: wait for daemon to exit with a deadline, killing if needed.
+#[cfg(unix)]
+fn wait_for_exit(child: &mut std::process::Child, timeout_secs: u64) {
+    let deadline = std::time::Instant::now() + Duration::from_secs(timeout_secs);
+    loop {
+        match child.try_wait().unwrap() {
+            Some(_) => return,
+            None => {
+                if std::time::Instant::now() > deadline {
+                    child.kill().unwrap();
+                    panic!("daemon did not exit within {timeout_secs} seconds");
+                }
+                std::thread::sleep(Duration::from_millis(100));
+            }
+        }
+    }
+}
+
+/// Helper: send a signal to a child process.
+#[cfg(unix)]
+fn send_signal(child: &std::process::Child, sig: &str) {
+    Command::new("kill")
+        .args([sig, &child.id().to_string()])
+        .status()
+        .unwrap();
+}
+
+#[test]
+#[cfg(unix)]
+fn cli_daemon_sighup_reloads_config() {
+    let fx = CliFixture::new();
+
+    // Start with empty sources and a 2-second interval so the second cycle
+    // fires quickly after SIGHUP reload reschedules.
+    let config = format!(
+        "repositories:\n  - url: {}\nencryption:\n  mode: none\nsources: []\nschedule:\n  enabled: true\n  every: \"2s\"\n  on_startup: true\n",
+        yaml_quote_path(&fx.repo_dir)
+    );
+    std::fs::write(&fx.config_path, config).unwrap();
+    let cfg = fx.config_path.to_string_lossy().to_string();
+
+    fx.run_ok(&["--config", &cfg, "init"]);
+
+    let (mut child, logs) = spawn_daemon(&fx, &cfg);
+
+    // Wait for first backup cycle (empty sources)
+    assert!(
+        logs.wait_for("Summary", Duration::from_secs(15)),
+        "first cycle should complete, got stderr:\n{}",
+        logs.snapshot()
+    );
+
+    // Write a file and update config to include the source directory
+    std::fs::write(fx.source_a.join("reload-test.txt"), b"reload data\n").unwrap();
+    let new_config = format!(
+        "repositories:\n  - url: {}\nencryption:\n  mode: none\nsources:\n  - {}\nschedule:\n  enabled: true\n  every: \"2s\"\n  on_startup: true\n",
+        yaml_quote_path(&fx.repo_dir),
+        yaml_quote_path(&fx.source_a),
+    );
+    std::fs::write(&fx.config_path, new_config).unwrap();
+
+    // Send SIGHUP to reload config
+    send_signal(&child, "-HUP");
+
+    // Wait for the reload + a second cycle that uses the new source.
+    // "1 files" in the Summary proves the daemon picked up the new source.
+    assert!(
+        logs.wait_for("1 files", Duration::from_secs(15)),
+        "second cycle should back up the new source, got stderr:\n{}",
+        logs.snapshot()
+    );
+
+    send_signal(&child, "-TERM");
+    wait_for_exit(&mut child, 10);
+
+    let stderr_str = logs.snapshot();
+    assert!(
+        stderr_str.contains("configuration reloaded successfully"),
+        "should see reload success log, got stderr:\n{stderr_str}"
+    );
+}
+
+#[test]
+#[cfg(unix)]
+fn cli_daemon_sighup_invalid_config_keeps_old() {
+    let fx = CliFixture::new();
+    let config = format!(
+        "repositories:\n  - url: {}\nencryption:\n  mode: none\nsources: []\nschedule:\n  enabled: true\n  every: \"1h\"\n  on_startup: true\n",
+        yaml_quote_path(&fx.repo_dir)
+    );
+    std::fs::write(&fx.config_path, config).unwrap();
+    let cfg = fx.config_path.to_string_lossy().to_string();
+
+    fx.run_ok(&["--config", &cfg, "init"]);
+
+    let (mut child, logs) = spawn_daemon(&fx, &cfg);
+
+    assert!(
+        logs.wait_for("Summary", Duration::from_secs(15)),
+        "first cycle should complete"
+    );
+
+    // Overwrite config with invalid YAML
+    std::fs::write(&fx.config_path, "{{{{invalid yaml!!!!").unwrap();
+
+    send_signal(&child, "-HUP");
+
+    assert!(
+        logs.wait_for("configuration reload rejected", Duration::from_secs(5)),
+        "should see rejection log, got stderr:\n{}",
+        logs.snapshot()
+    );
+
+    // Daemon should still be alive
+    assert!(
+        child.try_wait().unwrap().is_none(),
+        "daemon should still be running after invalid config reload"
+    );
+
+    send_signal(&child, "-TERM");
+    wait_for_exit(&mut child, 10);
+
+    assert!(
+        child.wait().unwrap().success(),
+        "daemon should exit cleanly after SIGTERM"
+    );
+}
+
+#[test]
+#[cfg(unix)]
+fn cli_daemon_sighup_empty_repos_rejected() {
+    let fx = CliFixture::new();
+    let config = format!(
+        "repositories:\n  - url: {}\nencryption:\n  mode: none\nsources: []\nschedule:\n  enabled: true\n  every: \"1h\"\n  on_startup: true\n",
+        yaml_quote_path(&fx.repo_dir)
+    );
+    std::fs::write(&fx.config_path, config).unwrap();
+    let cfg = fx.config_path.to_string_lossy().to_string();
+
+    fx.run_ok(&["--config", &cfg, "init"]);
+
+    let (mut child, logs) = spawn_daemon(&fx, &cfg);
+
+    assert!(
+        logs.wait_for("Summary", Duration::from_secs(15)),
+        "first cycle should complete"
+    );
+
+    // Overwrite config with empty repositories
+    std::fs::write(
+        &fx.config_path,
+        "encryption:\n  mode: none\nschedule:\n  enabled: true\n  every: \"1h\"\n",
+    )
+    .unwrap();
+
+    send_signal(&child, "-HUP");
+
+    assert!(
+        logs.wait_for("no repositories configured", Duration::from_secs(5)),
+        "should see 'no repositories configured' rejection, got stderr:\n{}",
+        logs.snapshot()
+    );
+
+    assert!(
+        child.try_wait().unwrap().is_none(),
+        "daemon should still be running"
+    );
+
+    send_signal(&child, "-TERM");
+    wait_for_exit(&mut child, 10);
+}
+
+#[test]
+#[cfg(unix)]
+fn cli_daemon_sighup_schedule_disabled_rejected() {
+    let fx = CliFixture::new();
+    let config = format!(
+        "repositories:\n  - url: {}\nencryption:\n  mode: none\nsources: []\nschedule:\n  enabled: true\n  every: \"1h\"\n  on_startup: true\n",
+        yaml_quote_path(&fx.repo_dir)
+    );
+    std::fs::write(&fx.config_path, config).unwrap();
+    let cfg = fx.config_path.to_string_lossy().to_string();
+
+    fx.run_ok(&["--config", &cfg, "init"]);
+
+    let (mut child, logs) = spawn_daemon(&fx, &cfg);
+
+    assert!(
+        logs.wait_for("Summary", Duration::from_secs(15)),
+        "first cycle should complete"
+    );
+
+    // Overwrite config with schedule.enabled: false
+    let disabled_config = format!(
+        "repositories:\n  - url: {}\nencryption:\n  mode: none\nsources: []\nschedule:\n  enabled: false\n  every: \"1h\"\n",
+        yaml_quote_path(&fx.repo_dir)
+    );
+    std::fs::write(&fx.config_path, disabled_config).unwrap();
+
+    send_signal(&child, "-HUP");
+
+    assert!(
+        logs.wait_for("schedule.enabled", Duration::from_secs(5)),
+        "should see schedule.enabled rejection, got stderr:\n{}",
+        logs.snapshot()
+    );
+
+    assert!(
+        child.try_wait().unwrap().is_none(),
+        "daemon should still be running"
+    );
+
+    send_signal(&child, "-TERM");
+    wait_for_exit(&mut child, 10);
+}
+
+#[test]
+#[cfg(unix)]
+fn cli_daemon_on_startup_not_retriggered_on_reload() {
+    let fx = CliFixture::new();
+    let config = format!(
+        "repositories:\n  - url: {}\nencryption:\n  mode: none\nsources: []\nschedule:\n  enabled: true\n  every: \"1h\"\n  on_startup: true\n",
+        yaml_quote_path(&fx.repo_dir)
+    );
+    std::fs::write(&fx.config_path, config).unwrap();
+    let cfg = fx.config_path.to_string_lossy().to_string();
+
+    fx.run_ok(&["--config", &cfg, "init"]);
+
+    let (mut child, logs) = spawn_daemon(&fx, &cfg);
+
+    // Wait for the initial on_startup cycle
+    assert!(
+        logs.wait_for("Summary", Duration::from_secs(15)),
+        "first cycle should complete"
+    );
+
+    // Send SIGHUP — should NOT trigger another immediate cycle
+    send_signal(&child, "-HUP");
+
+    // Wait for reload to process, then a few extra seconds
+    assert!(
+        logs.wait_for("reloaded", Duration::from_secs(5)),
+        "reload should succeed"
+    );
+    std::thread::sleep(Duration::from_secs(3));
+
+    send_signal(&child, "-TERM");
+    wait_for_exit(&mut child, 10);
+
+    // Count "Summary" occurrences — should be exactly 1 (the initial cycle).
+    // With every: "1h", the next cycle is ~1h away, so no second cycle runs.
+    let stderr_str = logs.snapshot();
+    let summary_count = stderr_str.matches("Summary").count();
+    assert_eq!(
+        summary_count, 1,
+        "on_startup should not retrigger on reload; expected 1 Summary, got {summary_count}.\nstderr:\n{stderr_str}"
+    );
+}
+
+#[test]
+#[cfg(unix)]
+fn cli_daemon_trust_repo_rejected() {
+    let fx = CliFixture::new();
+    let config = format!(
+        "repositories:\n  - url: {}\nencryption:\n  mode: none\nsources: []\nschedule:\n  enabled: true\n  every: \"1h\"\n",
+        yaml_quote_path(&fx.repo_dir)
+    );
+    std::fs::write(&fx.config_path, config).unwrap();
+    let cfg = fx.config_path.to_string_lossy().to_string();
+
+    let output = Command::new(vykar_binary_path())
+        .args(["--trust-repo", "--config", &cfg, "daemon"])
+        .env("HOME", &fx.home_dir)
+        .env("XDG_CACHE_HOME", &fx.cache_dir)
+        .env("XDG_CONFIG_HOME", &fx.config_home)
+        .env("NO_COLOR", "1")
+        .output()
+        .unwrap();
+
+    assert!(!output.status.success());
+    let stderr_str = stderr(&output);
+    assert!(
+        stderr_str.contains("--trust-repo"),
+        "expected --trust-repo error, got:\n{stderr_str}"
+    );
+}
+
+#[test]
+fn cli_daemon_empty_config_startup_rejected() {
+    let fx = CliFixture::new();
+    let config = "encryption:\n  mode: none\nschedule:\n  enabled: true\n  every: \"1h\"\n";
+    std::fs::write(&fx.config_path, config).unwrap();
+    let cfg = fx.config_path.to_string_lossy().to_string();
+
+    let output = Command::new(vykar_binary_path())
+        .args(["--config", &cfg, "daemon"])
+        .env("HOME", &fx.home_dir)
+        .env("XDG_CACHE_HOME", &fx.cache_dir)
+        .env("XDG_CONFIG_HOME", &fx.config_home)
+        .env("NO_COLOR", "1")
+        .output()
+        .unwrap();
+
+    assert!(!output.status.success());
+    let stderr_str = stderr(&output);
+    assert!(
+        stderr_str.contains("no repositories configured"),
+        "expected 'no repositories configured' error, got:\n{stderr_str}"
+    );
+}

@@ -81,6 +81,18 @@ Or exec into a running daemon container:
     volumes:
       vykar-cache:
 
+### Reloading configuration
+
+Send `SIGHUP` to the daemon container to reload the config file without restarting:
+
+    docker kill --signal=HUP vykar-daemon
+
+With Docker Compose:
+
+    docker compose kill -s HUP vykar
+
+The daemon logs whether the reload succeeded or was rejected (invalid config).
+
 ### Notes
 - Use `-it` with `docker run` for interactive commands to get progress bar output (e.g. `docker run --rm -it ...`)
 - Set `--hostname` to a stable name — Docker assigns random hostnames that appear in snapshot metadata

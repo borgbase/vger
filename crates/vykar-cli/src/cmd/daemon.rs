@@ -3,17 +3,30 @@ use std::time::{Duration, Instant};
 
 use vykar_core::app::passphrase::configured_passphrase;
 use vykar_core::app::scheduler::{self, SchedulerLock};
-use vykar_core::config::{EncryptionModeConfig, ResolvedRepo, ScheduleConfig};
+use vykar_core::app::RuntimeConfig;
+use vykar_core::config::{self, ConfigSource, EncryptionModeConfig, ResolvedRepo, ScheduleConfig};
 
 use crate::dispatch::{run_default_actions, warn_if_untrusted_rest};
-use crate::signal::SHUTDOWN;
+use crate::signal::{RELOAD, SHUTDOWN};
 
-pub(crate) fn run_daemon(
-    repos: &[&ResolvedRepo],
-    schedule: &ScheduleConfig,
-) -> Result<(), Box<dyn std::error::Error>> {
-    let _lock = SchedulerLock::try_acquire()
-        .ok_or("another vykar scheduler is already running (daemon or GUI); exiting")?;
+/// Load and validate daemon config from the given source.
+/// Returns the resolved repos and merged schedule, or an error describing
+/// what went wrong (suitable for both fatal startup errors and non-fatal
+/// reload rejections).
+fn load_daemon_config(
+    source: &ConfigSource,
+) -> Result<(Vec<ResolvedRepo>, ScheduleConfig), Box<dyn std::error::Error>> {
+    let repos = config::load_and_resolve(source.path())?;
+
+    if repos.is_empty() {
+        return Err("no repositories configured".into());
+    }
+
+    let runtime = RuntimeConfig {
+        source: source.clone(),
+        repos,
+    };
+    let schedule = runtime.schedule();
 
     if !schedule.enabled {
         return Err(
@@ -22,7 +35,7 @@ pub(crate) fn run_daemon(
     }
 
     // Pre-validate passphrases for encrypted repos
-    for repo in repos {
+    for repo in &runtime.repos {
         let label = repo.label.as_deref().unwrap_or(&repo.config.repository.url);
         if repo.config.encryption.mode != EncryptionModeConfig::None {
             match configured_passphrase(&repo.config) {
@@ -39,6 +52,15 @@ pub(crate) fn run_daemon(
             }
         }
     }
+
+    Ok((runtime.repos, schedule))
+}
+
+pub(crate) fn run_daemon(source: ConfigSource) -> Result<(), Box<dyn std::error::Error>> {
+    let _lock = SchedulerLock::try_acquire()
+        .ok_or("another vykar scheduler is already running (daemon or GUI); exiting")?;
+
+    let (mut repos, mut schedule) = load_daemon_config(&source)?;
 
     if schedule.is_cron() {
         tracing::info!(
@@ -59,7 +81,7 @@ pub(crate) fn run_daemon(
         );
     }
 
-    for repo in repos {
+    for repo in &repos {
         let name = repo.label.as_deref().unwrap_or(&repo.config.repository.url);
         tracing::info!(repo = name, "repository registered");
     }
@@ -68,7 +90,7 @@ pub(crate) fn run_daemon(
     let mut next_run = if schedule.on_startup {
         Instant::now()
     } else {
-        let delay = scheduler::next_run_delay(schedule)?;
+        let delay = scheduler::next_run_delay(&schedule)?;
         log_next_run(delay);
         Instant::now() + delay
     };
@@ -79,8 +101,50 @@ pub(crate) fn run_daemon(
             return Ok(());
         }
 
+        // Check for SIGHUP reload between cycles
+        if RELOAD.load(Ordering::SeqCst) {
+            RELOAD.store(false, Ordering::SeqCst);
+            tracing::info!("SIGHUP received, reloading configuration");
+
+            match load_daemon_config(&source) {
+                Ok((new_repos, new_schedule)) => {
+                    tracing::info!(
+                        repos = new_repos.len(),
+                        "configuration reloaded successfully"
+                    );
+                    repos = new_repos;
+                    schedule = new_schedule;
+
+                    for repo in &repos {
+                        let name = repo.label.as_deref().unwrap_or(&repo.config.repository.url);
+                        tracing::info!(repo = name, "repository registered");
+                    }
+
+                    // Recalculate next_run from schedule (ignore on_startup)
+                    match scheduler::next_run_delay(&schedule) {
+                        Ok(delay) => {
+                            next_run = Instant::now() + delay;
+                            log_next_run(delay);
+                        }
+                        Err(e) => {
+                            tracing::warn!(
+                                error = %e,
+                                "failed to compute next run delay after reload, keeping previous schedule"
+                            );
+                        }
+                    }
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        error = %e,
+                        "configuration reload rejected, continuing with previous config"
+                    );
+                }
+            }
+        }
+
         if Instant::now() >= next_run {
-            run_backup_cycle(repos);
+            run_backup_cycle(&repos);
 
             if SHUTDOWN.load(Ordering::SeqCst) {
                 tracing::info!("shutdown signal received, exiting");
@@ -88,7 +152,7 @@ pub(crate) fn run_daemon(
             }
 
             // Schedule next run
-            let delay = scheduler::next_run_delay(schedule)?;
+            let delay = scheduler::next_run_delay(&schedule)?;
             next_run = Instant::now() + delay;
             log_next_run(delay);
         }
@@ -97,7 +161,7 @@ pub(crate) fn run_daemon(
     }
 }
 
-fn run_backup_cycle(repos: &[&ResolvedRepo]) {
+fn run_backup_cycle(repos: &[ResolvedRepo]) {
     tracing::info!("backup cycle starting");
     let cycle_start = Instant::now();
     let mut had_error = false;

@@ -3,6 +3,10 @@ use std::sync::atomic::{AtomicBool, Ordering};
 /// Global shutdown flag. Set to `true` on first SIGINT/SIGTERM.
 pub static SHUTDOWN: AtomicBool = AtomicBool::new(false);
 
+/// Global reload flag (Unix only). Set to `true` on SIGHUP.
+/// The daemon checks this between backup cycles and re-reads config.
+pub static RELOAD: AtomicBool = AtomicBool::new(false);
+
 /// Install signal handlers for cooperative shutdown.
 ///
 /// First signal sets [`SHUTDOWN`] and restores the default handler so a
@@ -19,6 +23,10 @@ pub fn install_signal_handlers() {
             libc::signal(
                 libc::SIGINT,
                 unix_signal_handler as *const () as libc::sighandler_t,
+            );
+            libc::signal(
+                libc::SIGHUP,
+                unix_reload_handler as *const () as libc::sighandler_t,
             );
         }
     }
@@ -41,6 +49,12 @@ extern "C" fn unix_signal_handler(sig: libc::c_int) {
     unsafe {
         libc::signal(sig, libc::SIG_DFL);
     }
+}
+
+#[cfg(unix)]
+extern "C" fn unix_reload_handler(_sig: libc::c_int) {
+    RELOAD.store(true, Ordering::SeqCst);
+    // Do NOT restore default handler — SIGHUP should be repeatable
 }
 
 #[cfg(windows)]

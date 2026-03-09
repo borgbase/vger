@@ -80,6 +80,20 @@ fn main() {
 
     tracing::info!("Using config: {source}");
 
+    // Handle `daemon` subcommand early — it owns its own config lifecycle
+    // (loads, validates, and reloads config internally).
+    if matches!(&cli.command, Some(Commands::Daemon)) {
+        if cli.trust_repo {
+            eprintln!("Error: --trust-repo cannot be used with the daemon command");
+            std::process::exit(1);
+        }
+        if let Err(e) = cmd::daemon::run_daemon(source) {
+            eprintln!("Error: {e}");
+            std::process::exit(1);
+        }
+        return;
+    }
+
     let mut all_repos = match config::load_and_resolve(source.path()) {
         Ok(r) => r,
         Err(e) => {
@@ -94,13 +108,9 @@ fn main() {
     }
 
     // --trust-repo validation: must target exactly one repo.
-    // Rejected for daemon (long-lived, fan-out) and for multi-repo without -R
-    // (would silently re-pin unrelated repos during probing/dispatch).
+    // Rejected for multi-repo without -R (would silently re-pin unrelated
+    // repos during probing/dispatch).
     if cli.trust_repo {
-        if matches!(&cli.command, Some(Commands::Daemon)) {
-            eprintln!("Error: --trust-repo cannot be used with the daemon command");
-            std::process::exit(1);
-        }
         let repo_selector = cli.command.as_ref().and_then(|cmd| cmd.repo());
         if repo_selector.is_none() && all_repos.len() > 1 {
             eprintln!(
@@ -108,21 +118,6 @@ fn main() {
             );
             std::process::exit(1);
         }
-    }
-
-    // Handle `daemon` subcommand early — operates on all repos at once
-    if matches!(&cli.command, Some(Commands::Daemon)) {
-        let runtime = vykar_core::app::RuntimeConfig {
-            source,
-            repos: all_repos,
-        };
-        let schedule = runtime.schedule();
-        let repo_refs: Vec<&ResolvedRepo> = runtime.repos.iter().collect();
-        if let Err(e) = cmd::daemon::run_daemon(&repo_refs, &schedule) {
-            eprintln!("Error: {e}");
-            std::process::exit(1);
-        }
-        return;
     }
 
     // Resolve --repo selector and set --trust-repo on the single targeted repo.

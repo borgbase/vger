@@ -17,7 +17,7 @@ Below is a list of all available commands. Each command and subcommand provides 
 | `vykar delete` | Delete an entire repository permanently |
 | `vykar prune` | Prune snapshots according to retention policy |
 | `vykar break-lock` | Remove stale repository locks left by interrupted processes when lock conflicts block operations |
-| `vykar daemon` | Run scheduled backup cycles in the foreground using the `schedule` config |
+| `vykar daemon` | Run scheduled backup cycles in the foreground. See [Daemon Mode](daemon.md). |
 | `vykar check` | Verify repository integrity (`--verify-data` for full content verification) |
 | `vykar info` | Show repository statistics (snapshot counts and size totals) |
 | `vykar compact` | Free space by repacking pack files after delete/prune |

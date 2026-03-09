@@ -78,12 +78,13 @@ pub fn parse_human_duration(raw: &str) -> vykar_types::error::Result<Duration> {
     })?;
 
     let secs = match unit {
+        Some('s') | Some('S') => value,
         Some('m') | Some('M') => value.saturating_mul(60),
         Some('h') | Some('H') => value.saturating_mul(60 * 60),
         Some('d') | Some('D') => value.saturating_mul(60 * 60 * 24),
         Some(other) => {
             return Err(vykar_types::error::VykarError::Config(format!(
-                "unsupported duration suffix '{other}' in '{raw}' (use m/h/d)"
+                "unsupported duration suffix '{other}' in '{raw}' (use s/m/h/d)"
             )));
         }
         None => value.saturating_mul(60 * 60 * 24),
@@ -104,6 +105,7 @@ mod tests {
 
     #[test]
     fn test_parse_human_duration_units() {
+        assert_eq!(parse_human_duration("10s").unwrap().as_secs(), 10);
         assert_eq!(parse_human_duration("30m").unwrap().as_secs(), 30 * 60);
         assert_eq!(parse_human_duration("4h").unwrap().as_secs(), 4 * 60 * 60);
         assert_eq!(
