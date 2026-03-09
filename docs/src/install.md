@@ -9,6 +9,87 @@ curl -fsSL https://vykar.borgbase.com/install.sh | sh
 Or download the latest release for your platform from the [releases page](https://github.com/borgbase/vykar/releases).
 
 
+## Docker
+
+Available as `ghcr.io/borgbase/vykar` on GitHub Container Registry.
+
+### Config file
+
+Create a `vykar.yaml` for Docker. Source paths must reference `/data/...` (the container mount point):
+
+    repositories:
+      - url: s3://my-bucket/backups
+        access_key_id: "..."
+        secret_access_key: "..."
+
+    sources:
+      - /data/documents
+      - /data/photos
+
+    encryption:
+      passphrase: "change-me"
+
+    retention:
+      keep_daily: 7
+      keep_weekly: 4
+
+    schedule:
+      enabled: true
+      every: "24h"
+      on_startup: true
+
+For a local repository backend, use `/repo` as the repo path and mount a host directory there.
+
+### Run as daemon
+
+    docker run -d \
+      --name vykar-daemon \
+      --hostname my-server \
+      -v /path/to/vykar.yaml:/etc/vykar/config.yaml:ro \
+      -v /home/user/documents:/data/documents:ro \
+      -v /home/user/photos:/data/photos:ro \
+      -v vykar-cache:/cache \
+      ghcr.io/borgbase/vykar
+
+### Run ad-hoc commands
+
+With a new container (uses the entrypoint, no need to repeat `vykar`):
+
+    docker run --rm \
+      -v /path/to/vykar.yaml:/etc/vykar/config.yaml:ro \
+      -v vykar-cache:/cache \
+      ghcr.io/borgbase/vykar list
+
+Or exec into a running daemon container:
+
+    docker exec vykar-daemon vykar list
+
+### Docker Compose
+
+    services:
+      vykar:
+        image: ghcr.io/borgbase/vykar:latest
+        hostname: my-server
+        restart: unless-stopped
+        environment:
+          - VYKAR_PASSPHRASE
+          - TZ=UTC
+        volumes:
+          - ./vykar.yaml:/etc/vykar/config.yaml:ro
+          - /home/user/documents:/data/documents:ro
+          - vykar-cache:/cache
+    volumes:
+      vykar-cache:
+
+### Notes
+- Use `-it` with `docker run` for interactive commands to get progress bar output (e.g. `docker run --rm -it ...`)
+- Set `--hostname` to a stable name — Docker assigns random hostnames that appear in snapshot metadata
+- Mount source directories under `/data/` and reference them as `/data/...` in the config
+- For encryption, use `VYKAR_PASSPHRASE` env var or Docker secrets via `passcommand: "cat /run/secrets/vykar_passphrase"`
+- Use a named volume for `/cache` to persist the snapshot cache across restarts
+- Available for `linux/amd64` and `linux/arm64`
+
+
 ## Pre-built binaries
 
 Extract the archive and place the `vykar` binary somewhere on your `PATH`:

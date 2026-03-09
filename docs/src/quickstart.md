@@ -8,7 +8,7 @@ Run the install script:
 curl -fsSL https://vykar.borgbase.com/install.sh | sh
 ```
 
-Or download a pre-built binary from the [releases page](https://github.com/borgbase/vykar/releases). See [Installing](install.md) for more details.
+Or download a pre-built binary from the [releases page](https://github.com/borgbase/vykar/releases). A [Docker image](install.md#docker) is also available. See [Installing](install.md) for more details.
 
 
 ## Create a config file

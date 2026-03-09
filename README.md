@@ -36,7 +36,7 @@ All benchmarks were run on the same idle Intel i7-6700 CPU @ 3.40GHz machine wit
 curl -fsSL https://vykar.borgbase.com/install.sh | sh
 ```
 
-Or download the latest release for your platform from the [releases page](https://github.com/borgbase/vykar/releases).
+Or download the latest release for your platform from the [releases page](https://github.com/borgbase/vykar/releases). A [Docker image](https://vykar.borgbase.com/install#docker) is also available.
 
 ```bash
 # Generate a starter config and edit it
