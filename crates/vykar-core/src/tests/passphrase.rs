@@ -112,6 +112,27 @@ fn resolve_passphrase_surfaces_passcommand_failure() {
     assert!(format!("{err}").contains("passcommand failed"));
 }
 
+#[cfg(not(windows))]
+#[test]
+fn resolve_passphrase_passcommand_handles_shell_quoting() {
+    let _lock = ENV_LOCK.lock().unwrap();
+    let tmp = tempfile::tempdir().unwrap();
+    let repo_dir = tmp.path().join("repo");
+    std::fs::create_dir_all(&repo_dir).unwrap();
+    let mut config = make_test_config(&repo_dir);
+    config.encryption.mode = EncryptionModeConfig::Aes256Gcm;
+    config.encryption.passphrase = None;
+    // Single quotes inside the command — sh -c must handle them correctly.
+    config.encryption.passcommand = Some("printf '%s' 'hello world'".into());
+    set_vykar_passphrase(None);
+
+    let pass = resolve_passphrase(&config, None, |_prompt| {
+        Ok(Some(Zeroizing::new("prompt-pass".into())))
+    })
+    .unwrap();
+    assert_eq!(pass.as_deref().map(String::as_str), Some("hello world"));
+}
+
 #[test]
 fn resolve_passphrase_passes_prompt_context() {
     let _lock = ENV_LOCK.lock().unwrap();
