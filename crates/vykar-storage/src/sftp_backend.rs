@@ -751,12 +751,28 @@ async fn mkdir_p(sftp: &SftpSession, path: &str) -> RetryResult<()> {
         match sftp.create_dir(&current).await {
             Ok(()) => {}
             Err(e) => match &e {
-                russh_sftp::client::error::Error::Status(s)
-                    if s.status_code == StatusCode::Failure =>
-                {
-                    // Likely already exists; verify with metadata.
-                    if let Err(meta_err) = sftp.metadata(&current).await {
-                        return Err(sftp_retry_error("mkdir", &current, meta_err));
+                russh_sftp::client::error::Error::Status(s) => {
+                    // SFTP servers return inconsistent status codes when mkdir
+                    // fails on an existing path (e.g. Synology returns
+                    // PermissionDenied for symlinks instead of Failure).
+                    // Verify with metadata() whether the path is a directory.
+                    // metadata() uses stat() which follows symlinks, so
+                    // symlink-to-directory correctly reports is_dir() == true.
+                    tracing::debug!(
+                        path = %current,
+                        status = ?s.status_code,
+                        "mkdir failed, verifying with metadata"
+                    );
+                    match sftp.metadata(&current).await {
+                        Ok(attrs) if attrs.is_dir() => {}
+                        Ok(_) => {
+                            return Err(RetryError::permanent(VykarError::Other(format!(
+                                "SFTP mkdir '{current}': path exists but is not a directory"
+                            ))));
+                        }
+                        Err(meta_err) => {
+                            return Err(sftp_retry_error("mkdir", &current, meta_err));
+                        }
                     }
                 }
                 _ => {
