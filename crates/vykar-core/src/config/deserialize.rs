@@ -1,6 +1,7 @@
 use std::collections::HashMap;
 use std::fmt;
 
+use serde::de;
 use serde::Deserialize;
 
 pub(super) const STRICT_STRING_ERROR: &str = "string value must be quoted";
@@ -205,22 +206,79 @@ where
     }
 }
 
+/// Visitor that accepts either a single string or a list of strings,
+/// rejecting non-string scalars (bool, int, float, null).
+struct StringOrVecVisitor;
+
+impl<'de> de::Visitor<'de> for StringOrVecVisitor {
+    type Value = Vec<String>;
+
+    fn expecting(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        f.write_str("a string or a list of strings")
+    }
+
+    fn visit_str<E: de::Error>(self, v: &str) -> Result<Vec<String>, E> {
+        Ok(vec![v.to_string()])
+    }
+
+    fn visit_string<E: de::Error>(self, v: String) -> Result<Vec<String>, E> {
+        Ok(vec![v])
+    }
+
+    fn visit_seq<A: de::SeqAccess<'de>>(self, mut seq: A) -> Result<Vec<String>, A::Error> {
+        let mut v = Vec::new();
+        while let Some(s) = seq.next_element::<StrictString>()? {
+            v.push(s.into_inner());
+        }
+        Ok(v)
+    }
+
+    reject_non_string_visits!(Vec<String>);
+}
+
+/// `DeserializeSeed` adapter so `StringOrVecVisitor` can be used for map values.
+struct StringOrVecSeed;
+
+impl<'de> de::DeserializeSeed<'de> for StringOrVecSeed {
+    type Value = Vec<String>;
+
+    fn deserialize<D>(self, deserializer: D) -> Result<Vec<String>, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        deserializer.deserialize_any(StringOrVecVisitor)
+    }
+}
+
 pub(super) fn deserialize_strict_hooks_map<'de, D>(
     deserializer: D,
 ) -> Result<HashMap<String, Vec<String>>, D::Error>
 where
     D: serde::Deserializer<'de>,
 {
-    let raw = HashMap::<StrictString, Vec<StrictString>>::deserialize(deserializer)?;
-    Ok(raw
-        .into_iter()
-        .map(|(k, v)| {
-            (
-                k.into_inner(),
-                v.into_iter().map(StrictString::into_inner).collect(),
-            )
-        })
-        .collect())
+    struct StrictHooksMapVisitor;
+
+    impl<'de> de::Visitor<'de> for StrictHooksMapVisitor {
+        type Value = HashMap<String, Vec<String>>;
+
+        fn expecting(&self, f: &mut fmt::Formatter) -> fmt::Result {
+            f.write_str("a map of hook keys to strings or lists of strings")
+        }
+
+        fn visit_map<A: de::MapAccess<'de>>(
+            self,
+            mut map: A,
+        ) -> Result<HashMap<String, Vec<String>>, A::Error> {
+            let mut result = HashMap::new();
+            while let Some(key) = map.next_key::<StrictString>()? {
+                let value = map.next_value_seed(StringOrVecSeed)?;
+                result.insert(key.into_inner(), value);
+            }
+            Ok(result)
+        }
+    }
+
+    deserializer.deserialize_map(StrictHooksMapVisitor)
 }
 
 /// Deserialize a YAML field that can be either a single string or a list of strings.
@@ -228,35 +286,5 @@ pub(super) fn deserialize_string_or_vec<'de, D>(deserializer: D) -> Result<Vec<S
 where
     D: serde::Deserializer<'de>,
 {
-    use serde::de;
-
-    struct StringOrVec;
-
-    impl<'de> de::Visitor<'de> for StringOrVec {
-        type Value = Vec<String>;
-
-        fn expecting(&self, f: &mut fmt::Formatter) -> fmt::Result {
-            f.write_str("a string or a list of strings")
-        }
-
-        fn visit_str<E: de::Error>(self, v: &str) -> Result<Vec<String>, E> {
-            Ok(vec![v.to_string()])
-        }
-
-        fn visit_string<E: de::Error>(self, v: String) -> Result<Vec<String>, E> {
-            Ok(vec![v])
-        }
-
-        fn visit_seq<A: de::SeqAccess<'de>>(self, mut seq: A) -> Result<Vec<String>, A::Error> {
-            let mut v = Vec::new();
-            while let Some(s) = seq.next_element::<StrictString>()? {
-                v.push(s.into_inner());
-            }
-            Ok(v)
-        }
-
-        reject_non_string_visits!(Vec<String>);
-    }
-
-    deserializer.deserialize_any(StringOrVec)
+    deserializer.deserialize_any(StringOrVecVisitor)
 }

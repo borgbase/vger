@@ -1456,6 +1456,67 @@ repositories:
         assert!(msg.contains("invalid hook key"), "unexpected error: {msg}");
     }
 
+    #[test]
+    fn test_hooks_string_and_list_global_and_repo() {
+        let yaml = r#"
+repositories:
+  - url: /tmp/repo
+    hooks:
+      before: "echo repo-before"
+      after:
+        - "echo repo-after-1"
+        - "echo repo-after-2"
+hooks:
+  before_backup: "pg_dump mydb > /tmp/db.sql"
+  after:
+    - "echo done"
+  failed: "curl -fsS -m 10 https://hc-ping.com/uuid/fail"
+"#;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.yaml");
+        fs::write(&path, yaml).unwrap();
+
+        let repos = load_and_resolve(&path).unwrap();
+
+        // Global hooks: string and list both work
+        assert_eq!(
+            repos[0].global_hooks.get_hooks("before_backup"),
+            &["pg_dump mydb > /tmp/db.sql"]
+        );
+        assert_eq!(repos[0].global_hooks.get_hooks("after"), &["echo done"]);
+        assert_eq!(
+            repos[0].global_hooks.get_hooks("failed"),
+            &["curl -fsS -m 10 https://hc-ping.com/uuid/fail"]
+        );
+
+        // Per-repo hooks: string and list both work
+        assert_eq!(
+            repos[0].repo_hooks.get_hooks("before"),
+            &["echo repo-before"]
+        );
+        assert_eq!(
+            repos[0].repo_hooks.get_hooks("after"),
+            &["echo repo-after-1", "echo repo-after-2"]
+        );
+    }
+
+    #[test]
+    fn test_hooks_rejects_bool_as_string_value() {
+        let yaml = r#"
+repositories:
+  - url: /tmp/repo
+hooks:
+  before_backup: true
+"#;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.yaml");
+        fs::write(&path, yaml).unwrap();
+
+        let err = load_and_resolve(&path).unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains(STRICT_STRING_ERROR), "unexpected error: {msg}");
+    }
+
     // --- Sources tests ---
 
     #[test]
