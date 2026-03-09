@@ -351,8 +351,20 @@ pub(crate) fn dispatch_command(
         Commands::Check {
             verify_data,
             distrust_server,
+            repair,
+            dry_run,
+            yes,
             ..
-        } => cmd::check::run_check(cfg, label, *verify_data, *distrust_server).map(|()| false),
+        } => cmd::check::run_check(
+            cfg,
+            label,
+            *verify_data,
+            *distrust_server,
+            *repair,
+            *dry_run,
+            *yes,
+        )
+        .map(|()| false),
         Commands::Info { .. } => cmd::info::run_info(cfg, label).map(|()| false),
         Commands::Mount {
             snapshot,

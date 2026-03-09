@@ -155,8 +155,21 @@ pub(crate) enum Commands {
         /// Force client-side download + crypto verification even when the
         /// server supports server-side pack verification. Use this if you
         /// don't trust the server to report honestly.
+        /// Ignored in --repair mode (repair always verifies client-side).
         #[arg(long)]
         distrust_server: bool,
+
+        /// Detect and fix integrity issues
+        #[arg(long)]
+        repair: bool,
+
+        /// Dry-run: show repair plan without applying
+        #[arg(short = 'n', long, requires = "repair")]
+        dry_run: bool,
+
+        /// Skip interactive confirmation (for scripting)
+        #[arg(long, requires = "repair")]
+        yes: bool,
     },
 
     /// Show repository statistics and snapshot totals

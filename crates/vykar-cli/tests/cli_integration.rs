@@ -81,6 +81,30 @@ impl CliFixture {
         );
         (stdout(&output), stderr(&output))
     }
+
+    fn run_with_stdin(&self, args: &[&str], stdin_data: &str) -> Output {
+        use std::io::Write;
+        use std::process::Stdio;
+
+        let mut child = Command::new(vykar_binary_path());
+        child
+            .args(args)
+            .env("HOME", &self.home_dir)
+            .env("XDG_CACHE_HOME", &self.cache_dir)
+            .env("XDG_CONFIG_HOME", &self.config_home)
+            .env("NO_COLOR", "1")
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
+        let mut child = child.spawn().unwrap();
+        child
+            .stdin
+            .take()
+            .unwrap()
+            .write_all(stdin_data.as_bytes())
+            .unwrap();
+        child.wait_with_output().unwrap()
+    }
 }
 
 fn stdout(output: &Output) -> String {
@@ -167,6 +191,18 @@ fn delete_pack_for_first_chunk(repo_dir: &Path) {
         "expected pack file to exist: {pack_path:?}"
     );
     std::fs::remove_file(pack_path).unwrap();
+}
+
+fn corrupt_first_snapshot(repo_dir: &Path) {
+    let storage = Box::new(LocalBackend::new(repo_dir.to_str().unwrap()).unwrap());
+    let repo = Repository::open(storage, None, None).unwrap();
+    let entry = repo
+        .manifest()
+        .snapshots
+        .first()
+        .expect("must have snapshot");
+    let snap_path = repo_dir.join(entry.id.storage_key());
+    std::fs::write(snap_path, b"garbage-snapshot-data").unwrap();
 }
 
 #[test]
@@ -765,5 +801,181 @@ fn cli_empty_config_exits_with_error() {
     assert!(
         stderr.contains("no repositories configured"),
         "expected 'no repositories configured' error, got:\n{stderr}"
+    );
+}
+
+// ── check --repair tests ────────────────────────────────────────────────────
+
+#[test]
+fn cli_check_repair_dry_run_prints_plan() {
+    let fx = CliFixture::new();
+    write_plain_config(&fx.config_path, &fx.repo_dir);
+    std::fs::write(fx.source_a.join("some.txt"), b"some data\n").unwrap();
+
+    let cfg = fx.config_path.to_string_lossy().to_string();
+    let source = fx.source_a.to_string_lossy().to_string();
+
+    fx.run_ok(&["--config", &cfg, "init"]);
+    fx.run_ok(&["--config", &cfg, "backup", &source]);
+
+    corrupt_first_snapshot(&fx.repo_dir);
+
+    let (out, err) = fx.run_err(&["--config", &cfg, "check", "--repair", "--dry-run"]);
+    assert!(
+        out.contains("Repair plan:"),
+        "expected 'Repair plan:' in stdout, got:\n{out}"
+    );
+    assert!(
+        out.contains("Remove corrupted snapshot blob"),
+        "expected 'Remove corrupted snapshot blob' in stdout, got:\n{out}"
+    );
+    assert!(
+        err.contains("Dry run: no changes applied"),
+        "expected 'Dry run: no changes applied' in stderr, got:\n{err}"
+    );
+}
+
+#[test]
+fn cli_check_repair_yes_repairs_then_clean() {
+    let fx = CliFixture::new();
+    write_plain_config(&fx.config_path, &fx.repo_dir);
+    std::fs::write(fx.source_a.join("some.txt"), b"some data\n").unwrap();
+
+    let cfg = fx.config_path.to_string_lossy().to_string();
+    let source = fx.source_a.to_string_lossy().to_string();
+
+    fx.run_ok(&["--config", &cfg, "init"]);
+    fx.run_ok(&["--config", &cfg, "backup", &source]);
+
+    corrupt_first_snapshot(&fx.repo_dir);
+
+    let out = fx.run_ok(&["--config", &cfg, "check", "--repair", "--yes"]);
+    assert!(
+        out.contains("Repairs applied:"),
+        "expected 'Repairs applied:' in stdout, got:\n{out}"
+    );
+
+    let check_out = fx.run_ok(&["--config", &cfg, "check"]);
+    assert!(
+        check_out.contains("0 errors"),
+        "expected '0 errors' after repair, got:\n{check_out}"
+    );
+}
+
+#[test]
+fn cli_check_repair_noninteractive_aborts_tier2() {
+    let fx = CliFixture::new();
+    write_plain_config(&fx.config_path, &fx.repo_dir);
+    std::fs::write(fx.source_a.join("some.txt"), b"some data\n").unwrap();
+
+    let cfg = fx.config_path.to_string_lossy().to_string();
+    let source = fx.source_a.to_string_lossy().to_string();
+
+    fx.run_ok(&["--config", &cfg, "init"]);
+    fx.run_ok(&["--config", &cfg, "backup", &source]);
+
+    corrupt_first_snapshot(&fx.repo_dir);
+
+    // stdin is closed by Command::output() → read_line gets EOF → empty input
+    // → input.trim() != "repair" → prints "Aborted." → exits 0
+    let output = fx.run(&["--config", &cfg, "check", "--repair"]);
+    assert!(
+        output.status.success(),
+        "abort should exit 0, got status: {}, stderr:\n{}",
+        output.status,
+        stderr(&output)
+    );
+    let err = stderr(&output);
+    assert!(
+        err.contains("Aborted"),
+        "expected 'Aborted' in stderr, got:\n{err}"
+    );
+}
+
+#[test]
+fn cli_check_repair_positive_prompt_applies() {
+    let fx = CliFixture::new();
+    write_plain_config(&fx.config_path, &fx.repo_dir);
+    std::fs::write(fx.source_a.join("some.txt"), b"some data\n").unwrap();
+
+    let cfg = fx.config_path.to_string_lossy().to_string();
+    let source = fx.source_a.to_string_lossy().to_string();
+
+    fx.run_ok(&["--config", &cfg, "init"]);
+    fx.run_ok(&["--config", &cfg, "backup", &source]);
+
+    corrupt_first_snapshot(&fx.repo_dir);
+
+    let output = fx.run_with_stdin(&["--config", &cfg, "check", "--repair"], "repair\n");
+    assert!(
+        output.status.success(),
+        "repair with positive prompt should succeed, got status: {}, stderr:\n{}",
+        output.status,
+        stderr(&output)
+    );
+    let out = stdout(&output);
+    assert!(
+        out.contains("Repairs applied:"),
+        "expected 'Repairs applied:' in stdout, got:\n{out}"
+    );
+}
+
+#[test]
+fn cli_check_repair_safe_auto_apply() {
+    let fx = CliFixture::new();
+    write_plain_config(&fx.config_path, &fx.repo_dir);
+    std::fs::write(fx.source_a.join("some.txt"), b"some data\n").unwrap();
+
+    let cfg = fx.config_path.to_string_lossy().to_string();
+    let source = fx.source_a.to_string_lossy().to_string();
+
+    fx.run_ok(&["--config", &cfg, "init"]);
+    fx.run_ok(&["--config", &cfg, "backup", &source]);
+
+    // No corruption — safe plan (refcount rebuild only)
+    let output = fx.run(&["--config", &cfg, "check", "--repair"]);
+    assert!(
+        output.status.success(),
+        "safe auto-apply should succeed, got status: {}, stderr:\n{}",
+        output.status,
+        stderr(&output)
+    );
+    let err = stderr(&output);
+    assert!(
+        err.contains("No data-loss actions; applying safe repairs"),
+        "expected safe-auto-apply message in stderr, got:\n{err}"
+    );
+    let out = stdout(&output);
+    assert!(
+        out.contains("Repair plan:"),
+        "expected 'Repair plan:' in stdout, got:\n{out}"
+    );
+    assert!(
+        out.contains("Rebuild chunk refcounts"),
+        "expected 'Rebuild chunk refcounts' in stdout, got:\n{out}"
+    );
+}
+
+#[test]
+fn cli_check_repair_yes_clean_repo() {
+    let fx = CliFixture::new();
+    write_plain_config(&fx.config_path, &fx.repo_dir);
+    std::fs::write(fx.source_a.join("some.txt"), b"some data\n").unwrap();
+
+    let cfg = fx.config_path.to_string_lossy().to_string();
+    let source = fx.source_a.to_string_lossy().to_string();
+
+    fx.run_ok(&["--config", &cfg, "init"]);
+    fx.run_ok(&["--config", &cfg, "backup", &source]);
+
+    // No corruption — --yes should still work on a clean repo
+    let out = fx.run_ok(&["--config", &cfg, "check", "--repair", "--yes"]);
+    assert!(
+        out.contains("Repair plan:"),
+        "expected 'Repair plan:' in stdout, got:\n{out}"
+    );
+    assert!(
+        out.contains("Rebuild chunk refcounts"),
+        "expected 'Rebuild chunk refcounts' in stdout, got:\n{out}"
     );
 }

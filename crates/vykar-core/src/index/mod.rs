@@ -146,6 +146,31 @@ impl ChunkIndex {
             self.entries.values().map(|e| e.pack_id).collect();
         packs.len()
     }
+
+    /// Remove a single chunk entry. Returns the removed entry if found.
+    pub fn remove(&mut self, id: &ChunkId) -> Option<ChunkIndexEntry> {
+        self.entries.remove(id)
+    }
+
+    /// Remove all entries referencing the given pack. Returns the number of entries removed.
+    pub fn remove_by_pack(&mut self, pack_id: &PackId) -> usize {
+        let before = self.entries.len();
+        self.entries.retain(|_, entry| entry.pack_id != *pack_id);
+        before - self.entries.len()
+    }
+
+    /// Replace all refcounts from a snapshot-derived map.
+    /// Entries with zero refs (not in `new_refcounts`) are removed.
+    pub fn rebuild_refcounts(&mut self, new_refcounts: &HashMap<ChunkId, u32>) {
+        self.entries.retain(|id, entry| {
+            if let Some(&rc) = new_refcounts.get(id) {
+                entry.refcount = rc;
+                true
+            } else {
+                false
+            }
+        });
+    }
 }
 
 /// Lightweight dedup-only index that stores only chunk_id → stored_size.
@@ -739,5 +764,70 @@ mod tests {
             serialized_blob, serialized_ref,
             "IndexBlobRef should produce the same wire format as IndexBlob"
         );
+    }
+
+    // --- ChunkIndex mutation method tests ---
+
+    #[test]
+    fn chunk_index_remove_single() {
+        let mut index = ChunkIndex::new();
+        let c1 = make_chunk_id(1);
+        let c2 = make_chunk_id(2);
+        let pack = make_pack_id(10);
+        index.add(c1, 100, pack, 0);
+        index.add(c2, 200, pack, 100);
+        assert_eq!(index.len(), 2);
+
+        let removed = index.remove(&c1);
+        assert!(removed.is_some());
+        assert_eq!(removed.unwrap().stored_size, 100);
+        assert_eq!(index.len(), 1);
+        assert!(!index.contains(&c1));
+        assert!(index.contains(&c2));
+
+        // Remove non-existent — returns None
+        assert!(index.remove(&make_chunk_id(99)).is_none());
+    }
+
+    #[test]
+    fn chunk_index_remove_by_pack() {
+        let mut index = ChunkIndex::new();
+        let pack_a = make_pack_id(1);
+        let pack_b = make_pack_id(2);
+        index.add(make_chunk_id(10), 100, pack_a, 0);
+        index.add(make_chunk_id(11), 100, pack_a, 100);
+        index.add(make_chunk_id(20), 200, pack_b, 0);
+        assert_eq!(index.len(), 3);
+
+        let removed = index.remove_by_pack(&pack_a);
+        assert_eq!(removed, 2);
+        assert_eq!(index.len(), 1);
+        assert!(index.contains(&make_chunk_id(20)));
+
+        // Remove pack with no entries — returns 0
+        assert_eq!(index.remove_by_pack(&make_pack_id(99)), 0);
+    }
+
+    #[test]
+    fn chunk_index_rebuild_refcounts() {
+        let mut index = ChunkIndex::new();
+        let c1 = make_chunk_id(1);
+        let c2 = make_chunk_id(2);
+        let c3 = make_chunk_id(3);
+        let pack = make_pack_id(10);
+        index.add(c1, 100, pack, 0);
+        index.add(c2, 200, pack, 100);
+        index.add(c3, 300, pack, 300);
+
+        let mut new_refs = HashMap::new();
+        new_refs.insert(c1, 5);
+        new_refs.insert(c2, 1);
+        // c3 not in new_refs → should be removed
+
+        index.rebuild_refcounts(&new_refs);
+        assert_eq!(index.len(), 2);
+        assert_eq!(index.get(&c1).unwrap().refcount, 5);
+        assert_eq!(index.get(&c2).unwrap().refcount, 1);
+        assert!(!index.contains(&c3));
     }
 }

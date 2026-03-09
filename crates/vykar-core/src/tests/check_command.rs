@@ -3,7 +3,8 @@ use std::sync::Arc;
 
 use crate::commands;
 use crate::commands::check::{
-    process_verify_response, try_server_verify, verify_pack_full, CheckError, ServerVerifyOutcome,
+    process_verify_response, try_server_verify, verify_pack_full, CheckError, IntegrityIssue,
+    ServerVerifyOutcome,
 };
 use crate::index::ChunkIndexEntry;
 use vykar_storage::local_backend::LocalBackend;
@@ -373,23 +374,22 @@ fn test_verify_pack_full_overflow_offset() {
         pack_offset: u64::MAX,
     };
 
-    let mut errors = Vec::new();
+    let mut issues: Vec<IntegrityIssue> = Vec::new();
     let count = verify_pack_full(
         &storage,
         &crypto,
         &chunk_id_key,
         &pack_id,
         &[(chunk_id, entry)],
-        &mut errors,
+        &mut issues,
     );
 
     assert_eq!(count, 0);
-    assert_eq!(errors.len(), 1);
+    assert_eq!(issues.len(), 1);
+    let msg = issues[0].to_check_error().message;
     assert!(
-        errors[0].message.contains("exceeds addressable range")
-            || errors[0].message.contains("blob range overflows"),
-        "expected overflow error, got: {}",
-        errors[0].message
+        msg.contains("exceeds addressable range") || msg.contains("blob range overflows"),
+        "expected overflow error, got: {msg}",
     );
 }
 
@@ -416,21 +416,21 @@ fn test_verify_pack_full_overflow_add() {
         pack_offset: (usize::MAX - 5) as u64,
     };
 
-    let mut errors = Vec::new();
+    let mut issues: Vec<IntegrityIssue> = Vec::new();
     let count = verify_pack_full(
         &storage,
         &crypto,
         &chunk_id_key,
         &pack_id,
         &[(chunk_id, entry)],
-        &mut errors,
+        &mut issues,
     );
 
     assert_eq!(count, 0);
-    assert_eq!(errors.len(), 1);
+    assert_eq!(issues.len(), 1);
+    let msg = issues[0].to_check_error().message;
     assert!(
-        errors[0].message.contains("blob range overflows"),
-        "expected overflow error, got: {}",
-        errors[0].message
+        msg.contains("blob range overflows"),
+        "expected overflow error, got: {msg}",
     );
 }

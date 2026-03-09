@@ -10,7 +10,7 @@ use super::helpers::{backup_single_source, init_repo, open_local_repo};
 
 #[derive(Debug, Clone, Copy)]
 #[allow(dead_code)]
-enum Corruption {
+pub(super) enum Corruption {
     BitFlipInPack,
     BitFlipInBlob,
     TruncatePack,
@@ -27,7 +27,7 @@ enum Corruption {
 // ---------------------------------------------------------------------------
 
 /// Create a repo with 10x4KB files and one snapshot "snap-base".
-fn setup_repo(tmp: &Path) -> (PathBuf, VykarConfig) {
+pub(super) fn setup_repo(tmp: &Path) -> (PathBuf, VykarConfig) {
     let repo_dir = tmp.join("repo");
     let source_dir = tmp.join("source");
     std::fs::create_dir_all(&repo_dir).unwrap();
@@ -47,7 +47,7 @@ fn setup_repo(tmp: &Path) -> (PathBuf, VykarConfig) {
 // Helpers to locate repo artifacts
 // ---------------------------------------------------------------------------
 
-fn find_first_pack_path(repo_dir: &Path) -> PathBuf {
+pub(super) fn find_first_pack_path(repo_dir: &Path) -> PathBuf {
     let repo = open_local_repo(repo_dir);
     let (_chunk_id, entry) = repo
         .chunk_index()
@@ -57,7 +57,7 @@ fn find_first_pack_path(repo_dir: &Path) -> PathBuf {
     repo_dir.join(entry.pack_id.storage_key())
 }
 
-fn find_snapshot_path(repo_dir: &Path, name: &str) -> PathBuf {
+pub(super) fn find_snapshot_path(repo_dir: &Path, name: &str) -> PathBuf {
     let repo = open_local_repo(repo_dir);
     let entry = repo
         .manifest()
@@ -135,7 +135,7 @@ fn apply_corrupt_config(repo_dir: &Path) {
     std::fs::write(&config_path, b"garbage-config-data").unwrap();
 }
 
-fn apply_corruption(corruption: Corruption, repo_dir: &Path) {
+pub(super) fn apply_corruption(corruption: Corruption, repo_dir: &Path) {
     match corruption {
         Corruption::BitFlipInPack => apply_bit_flip_in_pack(repo_dir),
         Corruption::BitFlipInBlob => apply_bit_flip_in_blob(repo_dir),
@@ -261,4 +261,66 @@ fn backup_succeeds_after_corrupt_snapshot() {
     let source2 = create_fresh_source(tmp.path());
     let stats = backup_single_source(&config, &source2, "src-fresh", "snap-after-corrupt-snap");
     assert!(stats.nfiles > 0, "backup should produce files");
+}
+
+#[test_case(Corruption::BitFlipInPack ; "bit_flip_in_pack")]
+#[test_case(Corruption::BitFlipInBlob ; "bit_flip_in_blob")]
+#[test_case(Corruption::TruncatePack ; "truncate_pack")]
+#[test_case(Corruption::ZeroFillRegion ; "zero_fill_region")]
+#[test_case(Corruption::DeletePack ; "delete_pack")]
+#[test_case(Corruption::CorruptSnapshot ; "corrupt_snapshot")]
+fn repair_fixes_corruption(corruption: Corruption) {
+    let tmp = tempfile::tempdir().unwrap();
+    let (repo_dir, config) = setup_repo(tmp.path());
+
+    apply_corruption(corruption, &repo_dir);
+
+    let result = commands::check::run_with_repair(
+        &config,
+        None,
+        true, // verify_data
+        commands::check::RepairMode::Apply,
+        None,
+    )
+    .unwrap();
+
+    assert!(
+        !result.applied.is_empty(),
+        "{corruption:?}: repair should have applied actions"
+    );
+    assert!(
+        result.repair_errors.is_empty(),
+        "{corruption:?}: repair should have no errors, got: {:?}",
+        result.repair_errors
+    );
+
+    // Verify repo is actually clean with a read-only check
+    let check = commands::check::run(&config, None, true, false).unwrap();
+    assert!(
+        check.errors.is_empty(),
+        "{corruption:?}: post-repair check should report 0 errors, got: {:?}",
+        check.errors
+    );
+}
+
+#[test_case(Corruption::TruncateIndex ; "truncate_index")]
+#[test_case(Corruption::CorruptConfig ; "corrupt_config")]
+fn repair_not_possible_err_path(corruption: Corruption) {
+    let tmp = tempfile::tempdir().unwrap();
+    let (repo_dir, config) = setup_repo(tmp.path());
+
+    apply_corruption(corruption, &repo_dir);
+
+    let result = commands::check::run_with_repair(
+        &config,
+        None,
+        true,
+        commands::check::RepairMode::Apply,
+        None,
+    );
+    assert!(
+        result.is_err(),
+        "{corruption:?}: repair should return Err, got Ok({:?})",
+        result.unwrap()
+    );
 }

@@ -18,5 +18,6 @@ mod passphrase;
 mod proptest;
 mod prune;
 mod prune_command;
+mod repair;
 mod repo;
 mod util_lock;
