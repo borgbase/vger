@@ -5,10 +5,15 @@
 	docs-test \
 	fmt \
 	fmt-check \
+	fuzz \
+	fuzz-check \
 	lint \
 	test \
 	test-all \
 	pre-commit
+
+FUZZ_TARGETS := fuzz_pack_scan fuzz_decompress fuzz_msgpack_snapshot_meta \
+	fuzz_msgpack_index_blob fuzz_item_stream fuzz_file_cache_decode fuzz_unpack_object
 
 fmt:
 	cargo fmt --all
@@ -36,6 +41,20 @@ app:
 	cp crates/vykar-gui/macos/Info.plist "$(APP_BUNDLE)/Contents/"
 	cp target/release/vykar-gui "$(APP_BUNDLE)/Contents/MacOS/"
 	cp target/AppIcon.icns "$(APP_BUNDLE)/Contents/Resources/"
+
+fuzz:
+	@for target in $(FUZZ_TARGETS); do \
+		echo "==> Fuzzing $$target (60s)"; \
+		cargo +nightly fuzz run $$target -- \
+			-max_total_time=60 -rss_limit_mb=4096 -max_len=1048576 || exit 1; \
+	done
+
+fuzz-check:
+	@for target in $(FUZZ_TARGETS); do \
+		echo "==> Replaying corpus for $$target"; \
+		cargo +nightly fuzz run $$target -- \
+			-runs=0 -rss_limit_mb=4096 -max_len=1048576 || exit 1; \
+	done
 
 docs-build:
 	mdbook build docs

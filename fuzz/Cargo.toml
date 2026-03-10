@@ -1,0 +1,65 @@
+[package]
+name = "vykar-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2021"
+
+[package.metadata]
+cargo-fuzz = true
+
+# Standalone crate — not part of the main workspace.
+[workspace]
+members = ["."]
+
+[dependencies]
+libfuzzer-sys = "0.4"
+rmp-serde = "1"
+rmp = "0.8"
+serde = { version = "1", features = ["derive"] }
+chrono = { version = "0.4", features = ["serde"] }
+aes-gcm = "0.10"
+
+vykar-core = { path = "../crates/vykar-core", default-features = false }
+vykar-crypto = { path = "../crates/vykar-crypto" }
+vykar-types = { path = "../crates/vykar-types" }
+vykar-protocol = { path = "../crates/vykar-protocol" }
+
+[[bin]]
+name = "fuzz_pack_scan"
+path = "fuzz_targets/fuzz_pack_scan.rs"
+doc = false
+
+[[bin]]
+name = "fuzz_decompress"
+path = "fuzz_targets/fuzz_decompress.rs"
+doc = false
+
+[[bin]]
+name = "fuzz_msgpack_snapshot_meta"
+path = "fuzz_targets/fuzz_msgpack_snapshot_meta.rs"
+doc = false
+
+[[bin]]
+name = "fuzz_msgpack_index_blob"
+path = "fuzz_targets/fuzz_msgpack_index_blob.rs"
+doc = false
+
+[[bin]]
+name = "fuzz_item_stream"
+path = "fuzz_targets/fuzz_item_stream.rs"
+doc = false
+
+[[bin]]
+name = "fuzz_file_cache_decode"
+path = "fuzz_targets/fuzz_file_cache_decode.rs"
+doc = false
+
+[[bin]]
+name = "fuzz_unpack_object"
+path = "fuzz_targets/fuzz_unpack_object.rs"
+doc = false
+
+[[bin]]
+name = "generate_corpus"
+path = "fuzz_targets/generate_corpus.rs"
+required-features = []

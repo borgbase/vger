@@ -163,7 +163,7 @@ impl FileCache {
     /// safety cap based on plaintext length, then deserializes entries into a
     /// pre-sized HashMap. Falls back to legacy String-key deserialization on
     /// parse error (handles old cache files with String keys).
-    fn decode_from_plaintext(plaintext: &[u8]) -> Result<Self> {
+    pub fn decode_from_plaintext(plaintext: &[u8]) -> Result<Self> {
         match Self::try_decode_preallocated(plaintext) {
             Ok(cache) => Ok(cache),
             Err(_) => {

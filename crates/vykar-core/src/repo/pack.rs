@@ -283,13 +283,9 @@ pub fn read_blob_from_pack(
     Ok(data)
 }
 
-/// Forward-scan a pack file using per-blob length prefixes.
+/// Forward-scan pack bytes using per-blob length prefixes.
 /// Returns (offset, length) pairs for each blob.
-pub fn scan_pack_blobs(storage: &dyn StorageBackend, pack_id: &PackId) -> Result<Vec<(u64, u32)>> {
-    let pack_data = storage
-        .get(&pack_id.storage_key())?
-        .ok_or_else(|| VykarError::Other(format!("pack not found: {pack_id}")))?;
-
+pub fn scan_pack_blobs_bytes(pack_data: &[u8]) -> Result<Vec<(u64, u32)>> {
     if pack_data.len() < PACK_HEADER_SIZE {
         return Err(VykarError::InvalidFormat("pack too small".into()));
     }
@@ -333,6 +329,15 @@ pub fn scan_pack_blobs(storage: &dyn StorageBackend, pack_id: &PackId) -> Result
     }
 
     Ok(blobs)
+}
+
+/// Forward-scan a pack file using per-blob length prefixes.
+/// Returns (offset, length) pairs for each blob.
+pub fn scan_pack_blobs(storage: &dyn StorageBackend, pack_id: &PackId) -> Result<Vec<(u64, u32)>> {
+    let pack_data = storage
+        .get(&pack_id.storage_key())?
+        .ok_or_else(|| VykarError::Other(format!("pack not found: {pack_id}")))?;
+    scan_pack_blobs_bytes(&pack_data)
 }
 
 /// Compute the dynamic target pack size for data packs.

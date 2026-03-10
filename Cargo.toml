@@ -9,6 +9,7 @@ members = [
     "crates/vykar-gui",
     "crates/vykar-protocol",
 ]
+exclude = ["fuzz"]
 resolver = "2"
 
 [workspace.dependencies]

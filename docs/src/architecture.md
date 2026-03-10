@@ -737,6 +737,22 @@ A single bug in serialization, encryption, or refcount tracking can silently des
 | TruncateIndex | yes (Err) | not possible (Err) | — |
 | CorruptConfig | yes (Err) | not possible (Err) | — |
 
+### Fuzz Tests
+
+7 coverage-guided fuzz targets via `cargo-fuzz` (libFuzzer). Each target feeds adversarial byte sequences into a parser, deserializer, or decrypt path, mutating from committed corpus seeds toward crashes, hangs, and OOM. Complements proptest by running for hours/days and optimizing for code-path coverage rather than round-trip invariants.
+
+| Target | Function under test | Risk surface |
+|--------|-------------------|--------------|
+| `fuzz_pack_scan` | `scan_pack_blobs_bytes` | Integer overflow in length fields, truncated frames |
+| `fuzz_decompress` | `decompress` + `decompress_metadata` | Decompression bombs, corrupt LZ4/Zstd frames |
+| `fuzz_msgpack_snapshot_meta` | `from_slice::<SnapshotMeta>` | Large collection size declarations |
+| `fuzz_msgpack_index_blob` | `from_slice::<IndexBlob>` | Massive chunk index allocation |
+| `fuzz_item_stream` | `for_each_decoded_item` | Streaming framing via `Deserializer::position()`, EOF handling |
+| `fuzz_file_cache_decode` | `FileCache::decode_from_plaintext` | Manual msgpack marker parsing, allocation cap, legacy fallback |
+| `fuzz_unpack_object` | `unpack_object` + `unpack_object_expect_with_context` | AEAD envelope parse, nonce extraction, context/AAD wiring, tag authentication |
+
+Corpus seeds are committed and deterministic. CI runs each target for 300 seconds weekly on nightly (`make fuzz-check` replays the corpus without new fuzzing for fast regression checks).
+
 ### Integration Tests
 
 End-to-end tests at two levels:
