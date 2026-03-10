@@ -1717,6 +1717,7 @@ fn run_worker(
                     "Running backup cycle...".to_string()
                 }));
 
+                let mut any_snapshots_created = false;
                 let total = runtime.repos.len();
                 for (i, repo) in runtime.repos.iter().enumerate() {
                     if cancel_requested.load(Ordering::SeqCst) {
@@ -1785,6 +1786,9 @@ fn run_worker(
                     );
 
                     if let Some(ref report) = result.backup_report {
+                        if !report.created.is_empty() {
+                            any_snapshots_created = true;
+                        }
                         log_backup_report(&ui_tx, &repo_name, report);
                     }
                     for (step, outcome) in &result.steps {
@@ -1793,6 +1797,12 @@ fn run_worker(
                             send_log(&ui_tx, msg);
                         }
                     }
+                }
+
+                if any_snapshots_created {
+                    let _ = app_tx.send(AppCommand::RefreshSnapshots {
+                        repo_selector: String::new(),
+                    });
                 }
 
                 backup_running.store(false, Ordering::SeqCst);
@@ -1857,7 +1867,14 @@ fn run_worker(
                     },
                     Some(&cancel_requested),
                 ) {
-                    Ok(report) => log_backup_report(&ui_tx, &rn, &report),
+                    Ok(report) => {
+                        if !report.created.is_empty() {
+                            let _ = app_tx.send(AppCommand::RefreshSnapshots {
+                                repo_selector: rn.clone(),
+                            });
+                        }
+                        log_backup_report(&ui_tx, &rn, &report);
+                    }
                     Err(e) => send_log(&ui_tx, format!("[{rn}] backup failed: {e}")),
                 }
 
@@ -1937,7 +1954,9 @@ fn run_worker(
                         Some(&cancel_requested),
                     ) {
                         Ok(report) => {
-                            any_backed_up = true;
+                            if !report.created.is_empty() {
+                                any_backed_up = true;
+                            }
                             log_backup_report(&ui_tx, &repo_name, &report);
                         }
                         Err(e) => {
@@ -1951,6 +1970,10 @@ fn run_worker(
                         &ui_tx,
                         format!("No repositories found with source '{source_label}'."),
                     );
+                } else {
+                    let _ = app_tx.send(AppCommand::RefreshSnapshots {
+                        repo_selector: String::new(),
+                    });
                 }
 
                 backup_running.store(false, Ordering::SeqCst);
