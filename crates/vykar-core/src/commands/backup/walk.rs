@@ -13,12 +13,22 @@ use vykar_types::error::{Result, VykarError};
 
 use super::concurrency::ByteBudget;
 
-/// Returns `true` for I/O errors safe to skip (permission denied, not found).
+/// Returns `true` for I/O errors safe to skip (permission denied, not found, or EIO).
 pub(super) fn is_soft_io_error(e: &std::io::Error) -> bool {
     matches!(
         e.kind(),
         std::io::ErrorKind::PermissionDenied | std::io::ErrorKind::NotFound
-    )
+    ) || is_eio(e)
+}
+
+#[cfg(unix)]
+fn is_eio(e: &std::io::Error) -> bool {
+    e.raw_os_error() == Some(libc::EIO)
+}
+
+#[cfg(not(unix))]
+fn is_eio(_e: &std::io::Error) -> bool {
+    false
 }
 
 /// Returns `true` for walk errors caused by soft I/O conditions.
@@ -713,5 +723,30 @@ mod tests {
         let unix_path = "folder/sub/file.txt".to_string();
         let normalized = super::super::normalize_rel_path(unix_path);
         assert_eq!(normalized, "folder/sub/file.txt");
+    }
+
+    #[test]
+    fn soft_io_error_permission_denied() {
+        let e = std::io::Error::new(std::io::ErrorKind::PermissionDenied, "denied");
+        assert!(is_soft_io_error(&e));
+    }
+
+    #[test]
+    fn soft_io_error_not_found() {
+        let e = std::io::Error::new(std::io::ErrorKind::NotFound, "gone");
+        assert!(is_soft_io_error(&e));
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn soft_io_error_eio() {
+        let e = std::io::Error::from_raw_os_error(libc::EIO);
+        assert!(is_soft_io_error(&e));
+    }
+
+    #[test]
+    fn non_soft_io_error() {
+        let e = std::io::Error::new(std::io::ErrorKind::ConnectionRefused, "refused");
+        assert!(!is_soft_io_error(&e));
     }
 }

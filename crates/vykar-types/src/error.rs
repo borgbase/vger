@@ -83,13 +83,72 @@ pub enum VykarError {
     Other(String),
 }
 
+/// On Unix, returns `true` if the raw OS error is EIO (errno 5).
+fn is_eio(e: &std::io::Error) -> bool {
+    #[cfg(unix)]
+    {
+        e.raw_os_error() == Some(5)
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = e;
+        false
+    }
+}
+
 impl VykarError {
     /// Returns `true` for I/O errors that indicate a file was unreadable
-    /// (permission denied or file vanished) **before** any data was committed.
-    /// These are safe to skip for partial-backup support.
+    /// (permission denied, file vanished, or EIO) **before** any data was
+    /// committed. These are safe to skip for partial-backup support.
     pub fn is_soft_file_error(&self) -> bool {
         matches!(self, VykarError::Io(e)
             if matches!(e.kind(),
-                std::io::ErrorKind::PermissionDenied | std::io::ErrorKind::NotFound))
+                std::io::ErrorKind::PermissionDenied | std::io::ErrorKind::NotFound)
+            || is_eio(e))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn is_soft_file_error_permission_denied() {
+        let err = VykarError::Io(std::io::Error::new(
+            std::io::ErrorKind::PermissionDenied,
+            "permission denied",
+        ));
+        assert!(err.is_soft_file_error());
+    }
+
+    #[test]
+    fn is_soft_file_error_not_found() {
+        let err = VykarError::Io(std::io::Error::new(
+            std::io::ErrorKind::NotFound,
+            "not found",
+        ));
+        assert!(err.is_soft_file_error());
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn is_soft_file_error_eio() {
+        let err = VykarError::Io(std::io::Error::from_raw_os_error(5));
+        assert!(err.is_soft_file_error());
+    }
+
+    #[test]
+    fn is_soft_file_error_other_io_is_not_soft() {
+        let err = VykarError::Io(std::io::Error::new(
+            std::io::ErrorKind::ConnectionRefused,
+            "connection refused",
+        ));
+        assert!(!err.is_soft_file_error());
+    }
+
+    #[test]
+    fn other_variant_is_not_soft() {
+        let err = VykarError::Other("some error".to_string());
+        assert!(!err.is_soft_file_error());
     }
 }

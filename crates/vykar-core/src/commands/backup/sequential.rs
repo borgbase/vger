@@ -325,8 +325,12 @@ pub(super) fn process_regular_file_item(
     let mut pending_bytes: usize = 0;
 
     for chunk_result in chunk_stream {
-        let chunk = chunk_result.map_err(|e| {
-            VykarError::Other(format!("chunking failed for {}: {e}", entry_path.display()))
+        let chunk = chunk_result.map_err(|e| match e {
+            fastcdc::v2020::Error::IoError(ioe) => VykarError::Io(ioe),
+            other => VykarError::Other(format!(
+                "chunking failed for {}: {other}",
+                entry_path.display()
+            )),
         })?;
 
         let data_len = chunk.data.len();

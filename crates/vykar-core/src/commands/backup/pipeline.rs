@@ -208,8 +208,9 @@ fn process_file_worker_inner(
             let mut worker_chunks =
                 Vec::with_capacity(estimate_chunk_count(file_size, chunker_config.avg_size));
             for chunk_result in chunk_stream {
-                let chunk = chunk_result.map_err(|e| {
-                    VykarError::Other(format!("chunking failed for {abs_path}: {e}"))
+                let chunk = chunk_result.map_err(|e| match e {
+                    fastcdc::v2020::Error::IoError(ioe) => VykarError::Io(ioe),
+                    other => VykarError::Other(format!("chunking failed for {abs_path}: {other}")),
                 })?;
 
                 let chunk_id = ChunkId::compute(chunk_id_key, &chunk.data);
@@ -256,8 +257,9 @@ fn process_file_worker_inner(
             let mut worker_chunks =
                 Vec::with_capacity(estimate_chunk_count(len, chunker_config.avg_size));
             for chunk_result in chunk_stream {
-                let chunk = chunk_result.map_err(|e| {
-                    VykarError::Other(format!("chunking failed for {abs_path}: {e}"))
+                let chunk = chunk_result.map_err(|e| match e {
+                    fastcdc::v2020::Error::IoError(ioe) => VykarError::Io(ioe),
+                    other => VykarError::Other(format!("chunking failed for {abs_path}: {other}")),
                 })?;
 
                 let chunk_id = ChunkId::compute(chunk_id_key, &chunk.data);

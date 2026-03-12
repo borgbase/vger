@@ -162,11 +162,12 @@ fn stream_dump_command(
         let mut bytes_since_progress: u64 = 0;
 
         for chunk_result in chunk_stream {
-            let chunk = chunk_result.map_err(|e| {
-                VykarError::Other(format!(
-                    "chunking failed for command_dump '{}': {e}",
+            let chunk = chunk_result.map_err(|e| match e {
+                fastcdc::v2020::Error::IoError(ioe) => VykarError::Io(ioe),
+                other => VykarError::Other(format!(
+                    "chunking failed for command_dump '{}': {other}",
                     dump.name
-                ))
+                )),
             })?;
 
             let size = chunk.data.len() as u32;
