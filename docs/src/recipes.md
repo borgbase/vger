@@ -336,6 +336,81 @@ limits:
 - If this is too slow, raise `upload_mib_per_sec` first, then increase `connections`.
 
 
+## Network-Aware Backups
+
+A `before_backup` hook that exits non-zero skips the backup. This lets you restrict backups to specific networks without any changes to Vykar itself.
+
+
+### WiFi SSID filtering
+
+Only run backups when connected to a specific WiFi network.
+
+**macOS:**
+
+```yaml
+hooks:
+  before_backup: >-
+    networksetup -getairportnetwork en0
+    | grep -q 'HomeNetwork'
+```
+
+**Linux (NetworkManager):**
+
+```yaml
+hooks:
+  before_backup: >-
+    nmcli -t -f active,ssid dev wifi
+    | grep -q '^yes:HomeNetwork$'
+```
+
+Multiple allowed SSIDs:
+
+```yaml
+hooks:
+  before_backup: >-
+    nmcli -t -f active,ssid dev wifi
+    | grep -qE '^yes:(HomeNetwork|OfficeNetwork)$'
+```
+
+Inverted logic — run on any network *except* a blocklist:
+
+```yaml
+hooks:
+  before_backup: >-
+    ! nmcli -t -f active,ssid dev wifi
+    | grep -q '^yes:CoffeeShopWiFi$'
+```
+
+
+### Metered network detection
+
+Android hotspots and tethered connections advertise metered status via DHCP. Linux network managers read this automatically, so you can skip backups on metered connections without maintaining an SSID list.
+
+**NetworkManager:**
+
+```yaml
+hooks:
+  before_backup: >-
+    METERED=$(nmcli -t -f GENERAL.METERED dev show
+    | grep -m1 GENERAL.METERED
+    | cut -d: -f2);
+    [ "$METERED" != "yes" ] && [ "$METERED" != "guess-yes" ]
+```
+
+NetworkManager reports four values: `yes` (explicitly metered), `guess-yes` (heuristic, e.g. Android hotspot), `no`, and `unknown`. The hook above skips on both `yes` and `guess-yes`.
+
+**systemd-networkd:**
+
+```yaml
+hooks:
+  before_backup: >-
+    ! networkctl status
+    | grep -qi 'metered.*yes'
+```
+
+> **Note:** macOS has no CLI-exposed metered attribute. Use SSID filtering instead.
+
+
 ## Monitoring
 
 Vykar hooks can notify monitoring services on success or failure. A `curl` in an `after` hook replaces the need for dedicated integrations.
