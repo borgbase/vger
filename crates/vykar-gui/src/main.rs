@@ -177,6 +177,22 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     });
 
+    ui.on_close_window({
+        let ui_weak = ui.as_weak();
+        let last_gui_state = last_gui_state.clone();
+        move || {
+            if let Some(ui) = ui_weak.upgrade() {
+                if let Some(s) = event_consumer::capture_gui_state(&ui) {
+                    state::save(&s);
+                    if let Ok(mut last) = last_gui_state.lock() {
+                        *last = Some(s);
+                    }
+                }
+                let _ = ui.hide();
+            }
+        }
+    });
+
     // ── Periodic resize-save timer ──
     // Flush GUI state to disk when the window size changes so Cmd-Q (which
     // bypasses on_close_requested) doesn't lose the latest dimensions.
