@@ -120,14 +120,7 @@ pub fn load_snapshot_items(repo: &mut Repository, snapshot_name: &str) -> Result
 /// Load the raw concatenated item stream bytes for a snapshot.
 pub fn load_snapshot_item_stream(repo: &mut Repository, snapshot_name: &str) -> Result<Vec<u8>> {
     let snapshot_meta = load_snapshot_meta(repo, snapshot_name)?;
-
-    let mut items_stream = Vec::new();
-    for chunk_id in &snapshot_meta.item_ptrs {
-        let chunk_data = repo.read_chunk(chunk_id)?;
-        items_stream.extend_from_slice(&chunk_data);
-    }
-
-    Ok(items_stream)
+    load_item_stream_from_ptrs(repo, &snapshot_meta.item_ptrs)
 }
 
 /// Load item stream using a lookup closure instead of the chunk index.
@@ -141,13 +134,37 @@ where
     L: Fn(&ChunkId) -> Option<(PackId, u64, u32)>,
 {
     let snapshot_meta = load_snapshot_meta(repo, snapshot_name)?;
+    resolve_and_read(repo, &snapshot_meta.item_ptrs, |chunk_id, _repo| {
+        lookup(chunk_id).ok_or(VykarError::ChunkNotInIndex(*chunk_id))
+    })
+}
+
+/// Load the raw concatenated item stream bytes from chunk pointers using the chunk index.
+pub fn load_item_stream_from_ptrs(repo: &mut Repository, item_ptrs: &[ChunkId]) -> Result<Vec<u8>> {
+    resolve_and_read(repo, item_ptrs, |chunk_id, repo| {
+        let entry = *repo
+            .chunk_index()
+            .get(chunk_id)
+            .ok_or_else(|| VykarError::Other(format!("chunk not found: {chunk_id}")))?;
+        Ok((entry.pack_id, entry.pack_offset, entry.stored_size))
+    })
+}
+
+/// Resolve chunk locations and read them via coalesced range reads.
+fn resolve_and_read<R>(repo: &mut Repository, item_ptrs: &[ChunkId], resolve: R) -> Result<Vec<u8>>
+where
+    R: Fn(&ChunkId, &Repository) -> Result<(PackId, u64, u32)>,
+{
+    let chunks: Vec<(ChunkId, PackId, u64, u32)> = item_ptrs
+        .iter()
+        .map(|chunk_id| {
+            let (pack_id, pack_offset, stored_size) = resolve(chunk_id, repo)?;
+            Ok((*chunk_id, pack_id, pack_offset, stored_size))
+        })
+        .collect::<Result<_>>()?;
+
     let mut items_stream = Vec::new();
-    for chunk_id in &snapshot_meta.item_ptrs {
-        let (pack_id, pack_offset, stored_size) =
-            lookup(chunk_id).ok_or(VykarError::ChunkNotInIndex(*chunk_id))?;
-        let chunk_data = repo.read_chunk_at(chunk_id, &pack_id, pack_offset, stored_size)?;
-        items_stream.extend_from_slice(&chunk_data);
-    }
+    repo.read_chunks_coalesced_into(&chunks, &mut items_stream)?;
     Ok(items_stream)
 }
 

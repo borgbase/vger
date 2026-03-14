@@ -1,6 +1,7 @@
 mod app_ops;
 mod check_command;
 mod chunker;
+mod coalesced_read;
 mod compact;
 mod corruption;
 mod delete;

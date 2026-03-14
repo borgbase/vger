@@ -7,7 +7,7 @@ use crate::config::{RetentionConfig, SourceEntry, VykarConfig};
 use crate::prune::{apply_policy, apply_policy_by_label, PruneDecision};
 use vykar_types::error::{Result, VykarError};
 
-use super::list::load_snapshot_meta;
+use super::list::{load_item_stream_from_ptrs, load_snapshot_meta};
 use super::snapshot_ops::decrement_snapshot_chunk_refs;
 use super::util::{check_interrupted, with_open_repo_maintenance_lock};
 
@@ -168,11 +168,7 @@ pub fn run(
         let mut total_chunks_deleted = 0u64;
         let mut total_space_freed = 0u64;
         for target in targets {
-            let mut items_stream = Vec::new();
-            for chunk_id in &target.item_ptrs {
-                let chunk_data = repo.read_chunk(chunk_id)?;
-                items_stream.extend_from_slice(&chunk_data);
-            }
+            let items_stream = load_item_stream_from_ptrs(repo, &target.item_ptrs)?;
             let impact = decrement_snapshot_chunk_refs(repo, &items_stream, &target.item_ptrs)?;
             total_chunks_deleted += impact.chunks_deleted;
             total_space_freed += impact.space_freed;
