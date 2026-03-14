@@ -7840,8 +7840,10 @@ dependencies = [
 name = "vykar-storage"
 version = "0.12.5"
 dependencies = [
+ "base64",
  "blake2",
  "hex",
+ "md-5",
  "nix 0.29.0",
  "percent-encoding",
  "rand 0.8.5",

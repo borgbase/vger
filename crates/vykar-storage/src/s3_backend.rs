@@ -1,6 +1,8 @@
 use std::io::Read;
 use std::time::Duration;
 
+use base64::Engine;
+use md5::{Digest, Md5};
 use percent_encoding::percent_decode_str;
 use rusty_s3::actions::{ListObjectsV2, S3Action};
 use rusty_s3::{Bucket, Credentials, UrlStyle};
@@ -131,7 +133,7 @@ impl StorageBackend for S3Backend {
                 Err(e) => Err(HttpRetryError::http(e)),
             }
         })
-        .map_err(|e| VykarError::Other(format!("S3 GET {key}: {e}")))
+        .map_err(|e| s3_body_error("GET", key, e))
     }
 
     fn put(&self, key: &str, data: &[u8]) -> Result<()> {
@@ -158,7 +160,7 @@ impl StorageBackend for S3Backend {
         self.retry_call(&format!("DELETE {key}"), || {
             self.agent.delete(url.as_str()).call()
         })
-        .map_err(|e| VykarError::Other(format!("S3 DELETE {key}: {e}")))?;
+        .map_err(|e| s3_error("DELETE", key, e))?;
         Ok(())
     }
 
@@ -174,17 +176,15 @@ impl StorageBackend for S3Backend {
         }) {
             Ok(resp) => {
                 if self.soft_delete {
-                    let len = crate::http_util::extract_content_length(
-                        &resp,
-                        &format!("S3 HEAD {key}"),
-                    )?;
+                    let len =
+                        crate::http_util::extract_content_length(&resp, &format!("S3 HEAD {key}"))?;
                     Ok(len > 0)
                 } else {
                     Ok(true)
                 }
             }
             Err(ureq::Error::Status(404, _)) => Ok(false),
-            Err(e) => Err(VykarError::Other(format!("S3 HEAD {key}: {e}"))),
+            Err(e) => Err(s3_error("HEAD", key, e)),
         }
     }
 
@@ -208,7 +208,7 @@ impl StorageBackend for S3Backend {
                 Ok(Some(len))
             }
             Err(ureq::Error::Status(404, _)) => Ok(None),
-            Err(e) => Err(VykarError::Other(format!("S3 HEAD {key}: {e}"))),
+            Err(e) => Err(s3_error("HEAD", key, e)),
         }
     }
 
@@ -249,7 +249,7 @@ impl StorageBackend for S3Backend {
                         ))
                     })
                 })
-                .map_err(|e| VykarError::Other(format!("S3 LIST {prefix}: {e}")))?;
+                .map_err(|e| s3_body_error("LIST", prefix, e))?;
 
             for obj in &parsed.contents {
                 // rusty_s3 sends encoding-type=url; some S3-compatible backends
@@ -359,7 +359,7 @@ impl StorageBackend for S3Backend {
                 Err(e) => Err(HttpRetryError::http(e)),
             }
         })
-        .map_err(|e| VykarError::Other(format!("S3 GET_RANGE {key}: {e}")))
+        .map_err(|e| s3_body_error("GET_RANGE", key, e))
     }
 
     fn create_dir(&self, key: &str) -> Result<()> {
@@ -368,16 +368,52 @@ impl StorageBackend for S3Backend {
         } else {
             self.full_key(&format!("{key}/"))
         };
-        let url = self
-            .bucket
-            .put_object(Some(&self.credentials), &dir_key)
-            .sign(PRESIGN_DURATION);
+        let content_type = "application/octet-stream";
+        let content_md5 = base64::engine::general_purpose::STANDARD.encode(Md5::digest(b""));
+
+        let mut action = self.bucket.put_object(Some(&self.credentials), &dir_key);
+        action.headers_mut().insert("content-type", content_type);
+        action.headers_mut().insert("content-md5", &content_md5);
+        let url = action.sign(PRESIGN_DURATION);
 
         self.retry_call(&format!("MKDIR {key}"), || {
-            self.agent.put(url.as_str()).send_bytes(&[])
+            self.agent
+                .put(url.as_str())
+                .set("content-type", content_type)
+                .set("content-md5", &content_md5)
+                .send_bytes(&[])
         })
-        .map_err(|e| VykarError::Other(format!("S3 MKDIR {key}: {e}")))?;
+        .map_err(|e| s3_error("MKDIR", key, e))?;
         Ok(())
+    }
+}
+
+/// Convert a `ureq::Error` into `VykarError`, extracting the S3 XML
+/// response body from HTTP status errors for diagnostic logging.
+fn s3_error(op: &str, key: &str, err: ureq::Error) -> VykarError {
+    match err {
+        ureq::Error::Status(code, response) => {
+            let body = response.into_string().unwrap_or_default();
+            // Truncate excessively long error bodies.
+            let truncated;
+            let body = if body.len() > 1024 {
+                truncated = format!("{}...(truncated)", &body[..body.floor_char_boundary(1024)]);
+                &truncated
+            } else {
+                &body
+            };
+            tracing::debug!("S3 {op} {key}: HTTP {code}: {body}");
+            VykarError::Other(format!("S3 {op} {key}: HTTP {code}: {body}"))
+        }
+        ureq::Error::Transport(t) => VykarError::Other(format!("S3 {op} {key}: {t}")),
+    }
+}
+
+/// Like [`s3_error`] but accepts [`HttpRetryError`](crate::retry::HttpRetryError).
+fn s3_body_error(op: &str, key: &str, err: crate::retry::HttpRetryError) -> VykarError {
+    match err {
+        crate::retry::HttpRetryError::Http(e) => s3_error(op, key, *e),
+        other => VykarError::Other(format!("S3 {op} {key}: {other}")),
     }
 }
 
@@ -385,15 +421,25 @@ impl StorageBackend for S3Backend {
 impl S3Backend {
     fn put_bytes(&self, key: &str, data: &[u8]) -> Result<()> {
         let full_key = self.full_key(key);
-        let url = self
-            .bucket
-            .put_object(Some(&self.credentials), &full_key)
-            .sign(PRESIGN_DURATION);
+        let content_type = "application/octet-stream";
+        // Content-MD5 is required for S3 buckets with Object Lock enabled.
+        let content_md5 = base64::engine::general_purpose::STANDARD.encode(Md5::digest(data));
+
+        let mut action = self.bucket.put_object(Some(&self.credentials), &full_key);
+        // Sign content-type and content-md5 so the presigned URL covers the
+        // headers the HTTP client sends with the body.
+        action.headers_mut().insert("content-type", content_type);
+        action.headers_mut().insert("content-md5", &content_md5);
+        let url = action.sign(PRESIGN_DURATION);
 
         self.retry_call(&format!("PUT {key}"), || {
-            self.agent.put(url.as_str()).send_bytes(data)
+            self.agent
+                .put(url.as_str())
+                .set("content-type", content_type)
+                .set("content-md5", &content_md5)
+                .send_bytes(data)
         })
-        .map_err(|e| VykarError::Other(format!("S3 PUT {key}: {e}")))?;
+        .map_err(|e| s3_error("PUT", key, e))?;
         Ok(())
     }
 }

@@ -21,6 +21,10 @@ blake2.workspace = true
 hex.workspace = true
 rand.workspace = true
 
+# Content-MD5 for S3 Object Lock compatibility
+md-5 = "0.10"
+base64 = "0.22"
+
 # URL parsing
 url = "2"
 percent-encoding = "2"
