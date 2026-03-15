@@ -7,7 +7,7 @@ use vykar_core::app::RuntimeConfig;
 use vykar_core::config::{self, ConfigSource, EncryptionModeConfig, ResolvedRepo, ScheduleConfig};
 
 use crate::dispatch::{run_default_actions, warn_if_untrusted_rest};
-use crate::signal::{RELOAD, SHUTDOWN};
+use crate::signal::{RELOAD, SHUTDOWN, TRIGGER};
 
 /// Load and validate daemon config from the given source.
 /// Returns the resolved repos and merged schedule, or an error describing
@@ -140,6 +140,27 @@ pub(crate) fn run_daemon(source: ConfigSource) -> Result<(), Box<dyn std::error:
                         "configuration reload rejected, continuing with previous config"
                     );
                 }
+            }
+        }
+
+        // Check for SIGUSR1 ad-hoc trigger
+        if TRIGGER.load(Ordering::SeqCst) {
+            TRIGGER.store(false, Ordering::SeqCst);
+            tracing::info!("SIGUSR1 received, triggering immediate backup");
+            run_backup_cycle(&repos);
+
+            if SHUTDOWN.load(Ordering::SeqCst) {
+                tracing::info!("shutdown signal received, exiting");
+                return Ok(());
+            }
+
+            // If the scheduled slot was missed during the ad-hoc cycle, recalculate
+            // next_run from now. Otherwise leave next_run untouched — the scheduled
+            // cadence is preserved.
+            if Instant::now() >= next_run {
+                let delay = scheduler::next_run_delay(&schedule)?;
+                next_run = Instant::now() + delay;
+                log_next_run(delay);
             }
         }
 

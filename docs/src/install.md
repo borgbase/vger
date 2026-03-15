@@ -93,6 +93,16 @@ With Docker Compose:
 
 The daemon logs whether the reload succeeded or was rejected (invalid config).
 
+### Triggering a backup
+
+Send `SIGUSR1` to trigger an immediate backup cycle without waiting for the next scheduled run:
+
+    docker kill --signal=USR1 vykar-daemon
+
+With Docker Compose:
+
+    docker compose kill -s USR1 vykar
+
 ### Notes
 - Use `-it` with `docker run` for interactive commands to get progress bar output (e.g. `docker run --rm -it ...`)
 - Set `--hostname` to a stable name — Docker assigns random hostnames that appear in snapshot metadata

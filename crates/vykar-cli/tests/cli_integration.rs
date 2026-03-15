@@ -1319,6 +1319,107 @@ fn cli_daemon_on_startup_not_retriggered_on_reload() {
 
 #[test]
 #[cfg(unix)]
+fn cli_daemon_sigusr1_triggers_immediate_backup() {
+    let fx = CliFixture::new();
+    let config = format!(
+        "repositories:\n  - url: {}\nencryption:\n  mode: none\nsources: []\nschedule:\n  enabled: true\n  every: \"1h\"\n  on_startup: false\n",
+        yaml_quote_path(&fx.repo_dir)
+    );
+    std::fs::write(&fx.config_path, config).unwrap();
+    let cfg = fx.config_path.to_string_lossy().to_string();
+
+    fx.run_ok(&["--config", &cfg, "init"]);
+
+    let (mut child, logs) = spawn_daemon(&fx, &cfg);
+
+    // Wait for the daemon to enter its main loop (signal handlers installed)
+    assert!(
+        logs.wait_for("next backup scheduled", Duration::from_secs(10)),
+        "daemon should log next backup scheduled, got stderr:\n{}",
+        logs.snapshot()
+    );
+
+    // Send SIGUSR1 to trigger an immediate backup
+    send_signal(&child, "-USR1");
+
+    assert!(
+        logs.wait_for("SIGUSR1 received", Duration::from_secs(5)),
+        "should see SIGUSR1 log, got stderr:\n{}",
+        logs.snapshot()
+    );
+
+    assert!(
+        logs.wait_for("Summary", Duration::from_secs(15)),
+        "SIGUSR1 should trigger a backup cycle, got stderr:\n{}",
+        logs.snapshot()
+    );
+
+    send_signal(&child, "-TERM");
+    wait_for_exit(&mut child, 10);
+}
+
+#[test]
+#[cfg(unix)]
+fn cli_daemon_sigusr1_preserves_schedule() {
+    let fx = CliFixture::new();
+    let config = format!(
+        "repositories:\n  - url: {}\nencryption:\n  mode: none\nsources: []\nschedule:\n  enabled: true\n  every: \"1h\"\n  on_startup: true\n",
+        yaml_quote_path(&fx.repo_dir)
+    );
+    std::fs::write(&fx.config_path, config).unwrap();
+    let cfg = fx.config_path.to_string_lossy().to_string();
+
+    fx.run_ok(&["--config", &cfg, "init"]);
+
+    let (mut child, logs) = spawn_daemon(&fx, &cfg);
+
+    // Wait for the on_startup cycle to complete and next_run to be scheduled
+    assert!(
+        logs.wait_for("next backup scheduled", Duration::from_secs(15)),
+        "daemon should schedule next backup after startup cycle, got stderr:\n{}",
+        logs.snapshot()
+    );
+
+    // Snapshot the log position before SIGUSR1
+    let pre_signal_log = logs.snapshot();
+    let pre_signal_len = pre_signal_log.len();
+
+    // Send SIGUSR1 to trigger an ad-hoc backup
+    send_signal(&child, "-USR1");
+
+    assert!(
+        logs.wait_for("SIGUSR1 received", Duration::from_secs(5)),
+        "should see SIGUSR1 log, got stderr:\n{}",
+        logs.snapshot()
+    );
+
+    // Give it a moment to finish the cycle
+    for _ in 0..50 {
+        std::thread::sleep(Duration::from_millis(100));
+        let current = logs.snapshot();
+        if current[pre_signal_len..].contains("backup cycle finished") {
+            break;
+        }
+    }
+
+    send_signal(&child, "-TERM");
+    wait_for_exit(&mut child, 10);
+
+    // Check that "next backup scheduled" does NOT appear after the SIGUSR1 line —
+    // this confirms next_run was not recalculated (the ~1h schedule is preserved).
+    let final_log = logs.snapshot();
+    let post_signal_final = &final_log[pre_signal_len..];
+    let sigusr1_pos = post_signal_final.find("SIGUSR1 received").unwrap();
+    let after_sigusr1 = &post_signal_final[sigusr1_pos..];
+
+    assert!(
+        !after_sigusr1.contains("next backup scheduled"),
+        "next_run should NOT be recalculated when ad-hoc cycle finishes before scheduled slot.\nPost-SIGUSR1 log:\n{after_sigusr1}"
+    );
+}
+
+#[test]
+#[cfg(unix)]
 fn cli_daemon_trust_repo_rejected() {
     let fx = CliFixture::new();
     let config = format!(

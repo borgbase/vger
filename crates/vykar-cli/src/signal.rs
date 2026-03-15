@@ -7,6 +7,10 @@ pub static SHUTDOWN: AtomicBool = AtomicBool::new(false);
 /// The daemon checks this between backup cycles and re-reads config.
 pub static RELOAD: AtomicBool = AtomicBool::new(false);
 
+/// Global trigger flag (Unix only). Set to `true` on SIGUSR1.
+/// The daemon checks this between backup cycles and runs an immediate backup.
+pub static TRIGGER: AtomicBool = AtomicBool::new(false);
+
 /// Install signal handlers for cooperative shutdown.
 ///
 /// First signal sets [`SHUTDOWN`] and restores the default handler so a
@@ -27,6 +31,10 @@ pub fn install_signal_handlers() {
             libc::signal(
                 libc::SIGHUP,
                 unix_reload_handler as *const () as libc::sighandler_t,
+            );
+            libc::signal(
+                libc::SIGUSR1,
+                unix_trigger_handler as *const () as libc::sighandler_t,
             );
         }
     }
@@ -55,6 +63,12 @@ extern "C" fn unix_signal_handler(sig: libc::c_int) {
 extern "C" fn unix_reload_handler(_sig: libc::c_int) {
     RELOAD.store(true, Ordering::SeqCst);
     // Do NOT restore default handler — SIGHUP should be repeatable
+}
+
+#[cfg(unix)]
+extern "C" fn unix_trigger_handler(_sig: libc::c_int) {
+    TRIGGER.store(true, Ordering::SeqCst);
+    // Do NOT restore default handler — SIGUSR1 should be repeatable
 }
 
 #[cfg(windows)]

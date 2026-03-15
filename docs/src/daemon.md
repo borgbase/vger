@@ -30,6 +30,18 @@ Reload behavior:
 - If the new config is **invalid** (parse error, empty repositories, `schedule.enabled: false`, passphrase validation failure), the daemon logs a warning and continues with the previous config
 - If the new config is **valid**, repos and schedule are replaced and the next run time is recalculated
 
+## Ad-hoc backup via SIGUSR1
+
+Send `SIGUSR1` to the daemon to trigger an immediate backup cycle:
+
+```bash
+kill -USR1 $(pidof vykar)
+```
+
+- The cycle runs **between scheduled backups** — a cycle in progress runs to completion first, then the triggered cycle starts
+- The existing schedule is **preserved** when the ad-hoc cycle finishes before the next scheduled slot; if it overruns the slot, the next run is recalculated from the current time (same as after any regular cycle)
+- With systemd: `systemctl kill -s USR1 vykar`
+
 ## Deployment
 
 ### systemd
@@ -91,4 +103,12 @@ The default Docker entrypoint runs `vykar daemon`. See [Installing — Docker](i
 docker kill --signal=HUP vykar-daemon
 # or with Compose:
 docker compose kill -s HUP vykar
+```
+
+To trigger an immediate backup:
+
+```bash
+docker kill --signal=USR1 vykar-daemon
+# or with Compose:
+docker compose kill -s USR1 vykar
 ```
