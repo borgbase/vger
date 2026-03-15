@@ -6,10 +6,16 @@
 //! speedup on HDD for stat-dominated workloads (e.g. incremental backups
 //! where the file cache skips most reads).
 //!
+//! Filesystem detection via `statfs()` is performed per-directory to handle
+//! mixed-filesystem trees (e.g. ext4 root with Lustre submount). Only
+//! allowlisted filesystems get inode sorting; others fall back to filename
+//! order for deterministic snapshots.
+//!
 //! Non-Linux platforms continue using the `ignore`-based walker.
 
 use std::collections::VecDeque;
 use std::fs::FileType;
+use std::os::unix::ffi::OsStrExt;
 use std::os::unix::fs::DirEntryExt;
 use std::path::{Path, PathBuf};
 
@@ -20,6 +26,34 @@ use crate::platform::fs::{self, MetadataSummary};
 use vykar_types::error::{Result, VykarError};
 
 use super::{build_explicit_excludes, is_soft_io_error, should_skip_for_device};
+
+/// Filesystem magic numbers from linux/magic.h where inode order
+/// correlates with on-disk position.
+const EXT_SUPER_MAGIC: libc::__fsword_t = 0xEF53; // ext2/3/4
+const XFS_SUPER_MAGIC: libc::__fsword_t = 0x5846_5342; // "XFSB"
+const REISERFS_SUPER_MAGIC: libc::__fsword_t = 0x5265_4973;
+
+/// Returns true if inode-sorted stat reduces disk seeks on this filesystem.
+/// Allowlist-only: returns false on error or unknown filesystems.
+fn inode_sort_beneficial(path: &Path) -> bool {
+    let c_path = match std::ffi::CString::new(path.as_os_str().as_bytes()) {
+        Ok(p) => p,
+        Err(_) => {
+            tracing::debug!(path = %path.display(), "statfs skipped: path contains null byte");
+            return false;
+        }
+    };
+    let mut buf: libc::statfs = unsafe { std::mem::zeroed() };
+    let rc = unsafe { libc::statfs(c_path.as_ptr(), &mut buf) };
+    if rc != 0 {
+        tracing::debug!(path = %path.display(), "statfs failed, disabling inode sort");
+        return false;
+    }
+    matches!(
+        buf.f_type,
+        EXT_SUPER_MAGIC | XFS_SUPER_MAGIC | REISERFS_SUPER_MAGIC
+    )
+}
 
 /// A filesystem entry that has been statted and passed all filters.
 pub(in crate::commands::backup) struct WalkedEntry {
@@ -121,6 +155,12 @@ impl InodeSortedWalk {
                 std::env::current_dir().unwrap_or_default().join(source)
             }
         });
+
+        tracing::debug!(
+            inode_sort = inode_sort_beneficial(&abs_source),
+            path = %abs_source.display(),
+            "source filesystem detection"
+        );
 
         let mut gitignore_stack = Vec::new();
         if git_ignore {
@@ -288,8 +328,14 @@ impl InodeSortedWalk {
             true
         });
 
-        // Phase 3: Sort by inode number.
-        raw_entries.sort_unstable_by_key(|e| e.ino);
+        // Phase 3: Sort entries for sequential disk access.
+        if inode_sort_beneficial(dir) {
+            // ext4/xfs/reiserfs: inode order ≈ disk order → sequential stat.
+            raw_entries.sort_unstable_by_key(|e| e.ino);
+        } else {
+            // Other filesystems: filename order for deterministic snapshots.
+            raw_entries.sort_unstable_by(|a, b| a.path.cmp(&b.path));
+        }
 
         // Phase 4: Stat in inode order and post-stat filter.
         let mut events: VecDeque<WalkEvent> = VecDeque::new();
@@ -750,6 +796,24 @@ mod tests {
 
         paths.sort();
         assert_eq!(paths, vec!["a.txt"]);
+    }
+
+    #[test]
+    fn inode_sort_beneficial_tmpfs() {
+        // /tmp is typically tmpfs on Linux — inode sort should not be beneficial.
+        let tmp = tempfile::tempdir().unwrap();
+        let result = inode_sort_beneficial(tmp.path());
+        // On CI (tmpfs/overlay) this should be false. On ext4 it would be true.
+        // Either way, it must not panic.
+        let _ = result;
+    }
+
+    #[test]
+    fn inode_sort_beneficial_nonexistent() {
+        // Non-existent path should return false (statfs fails).
+        assert!(!inode_sort_beneficial(Path::new(
+            "/nonexistent/path/that/does/not/exist"
+        )));
     }
 
     #[test]
