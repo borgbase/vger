@@ -21,9 +21,9 @@ use vykar_types::error::{Result, VykarError};
 
 use super::chunk_process::{classify_chunk, WorkerChunk};
 use super::commit::process_worker_chunks;
-use super::walk::{
-    build_configured_walker, is_soft_io_error, is_soft_walk_error, read_item_xattrs,
-};
+#[cfg(not(target_os = "linux"))]
+use super::walk::{build_configured_walker, is_soft_walk_error};
+use super::walk::{is_soft_io_error, read_item_xattrs};
 #[cfg(target_os = "linux")]
 use super::walk::{rel_path_from_abs, InodeSortedWalk, WalkEvent};
 use super::{append_item_to_stream, emit_progress, emit_stats_progress};

@@ -86,7 +86,6 @@ struct RawDirEntry {
     ino: u64,
     /// From `d_type`; may be unreliable on some filesystems.
     is_dir_hint: Option<bool>,
-    is_symlink_hint: bool,
 }
 
 /// One level in the DFS stack.
@@ -280,16 +279,15 @@ impl InodeSortedWalk {
             let path = entry.path();
 
             // d_type from readdir — may be DT_UNKNOWN on some filesystems.
-            let (is_dir_hint, is_symlink_hint) = match entry.file_type() {
-                Ok(ft) => (Some(ft.is_dir()), ft.is_symlink()),
-                Err(_) => (None, false),
+            let is_dir_hint = match entry.file_type() {
+                Ok(ft) => Some(ft.is_dir()),
+                Err(_) => None,
             };
 
             raw_entries.push(RawDirEntry {
                 path,
                 ino,
                 is_dir_hint,
-                is_symlink_hint,
             });
         }
 
@@ -319,10 +317,11 @@ impl InodeSortedWalk {
             }
 
             // Marker file exclusion (directories only).
-            if is_dir && !self.markers.is_empty() {
-                if self.markers.iter().any(|m| raw.path.join(m).exists()) {
-                    return false;
-                }
+            if is_dir
+                && !self.markers.is_empty()
+                && self.markers.iter().any(|m| raw.path.join(m).exists())
+            {
+                return false;
             }
 
             true
@@ -380,10 +379,11 @@ impl InodeSortedWalk {
                     continue;
                 }
 
-                if actual_is_dir && !self.markers.is_empty() {
-                    if self.markers.iter().any(|m| raw.path.join(m).exists()) {
-                        continue;
-                    }
+                if actual_is_dir
+                    && !self.markers.is_empty()
+                    && self.markers.iter().any(|m| raw.path.join(m).exists())
+                {
+                    continue;
                 }
             }
 
@@ -655,7 +655,7 @@ mod tests {
     /// excludes, marker files, and gitignore.
     #[test]
     fn filter_equivalence_with_ignore_walker() {
-        use super::build_configured_walker;
+        use super::super::build_configured_walker;
 
         let tmp = tempfile::tempdir().unwrap();
         let root = tmp.path();

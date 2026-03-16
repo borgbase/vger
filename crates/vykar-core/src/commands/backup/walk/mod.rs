@@ -2,6 +2,7 @@ use std::collections::HashMap;
 use std::path::Path;
 use std::sync::Arc;
 
+#[cfg(any(not(target_os = "linux"), test))]
 use ignore::WalkBuilder;
 use tracing::warn;
 
@@ -37,6 +38,7 @@ fn is_eio(_e: &std::io::Error) -> bool {
 }
 
 /// Returns `true` for walk errors caused by soft I/O conditions.
+#[cfg(not(target_os = "linux"))]
 pub(super) fn is_soft_walk_error(e: &ignore::Error) -> bool {
     e.io_error().is_some_and(is_soft_io_error)
 }
@@ -74,6 +76,7 @@ pub(crate) fn should_skip_for_device(
 }
 
 /// Configure a WalkBuilder with standard filters (excludes, one_file_system, markers).
+#[cfg(any(not(target_os = "linux"), test))]
 pub(super) fn build_configured_walker(
     source: &Path,
     exclude_patterns: &[String],
@@ -390,7 +393,7 @@ fn walk_source<'a>(
 ) -> Box<dyn Iterator<Item = Result<WalkEntry>> + Send + 'a> {
     #[cfg(target_os = "linux")]
     {
-        return walk_source_inode_sorted(
+        walk_source_inode_sorted(
             source_path,
             multi_path,
             exclude_patterns,
@@ -401,7 +404,7 @@ fn walk_source<'a>(
             file_cache,
             segment_size,
             parent_reuse_index,
-        );
+        )
     }
 
     #[cfg(not(target_os = "linux"))]
