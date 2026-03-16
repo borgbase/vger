@@ -582,39 +582,33 @@ fn walked_entry_to_walk_items(
     if entry_type == ItemType::RegularFile && metadata_summary.size > 0 {
         let abs_path = walked.abs_path.to_string_lossy().to_string();
 
-        let cache_hit = file_cache.lookup(
-            &abs_path,
-            metadata_summary.device,
-            metadata_summary.inode,
-            metadata_summary.mtime_ns,
-            metadata_summary.ctime_ns,
-            metadata_summary.size,
-        );
-
-        if let Some(cached_refs) = cache_hit {
+        let cached_refs = file_cache
+            .lookup(
+                &abs_path,
+                metadata_summary.device,
+                metadata_summary.inode,
+                metadata_summary.mtime_ns,
+                metadata_summary.ctime_ns,
+                metadata_summary.size,
+            )
+            .map(Vec::as_slice)
+            .or_else(|| {
+                parent_reuse_index.and_then(|idx| {
+                    idx.lookup(
+                        &abs_path,
+                        metadata_summary.size,
+                        metadata_summary.mtime_ns,
+                        metadata_summary.ctime_ns,
+                    )
+                })
+            });
+        if let Some(cached_refs) = cached_refs {
             return WalkItems::One(Some(Ok(WalkEntry::CacheHit {
                 item,
                 abs_path,
                 metadata: metadata_summary,
                 cached_refs: cached_refs.to_vec(),
             })));
-        }
-
-        // Parent fallback: try parent reuse index when local cache misses.
-        if let Some(parent_idx) = parent_reuse_index {
-            if let Some(parent_refs) = parent_idx.lookup(
-                &abs_path,
-                metadata_summary.size,
-                metadata_summary.mtime_ns,
-                metadata_summary.ctime_ns,
-            ) {
-                return WalkItems::One(Some(Ok(WalkEntry::CacheHit {
-                    item,
-                    abs_path,
-                    metadata: metadata_summary,
-                    cached_refs: parent_refs.to_vec(),
-                })));
-            }
         }
 
         let file_size = metadata_summary.size;
@@ -820,40 +814,33 @@ fn walk_source_ignore<'a>(
             if entry_type == ItemType::RegularFile && metadata_summary.size > 0 {
                 let abs_path = entry.path().to_string_lossy().to_string();
 
-                // Check file cache (read-only).
-                let cache_hit = file_cache.lookup(
-                    &abs_path,
-                    metadata_summary.device,
-                    metadata_summary.inode,
-                    metadata_summary.mtime_ns,
-                    metadata_summary.ctime_ns,
-                    metadata_summary.size,
-                );
-
-                if let Some(cached_refs) = cache_hit {
+                let cached_refs = file_cache
+                    .lookup(
+                        &abs_path,
+                        metadata_summary.device,
+                        metadata_summary.inode,
+                        metadata_summary.mtime_ns,
+                        metadata_summary.ctime_ns,
+                        metadata_summary.size,
+                    )
+                    .map(Vec::as_slice)
+                    .or_else(|| {
+                        parent_reuse_index.and_then(|idx| {
+                            idx.lookup(
+                                &abs_path,
+                                metadata_summary.size,
+                                metadata_summary.mtime_ns,
+                                metadata_summary.ctime_ns,
+                            )
+                        })
+                    });
+                if let Some(cached_refs) = cached_refs {
                     return WalkItems::One(Some(Ok(WalkEntry::CacheHit {
                         item,
                         abs_path,
                         metadata: metadata_summary,
                         cached_refs: cached_refs.to_vec(),
                     })));
-                }
-
-                // Parent fallback: try parent reuse index when local cache misses.
-                if let Some(parent_idx) = parent_reuse_index {
-                    if let Some(parent_refs) = parent_idx.lookup(
-                        &abs_path,
-                        metadata_summary.size,
-                        metadata_summary.mtime_ns,
-                        metadata_summary.ctime_ns,
-                    ) {
-                        return WalkItems::One(Some(Ok(WalkEntry::CacheHit {
-                            item,
-                            abs_path,
-                            metadata: metadata_summary,
-                            cached_refs: parent_refs.to_vec(),
-                        })));
-                    }
                 }
 
                 let file_size = metadata_summary.size;

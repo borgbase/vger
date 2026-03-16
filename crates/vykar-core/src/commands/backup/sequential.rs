@@ -269,30 +269,31 @@ pub(super) fn process_regular_file_item(
     let abs_path = entry_path.to_string_lossy().to_string();
     let file_size = metadata_summary.size;
 
-    let cache_hit = repo.file_cache().lookup(
-        &abs_path,
-        metadata_summary.device,
-        metadata_summary.inode,
-        metadata_summary.mtime_ns,
-        metadata_summary.ctime_ns,
-        file_size,
-    );
-
-    // Combine local cache and parent fallback into a single hit path.
-    let effective_hit = cache_hit.map(|refs| refs.to_vec()).or_else(|| {
-        parent_reuse_index.and_then(|idx| {
-            idx.lookup(
-                &abs_path,
-                file_size,
-                metadata_summary.mtime_ns,
-                metadata_summary.ctime_ns,
-            )
-            .map(|refs| refs.to_vec())
-        })
-    });
+    let effective_hit = repo
+        .file_cache()
+        .lookup(
+            &abs_path,
+            metadata_summary.device,
+            metadata_summary.inode,
+            metadata_summary.mtime_ns,
+            metadata_summary.ctime_ns,
+            file_size,
+        )
+        .map(Vec::as_slice)
+        .or_else(|| {
+            parent_reuse_index.and_then(|idx| {
+                idx.lookup(
+                    &abs_path,
+                    file_size,
+                    metadata_summary.mtime_ns,
+                    metadata_summary.ctime_ns,
+                )
+            })
+        });
 
     if let Some(cached_refs) = effective_hit {
-        super::commit::commit_cache_hit(repo, item, cached_refs, stats);
+        let cached_refs = cached_refs.to_vec();
+        super::commit::commit_cache_hit(repo, item, cached_refs, stats)?;
 
         if verbose {
             emit_progress(
@@ -678,29 +679,30 @@ pub(super) fn process_source_path(
                 // Flush batch before cache-hit check since it may need walk-order items.
                 let abs_path = entry_path.to_string_lossy().to_string();
 
-                let cache_hit = repo.file_cache().lookup(
-                    &abs_path,
-                    metadata_summary.device,
-                    metadata_summary.inode,
-                    metadata_summary.mtime_ns,
-                    metadata_summary.ctime_ns,
-                    metadata_summary.size,
-                );
-
-                // Combine local cache hit with parent fallback.
-                let effective_hit = cache_hit.map(|refs| refs.to_vec()).or_else(|| {
-                    parent_reuse_index.and_then(|idx| {
-                        idx.lookup(
-                            &abs_path,
-                            metadata_summary.size,
-                            metadata_summary.mtime_ns,
-                            metadata_summary.ctime_ns,
-                        )
-                        .map(|refs| refs.to_vec())
-                    })
-                });
+                let effective_hit = repo
+                    .file_cache()
+                    .lookup(
+                        &abs_path,
+                        metadata_summary.device,
+                        metadata_summary.inode,
+                        metadata_summary.mtime_ns,
+                        metadata_summary.ctime_ns,
+                        metadata_summary.size,
+                    )
+                    .map(Vec::as_slice)
+                    .or_else(|| {
+                        parent_reuse_index.and_then(|idx| {
+                            idx.lookup(
+                                &abs_path,
+                                metadata_summary.size,
+                                metadata_summary.mtime_ns,
+                                metadata_summary.ctime_ns,
+                            )
+                        })
+                    });
 
                 if let Some(cached_refs) = effective_hit {
+                    let cached_refs = cached_refs.to_vec();
                     // Flush batch to preserve walk order before the cache-hit item.
                     flush_cross_file_batch(
                         &mut cross_batch,
@@ -724,7 +726,7 @@ pub(super) fn process_source_path(
                         });
                     }
 
-                    super::commit::commit_cache_hit(repo, &mut item, cached_refs, stats);
+                    super::commit::commit_cache_hit(repo, &mut item, cached_refs, stats)?;
 
                     if verbose {
                         emit_progress(

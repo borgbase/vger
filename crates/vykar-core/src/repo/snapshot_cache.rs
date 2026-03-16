@@ -4,7 +4,7 @@ use std::path::{Path, PathBuf};
 use serde::{Deserialize, Serialize};
 use tracing::{debug, warn};
 
-use super::file_cache::repo_cache_dir;
+use super::file_cache::{atomic_write, repo_cache_dir};
 use super::format::{pack_object_with_context, unpack_object_expect_with_context, ObjectType};
 use super::manifest::SnapshotEntry;
 use vykar_crypto::CryptoEngine;
@@ -81,7 +81,7 @@ impl SnapshotListCache {
             &plaintext,
             crypto,
         )?;
-        std::fs::write(&path, &packed)?;
+        atomic_write(&path, &packed)?;
         Ok(())
     }
 

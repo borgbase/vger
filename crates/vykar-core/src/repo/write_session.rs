@@ -32,6 +32,14 @@ const PENDING_INDEX_OBJECT_CONTEXT: &[u8] = b"pending_index";
 /// 3x the 15-minute refresh interval — if a session missed 2 refreshes, it's dead.
 const RECOVERY_STALE_SECS: i64 = 45 * 60;
 
+/// Result of recovering pending index journals from interrupted sessions.
+pub struct PendingIndexRecovery {
+    /// Total number of chunk entries recovered.
+    pub recovered_chunks: usize,
+    /// Session IDs whose journals were successfully recovered.
+    pub recovered_sessions: Vec<String>,
+}
+
 /// Result of attempting to recover a single session's pending index journal.
 enum RecoverResult {
     /// No journal data found at key.
@@ -365,7 +373,7 @@ impl WriteSessionState {
         storage: &dyn StorageBackend,
         crypto: &dyn CryptoEngine,
         chunk_index: &ChunkIndex,
-    ) -> Result<usize> {
+    ) -> Result<PendingIndexRecovery> {
         let all_keys = storage.list(SESSIONS_PREFIX)?;
         let now = chrono::Utc::now();
 
@@ -417,6 +425,7 @@ impl WriteSessionState {
             .collect();
 
         let mut total_recovered = 0usize;
+        let mut recovered_sessions = Vec::new();
         for (index_key, session_id) in &index_keys {
             match marker_states.get(session_id) {
                 None => {}                     // orphan — no .json, recoverable
@@ -428,6 +437,7 @@ impl WriteSessionState {
             match self.recover_single_index(storage, crypto, chunk_index, index_key) {
                 Ok(RecoverResult::Ok(n)) => {
                     self.recovered_index_keys.push(index_key.clone());
+                    recovered_sessions.push(session_id.clone());
                     total_recovered += n;
                 }
                 Ok(RecoverResult::Corrupt) => {
@@ -451,7 +461,10 @@ impl WriteSessionState {
                 "recovered pending index entries from interrupted sessions"
             );
         }
-        Ok(total_recovered)
+        Ok(PendingIndexRecovery {
+            recovered_chunks: total_recovered,
+            recovered_sessions,
+        })
     }
 
     /// Attempt to recover a single session's pending index journal.
@@ -760,10 +773,14 @@ mod tests {
         let mut ws = WriteSessionState::new(1024, 1024, 1);
         ws.session_id = "new".to_string();
 
-        let recovered = ws
+        let recovery = ws
             .recover_pending_index(&storage, &crypto, &chunk_index)
             .unwrap();
-        assert!(recovered > 0, "should recover chunks from orphan journal");
+        assert!(
+            recovery.recovered_chunks > 0,
+            "should recover chunks from orphan journal"
+        );
+        assert_eq!(recovery.recovered_sessions, vec!["old"]);
         assert_eq!(ws.recovered_index_keys.len(), 1);
         assert_eq!(ws.recovered_index_keys[0], index_key);
     }
@@ -783,10 +800,14 @@ mod tests {
         let mut ws = WriteSessionState::new(1024, 1024, 1);
         ws.session_id = "current".to_string();
 
-        let recovered = ws
+        let recovery = ws
             .recover_pending_index(&storage, &crypto, &chunk_index)
             .unwrap();
-        assert!(recovered > 0, "should recover chunks from stale session");
+        assert!(
+            recovery.recovered_chunks > 0,
+            "should recover chunks from stale session"
+        );
+        assert_eq!(recovery.recovered_sessions, vec!["stale"]);
         assert_eq!(ws.recovered_index_keys.len(), 1);
         assert_eq!(ws.recovered_index_keys[0], index_key);
         // .json marker must NOT be tracked for deletion — it's managed by
@@ -812,10 +833,14 @@ mod tests {
         let mut ws = WriteSessionState::new(1024, 1024, 1);
         ws.session_id = "current".to_string();
 
-        let recovered = ws
+        let recovery = ws
             .recover_pending_index(&storage, &crypto, &chunk_index)
             .unwrap();
-        assert_eq!(recovered, 0, "should skip active session's journal");
+        assert_eq!(
+            recovery.recovered_chunks, 0,
+            "should skip active session's journal"
+        );
+        assert!(recovery.recovered_sessions.is_empty());
         assert!(ws.recovered_index_keys.is_empty());
     }
 
@@ -836,13 +861,14 @@ mod tests {
         let mut ws = WriteSessionState::new(1024, 1024, 1);
         ws.session_id = "current".to_string();
 
-        let recovered = ws
+        let recovery = ws
             .recover_pending_index(&storage, &crypto, &chunk_index)
             .unwrap();
         assert_eq!(
-            recovered, 0,
+            recovery.recovered_chunks, 0,
             "should skip session with unknown marker state"
         );
+        assert!(recovery.recovered_sessions.is_empty());
         assert!(ws.recovered_index_keys.is_empty());
     }
 
@@ -864,10 +890,14 @@ mod tests {
         let mut ws = WriteSessionState::new(1024, 1024, 1);
         ws.session_id = "current".to_string();
 
-        let recovered = ws
+        let recovery = ws
             .recover_pending_index(&storage, &crypto, &chunk_index)
             .unwrap();
-        assert!(recovered > 0, "should recover from the valid journal");
+        assert!(
+            recovery.recovered_chunks > 0,
+            "should recover from the valid journal"
+        );
+        assert_eq!(recovery.recovered_sessions, vec!["valid"]);
 
         // Valid journal tracked for cleanup.
         assert_eq!(ws.recovered_index_keys.len(), 1);
@@ -929,10 +959,11 @@ mod tests {
         let mut ws = WriteSessionState::new(1024, 1024, 1);
         ws.session_id = "current".to_string();
 
-        let recovered = ws
+        let recovery = ws
             .recover_pending_index(&storage, &crypto, &chunk_index)
             .unwrap();
-        assert_eq!(recovered, 0, "all chunks already indexed");
+        assert_eq!(recovery.recovered_chunks, 0, "all chunks already indexed");
+        assert_eq!(recovery.recovered_sessions, vec!["old"]);
         // The journal should still be tracked for cleanup.
         assert_eq!(
             ws.recovered_index_keys.len(),

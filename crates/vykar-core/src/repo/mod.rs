@@ -779,6 +779,18 @@ impl Repository {
         self.chunk_index.contains(id)
     }
 
+    /// Resolve a cache-hit chunk reference by bumping its refcount.
+    /// Returns the stored size from the authoritative index/recovered entry.
+    /// Errors if the chunk is not found in any state (committed, recovered,
+    /// or pending pack writer) — this indicates storage corruption.
+    pub fn reuse_cached_chunk_ref(&mut self, chunk_id: &ChunkId) -> Result<u32> {
+        self.bump_ref_if_exists(chunk_id).ok_or_else(|| {
+            VykarError::Other(format!(
+                "cache hit references unresolvable chunk {chunk_id}"
+            ))
+        })
+    }
+
     /// Increment the refcount for a chunk (works in both normal and dedup modes).
     pub fn increment_chunk_ref(&mut self, id: &ChunkId) {
         if let Some(ref mut ws) = self.write_session {
@@ -979,7 +991,7 @@ impl Repository {
         &mut self,
         snapshot_entry: manifest::SnapshotEntry,
         snapshot_packed: Vec<u8>,
-        mut new_file_cache: file_cache::FileCache,
+        new_file_cache: &mut file_cache::FileCache,
     ) -> Result<()> {
         // 1. Flush all pending packs and wait for uploads.
         self.flush_packs()?;
@@ -1817,8 +1829,7 @@ impl Repository {
     /// `pending_index` file. Verifies each pack exists before adding entries.
     ///
     /// Must be called inside the repo lock, before `enable_tiered_dedup_mode()`.
-    /// Returns the number of recovered chunk entries.
-    pub fn recover_pending_index(&mut self) -> Result<usize> {
+    pub fn recover_pending_index(&mut self) -> Result<write_session::PendingIndexRecovery> {
         self.write_session
             .as_mut()
             .expect("no active write session")

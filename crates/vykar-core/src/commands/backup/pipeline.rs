@@ -564,7 +564,7 @@ fn consume_processed_entry(
                 });
             }
 
-            super::commit::commit_cache_hit(repo, &mut item, cached_refs, stats);
+            super::commit::commit_cache_hit(repo, &mut item, cached_refs, stats)?;
 
             if verbose {
                 super::emit_progress(

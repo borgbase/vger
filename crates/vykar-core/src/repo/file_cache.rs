@@ -12,6 +12,18 @@ use vykar_crypto::CryptoEngine;
 use vykar_types::error::Result;
 use vykar_types::snapshot_id::SnapshotId;
 
+/// Atomic write via temp file + fsync + rename. On error the temp file is
+/// cleaned up automatically (NamedTempFile drops on panic/early return).
+pub(crate) fn atomic_write(path: &Path, data: &[u8]) -> std::io::Result<()> {
+    use std::io::Write;
+    let dir = path.parent().unwrap_or(Path::new("."));
+    let mut tmp = tempfile::NamedTempFile::new_in(dir)?;
+    tmp.write_all(data)?;
+    tmp.as_file().sync_data()?;
+    tmp.persist(path).map_err(|e| e.error)?;
+    Ok(())
+}
+
 use super::format::{
     pack_object_streaming_with_context, unpack_object_expect_with_context, ObjectType,
 };
@@ -147,6 +159,12 @@ impl FileCache {
     /// Called on the **read** cache before walk begins.
     pub fn set_active_for_lookup(&mut self, source_label: &str) {
         self.active_label = Some(source_label.to_string());
+    }
+
+    /// Clear the active lookup label so no section is searched.
+    /// Called when the cached section is invalid (pruned anchor, changed paths).
+    pub fn clear_active_for_lookup(&mut self) {
+        self.active_label = None;
     }
 
     /// Look up a file in the active section. Returns the cached chunk refs only if all
@@ -424,7 +442,7 @@ impl FileCache {
             actual_bytes = packed.len(),
             "file cache serialized"
         );
-        std::fs::write(&path, packed)?;
+        atomic_write(&path, &packed)?;
         Ok(())
     }
 }

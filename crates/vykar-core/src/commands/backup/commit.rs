@@ -85,7 +85,11 @@ pub(super) fn process_worker_chunks(
     Ok(())
 }
 
-/// Increment chunk refcounts, update stats, populate item.chunks.
+/// Resolve and bump refcounts for cache-hit chunks, update stats, populate item.chunks.
+///
+/// Uses `reuse_cached_chunk_ref` which correctly handles committed, recovered
+/// (with promotion), and pending chunks. Returns an error if any chunk is
+/// unresolvable — this indicates storage corruption, not a recoverable condition.
 ///
 /// Callers handle file-cache insertion themselves (path types differ).
 pub(super) fn commit_cache_hit(
@@ -93,16 +97,17 @@ pub(super) fn commit_cache_hit(
     item: &mut Item,
     cached_refs: Vec<ChunkRef>,
     stats: &mut SnapshotStats,
-) {
+) -> Result<()> {
     let mut file_original: u64 = 0;
     let mut file_compressed: u64 = 0;
     for cr in &cached_refs {
-        repo.increment_chunk_ref(&cr.id);
+        let stored_size = repo.reuse_cached_chunk_ref(&cr.id)?;
         file_original += cr.size as u64;
-        file_compressed += cr.csize as u64;
+        file_compressed += stored_size as u64;
     }
     stats.nfiles += 1;
     stats.original_size += file_original;
     stats.compressed_size += file_compressed;
     item.chunks = cached_refs;
+    Ok(())
 }

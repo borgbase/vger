@@ -310,12 +310,14 @@ pub fn run_with_progress(
 
         // Recover chunk→pack mappings from a previous interrupted session.
         match repo.recover_pending_index() {
-            Ok(0) => {}
-            Ok(n) => {
-                info!(
-                    recovered_chunks = n,
-                    "recovered pending index from interrupted session"
-                );
+            Ok(recovery) => {
+                if recovery.recovered_chunks > 0 {
+                    info!(
+                        recovered_chunks = recovery.recovered_chunks,
+                        sessions = recovery.recovered_sessions.len(),
+                        "recovered pending index from interrupted session"
+                    );
+                }
             }
             Err(e) => {
                 warn!("failed to recover pending index: {e}");
@@ -350,15 +352,16 @@ pub fn run_with_progress(
                     source_label,
                     "file cache: section valid, using cached metadata"
                 );
-            } else if let Some(reason) = repo
-                .file_cache()
-                .diagnose_section(source_label, source_paths)
-            {
-                info!(source_label, reason = %reason, "file cache: section invalid, cold start");
+                repo.file_cache_mut().set_active_for_lookup(source_label);
+            } else {
+                if let Some(reason) = repo
+                    .file_cache()
+                    .diagnose_section(source_label, source_paths)
+                {
+                    info!(source_label, reason = %reason, "file cache: section invalid, cold start");
+                }
+                repo.file_cache_mut().clear_active_for_lookup();
             }
-
-            // Prepare read cache: tell it which section to search during lookup.
-            repo.file_cache_mut().set_active_for_lookup(source_label);
 
             if !section_valid {
                 // Cold start: build parent reuse index from latest matching
@@ -407,6 +410,7 @@ pub fn run_with_progress(
 
         // Switch to tiered dedup mode to minimize memory during backup.
         repo.enable_tiered_dedup_mode();
+
         let dedup_filter = repo.dedup_filter();
 
         let time_start = Utc::now();
@@ -477,7 +481,7 @@ pub fn run_with_progress(
                 parent_reuse_index.as_ref(),
             );
             // Always restore before propagating — keeps repo.file_cache valid
-            // for abort-time save and for commit-time merge.
+            // for commit-time merge.
             repo.restore_file_cache(file_cache_snapshot);
             pipeline_result?;
         } else {
@@ -572,22 +576,24 @@ pub fn run_with_progress(
         Ok((snapshot_entry, snapshot_packed, new_file_cache, stats))
     })();
 
-    // On Phase 1 error: best-effort cleanup then deregister session.
-    let (snapshot_entry, snapshot_packed, new_file_cache, stats) = match phase1_result {
+    // On Phase 1 error: flush packs, deregister.
+    let (snapshot_entry, snapshot_packed, mut new_file_cache, stats) = match phase1_result {
         Ok(result) => result,
         Err(e) => {
             repo.flush_on_abort();
-            // Persist invalidated cache sections so stale entries don't survive
-            // on disk across repeated aborted runs.
-            if let Err(fc_err) = repo.save_file_cache_if_dirty() {
-                warn!("failed to save file cache on abort: {fc_err}");
-            }
+            // Do NOT save file cache on abort — the on-disk cache from the last
+            // successful run is still valid. Saving here would persist the
+            // depleted (invalidated) cache and destroy future cache hits.
             lock::deregister_session(repo.storage.as_ref(), &session_id);
             return Err(e);
         }
     };
 
     // ── Phase 2: Commit (exclusive lock) ────────────────────────────────
+    //
+    // new_file_cache is passed by &mut so the caller retains ownership.
+    // On success, commit_concurrent_session consumes the active section
+    // (merges it into the persistent cache).
 
     let commit_result = (|| -> Result<()> {
         let guard = lock::acquire_lock_with_retry(repo.storage.as_ref(), 10, 500)?;
@@ -595,11 +601,7 @@ pub fn run_with_progress(
         repo.set_lock_fence(fence);
 
         let result =
-            repo.commit_concurrent_session(snapshot_entry, snapshot_packed, new_file_cache);
-
-        if result.is_err() {
-            repo.flush_on_abort();
-        }
+            repo.commit_concurrent_session(snapshot_entry, snapshot_packed, &mut new_file_cache);
 
         // Deregister session while holding the lock.
         lock::deregister_session(repo.storage.as_ref(), &session_id);
@@ -624,8 +626,11 @@ pub fn run_with_progress(
         Ok(())
     })();
 
-    // If commit fails, deregister session as a safety net (may already be done).
     if commit_result.is_err() {
+        // flush_on_abort writes the remote sessions/<id>.index so the next
+        // run's recover_pending_index() can discover our packs. Must run on
+        // ALL Phase 2 failures (lock acquisition, commit, lock release).
+        repo.flush_on_abort();
         lock::deregister_session(repo.storage.as_ref(), &session_id);
     }
     commit_result?;

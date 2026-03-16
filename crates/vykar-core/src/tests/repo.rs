@@ -939,15 +939,16 @@ fn cross_session_pending_index_recovery() {
     repo2.begin_write_session().unwrap();
     repo2.set_write_session_id("bbb".to_string());
 
-    let recovered = repo2.recover_pending_index().unwrap();
+    let recovery = repo2.recover_pending_index().unwrap();
     assert!(
-        recovered > 0,
-        "should recover chunks from session aaa's journal, got {recovered}"
+        recovery.recovered_chunks > 0,
+        "should recover chunks from session aaa's journal, got {}",
+        recovery.recovered_chunks
     );
 
     // Verify that the recovered chunk count matches what we stored.
     assert_eq!(
-        recovered,
+        recovery.recovered_chunks,
         chunk_ids.len(),
         "recovered count should match stored chunk count"
     );
