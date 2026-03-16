@@ -48,6 +48,7 @@ Vykar is the fastest tool for both backup and restore, with the lowest CPU cost,
 | Crash recovery | Checkpoints, rollback | Atomic rename | Atomic rename ([caveats](https://github.com/rustic-rs/rustic/discussions/1537)) | Atomic blobs ([caveats](https://github.com/kopia/kopia/issues/4305)) | Journals + two-phase commit |
 | Prune / GC safety | Exclusive lock | Exclusive lock | Two-phase delete (23h) | Time-based GC (24h min) | Session-aware lock |
 | Data verification | `check --repair`, full verify | `check --read-data`, repair | Restic-compat check | Verify + optional ECC | `check --verify-data`, server offload |
+| Unchanged-file reuse | Persistent local filecache (v1 repo-wide; v2 per-series) | Parent snapshot tree | Parent snapshot tree(s) | Previous snapshot manifests/dirs | Per-source local filecache with parent-snapshot fallback |
 
 ### Security Model
 

@@ -7,7 +7,7 @@ use tracing::warn;
 
 use crate::config::ChunkerConfig;
 use crate::platform::fs;
-use crate::repo::file_cache::FileCache;
+use crate::repo::file_cache::{FileCache, ParentReuseIndex};
 use crate::snapshot::item::{ChunkRef, Item, ItemType};
 use vykar_types::error::{Result, VykarError};
 
@@ -267,6 +267,7 @@ pub(super) fn build_walk_iter<'a>(
     xattrs_enabled: bool,
     file_cache: &'a FileCache,
     segment_size: u64,
+    parent_reuse_index: Option<&'a ParentReuseIndex>,
 ) -> Box<dyn Iterator<Item = Result<WalkEntry>> + Send + 'a> {
     let iter = source_paths.iter().flat_map(move |source_path| {
         let source_started = std::iter::once(Ok(WalkEntry::SourceStarted {
@@ -283,6 +284,7 @@ pub(super) fn build_walk_iter<'a>(
             xattrs_enabled,
             file_cache,
             segment_size,
+            parent_reuse_index,
         );
 
         let source_finished = std::iter::once(Ok(WalkEntry::SourceFinished {
@@ -384,6 +386,7 @@ fn walk_source<'a>(
     xattrs_enabled: bool,
     file_cache: &'a FileCache,
     segment_size: u64,
+    parent_reuse_index: Option<&'a ParentReuseIndex>,
 ) -> Box<dyn Iterator<Item = Result<WalkEntry>> + Send + 'a> {
     #[cfg(target_os = "linux")]
     {
@@ -397,6 +400,7 @@ fn walk_source<'a>(
             xattrs_enabled,
             file_cache,
             segment_size,
+            parent_reuse_index,
         );
     }
 
@@ -411,6 +415,7 @@ fn walk_source<'a>(
         xattrs_enabled,
         file_cache,
         segment_size,
+        parent_reuse_index,
     )
 }
 
@@ -427,6 +432,7 @@ fn walk_source_inode_sorted<'a>(
     xattrs_enabled: bool,
     file_cache: &'a FileCache,
     segment_size: u64,
+    parent_reuse_index: Option<&'a ParentReuseIndex>,
 ) -> Box<dyn Iterator<Item = Result<WalkEntry>> + Send + 'a> {
     let source = Path::new(source_path);
     let inode_walk = match InodeSortedWalk::new(
@@ -493,6 +499,7 @@ fn walk_source_inode_sorted<'a>(
                 xattrs_enabled,
                 file_cache,
                 segment_size,
+                parent_reuse_index,
             ),
         }
     });
@@ -509,6 +516,7 @@ fn walked_entry_to_walk_items(
     xattrs_enabled: bool,
     file_cache: &FileCache,
     segment_size: u64,
+    parent_reuse_index: Option<&ParentReuseIndex>,
 ) -> WalkItems {
     let file_type = walked.file_type;
     let metadata_summary = walked.metadata;
@@ -541,6 +549,12 @@ fn walked_entry_to_walk_items(
         None => rel_path,
     };
 
+    let item_ctime = if entry_type == ItemType::RegularFile {
+        Some(metadata_summary.ctime_ns)
+    } else {
+        None
+    };
+
     let mut item = Item {
         path: item_path,
         entry_type,
@@ -551,7 +565,7 @@ fn walked_entry_to_walk_items(
         group: None,
         mtime: metadata_summary.mtime_ns,
         atime: None,
-        ctime: None,
+        ctime: item_ctime,
         size: metadata_summary.size,
         chunks: Vec::new(),
         link_target,
@@ -581,6 +595,23 @@ fn walked_entry_to_walk_items(
                 metadata: metadata_summary,
                 cached_refs: cached_refs.to_vec(),
             })));
+        }
+
+        // Parent fallback: try parent reuse index when local cache misses.
+        if let Some(parent_idx) = parent_reuse_index {
+            if let Some(parent_refs) = parent_idx.lookup(
+                &abs_path,
+                metadata_summary.size,
+                metadata_summary.mtime_ns,
+                metadata_summary.ctime_ns,
+            ) {
+                return WalkItems::One(Some(Ok(WalkEntry::CacheHit {
+                    item,
+                    abs_path,
+                    metadata: metadata_summary,
+                    cached_refs: parent_refs.to_vec(),
+                })));
+            }
         }
 
         let file_size = metadata_summary.size;
@@ -622,10 +653,22 @@ fn walk_source_ignore<'a>(
     xattrs_enabled: bool,
     file_cache: &'a FileCache,
     segment_size: u64,
+    parent_reuse_index: Option<&'a ParentReuseIndex>,
 ) -> Box<dyn Iterator<Item = Result<WalkEntry>> + Send + 'a> {
     let source = Path::new(source_path);
+
+    // Canonicalize the source so abs_paths match the parent reuse index.
+    // Uses the same fallback logic as inode_walk.rs for consistency.
+    let canonical_source = std::fs::canonicalize(source).unwrap_or_else(|_| {
+        if source.is_absolute() {
+            source.to_path_buf()
+        } else {
+            std::env::current_dir().unwrap_or_default().join(source)
+        }
+    });
+
     let walk_builder = match build_configured_walker(
-        source,
+        &canonical_source,
         exclude_patterns,
         exclude_if_present,
         one_file_system,
@@ -635,7 +678,8 @@ fn walk_source_ignore<'a>(
         Err(e) => return Box::new(std::iter::once(Err(e))),
     };
 
-    // Multi-path prefix item.
+    // Multi-path prefix: always use the original (non-canonicalized) basename
+    // so snapshot items stay stable across symlink target changes.
     let prefix = if multi_path {
         let base = source
             .file_name()
@@ -669,7 +713,7 @@ fn walk_source_ignore<'a>(
             Box::new(std::iter::empty())
         };
 
-    let source_owned = source.to_path_buf();
+    let source_owned = canonical_source;
     let prefix_clone = prefix.clone();
     let walk_entries = walk_builder
         .build()
@@ -743,6 +787,12 @@ fn walk_source_ignore<'a>(
                 None => rel_path,
             };
 
+            let item_ctime = if entry_type == ItemType::RegularFile {
+                Some(metadata_summary.ctime_ns)
+            } else {
+                None
+            };
+
             let mut item = Item {
                 path: item_path,
                 entry_type,
@@ -753,7 +803,7 @@ fn walk_source_ignore<'a>(
                 group: None,
                 mtime: metadata_summary.mtime_ns,
                 atime: None,
-                ctime: None,
+                ctime: item_ctime,
                 size: metadata_summary.size,
                 chunks: Vec::new(),
                 link_target,
@@ -784,6 +834,23 @@ fn walk_source_ignore<'a>(
                         metadata: metadata_summary,
                         cached_refs: cached_refs.to_vec(),
                     })));
+                }
+
+                // Parent fallback: try parent reuse index when local cache misses.
+                if let Some(parent_idx) = parent_reuse_index {
+                    if let Some(parent_refs) = parent_idx.lookup(
+                        &abs_path,
+                        metadata_summary.size,
+                        metadata_summary.mtime_ns,
+                        metadata_summary.ctime_ns,
+                    ) {
+                        return WalkItems::One(Some(Ok(WalkEntry::CacheHit {
+                            item,
+                            abs_path,
+                            metadata: metadata_summary,
+                            cached_refs: parent_refs.to_vec(),
+                        })));
+                    }
                 }
 
                 let file_size = metadata_summary.size;

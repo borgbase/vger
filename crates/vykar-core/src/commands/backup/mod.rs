@@ -20,7 +20,7 @@ use std::sync::Arc;
 
 use crate::limits;
 use crate::platform::fs;
-use crate::repo::file_cache::FileCache;
+use crate::repo::file_cache::{FileCache, ParentReuseBuilder, ParentReuseIndex};
 use crate::repo::format::{pack_object_with_context, ObjectType};
 use crate::repo::lock;
 use crate::repo::manifest::SnapshotEntry;
@@ -32,6 +32,8 @@ use crate::storage;
 use vykar_types::chunk_id::ChunkId;
 use vykar_types::error::{Result, VykarError};
 use vykar_types::snapshot_id::SnapshotId;
+
+use std::collections::HashSet;
 
 use walk::items_chunker_config;
 
@@ -206,6 +208,32 @@ pub fn run_with_progress(
 
     let multi_path = source_paths.len() > 1;
 
+    // Build walk-root pairs: (original_basename, canonicalized_walk_root).
+    // The walker uses the original basename for snapshot item prefixes, but
+    // canonicalizes the root for abs_path construction (at least on Linux).
+    // The parent reuse builder needs both to reconstruct matching abs_paths.
+    let walk_roots: Vec<(String, String)> = source_paths
+        .iter()
+        .map(|sp| {
+            let p = std::path::Path::new(sp);
+            let basename = p
+                .file_name()
+                .map(|n| n.to_string_lossy().to_string())
+                .unwrap_or_else(|| sp.clone());
+            let walk_root = std::fs::canonicalize(p)
+                .unwrap_or_else(|_| {
+                    if p.is_absolute() {
+                        p.to_path_buf()
+                    } else {
+                        std::env::current_dir().unwrap_or_default().join(p)
+                    }
+                })
+                .to_string_lossy()
+                .to_string();
+            (basename, walk_root)
+        })
+        .collect();
+
     let _nice_guard = match limits::NiceGuard::apply(config.limits.nice) {
         Ok(guard) => guard,
         Err(e) => {
@@ -294,19 +322,75 @@ pub fn run_with_progress(
             }
         }
 
-        // Pre-sanitize stale file-cache entries whose chunks were pruned by
-        // delete+compact. Must happen before enable_dedup_mode() which drops
-        // the full chunk index.
+        // Invalidate file cache sections whose anchor snapshot no longer exists.
         {
-            let mut cache = repo.take_file_cache();
-            let pruned = cache.prune_stale_entries(&|id| repo.chunk_exists(id));
-            if pruned > 0 {
+            let snapshot_ids: HashSet<SnapshotId> =
+                repo.manifest().snapshots.iter().map(|s| s.id).collect();
+            let invalidated = repo
+                .file_cache_mut()
+                .invalidate_missing_snapshots(&|id| snapshot_ids.contains(id));
+            if invalidated > 0 {
                 info!(
-                    pruned_entries = pruned,
-                    "removed stale file cache entries referencing pruned chunks"
+                    invalidated,
+                    "invalidated file cache sections for deleted snapshots"
                 );
+                repo.mark_file_cache_dirty();
             }
-            repo.restore_file_cache(cache);
+        }
+
+        // Set up read cache + write cache sections for filesystem sources.
+        let mut parent_reuse_index: Option<ParentReuseIndex> = None;
+        if !source_paths.is_empty() {
+            let section_valid = repo
+                .file_cache()
+                .validate_section(source_label, source_paths);
+
+            // Prepare read cache: tell it which section to search during lookup.
+            repo.file_cache_mut().set_active_for_lookup(source_label);
+
+            if !section_valid {
+                // Cold start: build parent reuse index from latest matching
+                // snapshot. Uses incremental builder inside the streaming
+                // callback to avoid materializing Vec<Item>.
+                let latest = repo
+                    .manifest()
+                    .snapshots
+                    .iter()
+                    .filter(|s| s.source_label == source_label && s.source_paths == source_paths)
+                    .max_by_key(|s| s.time);
+                if let Some(parent_entry) = latest {
+                    let parent_name = parent_entry.name.clone();
+                    let mut builder = ParentReuseBuilder::new(walk_roots.clone(), multi_path);
+                    let stream_result =
+                        super::list::for_each_snapshot_item(&mut repo, &parent_name, |item| {
+                            builder.push(item);
+                            Ok(())
+                        });
+                    match stream_result {
+                        Ok(()) => {
+                            parent_reuse_index = builder.finish();
+                            if parent_reuse_index.is_some() {
+                                info!(
+                                    parent = parent_name,
+                                    "built parent reuse index for cold-start fallback"
+                                );
+                            } else {
+                                debug!(
+                                    parent = parent_name,
+                                    "parent snapshot lacks ctime on filesystem files, skipping parent fallback"
+                                );
+                            }
+                        }
+                        Err(e) => {
+                            debug!(
+                                parent = parent_name,
+                                error = %e,
+                                "failed to load parent snapshot for reuse index"
+                            );
+                        }
+                    }
+                }
+            }
         }
 
         // Switch to tiered dedup mode to minimize memory during backup.
@@ -318,7 +402,12 @@ pub fn run_with_progress(
         let mut item_stream = Vec::new();
         let mut item_ptrs: Vec<ChunkId> = Vec::new();
         let items_config = items_chunker_config();
-        let mut new_file_cache = FileCache::with_capacity(repo.file_cache().len());
+        let mut new_file_cache = FileCache::new();
+
+        // Prepare write cache: create empty section for inserts.
+        if !source_paths.is_empty() {
+            new_file_cache.begin_section(source_label);
+        }
 
         // Execute command dumps before walking filesystem.
         command_dump::process_command_dumps(
@@ -347,7 +436,7 @@ pub fn run_with_progress(
                 .segment_size_bytes()
                 .min(pipeline_buffer_bytes) as u64;
 
-            pipeline::run_parallel_pipeline(
+            let pipeline_result = pipeline::run_parallel_pipeline(
                 &mut repo,
                 source_paths,
                 multi_path,
@@ -373,7 +462,12 @@ pub fn run_with_progress(
                 dedup_filter.as_deref(),
                 shutdown,
                 verbose,
-            )?;
+                parent_reuse_index.as_ref(),
+            );
+            // Always restore before propagating — keeps repo.file_cache valid
+            // for abort-time save and for commit-time merge.
+            repo.restore_file_cache(file_cache_snapshot);
+            pipeline_result?;
         } else {
             for source_path in source_paths {
                 check_interrupted(shutdown)?;
@@ -401,6 +495,7 @@ pub fn run_with_progress(
                     dedup_filter.as_deref(),
                     shutdown,
                     verbose,
+                    parent_reuse_index.as_ref(),
                 )?;
             }
         }
@@ -439,6 +534,11 @@ pub fn run_with_progress(
         // Generate snapshot ID and pack the blob (but DO NOT write to storage yet).
         // Writing snapshots/<id> is deferred to Phase 2 (commit barrier).
         let snapshot_id = SnapshotId::generate();
+
+        // Finalize the write cache section with the snapshot ID.
+        if !source_paths.is_empty() {
+            new_file_cache.finalize_section(snapshot_id, source_paths.to_vec());
+        }
         let meta_bytes = rmp_serde::to_vec(&snapshot_meta)?;
         let snapshot_packed = pack_object_with_context(
             ObjectType::SnapshotMeta,
@@ -465,6 +565,11 @@ pub fn run_with_progress(
         Ok(result) => result,
         Err(e) => {
             repo.flush_on_abort();
+            // Persist invalidated cache sections so stale entries don't survive
+            // on disk across repeated aborted runs.
+            if let Err(fc_err) = repo.save_file_cache_if_dirty() {
+                warn!("failed to save file cache on abort: {fc_err}");
+            }
             lock::deregister_session(repo.storage.as_ref(), &session_id);
             return Err(e);
         }

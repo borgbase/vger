@@ -12,7 +12,7 @@ use crate::compress::Compression;
 use crate::config::ChunkerConfig;
 use crate::limits::{self, ByteRateLimiter};
 use crate::platform::fs;
-use crate::repo::file_cache::FileCache;
+use crate::repo::file_cache::{FileCache, ParentReuseIndex};
 use crate::repo::Repository;
 use crate::snapshot::item::{Item, ItemType};
 use crate::snapshot::SnapshotStats;
@@ -181,7 +181,7 @@ fn flush_cross_file_batch(
 
         if verbose {
             let added_bytes = stats.deduplicated_size - dedup_before;
-            let status = if repo.file_cache().get(&file.abs_path).is_some() {
+            let status = if repo.file_cache().contains(&file.abs_path) {
                 FileStatus::Modified
             } else {
                 FileStatus::New
@@ -257,6 +257,7 @@ pub(super) fn process_regular_file_item(
     max_pending_file_actions: usize,
     dedup_filter: Option<&xorf::Xor8>,
     verbose: bool,
+    parent_reuse_index: Option<&ParentReuseIndex>,
 ) -> Result<()> {
     if let Some(cb) = progress.as_deref_mut() {
         cb(BackupProgressEvent::FileStarted {
@@ -277,9 +278,20 @@ pub(super) fn process_regular_file_item(
         file_size,
     );
 
-    if let Some(cached_refs) = cache_hit {
-        // Clone to release the borrow on file_cache so we can mutate repo below.
-        let cached_refs = cached_refs.to_vec();
+    // Combine local cache and parent fallback into a single hit path.
+    let effective_hit = cache_hit.map(|refs| refs.to_vec()).or_else(|| {
+        parent_reuse_index.and_then(|idx| {
+            idx.lookup(
+                &abs_path,
+                file_size,
+                metadata_summary.mtime_ns,
+                metadata_summary.ctime_ns,
+            )
+            .map(|refs| refs.to_vec())
+        })
+    });
+
+    if let Some(cached_refs) = effective_hit {
         super::commit::commit_cache_hit(repo, item, cached_refs, stats);
 
         if verbose {
@@ -311,7 +323,7 @@ pub(super) fn process_regular_file_item(
     let chunk_id_key = *repo.crypto.chunk_id_key();
     // Check old cache for new-vs-modified before opening file (avoids borrow conflict).
     let was_in_old_cache = if verbose {
-        repo.file_cache().get(&abs_path).is_some()
+        repo.file_cache().contains(&abs_path)
     } else {
         false
     };
@@ -439,6 +451,7 @@ pub(super) fn process_source_path(
     dedup_filter: Option<&xorf::Xor8>,
     shutdown: Option<&AtomicBool>,
     verbose: bool,
+    parent_reuse_index: Option<&ParentReuseIndex>,
 ) -> Result<()> {
     emit_progress(
         progress,
@@ -518,19 +531,28 @@ pub(super) fn process_source_path(
     };
     #[cfg(not(target_os = "linux"))]
     let walk_iter: Box<dyn Iterator<Item = SequentialWalkItem>> = {
+        // Canonicalize so abs_paths match the parent reuse index.
+        let canonical_source = std::fs::canonicalize(source).unwrap_or_else(|_| {
+            if source.is_absolute() {
+                source.to_path_buf()
+            } else {
+                std::env::current_dir().unwrap_or_default().join(source)
+            }
+        });
         let walk_builder = build_configured_walker(
-            source,
+            &canonical_source,
             exclude_patterns,
             exclude_if_present,
             one_file_system,
             git_ignore,
         )?;
-        Box::new(walk_builder.build().filter_map(|entry_result| {
+        let walk_source = canonical_source;
+        Box::new(walk_builder.build().filter_map(move |entry_result| {
             match entry_result {
                 Ok(entry) => {
                     let rel_path = entry
                         .path()
-                        .strip_prefix(source)
+                        .strip_prefix(&walk_source)
                         .unwrap_or(entry.path())
                         .to_string_lossy()
                         .to_string();
@@ -622,6 +644,12 @@ pub(super) fn process_source_path(
             None => rel_path,
         };
 
+        let item_ctime = if entry_type == ItemType::RegularFile {
+            Some(metadata_summary.ctime_ns)
+        } else {
+            None
+        };
+
         let mut item = Item {
             path: item_path,
             entry_type,
@@ -632,7 +660,7 @@ pub(super) fn process_source_path(
             group: None,
             mtime: metadata_summary.mtime_ns,
             atime: None,
-            ctime: None,
+            ctime: item_ctime,
             size: metadata_summary.size,
             chunks: Vec::new(),
             link_target,
@@ -659,8 +687,20 @@ pub(super) fn process_source_path(
                     metadata_summary.size,
                 );
 
-                if let Some(cached_refs) = cache_hit {
-                    let cached_refs = cached_refs.to_vec();
+                // Combine local cache hit with parent fallback.
+                let effective_hit = cache_hit.map(|refs| refs.to_vec()).or_else(|| {
+                    parent_reuse_index.and_then(|idx| {
+                        idx.lookup(
+                            &abs_path,
+                            metadata_summary.size,
+                            metadata_summary.mtime_ns,
+                            metadata_summary.ctime_ns,
+                        )
+                        .map(|refs| refs.to_vec())
+                    })
+                });
+
+                if let Some(cached_refs) = effective_hit {
                     // Flush batch to preserve walk order before the cache-hit item.
                     flush_cross_file_batch(
                         &mut cross_batch,
@@ -776,6 +816,7 @@ pub(super) fn process_source_path(
                     max_pending_file_actions,
                     dedup_filter,
                     verbose,
+                    parent_reuse_index,
                 ) {
                     if e.is_soft_file_error() {
                         warn!(path = %entry_path.display(), error = %e, "skipping file");

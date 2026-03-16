@@ -12,7 +12,7 @@ use crate::compress::Compression;
 use crate::config::ChunkerConfig;
 use crate::limits::{self, ByteRateLimiter};
 use crate::platform::fs;
-use crate::repo::file_cache::FileCache;
+use crate::repo::file_cache::{FileCache, ParentReuseIndex};
 use crate::repo::Repository;
 use crate::snapshot::item::{ChunkRef, Item};
 use crate::snapshot::SnapshotStats;
@@ -414,7 +414,7 @@ fn consume_processed_entry(
 
             if verbose {
                 let added_bytes = stats.deduplicated_size - dedup_before;
-                let status = if old_file_cache.get(&abs_path).is_some() {
+                let status = if old_file_cache.contains(&abs_path) {
                     FileStatus::Modified
                 } else {
                     FileStatus::New
@@ -514,7 +514,7 @@ fn consume_processed_entry(
 
                 if verbose {
                     let added_bytes = stats.deduplicated_size - accum.dedup_baseline;
-                    let status = if old_file_cache.get(&accum.abs_path).is_some() {
+                    let status = if old_file_cache.contains(&accum.abs_path) {
                         FileStatus::Modified
                     } else {
                         FileStatus::New
@@ -684,6 +684,7 @@ pub(crate) fn run_parallel_pipeline(
     dedup_filter: Option<&xorf::Xor8>,
     shutdown: Option<&AtomicBool>,
     verbose: bool,
+    parent_reuse_index: Option<&ParentReuseIndex>,
 ) -> Result<()> {
     debug_assert!(segment_size > 0, "segment_size must be non-zero");
     debug_assert!(num_workers > 0, "num_workers must be non-zero");
@@ -721,6 +722,7 @@ pub(crate) fn run_parallel_pipeline(
                 xattrs_enabled,
                 file_cache,
                 segment_size,
+                parent_reuse_index,
             );
 
             let mut seq_idx: usize = 0;

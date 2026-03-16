@@ -563,6 +563,21 @@ impl Repository {
         self.file_cache_dirty = true;
     }
 
+    /// Save the file cache to local disk if it has been modified.
+    /// Returns `Ok(())` if no save was needed or the save succeeded.
+    pub fn save_file_cache_if_dirty(&mut self) -> Result<()> {
+        if !self.file_cache_dirty {
+            return Ok(());
+        }
+        self.file_cache.save(
+            &self.config.id,
+            self.crypto.as_ref(),
+            self.cache_dir_override.as_deref(),
+        )?;
+        self.file_cache_dirty = false;
+        Ok(())
+    }
+
     /// Try to open the mmap'd restore cache for this repository.
     /// Returns `None` if the cache is missing, stale, or corrupt.
     pub fn open_restore_cache(&self) -> Option<dedup_cache::MmapRestoreCache> {
@@ -629,6 +644,11 @@ impl Repository {
     /// Read-only access to the file cache.
     pub fn file_cache(&self) -> &FileCache {
         &self.file_cache
+    }
+
+    /// Mutable access to the file cache (for invalidation, section setup).
+    pub fn file_cache_mut(&mut self) -> &mut FileCache {
+        &mut self.file_cache
     }
 
     /// Temporarily take the file cache out of the repository.
@@ -919,21 +939,7 @@ impl Repository {
 
         // Save file cache before hydrating chunk_index to reduce peak memory.
         // Capture error instead of early-returning so we can hydrate first.
-        let fc_result = if self.file_cache_dirty {
-            match self.file_cache.save(
-                &self.config.id,
-                self.crypto.as_ref(),
-                self.cache_dir_override.as_deref(),
-            ) {
-                Ok(()) => {
-                    self.file_cache_dirty = false;
-                    Ok(())
-                }
-                Err(e) => Err(e),
-            }
-        } else {
-            Ok(())
-        };
+        let fc_result = self.save_file_cache_if_dirty();
 
         // Always hydrate chunk_index — postcondition: self.chunk_index is valid
         // on all exit paths (success and error).
@@ -973,7 +979,7 @@ impl Repository {
         &mut self,
         snapshot_entry: manifest::SnapshotEntry,
         snapshot_packed: Vec<u8>,
-        new_file_cache: file_cache::FileCache,
+        mut new_file_cache: file_cache::FileCache,
     ) -> Result<()> {
         // 1. Flush all pending packs and wait for uploads.
         self.flush_packs()?;
@@ -1036,17 +1042,18 @@ impl Repository {
         self.manifest.timestamp = Utc::now();
         self.manifest.snapshots.push(snapshot_entry);
 
-        // Save file cache.
-        self.file_cache = new_file_cache;
-        self.file_cache_dirty = true;
-        if let Err(e) = self.file_cache.save(
-            &self.config.id,
-            self.crypto.as_ref(),
-            self.cache_dir_override.as_deref(),
-        ) {
+        // Merge the active section if one was produced (filesystem backup).
+        // Dump-only runs produce no active section and skip this block.
+        if let Some((label, section)) = new_file_cache.take_active_section() {
+            self.file_cache.merge_section(&label, section);
+            self.file_cache_dirty = true;
+        }
+
+        // Persist if dirty — covers both the merge above AND any prior
+        // invalidation that set the dirty flag (e.g., stale sections removed
+        // at backup start).
+        if let Err(e) = self.save_file_cache_if_dirty() {
             warn!("failed to save file cache after concurrent commit: {e}");
-        } else {
-            self.file_cache_dirty = false;
         }
 
         // Rebuild dedup caches if needed.

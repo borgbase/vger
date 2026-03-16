@@ -647,14 +647,31 @@ fn file_cache_persists_and_matches_snapshot_items() {
             .collect();
         assert_eq!(files.len(), 2);
 
-        // Each file's cache entry should contain chunk_refs identical to the snapshot.
+        // Set up the active section for lookup.
+        repo.file_cache_mut().set_active_for_lookup("source");
+
+        // Cache keys are canonicalized (matches walker behavior).
+        let canonical_source = std::fs::canonicalize(&source_dir).unwrap();
+
+        // Each file's cache entry should be findable via lookup with matching metadata.
         for file_item in &files {
-            let abs_path = source_dir.join(&file_item.path);
-            let cache_entry = repo
+            let abs_path = canonical_source.join(&file_item.path);
+            let abs_str = abs_path.to_str().unwrap();
+            let meta = std::fs::symlink_metadata(&abs_path).unwrap();
+            let ft = meta.file_type();
+            let ms = vykar_core::platform::fs::summarize_metadata(&meta, &ft);
+            let cached_refs = repo
                 .file_cache()
-                .get(abs_path.to_str().unwrap())
+                .lookup(
+                    abs_str,
+                    ms.device,
+                    ms.inode,
+                    ms.mtime_ns,
+                    ms.ctime_ns,
+                    ms.size,
+                )
                 .unwrap_or_else(|| panic!("cache should have entry for {}", file_item.path));
-            let cached_ids: Vec<_> = cache_entry.chunk_refs.iter().map(|c| c.id).collect();
+            let cached_ids: Vec<_> = cached_refs.iter().map(|c| c.id).collect();
             let snap_ids: Vec<_> = file_item.chunks.iter().map(|c| c.id).collect();
             assert_eq!(
                 cached_ids, snap_ids,
@@ -815,12 +832,26 @@ fn file_cache_misses_on_modified_file() {
     );
 
     // The cache should now reflect the new content for modified.bin.
-    let abs_modified = source_dir.join("modified.bin");
-    let cache_entry = repo
+    // Cache keys are canonicalized (matches walker behavior).
+    repo.file_cache_mut().set_active_for_lookup("source");
+    let canonical_source = std::fs::canonicalize(&source_dir).unwrap();
+    let abs_modified = canonical_source.join("modified.bin");
+    let abs_str = abs_modified.to_str().unwrap();
+    let meta = std::fs::symlink_metadata(&abs_modified).unwrap();
+    let ft = meta.file_type();
+    let ms = vykar_core::platform::fs::summarize_metadata(&meta, &ft);
+    let cached_refs = repo
         .file_cache()
-        .get(abs_modified.to_str().unwrap())
+        .lookup(
+            abs_str,
+            ms.device,
+            ms.inode,
+            ms.mtime_ns,
+            ms.ctime_ns,
+            ms.size,
+        )
         .expect("cache should have entry for modified.bin after re-backup");
-    let cached_ids: Vec<_> = cache_entry.chunk_refs.iter().map(|c| c.id).collect();
+    let cached_ids: Vec<_> = cached_refs.iter().map(|c| c.id).collect();
     assert_eq!(
         cached_ids, files2["modified.bin"],
         "cache should be updated with new chunks for modified.bin"
