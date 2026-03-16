@@ -29,9 +29,12 @@ use super::{build_explicit_excludes, is_soft_io_error, should_skip_for_device};
 
 /// Filesystem magic numbers from linux/magic.h where inode order
 /// correlates with on-disk position.
-const EXT_SUPER_MAGIC: libc::__fsword_t = 0xEF53; // ext2/3/4
-const XFS_SUPER_MAGIC: libc::__fsword_t = 0x5846_5342; // "XFSB"
-const REISERFS_SUPER_MAGIC: libc::__fsword_t = 0x5265_4973;
+///
+/// The type of `statfs.f_type` differs between glibc (`__fsword_t`, i64) and
+/// musl (`c_ulong`, u64). We compare via `as u64` to work on both.
+const EXT_SUPER_MAGIC: u64 = 0xEF53; // ext2/3/4
+const XFS_SUPER_MAGIC: u64 = 0x5846_5342; // "XFSB"
+const REISERFS_SUPER_MAGIC: u64 = 0x5265_4973;
 
 /// Returns true if inode-sorted stat reduces disk seeks on this filesystem.
 /// Allowlist-only: returns false on error or unknown filesystems.
@@ -50,7 +53,7 @@ fn inode_sort_beneficial(path: &Path) -> bool {
         return false;
     }
     matches!(
-        buf.f_type,
+        buf.f_type as u64,
         EXT_SUPER_MAGIC | XFS_SUPER_MAGIC | REISERFS_SUPER_MAGIC
     )
 }
