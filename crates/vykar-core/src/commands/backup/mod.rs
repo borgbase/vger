@@ -261,7 +261,10 @@ pub fn run_with_progress(
 
     // Resolve effective worker count before building the rayon pool so we
     // can right-size it in pipeline mode (avoids 2× thread oversubscription).
-    let num_workers = config.limits.effective_threads();
+    let is_local = vykar_storage::parse_repo_url(&config.repository.url)
+        .map(|u| u.is_local())
+        .unwrap_or(false);
+    let num_workers = config.limits.effective_backup_threads(is_local);
 
     // Pipeline mode when we have more than 1 worker thread.
     let use_pipeline = num_workers > 1;
@@ -270,7 +273,7 @@ pub fn run_with_progress(
         // Pipeline mode doesn't need a rayon pool (no inline large-file processing).
         None
     } else {
-        sequential::build_transform_pool(config.limits.threads)?
+        sequential::build_transform_pool(num_workers)?
     };
 
     let backend = storage::backend_from_config(&config.repository, upload_concurrency)?;
@@ -465,7 +468,7 @@ pub fn run_with_progress(
         repo.set_max_in_flight_uploads(upload_concurrency);
 
         let pipeline_depth = config.limits.effective_pipeline_depth();
-        let pipeline_buffer_bytes = config.limits.pipeline_buffer_bytes();
+        let pipeline_buffer_bytes = config.limits.pipeline_buffer_for_workers(num_workers);
 
         if use_pipeline && !source_paths.is_empty() {
             let file_cache_snapshot = repo.take_file_cache();

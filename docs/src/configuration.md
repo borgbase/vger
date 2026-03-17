@@ -534,7 +534,7 @@ limits:
 | Field | Default | Values | Description |
 |-------|---------|--------|-------------|
 | `connections` | `2` | integer, 1–16 | Parallel backend operations; also controls upload/restore concurrency |
-| `threads` | `0` | integer | CPU worker threads. `0` = auto: min(cores, 12). `1` = mostly sequential |
+| `threads` | `0` | integer | CPU worker threads. `0` = auto: local repos use ceil(cores/2) clamped to [2, 4]; remote repos use min(cores, 12). `1` = mostly sequential |
 | `nice` | `0` | integer, -20–19 | Unix process niceness. `0` = unchanged. Ignored on Windows |
 | `upload_mib_per_sec` | `0` | integer (MiB/s) | Upload bandwidth cap. `0` = unlimited |
 | `download_mib_per_sec` | `0` | integer (MiB/s) | Download bandwidth cap. `0` = unlimited |

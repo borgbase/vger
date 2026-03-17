@@ -826,12 +826,9 @@ fn integrity_scan(
     let mut issues: Vec<IntegrityIssue> = Vec::new();
     let mut snapshot_chunk_refs: HashMap<String, HashSet<ChunkId>> = HashMap::new();
 
-    let is_remote = matches!(
-        vykar_storage::parse_repo_url(&config.repository.url),
-        Ok(vykar_storage::ParsedUrl::Rest { .. }
-            | vykar_storage::ParsedUrl::S3 { .. }
-            | vykar_storage::ParsedUrl::Sftp { .. })
-    );
+    let is_remote = vykar_storage::parse_repo_url(&config.repository.url)
+        .map(|u| !u.is_local())
+        .unwrap_or(false);
     let concurrency = config.limits.listing_concurrency(is_remote);
 
     // Phase 0: Raw storage scan for corrupted/invalid snapshots not in manifest.

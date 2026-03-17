@@ -65,12 +65,9 @@ pub fn run(
 
     let mut repo = open_repo(config, passphrase, OpenOptions::new().with_index())?;
 
-    let is_remote = matches!(
-        vykar_storage::parse_repo_url(&config.repository.url),
-        Ok(vykar_storage::ParsedUrl::Rest { .. }
-            | vykar_storage::ParsedUrl::S3 { .. }
-            | vykar_storage::ParsedUrl::Sftp { .. })
-    );
+    let is_remote = vykar_storage::parse_repo_url(&config.repository.url)
+        .map(|u| !u.is_local())
+        .unwrap_or(false);
     let concurrency = config.limits.listing_concurrency(is_remote);
 
     with_maintenance_lock(&mut repo, |repo| {

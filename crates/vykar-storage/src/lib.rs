@@ -195,6 +195,13 @@ pub enum ParsedUrl {
     Rest { url: String },
 }
 
+impl ParsedUrl {
+    /// Returns `true` for local filesystem repositories.
+    pub fn is_local(&self) -> bool {
+        matches!(self, Self::Local { .. })
+    }
+}
+
 /// Parse a repository URL into its components.
 ///
 /// Supported formats:

@@ -15,7 +15,7 @@ pub struct ResourceLimitsConfig {
     #[serde(default = "default_connections")]
     pub connections: usize,
     /// CPU worker threads for backup transforms.
-    /// 0 = auto (`min(available_cores, 12)`), 1 = sequential.
+    /// 0 = auto: local repos use ceil(cores/2) clamped to [2, 4]; remote repos use min(cores, 12). 1 = sequential.
     #[serde(default)]
     pub threads: usize,
     /// Unix process niceness target (-20..19). 0 = unchanged.
@@ -62,15 +62,20 @@ impl ResourceLimitsConfig {
         Ok(())
     }
 
-    /// Resolved thread count (0 → min(available cores, 12)).
-    pub fn effective_threads(&self) -> usize {
-        if self.threads == 0 {
-            std::thread::available_parallelism()
-                .map(|n| n.get().min(AUTO_THREADS_MAX))
-                .unwrap_or(2)
-        } else {
-            self.threads
+    /// Auto-resolved backup worker count, accounting for backend locality.
+    /// Local repos are I/O-bound and benefit from fewer workers to reduce
+    /// channel contention. Remote repos keep higher parallelism for
+    /// overlapping compress/encrypt with network I/O.
+    pub fn effective_backup_threads(&self, is_local: bool) -> usize {
+        if self.threads > 0 {
+            return self.threads;
         }
+        auto_backup_threads(
+            std::thread::available_parallelism()
+                .map(|n| n.get())
+                .unwrap_or(2),
+            is_local,
+        )
     }
 
     /// Pipeline depth derived from connections.
@@ -78,9 +83,9 @@ impl ResourceLimitsConfig {
         self.connections.max(2)
     }
 
-    /// Pipeline buffer size in bytes, derived from effective thread count.
-    pub fn pipeline_buffer_bytes(&self) -> usize {
-        self.effective_threads()
+    /// Pipeline buffer size in bytes, derived from worker count.
+    pub fn pipeline_buffer_for_workers(&self, workers: usize) -> usize {
+        workers
             .saturating_mul(64 * 1024 * 1024)
             .clamp(64 * 1024 * 1024, 1024 * 1024 * 1024)
     }
@@ -122,5 +127,59 @@ impl ResourceLimitsConfig {
     /// Verify-data concurrency: capped at 4 (each thread holds ~128 MiB).
     pub fn verify_data_concurrency(&self) -> usize {
         self.connections.min(4)
+    }
+}
+
+/// Pure helper for testability (no `available_parallelism()` call).
+fn auto_backup_threads(cores: usize, is_local: bool) -> usize {
+    if is_local {
+        if cores == 1 {
+            1
+        } else {
+            cores.div_ceil(2).clamp(2, 4)
+        }
+    } else {
+        cores.min(AUTO_THREADS_MAX)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn auto_backup_threads_local() {
+        assert_eq!(auto_backup_threads(1, true), 1);
+        assert_eq!(auto_backup_threads(2, true), 2);
+        assert_eq!(auto_backup_threads(4, true), 2);
+        assert_eq!(auto_backup_threads(8, true), 4);
+        assert_eq!(auto_backup_threads(16, true), 4);
+    }
+
+    #[test]
+    fn auto_backup_threads_remote() {
+        assert_eq!(auto_backup_threads(1, false), 1);
+        assert_eq!(auto_backup_threads(2, false), 2);
+        assert_eq!(auto_backup_threads(8, false), 8);
+        assert_eq!(auto_backup_threads(24, false), 12);
+    }
+
+    #[test]
+    fn explicit_threads_bypass_auto() {
+        let cfg = ResourceLimitsConfig {
+            threads: 6,
+            ..Default::default()
+        };
+        assert_eq!(cfg.effective_backup_threads(true), 6);
+        assert_eq!(cfg.effective_backup_threads(false), 6);
+    }
+
+    #[test]
+    fn pipeline_buffer_sizing() {
+        let cfg = ResourceLimitsConfig::default();
+        assert_eq!(cfg.pipeline_buffer_for_workers(4), 256 * 1024 * 1024);
+        assert_eq!(cfg.pipeline_buffer_for_workers(8), 512 * 1024 * 1024);
+        assert_eq!(cfg.pipeline_buffer_for_workers(1), 64 * 1024 * 1024);
+        assert_eq!(cfg.pipeline_buffer_for_workers(20), 1024 * 1024 * 1024);
     }
 }

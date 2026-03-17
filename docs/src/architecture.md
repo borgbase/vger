@@ -682,7 +682,7 @@ Large files are split into fixed-size 64 MiB segments and processed through the 
 
 ```yaml
 limits:
-  threads: 4                       # backup transform workers (0 = auto: min(cores,12))
+  threads: 4                       # backup transform workers (0 = auto: local ceil(cores/2)∈[2,4], remote min(cores,12))
   connections: 2                   # backend/upload/restore concurrency (1-16)
   nice: 10                         # Unix nice value
   upload_mib_per_sec: 100          # upload bandwidth cap (MiB/s, 0 = unlimited)
@@ -690,7 +690,7 @@ limits:
 ```
 
 Internal backup pipeline knobs are derived automatically:
-- `threads_effective = threads == 0 ? min(available_cores, 12) : threads`
+- `threads_effective = threads == 0 ? (local ? ceil(cores/2)∈[2,4] : min(cores, 12)) : threads`
 - `pipeline_depth = max(connections, 2)`
 - `pipeline_buffer_bytes = clamp(threads_effective * 64 MiB, 64 MiB..1 GiB)`
 - `segment_size = 64 MiB`, `transform_batch = 32 MiB`, `max_pending_actions = 8192`
