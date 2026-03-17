@@ -133,6 +133,8 @@ pub(crate) enum UiEvent {
         data: Vec<SnapshotRowData>,
     },
     SnapshotContentsData {
+        repo_name: String,
+        snapshot_name: String,
         items: Vec<Item>,
     },
     RestoreFinished {

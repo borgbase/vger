@@ -1,15 +1,51 @@
 use std::cell::RefCell;
 
 use crossbeam_channel::Sender;
-use slint::{ComponentHandle, ModelRc, VecModel};
+use slint::{ComponentHandle, ModelRc, SharedString, VecModel};
 use vykar_core::snapshot::item::Item;
 
 use crate::file_tree::FileTree;
 use crate::messages::AppCommand;
-use crate::RestoreWindow;
+use crate::{RestoreWindow, TreeRowData};
 
 thread_local! {
     static FILE_TREE: RefCell<Option<FileTree>> = const { RefCell::new(None) };
+    /// Strong reference keeps the window alive even when hidden, so in-flight
+    /// results (SnapshotContentsData, RestoreFinished) are never dropped.
+    static RESTORE_HANDLE: RefCell<Option<RestoreWindow>> = const { RefCell::new(None) };
+}
+
+/// Return the existing RestoreWindow or lazily create and wire one.
+/// Must be called on the main (UI) thread.
+pub(crate) fn ensure_window(app_tx: &Sender<AppCommand>) -> Option<RestoreWindow> {
+    RESTORE_HANDLE.with(|cell| {
+        let mut borrow = cell.borrow_mut();
+        if let Some(ref rw) = *borrow {
+            return Some(rw.clone_strong());
+        }
+        let rw = RestoreWindow::new().ok()?;
+        wire_callbacks(&rw, app_tx.clone());
+        let handle = rw.clone_strong();
+        *borrow = Some(rw);
+        Some(handle)
+    })
+}
+
+/// Access the RestoreWindow if it exists (runs closure on main thread).
+pub(crate) fn with_window(f: impl FnOnce(&RestoreWindow)) {
+    RESTORE_HANDLE.with(|cell| {
+        if let Some(ref rw) = *cell.borrow() {
+            f(rw);
+        }
+    });
+}
+
+/// Clear only the FILE_TREE backing data (not the UI).
+/// Called when switching snapshots to prevent stale tree access.
+pub(crate) fn clear_file_tree() {
+    FILE_TREE.with(|cell| {
+        *cell.borrow_mut() = None;
+    });
 }
 
 fn refresh_tree_view(rw: &RestoreWindow) {
@@ -23,7 +59,16 @@ fn refresh_tree_view(rw: &RestoreWindow) {
     });
 }
 
-pub(crate) fn handle_snapshot_contents(rw: &RestoreWindow, items: Vec<Item>) {
+pub(crate) fn handle_snapshot_contents(
+    rw: &RestoreWindow,
+    repo_name: &str,
+    snapshot_name: &str,
+    items: Vec<Item>,
+) {
+    // Discard stale results if the window has moved on to a different snapshot.
+    if rw.get_repo_name() != repo_name || rw.get_snapshot_name() != snapshot_name {
+        return;
+    }
     let tree = FileTree::build_from_items(&items);
     let selection = tree.selection_text();
     let rows = tree.to_slint_model();
@@ -35,9 +80,18 @@ pub(crate) fn handle_snapshot_contents(rw: &RestoreWindow, items: Vec<Item>) {
     });
 }
 
+fn clear_tree(rw: &RestoreWindow) {
+    FILE_TREE.with(|cell| {
+        *cell.borrow_mut() = None;
+    });
+    rw.set_tree_rows(ModelRc::new(VecModel::<TreeRowData>::default()));
+    rw.set_selection_text(SharedString::default());
+}
+
 pub(crate) fn handle_restore_finished(rw: &RestoreWindow, success: bool, message: String) {
     rw.set_busy(false);
     if success {
+        clear_tree(rw);
         let _ = rw.hide();
         tinyfiledialogs::message_box_ok(
             "Restore",
@@ -199,8 +253,20 @@ pub(crate) fn wire_callbacks(restore_win: &RestoreWindow, app_tx: Sender<AppComm
         let rw_weak = restore_win.as_weak();
         restore_win.on_cancel_clicked(move || {
             if let Some(rw) = rw_weak.upgrade() {
+                clear_tree(&rw);
                 let _ = rw.hide();
             }
+        });
+    }
+
+    // Titlebar close — clear tree so FILE_TREE doesn't keep snapshot data resident.
+    {
+        let rw_weak = restore_win.as_weak();
+        restore_win.window().on_close_requested(move || {
+            if let Some(rw) = rw_weak.upgrade() {
+                clear_tree(&rw);
+            }
+            slint::CloseRequestResponse::HideWindow
         });
     }
 }

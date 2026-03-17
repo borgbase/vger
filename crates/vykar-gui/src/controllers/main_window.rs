@@ -4,15 +4,14 @@ use std::sync::{Arc, Mutex};
 use crossbeam_channel::Sender;
 use slint::{ComponentHandle, Model, ModelRc, SharedString, VecModel};
 
+use crate::controllers;
 use crate::messages::{AppCommand, SnapshotRowData, UiEvent};
 use crate::repo_helpers::send_log;
 use crate::view_models::sort_snapshot_table;
-use crate::{AppData, FindWindow, MainWindow, RestoreWindow, SourceInfo, TreeRowData};
+use crate::{AppData, MainWindow, SourceInfo, TreeRowData};
 
 pub(crate) fn wire_callbacks(
     ui: &MainWindow,
-    restore_win: &RestoreWindow,
-    find_win: &FindWindow,
     app_tx: Sender<AppCommand>,
     ui_tx: Sender<UiEvent>,
     cancel_requested: Arc<AtomicBool>,
@@ -80,12 +79,13 @@ pub(crate) fn wire_callbacks(
         });
     }
 
-    // Find Files button — sync repo names and show FindWindow
+    // Find Files button — lazy-create FindWindow, sync repo names, and show
     {
-        let fw_weak = find_win.as_weak();
+        let tx = app_tx.clone();
         let ui_weak = ui.as_weak();
         ui.on_find_files_clicked(move || {
-            if let (Some(fw), Some(u)) = (fw_weak.upgrade(), ui_weak.upgrade()) {
+            if let (Some(fw), Some(u)) = (controllers::find::ensure_window(&tx), ui_weak.upgrade())
+            {
                 fw.set_repo_names(u.get_repo_names());
                 if fw.get_repo_combo_value().is_empty() {
                     fw.set_repo_combo_value(u.get_snapshots_repo_combo_value());
@@ -193,7 +193,6 @@ pub(crate) fn wire_callbacks(
     {
         let tx = app_tx.clone();
         let ui_weak = ui.as_weak();
-        let rw_weak = restore_win.as_weak();
         ui.on_restore_selected_snapshot_clicked(move |row| {
             let Some(ui) = ui_weak.upgrade() else {
                 return;
@@ -206,7 +205,10 @@ pub(crate) fn wire_callbacks(
                 _ => return,
             };
 
-            if let Some(rw) = rw_weak.upgrade() {
+            // Clear stale tree data before showing the window for a new snapshot.
+            controllers::restore::clear_file_tree();
+
+            if let Some(rw) = controllers::restore::ensure_window(&tx) {
                 rw.set_snapshot_name(snap_name.clone().into());
                 rw.set_repo_name(rname.clone().into());
                 rw.set_status_text("Loading contents...".into());

@@ -3,6 +3,9 @@
     windows_subsystem = "windows"
 )]
 
+#[global_allocator]
+static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
+
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread;
@@ -125,9 +128,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     ui.global::<AppData>()
         .set_active_config_path(initial_config_path.into());
 
-    let restore_win = RestoreWindow::new()?;
-    let find_win = FindWindow::new()?;
-
     // snapshot_data stays as Arc<Mutex> — complex Rust struct used by sort_snapshot_table.
     let snapshot_data: Arc<Mutex<Vec<SnapshotRowData>>> = Arc::new(Mutex::new(Vec::new()));
 
@@ -139,8 +139,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     event_consumer::spawn(
         ui_rx,
         ui.as_weak(),
-        restore_win.as_weak(),
-        find_win.as_weak(),
         app_tx.clone(),
         snapshot_data.clone(),
         last_gui_state.clone(),
@@ -151,15 +149,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     controllers::main_window::wire_callbacks(
         &ui,
-        &restore_win,
-        &find_win,
         app_tx.clone(),
         ui_tx_for_cancel.clone(),
         cancel_requested.clone(),
         snapshot_data,
     );
-    controllers::restore::wire_callbacks(&restore_win, app_tx.clone());
-    controllers::find::wire_callbacks(&find_win, app_tx.clone());
 
     // ── Close-to-tray behavior ──
 

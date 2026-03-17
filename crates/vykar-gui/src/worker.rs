@@ -685,7 +685,11 @@ pub(crate) fn run_worker(
                                     ),
                                 );
 
-                                let _ = ui_tx.send(UiEvent::SnapshotContentsData { items });
+                                let _ = ui_tx.send(UiEvent::SnapshotContentsData {
+                                    repo_name: repo_name.clone(),
+                                    snapshot_name: snapshot_name.clone(),
+                                    items,
+                                });
                             }
                             Err(e) => {
                                 send_log(&ui_tx, format!("Failed to load snapshot items: {e}"));

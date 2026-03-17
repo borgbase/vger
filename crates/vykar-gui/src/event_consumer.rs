@@ -11,7 +11,7 @@ use crate::messages::{AppCommand, SnapshotRowData, UiEvent};
 use crate::state;
 use crate::tray_state;
 use crate::view_models::{to_string_model, to_table_model};
-use crate::{AppData, FindWindow, MainWindow, RepoInfo, RestoreWindow, SourceInfo};
+use crate::{AppData, MainWindow, RepoInfo, SourceInfo};
 
 thread_local! {
     static LOG_MODEL: RefCell<Option<Rc<VecModel<ModelRc<StandardListViewItem>>>>> = const { RefCell::new(None) };
@@ -29,8 +29,8 @@ fn ensure_log_model(ui: &MainWindow) -> Rc<VecModel<ModelRc<StandardListViewItem
     })
 }
 
-pub(crate) const MAX_LOG_ROWS: usize = 10_000;
-pub(crate) const TRIM_TARGET: usize = 9_000;
+pub(crate) const MAX_LOG_ROWS: usize = 2_000;
+pub(crate) const TRIM_TARGET: usize = 1_800;
 
 /// Insert a 3-column log row (Date, Time, Event) at position 0 (newest first).
 /// Trims the model to `TRIM_TARGET` rows when it exceeds `MAX_LOG_ROWS`.
@@ -87,12 +87,9 @@ pub(crate) fn capture_gui_state(ui: &MainWindow) -> Option<state::GuiState> {
     })
 }
 
-#[allow(clippy::too_many_arguments)]
 pub(crate) fn spawn(
     ui_rx: Receiver<UiEvent>,
     ui_weak: slint::Weak<MainWindow>,
-    restore_weak: slint::Weak<RestoreWindow>,
-    find_weak: slint::Weak<FindWindow>,
     app_tx: crossbeam_channel::Sender<AppCommand>,
     snapshot_data: Arc<Mutex<Vec<SnapshotRowData>>>,
     last_gui_state: Arc<Mutex<Option<state::GuiState>>>,
@@ -101,8 +98,6 @@ pub(crate) fn spawn(
     std::thread::spawn(move || {
         while let Ok(event) = ui_rx.recv() {
             let ui_weak = ui_weak.clone();
-            let restore_weak = restore_weak.clone();
-            let find_weak = find_weak.clone();
             let snapshot_data = snapshot_data.clone();
             let app_tx = app_tx.clone();
             let last_gui_state = last_gui_state.clone();
@@ -214,20 +209,29 @@ pub(crate) fn spawn(
                         }
                         ui.set_snapshot_rows(to_table_model(rows));
                     }
-                    UiEvent::SnapshotContentsData { items } => {
-                        if let Some(rw) = restore_weak.upgrade() {
-                            controllers::restore::handle_snapshot_contents(&rw, items);
-                        }
+                    UiEvent::SnapshotContentsData {
+                        repo_name,
+                        snapshot_name,
+                        items,
+                    } => {
+                        controllers::restore::with_window(|rw| {
+                            controllers::restore::handle_snapshot_contents(
+                                rw,
+                                &repo_name,
+                                &snapshot_name,
+                                items,
+                            );
+                        });
                     }
                     UiEvent::RestoreFinished { success, message } => {
-                        if let Some(rw) = restore_weak.upgrade() {
-                            controllers::restore::handle_restore_finished(&rw, success, message);
-                        }
+                        controllers::restore::with_window(|rw| {
+                            controllers::restore::handle_restore_finished(rw, success, message);
+                        });
                     }
                     UiEvent::FindResultsData { rows } => {
-                        if let Some(fw) = find_weak.upgrade() {
-                            controllers::find::handle_results(&fw, rows);
-                        }
+                        controllers::find::with_window(|fw| {
+                            controllers::find::handle_results(fw, rows);
+                        });
                     }
                     UiEvent::ConfigText(text) => {
                         ui.set_editor_baseline(text.clone().into());

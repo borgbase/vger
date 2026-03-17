@@ -1,9 +1,42 @@
+use std::cell::RefCell;
+
 use crossbeam_channel::Sender;
 use slint::ComponentHandle;
 
 use crate::messages::{AppCommand, FindResultRow};
 use crate::view_models::to_table_model;
 use crate::FindWindow;
+
+thread_local! {
+    /// Strong reference keeps the window alive even when hidden, so in-flight
+    /// FindResultsData events are never dropped.
+    static FIND_HANDLE: RefCell<Option<FindWindow>> = const { RefCell::new(None) };
+}
+
+/// Return the existing FindWindow or lazily create and wire one.
+/// Must be called on the main (UI) thread.
+pub(crate) fn ensure_window(app_tx: &Sender<AppCommand>) -> Option<FindWindow> {
+    FIND_HANDLE.with(|cell| {
+        let mut borrow = cell.borrow_mut();
+        if let Some(ref fw) = *borrow {
+            return Some(fw.clone_strong());
+        }
+        let fw = FindWindow::new().ok()?;
+        wire_callbacks(&fw, app_tx.clone());
+        let handle = fw.clone_strong();
+        *borrow = Some(fw);
+        Some(handle)
+    })
+}
+
+/// Access the FindWindow if it exists (runs closure on main thread).
+pub(crate) fn with_window(f: impl FnOnce(&FindWindow)) {
+    FIND_HANDLE.with(|cell| {
+        if let Some(ref fw) = *cell.borrow() {
+            f(fw);
+        }
+    });
+}
 
 pub(crate) fn handle_results(fw: &FindWindow, rows: Vec<FindResultRow>) {
     let count = rows.len();
@@ -15,7 +48,7 @@ pub(crate) fn handle_results(fw: &FindWindow, rows: Vec<FindResultRow>) {
     fw.set_status_text(format!("{count} results found.").into());
 }
 
-pub(crate) fn wire_callbacks(find_win: &FindWindow, app_tx: Sender<AppCommand>) {
+fn wire_callbacks(find_win: &FindWindow, app_tx: Sender<AppCommand>) {
     {
         let tx = app_tx.clone();
         let fw_weak = find_win.as_weak();
@@ -46,4 +79,9 @@ pub(crate) fn wire_callbacks(find_win: &FindWindow, app_tx: Sender<AppCommand>) 
             }
         });
     }
+
+    // Titlebar close — hide instead of destroy.
+    find_win
+        .window()
+        .on_close_requested(|| slint::CloseRequestResponse::HideWindow);
 }
