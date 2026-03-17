@@ -357,24 +357,6 @@ jobs:
         run: |
           git fetch --tags
           echo "tag=$(git tag -l 'v*' --sort=-v:refname | head -1 | sed 's/^v//')" >> "$GITHUB_OUTPUT"
-      - id: meta
-        uses: docker/metadata-action@v5
-        with:
-          images: ghcr.io/borgbase/vykar
-          tags: |
-            type=semver,pattern={{version}}
-            type=semver,pattern={{major}}.{{minor}}
-            type=semver,pattern={{major}},enable=${{ !startsWith(github.ref, 'refs/tags/v0.') }}
-            type=raw,value=latest
-            type=raw,value=${{ steps.version.outputs.tag }},enable=${{ github.event_name == 'workflow_dispatch' }}
-      - uses: docker/build-push-action@v6
-        with:
-          context: .
-          platforms: linux/amd64,linux/arm64
-          push: true
-          tags: ${{ steps.meta.outputs.tags }}
-          labels: ${{ steps.meta.outputs.labels }}
-
       - id: meta-apprise
         uses: docker/metadata-action@v5
         with:
@@ -395,3 +377,21 @@ jobs:
           push: true
           tags: ${{ steps.meta-apprise.outputs.tags }}
           labels: ${{ steps.meta-apprise.outputs.labels }}
+
+      - id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ghcr.io/borgbase/vykar
+          tags: |
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
+            type=semver,pattern={{major}},enable=${{ !startsWith(github.ref, 'refs/tags/v0.') }}
+            type=raw,value=latest
+            type=raw,value=${{ steps.version.outputs.tag }},enable=${{ github.event_name == 'workflow_dispatch' }}
+      - uses: docker/build-push-action@v6
+        with:
+          context: .
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
