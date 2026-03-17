@@ -416,6 +416,47 @@ hooks:
 Vykar hooks can notify monitoring services on success or failure. A `curl` in an `after` hook replaces the need for dedicated integrations.
 
 
+### Apprise (multi-service)
+
+[Apprise](https://github.com/caronc/apprise) sends notifications to 100+ services (Gotify, Slack, Discord, Telegram, ntfy, email, and more) from the command line. Since vykar hooks run arbitrary shell commands, you can use the `apprise` CLI directly — no built-in integration needed.
+
+Install it with:
+
+```bash
+pip install apprise
+```
+
+If you use the Docker image, the `apprise` variant has it pre-installed — use the `latest-apprise` tag (or e.g. `0.12.6-apprise`). See [Docker installation](install.md#docker).
+
+```yaml
+hooks:
+  after_backup:
+    - >-
+      apprise -t "Backup complete"
+      -b "vykar {command} finished for {repository}"
+      "gotify://hostname/token"
+      "slack://tokenA/tokenB/tokenC"
+  failed:
+    - >-
+      apprise -t "Backup failed"
+      -b "vykar {command} failed for {repository}: {error}"
+      "gotify://hostname/token"
+```
+
+Common service URL examples:
+
+| Service  | URL format                                          |
+|----------|-----------------------------------------------------|
+| Gotify   | `gotify://hostname/token`                           |
+| Slack    | `slack://tokenA/tokenB/tokenC`                      |
+| Discord  | `discord://webhook_id/webhook_token`                |
+| Telegram | `tgram://bot_token/chat_id`                         |
+| ntfy     | `ntfy://topic`                                      |
+| Email    | `mailto://user:pass@gmail.com`                      |
+
+You can pass multiple URLs in a single command to notify several services at once. See the [Apprise wiki](https://github.com/caronc/apprise/wiki) for the full list of supported services and URL formats.
+
+
 ### Healthchecks
 
 [Healthchecks](https://healthchecks.io/) alerts you when backups stop arriving. Ping the check URL after each successful backup.

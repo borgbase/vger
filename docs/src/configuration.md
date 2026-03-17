@@ -22,6 +22,14 @@ Vykar automatically finds config files in this order:
 
 You can also set `VYKAR_PASSPHRASE` to supply the passphrase non-interactively.
 
+Override the local cache directory with `cache_dir` at the top level:
+
+```yaml
+cache_dir: "/tmp/vykar-cache"
+```
+
+Defaults to the platform cache directory when omitted.
+
 ## Minimal example
 
 A complete but minimal working config. Encryption defaults to `auto` (init benchmarks AES-256-GCM vs ChaCha20-Poly1305 and pins the repo), so you only need repositories and sources:
@@ -55,7 +63,44 @@ repositories:
     secret_access_key: "..."
 ```
 
-Each entry accepts an optional `label` for CLI targeting (`vykar list --repo local`) and optional pack size tuning (`min_pack_size`, `max_pack_size`). Defaults are `min_pack_size = 32 MiB` and `max_pack_size = 192 MiB`; `max_pack_size` has a hard ceiling of `512 MiB`. See [Storage Backends](backends.md) for all backend-specific options.
+Each entry in the `repositories` list accepts the following fields. `url` is the only required one.
+
+**Common fields (all backends):**
+
+| Field | Default | Values | Description |
+|-------|---------|--------|-------------|
+| `url` | *(required)* | string | Repository URL or local path |
+| `label` | — | string | Human label for `--repo` targeting |
+| `allow_insecure_http` | `false` | bool | Allow plaintext HTTP (required for `http://` and `s3+http://` URLs) |
+| `min_pack_size` | 32 MiB (33554432) | integer (bytes) | Minimum pack file size |
+| `max_pack_size` | 192 MiB (201326592) | integer (bytes) | Maximum pack file size (hard ceiling: 512 MiB) |
+
+**S3 fields:**
+
+| Field | Default | Values | Description |
+|-------|---------|--------|-------------|
+| `region` | — | string | S3 region (defaults to `us-east-1` at runtime) |
+| `access_key_id` | — | string | S3 access key ID |
+| `secret_access_key` | — | string | S3 secret access key |
+| `s3_soft_delete` | `false` | bool | Use soft delete for S3 Object Lock compatibility |
+
+**SFTP fields:**
+
+| Field | Default | Values | Description |
+|-------|---------|--------|-------------|
+| `sftp_key` | — | string | Path to SSH private key. Auto-detects `~/.ssh/{id_ed25519, id_rsa, id_ecdsa}` when omitted |
+| `sftp_known_hosts` | — | string | Path to known_hosts file. Defaults to `~/.ssh/known_hosts` at runtime |
+| `sftp_timeout` | — | integer (seconds, 5–300) | Per-request timeout. Defaults to 30s; clamped to 5–300s range |
+
+**REST server fields:**
+
+| Field | Default | Values | Description |
+|-------|---------|--------|-------------|
+| `access_token` | — | string | Bearer token for REST server auth |
+
+Per-repo override sections (optional, replace top-level when set): `encryption`, `compression`, `retention`, `limits`. Per-repo-only section: `retry`. Per-repo `hooks` are additive — both global and repo hooks are kept and executed in the order described in [Execution order](#execution-order).
+
+See [Storage Backends](backends.md) for all backend-specific options.
 
 For remote repositories, transport is HTTPS-first by default. To intentionally use plaintext HTTP (for local/dev setups), set:
 
@@ -100,6 +145,24 @@ By default, commands operate on all repositories. Use `--repo` / `-R` to target 
 vykar list --repo local
 vykar list -R /backups/local
 ```
+
+### Retry
+
+Retry settings for transient remote errors. Repo-level only — there is no top-level `retry` section. Uses exponential backoff with jitter.
+
+```yaml
+repositories:
+  - url: "s3://..."
+    retry:
+      max_retries: 5
+      retry_delay_ms: 2000
+```
+
+| Field | Default | Values | Description |
+|-------|---------|--------|-------------|
+| `max_retries` | `3` | integer | Maximum retry attempts |
+| `retry_delay_ms` | `1000` | integer (ms) | Initial delay between retries |
+| `retry_max_delay_ms` | `60000` | integer (ms) | Maximum delay between retries |
 
 ### 3-2-1 backup strategy
 
@@ -153,6 +216,21 @@ sources:
 
 These directories are backed up together as one snapshot. You cannot use both `path` and `paths` on the same entry.
 
+| Field | Default | Values | Description |
+|-------|---------|--------|-------------|
+| `path` | — | string | Single directory to back up (mutually exclusive with `paths`) |
+| `paths` | — | list of strings | Multiple directories as one snapshot (requires `label`) |
+| `label` | derived | string | Source label. Auto-derived from dir name for single path; required for multi-path and dump-only |
+| `exclude` | `[]` | list of strings | Per-source exclude patterns (merged with global `exclude_patterns`) |
+| `exclude_if_present` | — | list of strings | Per-source marker files. Inherits global `exclude_if_present` when omitted; **replaces** global when set |
+| `one_file_system` | inherited | bool | Override global `one_file_system` |
+| `git_ignore` | inherited | bool | Override global `git_ignore` |
+| `xattrs` | inherited | `{enabled: bool}` | Override global `xattrs` |
+| `repos` | `[]` (all) | list of strings | Restrict to named repositories |
+| `retention` | inherited | object | Per-source retention policy |
+| `hooks` | `{}` | object | Source-level hooks (`before`/`after`/`failed`/`finally` only) |
+| `command_dumps` | `[]` | list | Command dump entries |
+
 ### Per-source overrides
 
 Each source entry in rich form can override global settings. This lets you tailor backup behavior per directory:
@@ -197,12 +275,10 @@ sources:
 
 Each source with `command_dumps` produces its own snapshot. An explicit `label` is required.
 
-Each entry has two required fields:
-
-| Field     | Description                                           |
-|-----------|-------------------------------------------------------|
-| `name`    | Virtual filename (e.g. `mydb.sql`). Must not contain `/` or `\`. No duplicates within a source. |
-| `command` | Shell command whose stdout is captured (run via `sh -c`). |
+| Field | Default | Values | Description |
+|-------|---------|--------|-------------|
+| `name` | *(required)* | string | Virtual filename (no `/` or `\`, no duplicates within source) |
+| `command` | *(required)* | string | Shell command whose stdout is captured (run via `sh -c`) |
 
 Output is stored as virtual files under `.vykar-dumps/` in the snapshot. On restore they appear as regular files (e.g. `.vykar-dumps/postgres.sql`).
 
@@ -225,17 +301,19 @@ See [Backup — Command dumps](backup.md#command-dumps) for more details and [Re
 
 ## Encryption
 
-Encryption is enabled by default (`auto` mode with Argon2id key derivation). You only need an `encryption` section to supply a passcommand, force a specific algorithm, or disable encryption:
+Encryption is enabled by default (`auto` mode with Argon2id key derivation). You only need an `encryption` section to supply a passcommand, force a specific algorithm, or disable encryption.
 
 ```yaml
 encryption:
-  # mode: "auto"                     # Default — benchmark at init and persist chosen mode
-  # mode: "aes256gcm"                # Force AES-256-GCM
-  # mode: "chacha20poly1305"         # Force ChaCha20-Poly1305
-  # mode: "none"                     # Disable encryption
-  # passphrase: "inline-secret"      # Not recommended for production
-  # passcommand: "pass show borg"    # Shell command that prints the passphrase
+  mode: "chacha20poly1305"
+  passphrase: "correct-horse-battery-staple"
 ```
+
+| Field | Default | Values | Description |
+|-------|---------|--------|-------------|
+| `mode` | `"auto"` | `"auto"`, `"aes256gcm"`, `"chacha20poly1305"`, `"none"` | Encryption algorithm. `auto` benchmarks at init |
+| `passphrase` | — | string (quoted) | Inline passphrase (not recommended for production) |
+| `passcommand` | — | string (quoted) | Shell command that prints the passphrase |
 
 `none` mode requires no passphrase and creates no key file. Data is still checksummed via keyed BLAKE2b-256 chunk IDs to detect storage corruption, but is not authenticated against tampering. See [Architecture — Plaintext Mode](architecture.md#plaintext-mode-none) for details.
 
@@ -248,13 +326,18 @@ For `vykar daemon`, encrypted repositories must have a non-interactive passphras
 
 ## Compression
 
+LZ4 (default) is optimised for speed — even on incompressible data the overhead is negligible, and reduced I/O usually more than compensates. ZSTD gives better compression ratios at the cost of more CPU; level 3 is a good starting point. `none` disables compression entirely.
+
 ```yaml
-compression:                           # Optional, defaults shown
-  algorithm: "lz4"                     # "lz4", "zstd", or "none"
-  zstd_level: 3                        # 1-22, only used with zstd
+compression:
+  algorithm: "zstd"
+  zstd_level: 6
 ```
 
-LZ4 (default) is optimised for speed — even on incompressible data the overhead is negligible, and reduced I/O usually more than compensates. ZSTD gives better compression ratios at the cost of more CPU; level 3 is a good starting point. `none` disables compression entirely.
+| Field | Default | Values | Description |
+|-------|---------|--------|-------------|
+| `algorithm` | `"lz4"` | `"lz4"`, `"zstd"`, `"none"` | Compression algorithm |
+| `zstd_level` | `3` | integer, 1–22 | Zstd compression level (only used with `zstd`). 1–3 favours speed, 6–9 balances speed and ratio, 19–22 maximises ratio at significant CPU cost. Most users should stay in the 3–6 range |
 
 Use `--compression` on the CLI to override the configured algorithm for a single backup run:
 
@@ -265,11 +348,17 @@ vykar backup --compression zstd
 ## Chunker
 
 ```yaml
-chunker:                             # Optional, defaults shown
-  min_size: 524288                   # 512 KiB
-  avg_size: 2097152                  # 2 MiB
-  max_size: 8388608                  # 8 MiB
+chunker:
+  min_size: 524288      # 512 KiB
+  avg_size: 2097152     # 2 MiB
+  max_size: 8388608     # 8 MiB
 ```
+
+| Field | Default | Values | Description |
+|-------|---------|--------|-------------|
+| `min_size` | 512 KiB (524288) | integer (bytes) | Minimum chunk size. Must be ≤ `avg_size` |
+| `avg_size` | 2 MiB (2097152) | integer (bytes) | Average chunk size |
+| `max_size` | 8 MiB (8388608) | integer (bytes, hard cap: 16 MiB) | Maximum chunk size. Clamped to 16 MiB if set higher |
 
 ## Exclude Patterns
 
@@ -359,6 +448,13 @@ xattrs:                              # Extended attribute handling
   enabled: true                      # Preserve xattrs on backup/restore (default true, Unix-only)
 ```
 
+| Field | Default | Values | Description |
+|-------|---------|--------|-------------|
+| `exclude_if_present` | `[]` | list of strings | Marker filenames — directories containing any of these are skipped |
+| `one_file_system` | `false` | bool | Don't cross filesystem/mount boundaries |
+| `git_ignore` | `false` | bool | Respect `.gitignore` files in source dirs |
+| `xattrs.enabled` | `true` | bool | Preserve extended file attributes on backup/restore (Unix only) |
+
 ## Hostname
 
 By default, vykar records the short system hostname (everything before the first `.`) in each snapshot. On macOS, `gethostname()` returns a network-dependent FQDN (e.g. `MyMac.local` vs `MyMac.fritz.box` depending on VPN); truncating at the first dot keeps the hostname stable across network changes. On Linux and Windows, hostnames typically have no dots, so this is a no-op.
@@ -369,26 +465,44 @@ To override the hostname recorded in snapshots:
 hostname: MyMachine
 ```
 
+| Field | Default | Values | Description |
+|-------|---------|--------|-------------|
+| `hostname` | — | string | Override hostname in snapshots. Defaults to system short hostname at runtime |
+
 This only affects snapshot metadata — lock files and session markers always use the raw system hostname.
 
 ## Retention
 
+All fields optional. At least one should be set for the policy to have effect.
+
 ```yaml
-retention:                           # Global retention policy (can be overridden per-source)
-  keep_last: 10
+retention:
   keep_daily: 7
   keep_weekly: 4
   keep_monthly: 6
-  keep_yearly: 2
-  keep_within: "2d"                  # Keep everything within this period (e.g. "2d", "48h", "1w")
+  keep_within: "2d"
 ```
+
+| Field | Default | Values | Description |
+|-------|---------|--------|-------------|
+| `keep_last` | — | integer | Keep N most recent snapshots |
+| `keep_hourly` | — | integer | Keep N hourly snapshots |
+| `keep_daily` | — | integer | Keep N daily snapshots |
+| `keep_weekly` | — | integer | Keep N weekly snapshots |
+| `keep_monthly` | — | integer | Keep N monthly snapshots |
+| `keep_yearly` | — | integer | Keep N yearly snapshots |
+| `keep_within` | — | duration string (`h`/`d`/`w`/`m`/`y`) | Keep all snapshots within this period. Suffixes: `h` = hours, `d` = days, `w` = weeks, `m` = months (30d), `y` = years (365d) |
 
 ## Compact
 
 ```yaml
 compact:
-  threshold: 20                      # Minimum % unused space to trigger repack (default 20)
+  threshold: 30
 ```
+
+| Field | Default | Values | Description |
+|-------|---------|--------|-------------|
+| `threshold` | `20` | number, 0–100 | Minimum % unused space to trigger repack. Reset to default if out of range |
 
 ## Check
 
@@ -396,14 +510,14 @@ Control the integrity check step during scheduled/daemon backup cycles. Standalo
 
 ```yaml
 check:
-  max_percent: 0                     # % of packs/snapshots to verify per cycle (0-100, default: 0)
-  full_every: "60d"                  # Full 100% check interval (default: "60d")
+  max_percent: 10
+  full_every: "30d"
 ```
 
-| Field          | Default | Description |
-|----------------|---------|-------------|
-| `max_percent`  | `0`     | Percentage of packs and snapshots to verify on each scheduled cycle. `0` means no partial checks are run — only `full_every` triggers checks. |
-| `full_every`   | `"60d"` | Run a full 100% check at this interval. Accepts duration suffixes: `s`, `m`, `h`, `d`. When due, overrides `max_percent` to 100. Set to `null` to disable periodic full checks entirely. |
+| Field | Default | Values | Description |
+|-------|---------|--------|-------------|
+| `max_percent` | `0` | integer, 0–100 | % of packs/snapshots to verify per scheduled cycle. `0` = skip partial checks |
+| `full_every` | `"60d"` | duration string (`s`/`m`/`h`/`d`) or `null` | Full 100% check interval. Overrides `max_percent` when due. `null` disables periodic full checks |
 
 **How it works:** On each daemon/GUI cycle, vykar checks a local timestamp file to determine whether a full check is due. If `full_every` is due (or the timestamp is missing/corrupt), a full 100% check runs and the timestamp is updated. Otherwise, if `max_percent > 0`, a random sample of that percentage of packs and snapshots is verified. If `max_percent` is 0 and `full_every` is not yet due, the check step is skipped entirely (no index loaded).
 
@@ -412,13 +526,18 @@ Standalone `vykar check` always runs at 100% and does not update the daemon's ti
 ## Limits
 
 ```yaml
-limits:                              # Optional backup resource limits
-  connections: 2                     # Parallel backend ops (1-16); also drives upload/restore concurrency
-  threads: 0                         # Backup transform workers (0 = auto: min(cores,12), 1 = mostly sequential)
-  nice: 0                            # Unix niceness target (-20..19), ignored on Windows
-  upload_mib_per_sec: 0              # Upload bandwidth cap (MiB/s, 0 = unlimited)
-  download_mib_per_sec: 0            # Download bandwidth cap (MiB/s, 0 = unlimited)
+limits:
+  connections: 4
+  upload_mib_per_sec: 50
 ```
+
+| Field | Default | Values | Description |
+|-------|---------|--------|-------------|
+| `connections` | `2` | integer, 1–16 | Parallel backend operations; also controls upload/restore concurrency |
+| `threads` | `0` | integer | CPU worker threads. `0` = auto: min(cores, 12). `1` = mostly sequential |
+| `nice` | `0` | integer, -20–19 | Unix process niceness. `0` = unchanged. Ignored on Windows |
+| `upload_mib_per_sec` | `0` | integer (MiB/s) | Upload bandwidth cap. `0` = unlimited |
+| `download_mib_per_sec` | `0` | integer (MiB/s) | Download bandwidth cap. `0` = unlimited |
 
 `limits.connections` also controls SFTP connection pool size, backup in-flight uploads, and restore reader concurrency. Internal pipeline knobs are now derived automatically from `connections` and `threads`.
 
@@ -469,6 +588,8 @@ Hooks only run for `backup`, `prune`, `check`, and `compact`. The bare form (`be
 
 If a `before` hook fails, the command is skipped and both `failed` and `finally` hooks still run.
 
+Each hook key maps to a shell command (string) or list of commands.
+
 ### Variable substitution
 
 Hook commands support `{variable}` placeholders that are replaced before execution. Values are automatically shell-escaped.
@@ -494,47 +615,7 @@ hooks:
     - 'echo "Backed up {source_label} to {repository}"'
 ```
 
-### Notifications with Apprise
-
-[Apprise](https://github.com/caronc/apprise) lets you send notifications to 100+ services (Gotify, Slack, Discord, Telegram, ntfy, email, and more) from the command line. Since vykar hooks run arbitrary shell commands, you can use the `apprise` CLI directly — no built-in integration needed.
-
-Install it with:
-
-```bash
-pip install apprise
-```
-
-If you use the Docker image, the `apprise` variant has it pre-installed — use the `latest-apprise` tag (or e.g. `0.12.6-apprise`). See [Docker installation](install.md#docker).
-
-Then add hooks that call `apprise` with the service URLs you want:
-
-```yaml
-hooks:
-  after_backup:
-    - >-
-      apprise -t "Backup complete"
-      -b "vykar {command} finished for {repository}"
-      "gotify://hostname/token"
-      "slack://tokenA/tokenB/tokenC"
-  failed:
-    - >-
-      apprise -t "Backup failed"
-      -b "vykar {command} failed for {repository}: {error}"
-      "gotify://hostname/token"
-```
-
-Common service URL examples:
-
-| Service  | URL format                                          |
-|----------|-----------------------------------------------------|
-| Gotify   | `gotify://hostname/token`                           |
-| Slack    | `slack://tokenA/tokenB/tokenC`                      |
-| Discord  | `discord://webhook_id/webhook_token`                |
-| Telegram | `tgram://bot_token/chat_id`                         |
-| ntfy     | `ntfy://topic`                                      |
-| Email    | `mailto://user:pass@gmail.com`                      |
-
-You can pass multiple URLs in a single command to notify several services at once. See the [Apprise wiki](https://github.com/caronc/apprise/wiki) for the full list of supported services and URL formats.
+See [Recipes](recipes.md) for practical hook examples: database dumps, filesystem snapshots, network-aware backups, and monitoring notifications.
 
 ## Schedule
 
@@ -542,13 +623,19 @@ Configure the built-in daemon scheduler for automatic periodic backups. Used wit
 
 ```yaml
 schedule:
-  enabled: true                        # Enable scheduled backups (default false)
-  every: "6h"                          # Interval between runs: "30m", "6h", "2d", or integer days (default "24h")
-  # cron: "0 3 * * *"                 # OR 5-field cron expression (mutually exclusive with every)
-  on_startup: false                    # Run a backup immediately when the daemon starts (default false)
-  jitter_seconds: 0                    # Random delay 0–N seconds added to each run (default 0)
-  passphrase_prompt_timeout_seconds: 300  # Timeout for interactive passphrase prompts (default 300)
+  enabled: true
+  every: "6h"
+  on_startup: true
 ```
+
+| Field | Default | Values | Description |
+|-------|---------|--------|-------------|
+| `enabled` | `false` | bool | Enable scheduled backups |
+| `every` | — | duration string (`s`/`m`/`h`/`d`) | Interval between runs. Falls back to `24h` when neither `every` nor `cron` is set. Mutually exclusive with `cron` |
+| `cron` | — | 5-field cron expression | Cron schedule. Mutually exclusive with `every` |
+| `on_startup` | `false` | bool | Run backup immediately when daemon starts |
+| `jitter_seconds` | `0` | integer | Random delay 0–N seconds added to each run |
+| `passphrase_prompt_timeout_seconds` | `300` | integer (seconds) | Timeout for interactive passphrase prompts |
 
 ### Interval mode
 
