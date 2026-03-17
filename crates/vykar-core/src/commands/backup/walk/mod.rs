@@ -580,7 +580,11 @@ fn walked_entry_to_walk_items(
     }
 
     if entry_type == ItemType::RegularFile && metadata_summary.size > 0 {
-        let abs_path = walked.abs_path.to_string_lossy().to_string();
+        let abs_path = walked
+            .abs_path
+            .into_os_string()
+            .into_string()
+            .unwrap_or_else(|os| os.to_string_lossy().into_owned());
 
         let cached_refs = file_cache
             .lookup(
@@ -1046,5 +1050,40 @@ mod tests {
     fn non_soft_io_error() {
         let e = std::io::Error::new(std::io::ErrorKind::ConnectionRefused, "refused");
         assert!(!is_soft_io_error(&e));
+    }
+
+    #[test]
+    fn pathbuf_into_string_matches_to_string_lossy() {
+        let paths = ["/tmp/file.txt", "/home/user/Documents/photo.jpg", "/a/b/c"];
+        for p in paths {
+            let pb = std::path::PathBuf::from(p);
+            let expected = pb.to_string_lossy().to_string();
+            let actual = pb
+                .into_os_string()
+                .into_string()
+                .unwrap_or_else(|os| os.to_string_lossy().into_owned());
+            assert_eq!(actual, expected, "mismatch for path {p}");
+        }
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn pathbuf_into_string_fallback_for_non_utf8() {
+        use std::ffi::OsStr;
+        use std::os::unix::ffi::OsStrExt;
+
+        // 0x80 is not valid UTF-8
+        let os = OsStr::from_bytes(b"/tmp/\x80bad");
+        let pb = std::path::PathBuf::from(os);
+        let expected = pb.to_string_lossy().to_string();
+        let actual = pb
+            .into_os_string()
+            .into_string()
+            .unwrap_or_else(|os| os.to_string_lossy().into_owned());
+        assert_eq!(actual, expected);
+        assert!(
+            actual.contains('\u{FFFD}'),
+            "should contain replacement char"
+        );
     }
 }
