@@ -182,7 +182,6 @@ pub fn run_with_progress(
     let passphrase = req.passphrase;
     let source_paths = req.source_paths;
     let source_label = req.source_label;
-    let exclude_patterns = req.exclude_patterns;
     let exclude_if_present = req.exclude_if_present;
     let one_file_system = req.one_file_system;
     let git_ignore = req.git_ignore;
@@ -204,6 +203,21 @@ pub fn run_with_progress(
     }
     if one_file_system && !cfg!(unix) {
         warn!("one_file_system filtering has limited support on this platform");
+    }
+
+    // When command dumps are active, exclude the vykar-dumps/ directory from
+    // the filesystem walk to prevent duplicate paths in the snapshot.
+    let exclude_patterns: &[String];
+    let _owned_excludes;
+    if !command_dumps.is_empty() {
+        let mut v = req.exclude_patterns.to_vec();
+        v.push("/vykar-dumps".to_string());
+        _owned_excludes = v;
+        exclude_patterns = &_owned_excludes;
+        warn!("excluding vykar-dumps/ from filesystem walk (reserved for command dump output)");
+    } else {
+        _owned_excludes = Vec::new();
+        exclude_patterns = req.exclude_patterns;
     }
 
     let multi_path = source_paths.len() > 1;

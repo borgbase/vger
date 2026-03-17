@@ -280,7 +280,7 @@ Each source with `command_dumps` produces its own snapshot. An explicit `label` 
 | `name` | *(required)* | string | Virtual filename (no `/` or `\`, no duplicates within source) |
 | `command` | *(required)* | string | Shell command whose stdout is captured (run via `sh -c`) |
 
-Output is stored as virtual files under `.vykar-dumps/` in the snapshot. On restore they appear as regular files (e.g. `.vykar-dumps/postgres.sql`).
+Output is stored as virtual files under `vykar-dumps/` in the snapshot. On restore they appear as regular files (e.g. `vykar-dumps/postgres.sql`).
 
 To include command dumps in the same snapshot as filesystem paths, add both to one source entry:
 

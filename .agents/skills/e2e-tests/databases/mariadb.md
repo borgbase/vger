@@ -98,7 +98,7 @@ Use this when stress-testing `command_dumps` at larger scales:
 - In this sandbox, host TCP to a mapped port can work while in-container `--protocol=tcp -h 127.0.0.1` fails intermittently; prefer in-container socket dumps for `docker exec` workflows
 - Large `command_dumps` can drive high `vykar` RSS during capture; if memory pressure appears, prefer hook-based dump-to-file workflows for realistic large-data tests
 - Avoid low-entropy fillers (`REPEAT('x', ...)`) for baseline tests; high-entropy random data is required
-- Command dump artifacts appear under `.vykar-dumps/` in snapshot listings
+- Command dump artifacts appear under `vykar-dumps/` in snapshot listings
 - Use `sudo docker` if user lacks Docker socket access
 
 ## Cleanup

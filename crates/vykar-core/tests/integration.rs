@@ -967,19 +967,19 @@ fn command_dump_backup_and_restore() {
     assert_eq!(stats.nfiles, 1);
     assert!(stats.original_size > 0);
 
-    // List snapshot contents — verify .vykar-dumps/hello.txt appears
+    // List snapshot contents — verify vykar-dumps/hello.txt appears
     let mut repo = open_local_repo(repo_dir.path());
     let items = commands::list::load_snapshot_items(&mut repo, "snap-dumps").unwrap();
     let dump_items: Vec<_> = items
         .iter()
-        .filter(|i| i.path == ".vykar-dumps/hello.txt")
+        .filter(|i| i.path == "vykar-dumps/hello.txt")
         .collect();
     assert_eq!(dump_items.len(), 1);
     assert_eq!(dump_items[0].entry_type, ItemType::RegularFile);
     assert_eq!(dump_items[0].size, 12); // "hello world\n"
 
-    // Verify the .vykar-dumps directory item exists
-    let dir_items: Vec<_> = items.iter().filter(|i| i.path == ".vykar-dumps").collect();
+    // Verify the vykar-dumps directory item exists
+    let dir_items: Vec<_> = items.iter().filter(|i| i.path == "vykar-dumps").collect();
     assert_eq!(dir_items.len(), 1);
     assert_eq!(dir_items[0].entry_type, ItemType::Directory);
 
@@ -995,7 +995,7 @@ fn command_dump_backup_and_restore() {
     )
     .unwrap();
 
-    let dump_file = extract_dir.path().join(".vykar-dumps/hello.txt");
+    let dump_file = extract_dir.path().join("vykar-dumps/hello.txt");
     assert!(dump_file.exists(), "dump file should exist after restore");
     let contents = std::fs::read_to_string(&dump_file).unwrap();
     assert_eq!(contents, "hello world\n");
@@ -1087,9 +1087,9 @@ fn command_dump_mixed_with_files() {
     let mut repo = open_local_repo(repo_dir.path());
     let items = commands::list::load_snapshot_items(&mut repo, "snap-mixed").unwrap();
     let has_real = items.iter().any(|i| i.path == "real.txt");
-    let has_dump = items.iter().any(|i| i.path == ".vykar-dumps/dump.txt");
+    let has_dump = items.iter().any(|i| i.path == "vykar-dumps/dump.txt");
     assert!(has_real, "should contain real.txt");
-    assert!(has_dump, "should contain .vykar-dumps/dump.txt");
+    assert!(has_dump, "should contain vykar-dumps/dump.txt");
 
     // Extract and verify both files
     let extract_dir = tempfile::tempdir().unwrap();
@@ -1107,7 +1107,7 @@ fn command_dump_mixed_with_files() {
     assert_eq!(real_contents, "real file\n");
 
     let dump_contents =
-        std::fs::read_to_string(extract_dir.path().join(".vykar-dumps/dump.txt")).unwrap();
+        std::fs::read_to_string(extract_dir.path().join("vykar-dumps/dump.txt")).unwrap();
     assert_eq!(dump_contents, "dump output\n");
 }
 
@@ -1709,17 +1709,17 @@ fn command_dump_emits_progress_events() {
     let dump_start = events
         .iter()
         .position(|e| {
-            matches!(e, commands::backup::BackupProgressEvent::FileStarted { path } if path == ".vykar-dumps/big_dump.bin")
+            matches!(e, commands::backup::BackupProgressEvent::FileStarted { path } if path == "vykar-dumps/big_dump.bin")
         })
-        .expect("expected FileStarted for .vykar-dumps/big_dump.bin");
+        .expect("expected FileStarted for vykar-dumps/big_dump.bin");
 
     // 2. Find the final StatsUpdated with current_file identifying the dump.
     let dump_end = events
         .iter()
         .rposition(|e| {
-            matches!(e, commands::backup::BackupProgressEvent::StatsUpdated { current_file: Some(f), .. } if f == ".vykar-dumps/big_dump.bin")
+            matches!(e, commands::backup::BackupProgressEvent::StatsUpdated { current_file: Some(f), .. } if f == "vykar-dumps/big_dump.bin")
         })
-        .expect("expected final StatsUpdated for .vykar-dumps/big_dump.bin");
+        .expect("expected final StatsUpdated for vykar-dumps/big_dump.bin");
 
     // 3. Collect StatsUpdated events in the window.
     let dump_stats: Vec<_> = events[dump_start..=dump_end]
@@ -1753,7 +1753,7 @@ fn command_dump_emits_progress_events() {
     assert!(
         last_file
             .as_ref()
-            .is_some_and(|f| f == ".vykar-dumps/big_dump.bin"),
+            .is_some_and(|f| f == "vykar-dumps/big_dump.bin"),
         "final StatsUpdated should reference big_dump.bin, got {last_file:?}"
     );
 
@@ -1833,8 +1833,8 @@ fn command_dump_mixed_progress_events() {
     assert!(
         file_started_paths
             .iter()
-            .any(|p| p == ".vykar-dumps/mixed_dump.txt"),
-        "expected FileStarted for .vykar-dumps/mixed_dump.txt, got: {file_started_paths:?}"
+            .any(|p| p == "vykar-dumps/mixed_dump.txt"),
+        "expected FileStarted for vykar-dumps/mixed_dump.txt, got: {file_started_paths:?}"
     );
 
     // StatsUpdated events should cover both (final nfiles == 2).

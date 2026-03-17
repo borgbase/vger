@@ -544,7 +544,7 @@ impl ParentReuseBuilder {
         if item.entry_type != ItemType::RegularFile {
             return true;
         }
-        if item.path.starts_with(".vykar-dumps/") {
+        if item.path.starts_with("vykar-dumps/") {
             return true;
         }
         let Some(ctime_ns) = item.ctime else {
@@ -1205,7 +1205,7 @@ mod tests {
     fn parent_reuse_index_ignores_dumps() {
         let items = vec![
             Item {
-                path: ".vykar-dumps/pg_dump".into(),
+                path: "vykar-dumps/pg_dump".into(),
                 entry_type: ItemType::RegularFile,
                 mode: 0o644,
                 uid: 0,
@@ -1241,7 +1241,7 @@ mod tests {
         let idx = build_parent_index(items, &["/src".into()], false).unwrap();
         // Dump item should not be indexed
         assert!(idx
-            .lookup("/src/.vykar-dumps/pg_dump", 4096, 1000, 0)
+            .lookup("/src/vykar-dumps/pg_dump", 4096, 1000, 0)
             .is_none());
         // Real file should be indexed
         assert!(idx.lookup("/src/real.txt", 8192, 2000, 3000).is_some());

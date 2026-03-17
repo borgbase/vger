@@ -105,11 +105,11 @@ sources:
 
 Each source with `command_dumps` produces its own snapshot. An explicit `label` is required.
 
-Each command runs via `sh -c` and the captured output is stored as a virtual file under `.vykar-dumps/` in the snapshot. On restore, these appear as regular files:
+Each command runs via `sh -c` and the captured output is stored as a virtual file under `vykar-dumps/` in the snapshot. On restore, these appear as regular files:
 
 ```text
-.vykar-dumps/postgres.sql
-.vykar-dumps/redis.rdb
+vykar-dumps/postgres.sql
+vykar-dumps/redis.rdb
 ```
 
 If any command exits with a non-zero status, the backup is aborted.

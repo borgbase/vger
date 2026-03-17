@@ -260,7 +260,7 @@ pub(super) fn process_command_dumps(
     }
 
     let dumps_dir_item = Item {
-        path: ".vykar-dumps".to_string(),
+        path: "vykar-dumps".to_string(),
         entry_type: ItemType::Directory,
         mode: 0o755,
         uid: 0,
@@ -294,7 +294,7 @@ pub(super) fn process_command_dumps(
         emit_progress(
             progress,
             BackupProgressEvent::FileStarted {
-                path: format!(".vykar-dumps/{}", dump.name),
+                path: format!("vykar-dumps/{}", dump.name),
             },
         );
 
@@ -310,7 +310,7 @@ pub(super) fn process_command_dumps(
         stats.nfiles += 1;
 
         let dump_item = Item {
-            path: format!(".vykar-dumps/{}", dump.name),
+            path: format!("vykar-dumps/{}", dump.name),
             entry_type: ItemType::RegularFile,
             mode: 0o644,
             uid: 0,
@@ -334,7 +334,7 @@ pub(super) fn process_command_dumps(
             compression,
         )?;
 
-        emit_stats_progress(progress, stats, Some(format!(".vykar-dumps/{}", dump.name)));
+        emit_stats_progress(progress, stats, Some(format!("vykar-dumps/{}", dump.name)));
     }
 
     Ok(())

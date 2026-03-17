@@ -367,7 +367,7 @@ begin_write_session(session_id) → journal key = sessions/<session_id>.index
   → derive upload/pipeline limits from `limits.connections` + `limits.threads`
   → execute `command_dumps` first:
     → stream each command's stdout directly into chunk storage
-    → add virtual items under `.vykar-dumps/` to the item stream
+    → add virtual items under `vykar-dumps/` to the item stream
     → abort backup on non-zero exit or timeout
   → walk sources with excludes + one_file_system + exclude_if_present
     → cache-hit path: reuse cached ChunkRefs and bump refs
@@ -484,7 +484,7 @@ Snapshot metadata (the list of files, directories, and symlinks) is **not** stor
 
 This design means the item stream benefits from deduplication — if most files are unchanged between backups, the item-stream chunks are mostly identical and deduplicated away.
 
-Command dumps participate in this same item stream. A source with `command_dumps` produces a synthetic `.vykar-dumps/` directory entry plus one regular-file `Item` per dump, so restores treat dump output like ordinary files.
+Command dumps participate in this same item stream. A source with `command_dumps` produces a synthetic `vykar-dumps/` directory entry plus one regular-file `Item` per dump, so restores treat dump output like ordinary files.
 
 Restore now also consumes item streams incrementally (streaming deserialization) instead of materializing full `Vec<Item>` state up front.
 When the mmap restore cache is valid, item-stream chunk lookups can avoid loading the full chunk index. File-data read-group planning still uses the full index after planning, avoiding unrecoverable stale-location failures.

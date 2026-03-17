@@ -74,7 +74,7 @@ If host lacks `mongorestore`, use `docker exec` approach.
 ## Common Issues
 
 - Host may not have MongoDB client tools — `docker exec` is a reliable fallback
-- Command dump artifacts appear under `.vykar-dumps/` in snapshot listings
+- Command dump artifacts appear under `vykar-dumps/` in snapshot listings
 - Large archives can take substantial time; use generous timeouts for slower backends
 
 ## Cleanup

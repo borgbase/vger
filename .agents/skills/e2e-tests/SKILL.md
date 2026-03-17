@@ -205,7 +205,7 @@ Each sub-skill should produce:
 ## Common Gotchas
 
 - Mixing `sudo vykar` and regular `vykar` creates root-owned repo files — use `sudo rm -rf` for cleanup
-- Command dump artifacts appear under `.vykar-dumps/` in snapshot listings
+- Command dump artifacts appear under `vykar-dumps/` in snapshot listings
 - Prefer `vykar --config <config> ...` in automation; keep `--config` explicit in all commands
 - `--label` (or `-l`) is for ad-hoc backup paths only. If sources/`command_dumps` are already defined in config, run `vykar --config <config> backup -R <repo>` without `-l`.
 - `vykar snapshot` CLI forms:

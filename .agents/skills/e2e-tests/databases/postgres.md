@@ -47,7 +47,7 @@ Configure source in vykar config:
   - `name: vykar_pg_test.dump`
   - `command: pg_dump -U postgres -h 127.0.0.1 -Fc vykar_pg_test`
 
-Run backup and validate artifact exists under `.vykar-dumps/` in snapshot listing.
+Run backup and validate artifact exists under `vykar-dumps/` in snapshot listing.
 
 Use `vykar --config <config> backup -R <repo>` for these variants. Do not pass `-l/--label` when the source and `command_dumps` are already defined in config.
 
@@ -77,7 +77,7 @@ Clean remote storage with `rclone delete --rmdirs` between backend runs.
 ## Common Issues
 
 - `vykar snapshot` usage: `-R <repo>` belongs to `snapshot`, not `list` subcommand
-- Command dump artifacts appear under `.vykar-dumps/` in snapshot listings
+- Command dump artifacts appear under `vykar-dumps/` in snapshot listings
 - Client/server version mismatches can cause `pg_restore` config parameter errors
 - Use `sudo docker` if user lacks Docker socket access
 - Large dumps can run for a long time; use generous command timeouts for remote backends
