@@ -305,15 +305,6 @@ jobs:
           path: dist
           pattern: '{linux,macos,windows}-*'
           merge-multiple: true
-      - name: Generate checksums
-        run: |
-          cd dist
-          shopt -s nullglob
-          files=(*.tar.gz *.zip)
-          for f in "${files[@]}"; do
-            sha256sum "$f" > "$f.sha256"
-          done
-          sha256sum "${files[@]}" > SHA256SUMS
       - name: Publish GitHub release
         uses: softprops/action-gh-release@v2
         with:
