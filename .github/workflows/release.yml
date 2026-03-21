@@ -31,9 +31,10 @@ on:
         required: false
         default: true
       publish_release:
-        description: "Publish a GitHub Release (true/false)"
+        description: "Publish a GitHub Release"
+        type: boolean
         required: false
-        default: "false"
+        default: false
 
 concurrency:
   group: release-${{ github.ref }}
