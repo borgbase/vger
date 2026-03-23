@@ -42,6 +42,26 @@ sources:
   - "/home/user/documents"
 ```
 
+Windows:
+
+```yaml
+repositories:
+  - url: 'D:\Backups\repo'
+
+sources:
+  - 'C:\Users\me\Documents'
+```
+
+> **Windows paths and YAML quoting:** In YAML, double-quoted strings interpret backslashes as escape sequences — `"C:\Users\..."` will fail because `\U` is parsed as a hex escape. Use **single quotes** or **no quotes** for Windows paths:
+> ```yaml
+> # These work:
+> - 'C:\Users\me\Documents'
+> - C:\Users\me\Documents
+>
+> # This does NOT work:
+> - "C:\Users\me\Documents"
+> ```
+
 ## Repositories
 
 **Local:**
@@ -50,6 +70,7 @@ sources:
 repositories:
   - label: "local"
     url: "/backups/repo"
+    # Windows: url: 'D:\Backups\repo'
 ```
 
 **S3:**
@@ -178,6 +199,9 @@ Sources define what to back up — filesystem paths, command output, or both. Ea
 sources:
   - "/home/user/documents"
   - "/home/user/photos"
+  # Windows:
+  # - 'C:\Users\me\Documents'
+  # - 'C:\Users\me\Photos'
 ```
 
 Simple entries are grouped into one source. With one simple path, the source label is derived from the directory name. With multiple simple paths, the grouped source label becomes `default`. Use rich entries if you want separate source labels or one snapshot per path.

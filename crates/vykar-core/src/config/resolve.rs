@@ -745,6 +745,9 @@ pub fn minimal_config_template() -> &'static str {
 # sources:
 #   - /path/to/source
 
+# Windows paths: use single quotes or no quotes (double quotes break on backslashes)
+#   - 'C:\Users\me\Documents'
+
 # --- Common optional settings (uncomment as needed) ---
 
 # encryption:

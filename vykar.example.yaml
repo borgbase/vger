@@ -45,6 +45,12 @@ compression:
 
 # --- Sources (what to back up) ----------------------------------------------
 
+# Windows paths: use single quotes or no quotes. Double quotes interpret
+# backslashes as escape sequences and will cause a parse error.
+#   - 'C:\Users\me\Documents'       # single quotes: OK
+#   - C:\Users\me\Documents          # no quotes: OK
+#   - "C:\Users\me\Documents"        # double quotes: FAILS (\U is a hex escape)
+
 # Simple source form (path strings, label auto-derived from basename):
 #
 # sources:
