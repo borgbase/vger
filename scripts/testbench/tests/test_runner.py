@@ -1,3 +1,4 @@
+import json
 import subprocess
 import tempfile
 import unittest
@@ -116,6 +117,64 @@ class ScenarioRunnerTests(unittest.TestCase):
         generate_corpus.assert_not_called()
         write_config.assert_not_called()
         ensure_backend_ready.assert_not_called()
+
+    def test_run_scenario_records_failed_compact_phase_without_crashing(self) -> None:
+        scenario = {
+            "name": "compact-timeout",
+            "corpus": {"size_gib": 0.1},
+            "phases": [{"action": "init"}, {"action": "compact"}],
+        }
+
+        phase_results = [
+            {"action": "init", "label": "", "passed": True, "detail": "ok", "duration_sec": 0.01},
+            {
+                "action": "compact",
+                "label": "",
+                "passed": False,
+                "detail": "Command timed out after 3600 seconds",
+                "duration_sec": 3600.0,
+            },
+        ]
+
+        with tempfile.TemporaryDirectory() as output_dir:
+            with mock.patch(
+                "vykar_testbench.scenarios.corpus.validate_corpus_mix"
+            ), mock.patch(
+                "vykar_testbench.scenarios.corpus.generate_corpus",
+                return_value={"file_count": 1, "total_bytes": 1024},
+            ), mock.patch(
+                "vykar_testbench.scenarios.cfg.write_vykar_config",
+                return_value="/mnt/repos/scenario-repo",
+            ), mock.patch(
+                "vykar_testbench.scenarios.cfg.ensure_backend_ready"
+            ), mock.patch(
+                "vykar_testbench.scenarios.vykar_cmd.vykar_delete_repo"
+            ), mock.patch(
+                "vykar_testbench.scenarios._run_phase",
+                side_effect=phase_results,
+            ), mock.patch(
+                "vykar_testbench.scenarios.write_aggregate_report"
+            ), mock.patch(
+                "vykar_testbench.scenarios.print_summary"
+            ):
+                passed = scenarios.run_scenario(
+                    scenario,
+                    backend="local",
+                    runs=1,
+                    output_dir=output_dir,
+                    vykar_bin="vykar",
+                    seed=123,
+                )
+                summary_path = Path(output_dir) / "compact-timeout" / next(
+                    p.name for p in (Path(output_dir) / "compact-timeout").iterdir() if p.is_dir()
+                ) / "run-001" / "summary.json"
+                with open(summary_path) as f:
+                    summary = json.load(f)
+
+        self.assertFalse(passed)
+        self.assertEqual(summary["phases"][1]["action"], "compact")
+        self.assertFalse(summary["phases"][1]["passed"])
+        self.assertIn("timed out", summary["phases"][1]["detail"])
 
     def test_churn_phase_reports_cap_stats(self) -> None:
         ctx = {

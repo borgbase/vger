@@ -33,10 +33,11 @@ def _run_vykar_logged(
     env: dict[str, str],
     log_file: str,
     time_v: bool = False,
-    timeout: int = 120,
+    timeout: int | None = None,
 ) -> tuple[int, str]:
     """Run vykar, capturing output to log_file. Returns (rc, log_file)."""
     cmd = [vykar_bin, "--config", config_path] + args
+    resolved_timeout = timeout if timeout is not None else vykar_cmd.timeout_for_args(args)
     if time_v:
         time_file = log_file.replace(".log", ".timev")
         full_cmd = ["/usr/bin/time", "-v", "-o", time_file] + cmd
@@ -44,14 +45,22 @@ def _run_vykar_logged(
         full_cmd = cmd
 
     with open(log_file, "w") as f:
-        result = subprocess.run(
-            full_cmd,
-            env=env,
-            stdout=f,
-            stderr=subprocess.STDOUT,
-            timeout=timeout,
-            check=False,
-        )
+        try:
+            result = subprocess.run(
+                full_cmd,
+                env=env,
+                stdout=f,
+                stderr=subprocess.STDOUT,
+                timeout=resolved_timeout,
+                check=False,
+            )
+        except subprocess.TimeoutExpired:
+            print(
+                f"Command timed out after {resolved_timeout} seconds: {' '.join(cmd)}",
+                file=f,
+                flush=True,
+            )
+            return 124, log_file
 
     return result.returncode, log_file
 

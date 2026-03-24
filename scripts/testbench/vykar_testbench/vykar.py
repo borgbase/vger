@@ -15,6 +15,19 @@ import sys
 
 
 _SNAPSHOT_RE = re.compile(r"Snapshot created: (\S+)")
+SHORT_TIMEOUT_SECONDS = 120
+LONG_TIMEOUT_SECONDS = 3600
+
+
+def timeout_for_args(args: list[str]) -> int:
+    """Return the default timeout for a vykar subcommand."""
+    if not args:
+        return SHORT_TIMEOUT_SECONDS
+
+    command = args[0]
+    if command in {"backup", "restore", "check", "compact", "prune", "delete"}:
+        return LONG_TIMEOUT_SECONDS
+    return SHORT_TIMEOUT_SECONDS
 
 
 def _env_with_passphrase() -> dict[str, str]:
@@ -32,7 +45,7 @@ def run_vykar(
     config_path: str,
     args: list[str],
     *,
-    timeout: int = 120,
+    timeout: int | None = None,
     label: str = "",
     allow_missing_repo: bool = False,
     passphrase: str | None = None,
@@ -43,14 +56,33 @@ def run_vykar(
     env = _env_with_passphrase()
     if passphrase is not None:
         env["VYKAR_PASSPHRASE"] = passphrase
+    resolved_timeout = timeout if timeout is not None else timeout_for_args(args)
 
-    result = subprocess.run(
-        cmd,
-        capture_output=capture,
-        text=True,
-        env=env,
-        timeout=timeout,
-    )
+    try:
+        result = subprocess.run(
+            cmd,
+            capture_output=capture,
+            text=True,
+            env=env,
+            timeout=resolved_timeout,
+        )
+    except subprocess.TimeoutExpired as exc:
+        stdout = exc.stdout if isinstance(exc.stdout, str) else ""
+        stderr = exc.stderr if isinstance(exc.stderr, str) else ""
+        timeout_msg = (
+            f"Command timed out after {resolved_timeout} seconds: {' '.join(cmd)}"
+        )
+        if stderr:
+            stderr = f"{stderr}\n{timeout_msg}"
+        else:
+            stderr = timeout_msg
+        result = subprocess.CompletedProcess(
+            args=cmd,
+            returncode=124,
+            stdout=stdout,
+            stderr=stderr,
+        )
+
     missing_repo = allow_missing_repo and _is_missing_repo_error(result.stderr)
     if result.returncode != 0 and not missing_repo:
         print(
@@ -81,7 +113,7 @@ def vykar_backup(
 ) -> tuple[subprocess.CompletedProcess, str | None]:
     """Run backup, return (result, snapshot_id or None)."""
     args = ["backup", "-R", repo_label]
-    result = run_vykar(vykar_bin, config_path, args, timeout=3600, label="backup")
+    result = run_vykar(vykar_bin, config_path, args, label="backup")
     snapshot_id = None
     if result.returncode == 0:
         snapshot_id = extract_snapshot_id(result.stdout)
@@ -103,7 +135,6 @@ def vykar_restore(
         vykar_bin,
         config_path,
         ["restore", "-R", repo_label, snapshot_id, target_dir],
-        timeout=3600,
         label="restore",
     )
 
@@ -118,7 +149,7 @@ def vykar_check(
     args = ["check", "-R", repo_label]
     if verify_data:
         args.append("--verify-data")
-    return run_vykar(vykar_bin, config_path, args, timeout=3600, label="check")
+    return run_vykar(vykar_bin, config_path, args, label="check")
 
 
 def vykar_prune(vykar_bin: str, config_path: str, repo_label: str) -> subprocess.CompletedProcess:
