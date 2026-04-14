@@ -1,11 +1,12 @@
+use std::path::PathBuf;
+
 use crate::compress::Compression;
 use crate::config::ChunkerConfig;
-use crate::platform::paths;
 use crate::repo::pack::PackType;
 use crate::repo::EncryptionMode;
 use crate::repo::Repository;
 use crate::testutil::{test_repo_plaintext, MemoryBackend, PutLog, RecordingBackend};
-use std::path::PathBuf;
+use vykar_common::paths;
 
 #[test]
 fn init_creates_required_keys() {

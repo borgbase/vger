@@ -4,7 +4,7 @@ use std::path::{Path, PathBuf};
 
 use serde::Deserialize;
 
-use crate::platform::paths;
+use vykar_common::paths;
 
 use super::defaults::*;
 use super::deserialize::*;

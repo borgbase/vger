@@ -1,6 +1,7 @@
 [workspace]
 members = [
     "crates/vykar-types",
+    "crates/vykar-common",
     "crates/vykar-crypto",
     "crates/vykar-storage",
     "crates/vykar-core",
@@ -15,6 +16,7 @@ resolver = "2"
 [workspace.dependencies]
 # Internal crates
 vykar-types = { path = "crates/vykar-types" }
+vykar-common = { path = "crates/vykar-common" }
 vykar-crypto = { path = "crates/vykar-crypto" }
 vykar-storage = { path = "crates/vykar-storage" }
 vykar-core = { path = "crates/vykar-core" }

@@ -6,7 +6,7 @@ use blake2::Blake2bVar;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
-use crate::platform::paths;
+use vykar_common::paths;
 
 #[derive(Debug, Serialize, Deserialize)]
 struct CheckStateFile {

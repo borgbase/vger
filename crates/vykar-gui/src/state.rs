@@ -15,7 +15,7 @@ pub struct GuiState {
 }
 
 fn state_file_path() -> Option<PathBuf> {
-    vykar_core::platform::paths::config_dir().map(|d| d.join("vykar").join("gui_state.json"))
+    vykar_common::paths::config_dir().map(|d| d.join("vykar").join("gui_state.json"))
 }
 
 pub fn load() -> GuiState {

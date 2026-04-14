@@ -15,6 +15,7 @@ workspace = true
 
 [dependencies]
 vykar-core.workspace = true
+vykar-common.workspace = true
 vykar-types.workspace = true
 slint = { version = "1.15", default-features = false, features = ["std", "compat-1-2", "backend-winit", "renderer-skia", "accessibility"] }
 tray-icon = "0.21"

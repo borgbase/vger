@@ -10,9 +10,6 @@ mod retry;
 #[cfg(feature = "backend-sftp")]
 pub(crate) mod runtime;
 
-#[cfg(feature = "backend-sftp")]
-mod paths;
-
 use std::sync::Arc;
 
 use serde::{Deserialize, Serialize};

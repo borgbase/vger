@@ -3,8 +3,8 @@ use std::collections::HashMap;
 use slint::SharedString;
 use vykar_core::snapshot::item::{Item, ItemType};
 
-use crate::progress::format_bytes;
 use crate::TreeRowData;
+use vykar_common::display::format_bytes;
 
 // ── Tree view data structures ──
 

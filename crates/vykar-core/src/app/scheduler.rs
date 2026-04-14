@@ -28,7 +28,7 @@ impl SchedulerLock {
         let path = match path_override {
             Some(p) => p.to_path_buf(),
             None => {
-                let Some(config) = crate::platform::paths::config_dir() else {
+                let Some(config) = vykar_common::paths::config_dir() else {
                     tracing::warn!("could not determine config dir; scheduler lock skipped");
                     return Some(Self { _file: None });
                 };

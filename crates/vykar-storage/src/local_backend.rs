@@ -107,10 +107,6 @@ impl StorageBackend for LocalBackend {
         }
     }
 
-    fn put_owned(&self, key: &str, data: Vec<u8>) -> Result<()> {
-        self.put(key, &data)
-    }
-
     fn delete(&self, key: &str) -> Result<()> {
         let path = self.resolve(key)?;
         match fs::remove_file(&path) {

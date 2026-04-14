@@ -19,33 +19,7 @@ pub(crate) fn parse_size(s: &str) -> Result<u64, Box<dyn std::error::Error>> {
     Ok((num * multiplier as f64) as u64)
 }
 
-pub(crate) fn format_bytes(bytes: u64) -> String {
-    const KIB: u64 = 1024;
-    const MIB: u64 = KIB * 1024;
-    const GIB: u64 = MIB * 1024;
-
-    if bytes >= GIB {
-        format!("{:.2} GiB", bytes as f64 / GIB as f64)
-    } else if bytes >= MIB {
-        format!("{:.2} MiB", bytes as f64 / MIB as f64)
-    } else if bytes >= KIB {
-        format!("{:.2} KiB", bytes as f64 / KIB as f64)
-    } else {
-        format!("{bytes} B")
-    }
-}
-
-pub(crate) fn format_count(n: u64) -> String {
-    let s = n.to_string();
-    let mut result = String::with_capacity(s.len() + s.len() / 3);
-    for (i, c) in s.chars().enumerate() {
-        if i > 0 && (s.len() - i).is_multiple_of(3) {
-            result.push(',');
-        }
-        result.push(c);
-    }
-    result
-}
+pub(crate) use vykar_common::display::{format_bytes, format_count};
 
 pub(crate) fn format_size_with_savings(bytes: u64, reference: u64, label: &str) -> String {
     if reference == 0 {

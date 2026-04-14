@@ -1,5 +1,5 @@
 pub mod fs;
-pub mod paths;
+pub use vykar_common::paths;
 pub mod shell;
 
 /// Strip the domain suffix from a hostname (everything after the first `.`).

@@ -13,6 +13,7 @@ workspace = true
 
 [dependencies]
 vykar-core = { workspace = true, features = ["mount", "backend-sftp"] }
+vykar-common.workspace = true
 vykar-types.workspace = true
 vykar-storage.workspace = true
 clap.workspace = true

@@ -7938,11 +7938,19 @@ dependencies = [
  "tempfile",
  "tracing",
  "tracing-subscriber",
+ "vykar-common",
  "vykar-core",
  "vykar-storage",
  "vykar-types",
  "windows-sys 0.61.2",
  "zeroize",
+]
+
+[[package]]
+name = "vykar-common"
+version = "0.12.12"
+dependencies = [
+ "nix 0.31.2",
 ]
 
 [[package]]
@@ -7982,6 +7990,7 @@ dependencies = [
  "thiserror 2.0.18",
  "tokio",
  "tracing",
+ "vykar-common",
  "vykar-crypto",
  "vykar-protocol",
  "vykar-storage",
@@ -8025,6 +8034,7 @@ dependencies = [
  "slint-build",
  "tinyfiledialogs",
  "tray-icon",
+ "vykar-common",
  "vykar-core",
  "vykar-types",
  "winreg",
@@ -8073,7 +8083,6 @@ dependencies = [
  "hex",
  "http",
  "md-5",
- "nix 0.31.2",
  "percent-encoding",
  "rand 0.8.5",
  "russh",
@@ -8086,6 +8095,7 @@ dependencies = [
  "tracing",
  "ureq",
  "url",
+ "vykar-common",
  "vykar-protocol",
  "vykar-types",
 ]

@@ -7,8 +7,8 @@ use blake2::Blake2bVar;
 use serde::{Deserialize, Serialize};
 use tracing::{debug, info, warn};
 
-use crate::platform::paths;
 use crate::snapshot::item::ChunkRef;
+use vykar_common::paths;
 use vykar_crypto::CryptoEngine;
 use vykar_types::error::Result;
 use vykar_types::snapshot_id::SnapshotId;

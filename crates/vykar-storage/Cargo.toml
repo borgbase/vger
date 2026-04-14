@@ -10,6 +10,7 @@ workspace = true
 [dependencies]
 # Internal
 vykar-types.workspace = true
+vykar-common.workspace = true
 vykar-protocol.workspace = true
 
 # Serialization
@@ -50,6 +51,3 @@ russh-sftp = { version = "2.1", optional = true }
 [features]
 default = []
 backend-sftp = ["russh", "russh-sftp", "tokio"]
-
-[target.'cfg(unix)'.dependencies]
-nix = { version = "0.31", features = ["user"] }

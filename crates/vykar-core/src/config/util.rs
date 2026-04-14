@@ -1,6 +1,6 @@
 use std::path::Path;
 
-use crate::platform::paths;
+use vykar_common::paths;
 
 /// Expand a leading `~` or `~/` to the user's home directory.
 pub fn expand_tilde(path: &str) -> String {

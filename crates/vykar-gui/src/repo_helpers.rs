@@ -6,8 +6,8 @@ use vykar_core::config::{self, ResolvedRepo};
 use vykar_types::error::VykarError;
 
 use crate::messages::{log_entry_now, UiEvent};
-use crate::progress::format_bytes;
 use crate::APP_TITLE;
+use vykar_common::display::format_bytes;
 
 pub(crate) fn format_repo_name(repo: &ResolvedRepo) -> String {
     repo.label

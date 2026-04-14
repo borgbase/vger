@@ -339,10 +339,6 @@ impl StorageBackend for RestBackend {
         self.put_bytes(key, data)
     }
 
-    fn put_owned(&self, key: &str, data: Vec<u8>) -> Result<()> {
-        self.put_bytes(key, &data)
-    }
-
     fn delete(&self, key: &str) -> Result<()> {
         let url = self.url(key);
         self.retry_call(

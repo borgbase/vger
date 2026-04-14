@@ -5,7 +5,7 @@ use blake2::digest::{Update, VariableOutput};
 use blake2::Blake2bVar;
 use serde::{Deserialize, Serialize};
 
-use crate::platform::paths;
+use vykar_common::paths;
 use vykar_types::error::{Result, VykarError};
 
 /// Pin file format (one per repository URL).

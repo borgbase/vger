@@ -11,9 +11,9 @@ use russh_sftp::client::SftpSession;
 use russh_sftp::protocol::{OpenFlags, StatusCode};
 use tokio::io::{AsyncReadExt, AsyncSeekExt, AsyncWriteExt};
 
-use crate::paths;
 use crate::RetryConfig;
 use crate::StorageBackend;
+use vykar_common::paths;
 use vykar_types::error::{Result, VykarError};
 
 use super::runtime::ASYNC_RUNTIME;

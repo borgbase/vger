@@ -15,9 +15,7 @@ use vykar_types::error::VykarError;
 use crate::config_helpers;
 use crate::controllers;
 use crate::messages::{AppCommand, FindResultRow, RepoInfoData, SnapshotRowData, UiEvent};
-use crate::progress::{
-    format_bytes, format_check_status, format_count, format_step_outcome, BackupStatusTracker,
-};
+use crate::progress::{format_check_status, format_step_outcome, BackupStatusTracker};
 use crate::repo_helpers::{
     find_repo_for_snapshot, format_repo_name, get_or_resolve_passphrase, log_backup_report,
     select_repos, send_log,
@@ -25,6 +23,7 @@ use crate::repo_helpers::{
 use crate::scheduler;
 use crate::view_models::send_structured_data;
 use crate::APP_TITLE;
+use vykar_common::display::{format_bytes, format_count};
 
 fn finish_operation(
     backup_running: &AtomicBool,
