@@ -18,7 +18,7 @@ impl CliTableTheme {
     pub(crate) fn new_data_table(self, headers: &[&str]) -> Table {
         let mut table = Table::new();
         table.load_preset(NOTHING);
-        let header_cells: Vec<Cell> = headers.iter().map(|h| self.header_cell(h)).collect();
+        let header_cells: Vec<Cell> = headers.iter().map(|h| self.bold_cell(h)).collect();
         table.set_header(header_cells);
         table
     }
@@ -29,15 +29,7 @@ impl CliTableTheme {
         table
     }
 
-    fn header_cell(self, text: &str) -> Cell {
-        let mut cell = Cell::new(text);
-        if self.use_color {
-            cell = cell.add_attribute(Attribute::Bold);
-        }
-        cell
-    }
-
-    pub(crate) fn key_cell(self, text: &str) -> Cell {
+    pub(crate) fn bold_cell(self, text: &str) -> Cell {
         let mut cell = Cell::new(text);
         if self.use_color {
             cell = cell.add_attribute(Attribute::Bold);
@@ -59,7 +51,7 @@ pub(crate) fn add_kv_row(
     field: &str,
     value: impl ToString,
 ) {
-    table.add_row(vec![theme.key_cell(field), Cell::new(value.to_string())]);
+    table.add_row(vec![theme.bold_cell(field), Cell::new(value.to_string())]);
 }
 
 #[cfg(test)]

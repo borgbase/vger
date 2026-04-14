@@ -3,12 +3,12 @@ use std::sync::atomic::AtomicBool;
 
 use crate::progress::BackupProgressRenderer;
 use vykar_core::app::operations::{self, CycleEvent, CycleStep, FullCycleResult, StepOutcome};
-use vykar_core::commands;
 use vykar_core::config::{EncryptionModeConfig, ResolvedRepo, VykarConfig};
 use vykar_storage::{parse_repo_url, ParsedUrl};
 
 use crate::cli::Commands;
 use crate::cmd;
+use crate::cmd::check::format_check_progress;
 use crate::format::format_bytes;
 use crate::passphrase::with_repo_passphrase;
 
@@ -225,37 +225,6 @@ fn print_summary(
     }
 
     Ok(())
-}
-
-fn format_check_progress(event: &commands::check::CheckProgressEvent) {
-    match event {
-        commands::check::CheckProgressEvent::SnapshotStarted {
-            current,
-            total,
-            name,
-        } => eprintln!("[{current}/{total}] Checking snapshot '{name}'..."),
-        commands::check::CheckProgressEvent::PacksExistencePhaseStarted { total_packs } => {
-            eprintln!("Verifying existence of {total_packs} packs in storage...");
-        }
-        commands::check::CheckProgressEvent::PacksExistenceProgress {
-            checked,
-            total_packs,
-        } => eprintln!("  existence: {checked}/{total_packs} packs"),
-        commands::check::CheckProgressEvent::ChunksDataPhaseStarted { total_chunks } => {
-            eprintln!("Verifying data integrity of {total_chunks} chunks...");
-        }
-        commands::check::CheckProgressEvent::ChunksDataProgress {
-            verified,
-            total_chunks,
-        } => eprintln!("  verify-data: {verified}/{total_chunks}"),
-        commands::check::CheckProgressEvent::ServerVerifyPhaseStarted { total_packs } => {
-            eprintln!("Server-side verification of {total_packs} packs...");
-        }
-        commands::check::CheckProgressEvent::ServerVerifyProgress {
-            verified,
-            total_packs,
-        } => eprintln!("  server-verify: {verified}/{total_packs} packs"),
-    }
 }
 
 /// Returns `Ok(had_partial)` — `true` if backup had soft errors but still succeeded.

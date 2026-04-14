@@ -158,43 +158,39 @@ fn run_check_readonly(
     Ok(())
 }
 
-fn make_progress_callback() -> impl FnMut(commands::check::CheckProgressEvent) {
-    |event: commands::check::CheckProgressEvent| match event {
+pub(crate) fn format_check_progress(event: &commands::check::CheckProgressEvent) {
+    match event {
         commands::check::CheckProgressEvent::SnapshotStarted {
             current,
             total,
             name,
-        } => {
-            eprintln!("[{current}/{total}] Checking snapshot '{name}'...");
-        }
+        } => eprintln!("[{current}/{total}] Checking snapshot '{name}'..."),
         commands::check::CheckProgressEvent::PacksExistencePhaseStarted { total_packs } => {
             eprintln!("Verifying existence of {total_packs} packs in storage...");
         }
         commands::check::CheckProgressEvent::PacksExistenceProgress {
             checked,
             total_packs,
-        } => {
-            eprintln!("  existence: {checked}/{total_packs} packs");
-        }
+        } => eprintln!("  existence: {checked}/{total_packs} packs"),
         commands::check::CheckProgressEvent::ChunksDataPhaseStarted { total_chunks } => {
             eprintln!("Verifying data integrity of {total_chunks} chunks...");
         }
         commands::check::CheckProgressEvent::ChunksDataProgress {
             verified,
             total_chunks,
-        } => {
-            eprintln!("  verify-data: {verified}/{total_chunks}");
-        }
+        } => eprintln!("  verify-data: {verified}/{total_chunks}"),
         commands::check::CheckProgressEvent::ServerVerifyPhaseStarted { total_packs } => {
             eprintln!("Server-side verification of {total_packs} packs...");
         }
         commands::check::CheckProgressEvent::ServerVerifyProgress {
             verified,
             total_packs,
-        } => {
-            eprintln!("  server-verify: {verified}/{total_packs} packs");
-        }
+        } => eprintln!("  server-verify: {verified}/{total_packs} packs"),
     }
+}
+
+fn make_progress_callback() -> impl FnMut(commands::check::CheckProgressEvent) {
+    |event| format_check_progress(&event)
 }
 
 fn print_check_summary(result: &commands::check::CheckResult) {

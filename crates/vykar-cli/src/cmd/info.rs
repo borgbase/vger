@@ -3,7 +3,7 @@ use chrono::Local;
 use vykar_core::commands;
 use vykar_core::config::VykarConfig;
 
-use crate::format::{format_size_with_bytes, format_size_with_savings};
+use crate::format::{format_bytes, format_size_with_savings};
 use crate::passphrase::with_repo_passphrase;
 use crate::table::{add_kv_row, CliTableTheme};
 
@@ -48,12 +48,7 @@ pub(crate) fn run_info(
         })
         .unwrap_or_else(|| "-".to_string());
     add_kv_row(&mut t2, theme, "Last snapshot", last_snapshot);
-    add_kv_row(
-        &mut t2,
-        theme,
-        "Raw size",
-        format_size_with_bytes(stats.raw_size),
-    );
+    add_kv_row(&mut t2, theme, "Raw size", format_bytes(stats.raw_size));
     add_kv_row(
         &mut t2,
         theme,
@@ -70,13 +65,13 @@ pub(crate) fn run_info(
         &mut t2,
         theme,
         "Unique stored",
-        format_size_with_bytes(stats.unique_stored_size),
+        format_bytes(stats.unique_stored_size),
     );
     add_kv_row(
         &mut t2,
         theme,
         "Referenced",
-        format_size_with_bytes(stats.referenced_stored_size),
+        format_bytes(stats.referenced_stored_size),
     );
     add_kv_row(&mut t2, theme, "Unique chunks", stats.unique_chunks);
     println!("{t2}");

@@ -47,10 +47,6 @@ pub(crate) fn format_count(n: u64) -> String {
     result
 }
 
-pub(crate) fn format_size_with_bytes(bytes: u64) -> String {
-    format_bytes(bytes)
-}
-
 pub(crate) fn format_size_with_savings(bytes: u64, reference: u64, label: &str) -> String {
     if reference == 0 {
         return format_bytes(bytes);
