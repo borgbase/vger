@@ -599,6 +599,22 @@ fn cli_snapshot_delete_latest_rejects_alias() {
     );
 }
 
+// ── Backup --threads tests ──────────────────────────────────────────────────
+
+#[test]
+fn cli_backup_threads_out_of_range_rejected() {
+    let fx = CliFixture::new();
+    write_plain_config(&fx.config_path, &fx.repo_dir);
+    let cfg = fx.config_path.to_string_lossy().to_string();
+    let source = fx.source_a.to_string_lossy().to_string();
+
+    let (_stdout, stderr) = fx.run_err(&["--config", &cfg, "backup", "--threads", "200", &source]);
+    assert!(
+        stderr.contains("200") || stderr.contains("invalid"),
+        "--threads 200 should be rejected, got:\n{stderr}"
+    );
+}
+
 // ── Daemon tests ────────────────────────────────────────────────────────────
 
 #[test]

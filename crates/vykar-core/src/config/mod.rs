@@ -10,7 +10,7 @@ mod util;
 // Re-export config schema types
 pub use self::hooks::HOOK_COMMANDS;
 pub use self::hooks::{HooksConfig, SourceHooksConfig};
-pub use self::limits::ResourceLimitsConfig;
+pub use self::limits::{ResourceLimitsConfig, THREADS_MAX, THREADS_MIN};
 
 // Re-export from submodules
 pub use self::defaults::parse_interval;

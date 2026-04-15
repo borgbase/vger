@@ -7,6 +7,11 @@ const DEFAULT_CONNECTIONS: usize = 2;
 /// Auto mode cap for backup worker threads (`threads: 0`).
 const AUTO_THREADS_MAX: usize = 12;
 
+/// Minimum value for `limits.threads` (0 = auto).
+pub const THREADS_MIN: usize = 0;
+/// Maximum value for `limits.threads`.
+pub const THREADS_MAX: usize = 128;
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ResourceLimitsConfig {
@@ -51,6 +56,12 @@ impl ResourceLimitsConfig {
             return Err(VykarError::Config(format!(
                 "limits.connections must be in [1, 16], got {}",
                 self.connections
+            )));
+        }
+        if self.threads > THREADS_MAX {
+            return Err(VykarError::Config(format!(
+                "limits.threads must be in [{THREADS_MIN}, {THREADS_MAX}], got {}",
+                self.threads
             )));
         }
         if !(-20..=19).contains(&self.nice) {
@@ -170,6 +181,34 @@ mod tests {
         };
         assert_eq!(cfg.effective_backup_threads(true), 6);
         assert_eq!(cfg.effective_backup_threads(false), 6);
+    }
+
+    #[test]
+    fn validate_threads_accepts_bounds() {
+        let auto = ResourceLimitsConfig {
+            threads: 0,
+            ..Default::default()
+        };
+        assert!(auto.validate().is_ok());
+
+        let max = ResourceLimitsConfig {
+            threads: THREADS_MAX,
+            ..Default::default()
+        };
+        assert!(max.validate().is_ok());
+    }
+
+    #[test]
+    fn validate_threads_rejects_over_max() {
+        let cfg = ResourceLimitsConfig {
+            threads: THREADS_MAX + 1,
+            ..Default::default()
+        };
+        let err = cfg.validate().unwrap_err().to_string();
+        assert!(
+            err.contains("limits.threads"),
+            "error should mention threads: {err}"
+        );
     }
 
     #[test]

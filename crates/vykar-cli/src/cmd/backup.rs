@@ -17,6 +17,7 @@ pub(crate) fn run_backup(
     user_label: Option<String>,
     compression_override: Option<String>,
     connections: Option<usize>,
+    threads: Option<usize>,
     paths: Vec<String>,
     source_filter: &[String],
     shutdown: Option<&AtomicBool>,
@@ -26,6 +27,9 @@ pub(crate) fn run_backup(
     let mut repo = repo.clone();
     if let Some(c) = connections {
         repo.config.limits.connections = c;
+    }
+    if let Some(t) = threads {
+        repo.config.limits.threads = t;
     }
     if let Some(ref algo) = compression_override {
         // Validate the compression string by trying to parse it

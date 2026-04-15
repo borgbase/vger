@@ -214,6 +214,7 @@ pub(crate) fn dispatch_command(
             label: user_label,
             compression,
             connections,
+            threads,
             source,
             paths,
             ..
@@ -222,6 +223,7 @@ pub(crate) fn dispatch_command(
             user_label.clone(),
             compression.clone(),
             connections.map(|v| v as usize),
+            threads.map(|v| v as usize),
             paths.clone(),
             source,
             shutdown,

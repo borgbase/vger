@@ -66,6 +66,12 @@ pub(crate) enum Commands {
         #[arg(long, value_parser = clap::value_parser!(u16).range(1..=16))]
         connections: Option<u16>,
 
+        /// CPU worker threads (0 = auto, 1-128 explicit; overrides config)
+        #[arg(long, value_parser = clap::value_parser!(u16).range(
+            vykar_core::config::THREADS_MIN as i64 ..= vykar_core::config::THREADS_MAX as i64
+        ))]
+        threads: Option<u16>,
+
         /// Ad-hoc paths to back up (grouped into a single snapshot)
         paths: Vec<String>,
     },
