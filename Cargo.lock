@@ -7925,7 +7925,7 @@ dependencies = [
 
 [[package]]
 name = "vykar-cli"
-version = "0.12.12"
+version = "0.12.13"
 dependencies = [
  "chrono",
  "clap",
@@ -7955,7 +7955,7 @@ dependencies = [
 
 [[package]]
 name = "vykar-core"
-version = "0.12.12"
+version = "0.12.13"
 dependencies = [
  "blake2",
  "bytes",
@@ -8003,7 +8003,7 @@ dependencies = [
 
 [[package]]
 name = "vykar-crypto"
-version = "0.12.12"
+version = "0.12.13"
 dependencies = [
  "aes-gcm",
  "argon2",
@@ -8019,7 +8019,7 @@ dependencies = [
 
 [[package]]
 name = "vykar-gui"
-version = "0.12.12"
+version = "0.12.13"
 dependencies = [
  "chrono",
  "crossbeam-channel",
@@ -8044,7 +8044,7 @@ dependencies = [
 
 [[package]]
 name = "vykar-protocol"
-version = "0.12.12"
+version = "0.12.13"
 dependencies = [
  "serde",
  "serde_json",
@@ -8052,7 +8052,7 @@ dependencies = [
 
 [[package]]
 name = "vykar-server"
-version = "0.12.12"
+version = "0.12.13"
 dependencies = [
  "axum",
  "blake2",
@@ -8077,7 +8077,7 @@ dependencies = [
 
 [[package]]
 name = "vykar-storage"
-version = "0.12.12"
+version = "0.12.13"
 dependencies = [
  "base64",
  "blake2",
@@ -8103,7 +8103,7 @@ dependencies = [
 
 [[package]]
 name = "vykar-types"
-version = "0.12.12"
+version = "0.12.13"
 dependencies = [
  "blake2",
  "hex",
