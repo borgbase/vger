@@ -1,5 +1,6 @@
 .PHONY: \
 	app \
+	appimage \
 	doc-check \
 	docs-build \
 	docs-serve \
@@ -37,6 +38,10 @@ doc-check:
 pre-commit: fmt-check lint doc-check test
 
 APP_BUNDLE = target/release/Vykar Backup.app
+
+appimage:
+	cargo build --release -p vykar-gui
+	scripts/build-appimage.sh target/release/vykar-gui dist/
 
 app:
 	cargo build --release -p vykar-gui

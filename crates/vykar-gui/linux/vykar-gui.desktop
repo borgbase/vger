@@ -1,0 +1,10 @@
+[Desktop Entry]
+Type=Application
+Name=Vykar Backup
+Comment=Fast, encrypted, deduplicated backups
+Exec=vykar-gui
+Icon=vykar-gui
+Categories=System;Utility;Archiving;
+Keywords=backup;restore;borg;
+StartupWMClass=vykar-gui
+Terminal=false
