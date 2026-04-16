@@ -4,7 +4,7 @@ use std::sync::Arc;
 
 #[cfg(any(not(target_os = "linux"), test))]
 use ignore::WalkBuilder;
-use tracing::warn;
+use tracing::{debug, warn};
 
 use crate::config::ChunkerConfig;
 use crate::platform::fs;
@@ -121,6 +121,7 @@ pub(super) fn build_configured_walker(
             .matched_path_or_any_parents(rel, is_dir)
             .is_ignore()
         {
+            debug!(path = %path.display(), reason = "exclude pattern", "excluded");
             return false;
         }
 
@@ -128,6 +129,7 @@ pub(super) fn build_configured_walker(
             if let Ok(metadata) = std::fs::symlink_metadata(path) {
                 let entry_dev = fs::summarize_metadata(&metadata, &metadata.file_type()).device;
                 if should_skip_for_device(one_file_system, source_dev, entry_dev) {
+                    debug!(path = %path.display(), reason = "different filesystem", "excluded");
                     return false;
                 }
             }
@@ -136,6 +138,7 @@ pub(super) fn build_configured_walker(
         if is_dir && !markers.is_empty() {
             for marker in &markers {
                 if path.join(marker).exists() {
+                    debug!(path = %path.display(), reason = "marker file", "excluded");
                     return false;
                 }
             }

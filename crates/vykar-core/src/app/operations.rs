@@ -345,6 +345,7 @@ pub fn run_full_cycle_for_repo(
     repo: &ResolvedRepo,
     passphrase: Option<&str>,
     shutdown: Option<&AtomicBool>,
+    verbose: bool,
     on_event: &mut dyn FnMut(CycleEvent),
 ) -> FullCycleResult {
     let config = &repo.config;
@@ -371,7 +372,7 @@ pub fn run_full_cycle_for_repo(
                     passphrase,
                     repo.label.as_deref(),
                     shutdown,
-                    false,
+                    verbose,
                     &mut Some(&mut |bpe: BackupRunEvent| match bpe {
                         BackupRunEvent::Backup(e) => evt(CycleEvent::Backup(e)),
                         BackupRunEvent::HookWarning { scope, warning } => {

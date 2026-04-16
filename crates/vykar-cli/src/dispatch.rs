@@ -47,8 +47,12 @@ pub(crate) fn run_default_actions(
         let show_progress = is_tty || verbose > 0;
         let mut backup_renderer: Option<BackupProgressRenderer> = None;
 
-        let cycle_result =
-            operations::run_full_cycle_for_repo(repo, passphrase, shutdown, &mut |event| {
+        let cycle_result = operations::run_full_cycle_for_repo(
+            repo,
+            passphrase,
+            shutdown,
+            verbose >= 1,
+            &mut |event| {
                 match &event {
                     CycleEvent::StepStarted(step) => {
                         eprintln!("==> Starting {}", step.command_name());
@@ -81,7 +85,8 @@ pub(crate) fn run_default_actions(
                     // Events are for GUI consumers only.
                     CycleEvent::HookWarning { .. } => {}
                 }
-            });
+            },
+        );
 
         // Ensure renderer is cleaned up if cycle ended abruptly (e.g. shutdown).
         if let Some(ref mut r) = backup_renderer {

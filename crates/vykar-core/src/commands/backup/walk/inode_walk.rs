@@ -20,7 +20,7 @@ use std::os::unix::fs::DirEntryExt;
 use std::path::{Path, PathBuf};
 
 use ignore::gitignore::{Gitignore, GitignoreBuilder};
-use tracing::warn;
+use tracing::{debug, warn};
 
 use crate::platform::fs::{self, MetadataSummary};
 use vykar_types::error::{Result, VykarError};
@@ -317,11 +317,13 @@ impl InodeSortedWalk {
                 .matched_path_or_any_parents(rel, is_dir)
                 .is_ignore()
             {
+                debug!(path = %raw.path.display(), reason = "exclude pattern", "excluded");
                 return false;
             }
 
             // Gitignore filtering (pass absolute path for correct root stripping).
             if self.gitignore_enabled && self.is_gitignored(&raw.path, is_dir) {
+                debug!(path = %raw.path.display(), reason = "gitignore", "excluded");
                 return false;
             }
 
@@ -330,6 +332,7 @@ impl InodeSortedWalk {
                 && !self.markers.is_empty()
                 && self.markers.iter().any(|m| raw.path.join(m).exists())
             {
+                debug!(path = %raw.path.display(), reason = "marker file", "excluded");
                 return false;
             }
 
@@ -381,10 +384,12 @@ impl InodeSortedWalk {
                     .matched_path_or_any_parents(rel, actual_is_dir)
                     .is_ignore()
                 {
+                    debug!(path = %raw.path.display(), reason = "exclude pattern", "excluded");
                     continue;
                 }
 
                 if self.gitignore_enabled && self.is_gitignored(&raw.path, actual_is_dir) {
+                    debug!(path = %raw.path.display(), reason = "gitignore", "excluded");
                     continue;
                 }
 
@@ -392,6 +397,7 @@ impl InodeSortedWalk {
                     && !self.markers.is_empty()
                     && self.markers.iter().any(|m| raw.path.join(m).exists())
                 {
+                    debug!(path = %raw.path.display(), reason = "marker file", "excluded");
                     continue;
                 }
             }
@@ -400,6 +406,7 @@ impl InodeSortedWalk {
             if actual_is_dir
                 && should_skip_for_device(self.one_file_system, self.source_dev, summary.device)
             {
+                debug!(path = %raw.path.display(), reason = "different filesystem", "excluded");
                 continue;
             }
 
