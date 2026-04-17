@@ -1562,3 +1562,218 @@ fn cli_daemon_empty_config_startup_rejected() {
         "expected 'no repositories configured' error, got:\n{stderr_str}"
     );
 }
+
+// ── Top-level --repo/--source and skip-unavailable tests ───────────────────
+
+/// Helper: write a two-repo config with labels and per-source retention.
+fn write_two_repo_sources_config(
+    config_path: &Path,
+    repo_a: &Path,
+    repo_b: &Path,
+    source_a: &Path,
+    source_b: &Path,
+) {
+    let config = format!(
+        "repositories:\n\
+         \x20 - url: {}\n\
+         \x20   label: repo-a\n\
+         \x20 - url: {}\n\
+         \x20   label: repo-b\n\
+         encryption:\n  mode: none\n\
+         retention:\n  keep_last: 5\n\
+         sources:\n\
+         \x20 - path: {}\n\
+         \x20   label: src-a\n\
+         \x20 - path: {}\n\
+         \x20   label: src-b\n",
+        yaml_quote_path(repo_a),
+        yaml_quote_path(repo_b),
+        yaml_quote_path(source_a),
+        yaml_quote_path(source_b),
+    );
+    std::fs::write(config_path, config).unwrap();
+}
+
+#[test]
+fn cli_bare_source_without_repo_rejected() {
+    let fx = CliFixture::new();
+    write_plain_config(&fx.config_path, &fx.repo_dir);
+    let cfg = fx.config_path.to_string_lossy().to_string();
+
+    let (_stdout, stderr) = fx.run_err(&["--config", &cfg, "-S", "src-a"]);
+    assert!(
+        stderr.contains("required") || stderr.contains("--repo"),
+        "expected --source requires --repo error, got:\n{stderr}"
+    );
+}
+
+#[test]
+fn cli_bare_repo_source_with_subcommand_rejected() {
+    let fx = CliFixture::new();
+    write_plain_config(&fx.config_path, &fx.repo_dir);
+    let cfg = fx.config_path.to_string_lossy().to_string();
+
+    let (_stdout, stderr) = fx.run_err(&["--config", &cfg, "-R", "repo-a", "backup"]);
+    assert!(
+        stderr.contains("cannot be combined with a subcommand"),
+        "expected subcommand conflict error, got:\n{stderr}"
+    );
+}
+
+#[test]
+fn cli_bare_repo_source_filters_cycle() {
+    let fx = CliFixture::new();
+    write_sources_config(&fx.config_path, &fx.repo_dir, &fx.source_a, &fx.source_b, 5);
+    std::fs::write(fx.source_a.join("a.txt"), b"aaa").unwrap();
+    std::fs::write(fx.source_b.join("b.txt"), b"bbb").unwrap();
+
+    let cfg = fx.config_path.to_string_lossy().to_string();
+    fx.run_ok(&["--config", &cfg, "init"]);
+
+    // Run full cycle filtered to src-a only
+    let out = fx.run_ok(&[
+        "--config",
+        &cfg,
+        "-R",
+        &fx.repo_dir.to_string_lossy(),
+        "-S",
+        "src-a",
+    ]);
+    assert!(out.contains("src-a"), "should back up src-a, got:\n{out}");
+    assert!(
+        !out.contains("src-b"),
+        "should NOT back up src-b, got:\n{out}"
+    );
+
+    // Verify only one snapshot was created (src-a only)
+    let list_out = fx.run_ok(&["--config", &cfg, "list"]);
+    assert!(
+        list_out.contains("src-a"),
+        "list should show src-a snapshot, got:\n{list_out}"
+    );
+    assert!(
+        !list_out.contains("src-b"),
+        "list should NOT show src-b snapshot, got:\n{list_out}"
+    );
+}
+
+#[test]
+fn cli_bare_invalid_source_fails_backup_check_still_runs() {
+    let fx = CliFixture::new();
+    write_sources_config(&fx.config_path, &fx.repo_dir, &fx.source_a, &fx.source_b, 5);
+    std::fs::write(fx.source_a.join("a.txt"), b"aaa").unwrap();
+
+    let cfg = fx.config_path.to_string_lossy().to_string();
+    fx.run_ok(&["--config", &cfg, "init"]);
+
+    // Run with invalid source label — should fail overall
+    let (stdout, stderr) = fx.run_err(&[
+        "--config",
+        &cfg,
+        "-R",
+        &fx.repo_dir.to_string_lossy(),
+        "-S",
+        "nonexistent",
+    ]);
+    let combined = format!("{stdout}{stderr}");
+
+    // Backup should fail with unknown source
+    assert!(
+        combined.contains("FAILED") || combined.contains("nonexistent"),
+        "backup should fail for invalid source, got:\n{combined}"
+    );
+
+    // Check should still run (it's source-agnostic)
+    assert!(
+        combined.contains("check"),
+        "check step should still appear in output, got:\n{combined}"
+    );
+}
+
+#[test]
+fn cli_bare_multi_repo_skips_missing_local() {
+    let fx = CliFixture::new();
+    let repo_b = fx._tmp.path().join("repo_b");
+    // Note: repo_b directory is NOT created — simulates unmounted disk
+
+    write_two_repo_sources_config(
+        &fx.config_path,
+        &fx.repo_dir,
+        &repo_b,
+        &fx.source_a,
+        &fx.source_b,
+    );
+    std::fs::write(fx.source_a.join("a.txt"), b"aaa").unwrap();
+    std::fs::write(fx.source_b.join("b.txt"), b"bbb").unwrap();
+
+    let cfg = fx.config_path.to_string_lossy().to_string();
+    fx.run_ok(&["--config", &cfg, "init", "-R", "repo-a"]);
+
+    // Bare command across both repos — repo-b is missing, should be skipped
+    let output = fx.run(&["--config", &cfg]);
+    let err = stderr(&output);
+
+    assert!(
+        err.contains("skipping 'repo-b'"),
+        "should warn about skipping repo-b, got:\n{err}"
+    );
+    assert!(
+        output.status.success(),
+        "should exit successfully when missing repo is skipped, got status: {}, stderr:\n{err}",
+        output.status
+    );
+}
+
+#[test]
+fn cli_bare_single_repo_missing_still_errors() {
+    let fx = CliFixture::new();
+    let missing_repo = fx._tmp.path().join("nonexistent_repo");
+    // Single-repo config pointing to a non-existent directory
+    write_plain_config(&fx.config_path, &missing_repo);
+
+    let cfg = fx.config_path.to_string_lossy().to_string();
+
+    // Bare command with single repo — should error, not skip
+    let output = fx.run(&["--config", &cfg]);
+    assert!(
+        !output.status.success(),
+        "single-repo with missing path should error, got status: {}",
+        output.status
+    );
+}
+
+#[test]
+fn cli_multi_repo_init_not_skipped() {
+    let fx = CliFixture::new();
+    let repo_b = fx._tmp.path().join("repo_b");
+    std::fs::create_dir_all(&repo_b).unwrap();
+
+    write_two_repo_sources_config(
+        &fx.config_path,
+        &fx.repo_dir,
+        &repo_b,
+        &fx.source_a,
+        &fx.source_b,
+    );
+
+    let cfg = fx.config_path.to_string_lossy().to_string();
+
+    // Init without -R across both repos — neither should be skipped
+    let out = fx.run_ok(&["--config", &cfg, "init"]);
+    // Both repos should show initialization messages
+    let init_count = out.matches("Repository initialized at:").count();
+    assert_eq!(
+        init_count, 2,
+        "both repos should be initialized, got {init_count} init messages:\n{out}"
+    );
+
+    // Verify both have config files
+    assert!(
+        fx.repo_dir.join("config").exists(),
+        "repo-a should be initialized"
+    );
+    assert!(
+        repo_b.join("config").exists(),
+        "repo-b should be initialized"
+    );
+}

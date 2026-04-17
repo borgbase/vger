@@ -1,3 +1,4 @@
+use std::borrow::Cow;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use rand::RngCore;
@@ -346,6 +347,7 @@ pub fn run_full_cycle_for_repo(
     passphrase: Option<&str>,
     shutdown: Option<&AtomicBool>,
     verbose: bool,
+    source_filter: &[String],
     on_event: &mut dyn FnMut(CycleEvent),
 ) -> FullCycleResult {
     let config = &repo.config;
@@ -360,39 +362,44 @@ pub fn run_full_cycle_for_repo(
 
     // 1. Backup
     if !shutting_down(shutdown) {
-        backup_report = run_hooked_step(
-            CycleStep::Backup,
-            repo,
-            on_event,
-            &mut steps,
-            |evt| {
-                run_backup_sources(
-                    config,
-                    sources,
-                    passphrase,
-                    repo.label.as_deref(),
-                    shutdown,
-                    verbose,
-                    &mut Some(&mut |bpe: BackupRunEvent| match bpe {
-                        BackupRunEvent::Backup(e) => evt(CycleEvent::Backup(e)),
-                        BackupRunEvent::HookWarning { scope, warning } => {
-                            evt(CycleEvent::HookWarning {
-                                step: CycleStep::Backup,
-                                scope,
-                                warning,
-                            });
+        match resolve_cycle_sources(sources, source_filter) {
+            Err(e) => emit_failed(CycleStep::Backup, &e, on_event, &mut steps),
+            Ok(effective_sources) => {
+                backup_report = run_hooked_step(
+                    CycleStep::Backup,
+                    repo,
+                    on_event,
+                    &mut steps,
+                    |evt| {
+                        run_backup_sources(
+                            config,
+                            &effective_sources,
+                            passphrase,
+                            repo.label.as_deref(),
+                            shutdown,
+                            verbose,
+                            &mut Some(&mut |bpe: BackupRunEvent| match bpe {
+                                BackupRunEvent::Backup(e) => evt(CycleEvent::Backup(e)),
+                                BackupRunEvent::HookWarning { scope, warning } => {
+                                    evt(CycleEvent::HookWarning {
+                                        step: CycleStep::Backup,
+                                        scope,
+                                        warning,
+                                    });
+                                }
+                            }),
+                        )
+                    },
+                    |report| {
+                        if report.created.iter().any(|s| s.stats.errors > 0) {
+                            StepOutcome::Partial
+                        } else {
+                            StepOutcome::Ok
                         }
-                    }),
-                )
-            },
-            |report| {
-                if report.created.iter().any(|s| s.stats.errors > 0) {
-                    StepOutcome::Partial
-                } else {
-                    StepOutcome::Ok
-                }
-            },
-        );
+                    },
+                );
+            }
+        }
     }
 
     let backup_ok = steps
@@ -417,8 +424,16 @@ pub fn run_full_cycle_for_repo(
                 on_event,
                 &mut steps,
                 |_evt| {
-                    commands::prune::run(config, passphrase, false, false, sources, &[], shutdown)
-                        .map(|(stats, _)| stats)
+                    commands::prune::run(
+                        config,
+                        passphrase,
+                        false,
+                        false,
+                        sources,
+                        source_filter,
+                        shutdown,
+                    )
+                    .map(|(stats, _)| stats)
                 },
                 |_| StepOutcome::Ok,
             );
@@ -557,6 +572,31 @@ fn run_hooked_step<T>(
     on_event(CycleEvent::StepFinished(step, outcome.clone()));
     steps.push((step, outcome));
     value
+}
+
+/// Apply source_filter to the configured sources.
+/// Returns the original slice when filter is empty, or a filtered owned vec.
+fn resolve_cycle_sources<'a>(
+    sources: &'a [SourceEntry],
+    source_filter: &[String],
+) -> std::result::Result<Cow<'a, [SourceEntry]>, String> {
+    if source_filter.is_empty() {
+        return Ok(Cow::Borrowed(sources));
+    }
+    crate::config::select_sources(sources, source_filter)
+        .map(|selected| Cow::Owned(selected.into_iter().cloned().collect()))
+}
+
+fn emit_failed(
+    step: CycleStep,
+    error: &str,
+    on_event: &mut dyn FnMut(CycleEvent),
+    steps: &mut Vec<(CycleStep, StepOutcome)>,
+) {
+    let outcome = StepOutcome::Failed(error.into());
+    on_event(CycleEvent::StepStarted(step));
+    on_event(CycleEvent::StepFinished(step, outcome.clone()));
+    steps.push((step, outcome));
 }
 
 fn emit_skipped(

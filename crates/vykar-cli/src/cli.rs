@@ -15,7 +15,12 @@ Configuration file lookup order:
 
 Environment variables:
   VYKAR_CONFIG       Path to configuration file (overrides default search)
-  VYKAR_PASSPHRASE   Repository passphrase (skips interactive prompt)"
+  VYKAR_PASSPHRASE   Repository passphrase (skips interactive prompt)
+
+Bare command (full cycle: backup → prune → compact → check):
+  vykar                          Run full cycle for all repositories
+  vykar -R <repo>                Run full cycle for one repository
+  vykar -R <repo> -S <source>    Run full cycle filtered to specific sources"
 )]
 pub(crate) struct Cli {
     /// Path to configuration file (overrides VYKAR_CONFIG and default search)
@@ -30,6 +35,14 @@ pub(crate) struct Cli {
     /// Requires -R/--repo when multiple repositories are configured.
     #[arg(long, global = true)]
     pub trust_repo: bool,
+
+    /// Select repository by label or path (bare command only)
+    #[arg(short = 'R', long = "repo")]
+    pub repo: Option<String>,
+
+    /// Filter sources for backup/prune (bare command only; requires --repo)
+    #[arg(short = 'S', long = "source", requires = "repo")]
+    pub source: Vec<String>,
 
     #[command(subcommand)]
     pub command: Option<Commands>,

@@ -21,7 +21,9 @@ use crate::passphrase::with_repo_passphrase;
 
 use cli::{Cli, Commands};
 use config_gen::run_config_generate;
-use dispatch::{dispatch_command, run_default_actions, warn_if_untrusted_rest};
+use dispatch::{
+    dispatch_command, local_repo_unavailable, run_default_actions, warn_if_untrusted_rest,
+};
 
 /// Exit code: hard error (backup failed, config error, etc.).
 const EXIT_ERROR: i32 = 1;
@@ -51,6 +53,16 @@ fn main() {
         builder.without_time().init();
     } else {
         builder.init();
+    }
+
+    // Reject top-level --repo/--source when a subcommand is present.
+    // These flags belong on the subcommand itself (e.g. `vykar backup -R repo`).
+    if cli.command.is_some() && (cli.repo.is_some() || !cli.source.is_empty()) {
+        eprintln!(
+            "Error: --repo/--source on the bare command cannot be combined with a subcommand.\n\
+             Place -R/--repo and -S/--source after the subcommand instead."
+        );
+        std::process::exit(1);
     }
 
     // Handle `config` subcommand early — no config file needed
@@ -106,21 +118,24 @@ fn main() {
         std::process::exit(1);
     }
 
+    // Effective --repo selector: subcommand flag takes precedence, then top-level.
+    let repo_selector = cli
+        .command
+        .as_ref()
+        .and_then(|cmd| cmd.repo())
+        .or(cli.repo.as_deref());
+
     // --trust-repo validation: must target exactly one repo.
     // Rejected for multi-repo without -R (would silently re-pin unrelated
     // repos during probing/dispatch).
-    if cli.trust_repo {
-        let repo_selector = cli.command.as_ref().and_then(|cmd| cmd.repo());
-        if repo_selector.is_none() && all_repos.len() > 1 {
-            eprintln!(
-                "Error: --trust-repo requires -R / --repo when multiple repositories are configured"
-            );
-            std::process::exit(1);
-        }
+    if cli.trust_repo && repo_selector.is_none() && all_repos.len() > 1 {
+        eprintln!(
+            "Error: --trust-repo requires -R / --repo when multiple repositories are configured"
+        );
+        std::process::exit(1);
     }
 
     // Resolve --repo selector and set --trust-repo on the single targeted repo.
-    let repo_selector = cli.command.as_ref().and_then(|cmd| cmd.repo());
     if let Some(selector) = repo_selector {
         let found = all_repos
             .iter()
@@ -237,11 +252,26 @@ fn main() {
     // Default path: run against all selected repos
     let mut had_error = false;
     let mut had_partial = false;
+    let repo_explicitly_selected = repo_selector.is_some();
 
     for repo in &repos {
         if signal::SHUTDOWN.load(Ordering::SeqCst) {
             break;
         }
+
+        // Pre-flight: skip unavailable local repos in multi-repo bare
+        // command (no subcommand) when no explicit --repo was given.
+        // Subcommands like `init` must reach uninitialized repos normally.
+        if cli.command.is_none() && multi && !repo_explicitly_selected {
+            if let Some(path) = local_repo_unavailable(repo) {
+                eprintln!(
+                    "Warning: skipping '{}' — repository not found at '{path}'",
+                    repo_display_name(repo),
+                );
+                continue;
+            }
+        }
+
         if multi {
             eprintln!("--- Repository: {} ---", repo_display_name(repo));
         }
@@ -369,6 +399,6 @@ fn run_repo_command(cli: &Cli, repo: &ResolvedRepo) -> Result<bool, Box<dyn std:
                 operations::run_command_with_hooks(repo, cmd.name(), run_action)
             }
         }
-        None => run_default_actions(repo, shutdown, cli.verbose),
+        None => run_default_actions(repo, shutdown, cli.verbose, &cli.source),
     }
 }

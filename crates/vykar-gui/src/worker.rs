@@ -156,6 +156,7 @@ pub(crate) fn run_worker(
                         passphrase.as_deref().map(|s| s.as_str()),
                         Some(&cancel_requested),
                         false,
+                        &[],
                         &mut |event| match &event {
                             operations::CycleEvent::StepStarted(step) => {
                                 let _ = ui_tx_progress.send(UiEvent::Status(format!(

@@ -6,7 +6,7 @@ use vykar_core::app::scheduler::{self, SchedulerLock};
 use vykar_core::app::RuntimeConfig;
 use vykar_core::config::{self, ConfigSource, EncryptionModeConfig, ResolvedRepo, ScheduleConfig};
 
-use crate::dispatch::{run_default_actions, warn_if_untrusted_rest};
+use crate::dispatch::{local_repo_unavailable, run_default_actions, warn_if_untrusted_rest};
 use crate::signal::{RELOAD, SHUTDOWN, TRIGGER};
 
 /// Ask the system allocator to return freed memory to the OS.
@@ -208,6 +208,8 @@ fn run_backup_cycle(repos: &[ResolvedRepo]) {
     let mut had_error = false;
     let mut had_partial = false;
 
+    let multi = repos.len() > 1;
+
     for repo in repos {
         if SHUTDOWN.load(Ordering::SeqCst) {
             tracing::info!("shutdown signal received, skipping remaining repos");
@@ -215,7 +217,15 @@ fn run_backup_cycle(repos: &[ResolvedRepo]) {
         }
 
         let name = repo.label.as_deref().unwrap_or(&repo.config.repository.url);
-        let multi = repos.len() > 1;
+
+        // Pre-flight: skip unavailable local repos in multi-repo configs
+        if multi {
+            if let Some(path) = local_repo_unavailable(repo) {
+                tracing::info!(repo = name, path, "skipping unavailable repository");
+                continue;
+            }
+        }
+
         if multi {
             eprintln!("=== Repository: {name} ===");
             if repo.label.is_some() {
@@ -225,7 +235,7 @@ fn run_backup_cycle(repos: &[ResolvedRepo]) {
 
         warn_if_untrusted_rest(&repo.config, repo.label.as_deref());
 
-        match run_default_actions(repo, Some(&SHUTDOWN), 0) {
+        match run_default_actions(repo, Some(&SHUTDOWN), 0, &[]) {
             Ok(partial) => {
                 if partial {
                     tracing::warn!(repo = name, "backup cycle partial: some files were skipped");

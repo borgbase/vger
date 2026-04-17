@@ -38,6 +38,7 @@ pub(crate) fn run_default_actions(
     repo: &ResolvedRepo,
     shutdown: Option<&AtomicBool>,
     verbose: u8,
+    source_filter: &[String],
 ) -> Result<bool, Box<dyn std::error::Error>> {
     let start = std::time::Instant::now();
     let label = repo.label.as_deref();
@@ -52,6 +53,7 @@ pub(crate) fn run_default_actions(
             passphrase,
             shutdown,
             verbose >= 1,
+            source_filter,
             &mut |event| {
                 match &event {
                     CycleEvent::StepStarted(step) => {
@@ -314,4 +316,19 @@ pub(crate) fn dispatch_command(
             Err("'daemon' command should be handled before per-repo dispatch".into())
         }
     }
+}
+
+/// For local repos, check if the config sentinel file is reachable.
+/// Returns `Some(path)` if local and config definitely missing, `None` otherwise.
+pub(crate) fn local_repo_unavailable(repo: &ResolvedRepo) -> Option<String> {
+    let parsed = parse_repo_url(&repo.config.repository.url).ok()?;
+    if let ParsedUrl::Local { path } = parsed {
+        let config_path = std::path::Path::new(&path).join("config");
+        match config_path.try_exists() {
+            Ok(false) => return Some(path), // definitely missing → skip
+            Ok(true) => {}                  // present → proceed
+            Err(_) => {}                    // can't tell → let it fail normally
+        }
+    }
+    None
 }
