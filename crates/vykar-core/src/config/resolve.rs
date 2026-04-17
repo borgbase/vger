@@ -2047,7 +2047,14 @@ sources:
             "repo url not expanded: {}",
             repos[0].config.repository.url
         );
-        assert!(repos[0].config.repository.url.ends_with("/backups/repo"));
+        // Path::join inserts OS separator at the join point but preserves
+        // internal separators from the YAML value ("backups/repo").
+        let expected_suffix = format!("{}backups/repo", std::path::MAIN_SEPARATOR);
+        assert!(
+            repos[0].config.repository.url.ends_with(&expected_suffix),
+            "repo url suffix wrong: {}",
+            repos[0].config.repository.url
+        );
 
         // Simple source path should be expanded
         assert!(

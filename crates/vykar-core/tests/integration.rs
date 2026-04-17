@@ -95,10 +95,12 @@ fn make_test_config(repo_dir: &std::path::Path) -> VykarConfig {
     }
 }
 
+#[cfg(unix)]
 fn xattr_test_name() -> &'static str {
     "user.vykar.test"
 }
 
+#[cfg(unix)]
 fn supports_xattrs(dir: &std::path::Path) -> bool {
     let probe = dir.join(".xattr-probe");
     if std::fs::write(&probe, b"probe").is_err() {
@@ -479,6 +481,7 @@ fn backup_run_with_progress_emits_events_and_final_stats() {
 }
 
 #[test]
+#[cfg(unix)]
 fn backup_and_restore_preserves_file_xattrs_when_enabled() {
     let tmp = tempfile::tempdir().unwrap();
     let repo_dir = tmp.path().join("repo");
@@ -550,6 +553,7 @@ fn backup_and_restore_preserves_file_xattrs_when_enabled() {
 }
 
 #[test]
+#[cfg(unix)]
 fn backup_skips_xattrs_when_disabled() {
     let tmp = tempfile::tempdir().unwrap();
     let repo_dir = tmp.path().join("repo");
@@ -941,6 +945,7 @@ fn info_reports_repository_statistics() {
 }
 
 #[test]
+#[cfg(unix)]
 fn command_dump_backup_and_restore() {
     let repo_dir = tempfile::tempdir().unwrap();
     init_local_repo(repo_dir.path());
@@ -1014,6 +1019,7 @@ fn command_dump_backup_and_restore() {
 }
 
 #[test]
+#[cfg(unix)]
 fn command_dump_failing_command_aborts_backup() {
     let repo_dir = tempfile::tempdir().unwrap();
     init_local_repo(repo_dir.path());
@@ -1055,6 +1061,7 @@ fn command_dump_failing_command_aborts_backup() {
 }
 
 #[test]
+#[cfg(unix)]
 fn command_dump_mixed_with_files() {
     let repo_dir = tempfile::tempdir().unwrap();
     init_local_repo(repo_dir.path());

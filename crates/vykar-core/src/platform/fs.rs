@@ -140,7 +140,20 @@ pub fn set_file_mtime_fd(file: &std::fs::File, secs: i64, nanos: u32) -> std::io
         }
     }
 
-    #[cfg(not(unix))]
+    #[cfg(windows)]
+    {
+        use std::fs::FileTimes;
+        use std::time::{Duration, SystemTime};
+
+        let time = if secs >= 0 {
+            SystemTime::UNIX_EPOCH + Duration::new(secs as u64, nanos)
+        } else {
+            SystemTime::UNIX_EPOCH - Duration::new(secs.unsigned_abs(), 0) + Duration::new(0, nanos)
+        };
+        file.set_times(FileTimes::new().set_modified(time))
+    }
+
+    #[cfg(not(any(unix, windows)))]
     {
         let _ = (file, secs, nanos);
         Ok(())
@@ -329,7 +342,8 @@ mod tests {
         let path = dir.path().join("mtime_fd.txt");
         std::fs::write(&path, b"data").unwrap();
 
-        let file = std::fs::File::open(&path).unwrap();
+        // Windows needs FILE_WRITE_ATTRIBUTES, so open with write access.
+        let file = std::fs::OpenOptions::new().write(true).open(&path).unwrap();
         let target_secs: i64 = 1_700_000_000;
         set_file_mtime_fd(&file, target_secs, 0).unwrap();
         drop(file);

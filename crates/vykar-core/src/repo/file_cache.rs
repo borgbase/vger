@@ -670,6 +670,12 @@ mod tests {
     use super::*;
     use vykar_types::chunk_id::ChunkId;
 
+    /// Build an absolute path string using OS-native separators, matching what
+    /// `Path::join` (and therefore `reconstruct_abs_path`) produces.
+    fn native_join(root: &str, rel: &str) -> String {
+        Path::new(root).join(rel).to_string_lossy().to_string()
+    }
+
     fn sample_chunk_refs() -> Arc<Vec<ChunkRef>> {
         Arc::new(vec![ChunkRef {
             id: ChunkId([0xAA; 32]),
@@ -1207,15 +1213,16 @@ mod tests {
         ];
 
         let idx = build_parent_index(items, &["/src".into()], false).unwrap();
+        let path = native_join("/src", "a.txt");
         // Should find the file
-        let hit = idx.lookup("/src/a.txt", 4096, 1000, 2000);
+        let hit = idx.lookup(&path, 4096, 1000, 2000);
         assert!(hit.is_some());
         assert_eq!(hit.unwrap().len(), 1);
 
         // Wrong mtime — miss
-        assert!(idx.lookup("/src/a.txt", 4096, 9999, 2000).is_none());
+        assert!(idx.lookup(&path, 4096, 9999, 2000).is_none());
         // Wrong ctime — miss
-        assert!(idx.lookup("/src/a.txt", 4096, 1000, 9999).is_none());
+        assert!(idx.lookup(&path, 4096, 1000, 9999).is_none());
     }
 
     #[test]
@@ -1281,10 +1288,12 @@ mod tests {
         let idx = build_parent_index(items, &["/src".into()], false).unwrap();
         // Dump item should not be indexed
         assert!(idx
-            .lookup("/src/vykar-dumps/pg_dump", 4096, 1000, 0)
+            .lookup(&native_join("/src", "vykar-dumps/pg_dump"), 4096, 1000, 0)
             .is_none());
         // Real file should be indexed
-        assert!(idx.lookup("/src/real.txt", 8192, 2000, 3000).is_some());
+        assert!(idx
+            .lookup(&native_join("/src", "real.txt"), 8192, 2000, 3000)
+            .is_some());
     }
 
     #[test]
@@ -1309,14 +1318,16 @@ mod tests {
         let idx =
             build_parent_index(items, &["/mnt/home".into(), "/mnt/data".into()], true).unwrap();
         // "home/a.txt" → matches source_path "/mnt/home" (basename "home"), reconstructs to "/mnt/home/a.txt"
-        assert!(idx.lookup("/mnt/home/a.txt", 4096, 1000, 2000).is_some());
+        assert!(idx
+            .lookup(&native_join("/mnt/home", "a.txt"), 4096, 1000, 2000)
+            .is_some());
     }
 
     #[test]
     fn reconstruct_abs_path_single() {
         let roots = vec![("data".into(), "/data".into())];
         let p = reconstruct_abs_path("dir/file.txt", &roots, false);
-        assert_eq!(p, "/data/dir/file.txt");
+        assert_eq!(p, native_join("/data", "dir/file.txt"));
     }
 
     #[test]
@@ -1324,7 +1335,7 @@ mod tests {
         // Trailing slash in walk_root must not produce double-slash.
         let roots = vec![("data".into(), "/data/".into())];
         let p = reconstruct_abs_path("dir/file.txt", &roots, false);
-        assert_eq!(p, "/data/dir/file.txt");
+        assert_eq!(p, native_join("/data/", "dir/file.txt"));
     }
 
     #[test]
@@ -1334,7 +1345,7 @@ mod tests {
             ("home".into(), "/mnt/home".into()),
         ];
         let p = reconstruct_abs_path("data/sub/file.txt", &roots, true);
-        assert_eq!(p, "/mnt/data/sub/file.txt");
+        assert_eq!(p, native_join("/mnt/data", "sub/file.txt"));
     }
 
     #[test]
@@ -1344,7 +1355,7 @@ mod tests {
             ("home".into(), "/mnt/home/".into()),
         ];
         let p = reconstruct_abs_path("data/sub/file.txt", &roots, true);
-        assert_eq!(p, "/mnt/data/sub/file.txt");
+        assert_eq!(p, native_join("/mnt/data/", "sub/file.txt"));
     }
 
     #[test]
@@ -1356,7 +1367,7 @@ mod tests {
             ("config".into(), "/etc".into()),
         ];
         let p = reconstruct_abs_path("docs/readme.txt", &roots, true);
-        assert_eq!(p, "/mnt/real-docs/readme.txt");
+        assert_eq!(p, native_join("/mnt/real-docs", "readme.txt"));
     }
 
     // ── Per-path section tests ──────────────────────────────────────────

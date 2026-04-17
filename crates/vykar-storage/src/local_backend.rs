@@ -353,6 +353,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(unix)] // Windows mandatory file locking prevents concurrent rename-to-same-target
     fn put_concurrent_writes_are_atomic() {
         use std::sync::{Arc, Barrier};
         use std::thread;
