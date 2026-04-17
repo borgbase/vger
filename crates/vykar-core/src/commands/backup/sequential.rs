@@ -1,5 +1,5 @@
-use std::fs::{File, FileType};
-use std::path::{Path, PathBuf};
+use std::fs::File;
+use std::path::Path;
 use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
 
@@ -22,11 +22,9 @@ use vykar_types::error::{Result, VykarError};
 
 use super::chunk_process::{classify_chunk, WorkerChunk};
 use super::commit::process_worker_chunks;
-#[cfg(not(target_os = "linux"))]
-use super::walk::{build_configured_walker, is_soft_walk_error};
-use super::walk::{is_soft_io_error, read_item_xattrs};
-#[cfg(target_os = "linux")]
-use super::walk::{rel_path_from_abs, InodeSortedWalk, WalkEvent};
+use super::walk::{
+    is_soft_io_error, read_item_xattrs, rel_path_from_abs, InodeSortedWalk, WalkEvent,
+};
 use super::{append_item_to_stream, emit_progress, emit_stats_progress};
 use super::{BackupProgressEvent, FileStatus};
 use vykar_crypto::CryptoEngine;
@@ -281,26 +279,12 @@ pub(super) fn process_regular_file_item(
     let abs_path = entry_path.to_string_lossy().to_string();
     let file_size = metadata_summary.size;
 
-    let effective_hit = repo
-        .file_cache()
-        .lookup(
-            &abs_path,
-            metadata_summary.device,
-            metadata_summary.inode,
-            metadata_summary.mtime_ns,
-            metadata_summary.ctime_ns,
-            file_size,
-        )
-        .or_else(|| {
-            parent_reuse_index.and_then(|idx| {
-                idx.lookup(
-                    &abs_path,
-                    file_size,
-                    metadata_summary.mtime_ns,
-                    metadata_summary.ctime_ns,
-                )
-            })
-        });
+    let effective_hit = super::resolve_cache_hit(
+        repo.file_cache(),
+        parent_reuse_index,
+        &abs_path,
+        &metadata_summary,
+    );
 
     if let Some(cached_refs) = effective_hit {
         super::commit::commit_cache_hit(repo, item, &cached_refs, stats)?;
@@ -425,19 +409,6 @@ pub(super) fn process_regular_file_item(
     Ok(())
 }
 
-/// Unified walk item for the sequential backup loop.
-/// Abstracts over the inode-sorted walker (Linux) and ignore-crate walker.
-enum SequentialWalkItem {
-    Entry {
-        abs_path: PathBuf,
-        rel_path: String,
-        metadata_summary: fs::MetadataSummary,
-        file_type: FileType,
-    },
-    Skipped,
-    HardError(VykarError),
-}
-
 #[allow(clippy::too_many_arguments)]
 pub(super) fn process_source_path(
     repo: &mut Repository,
@@ -475,27 +446,7 @@ pub(super) fn process_source_path(
 
     // For multi-path mode, derive basename prefix.
     let prefix = if multi_path {
-        let base = source
-            .file_name()
-            .map(|n| n.to_string_lossy().to_string())
-            .unwrap_or_else(|| source_path.to_string());
-        // Emit a directory item for the prefix.
-        let dir_item = Item {
-            path: base.clone(),
-            entry_type: ItemType::Directory,
-            mode: 0o755,
-            uid: 0,
-            gid: 0,
-            user: None,
-            group: None,
-            mtime: 0,
-            atime: None,
-            ctime: None,
-            size: 0,
-            chunks: Vec::new(),
-            link_target: None,
-            xattrs: None,
-        };
+        let (base, dir_item) = super::build_multi_path_prefix(source_path, source);
         append_item_to_stream(
             repo,
             item_stream,
@@ -513,117 +464,31 @@ pub(super) fn process_source_path(
     let min_chunk_size = repo.config.chunker_params.min_size as u64;
     let mut cross_batch = CrossFileBatch::new();
 
-    // --- Walk loop: platform-dispatched ---
-    // On Linux, use inode-sorted walk for HDD performance.
-    // On other platforms, use the ignore-crate walker.
-    #[cfg(target_os = "linux")]
-    let walk_iter: Box<dyn Iterator<Item = SequentialWalkItem>> = {
-        let inode_walk = InodeSortedWalk::new(
-            source,
-            exclude_patterns,
-            exclude_if_present,
-            one_file_system,
-            git_ignore,
-        )?;
-        let abs_source = inode_walk.abs_source().to_owned();
-        Box::new(inode_walk.map(move |event_result| match event_result {
-            Ok(WalkEvent::Entry(walked)) => {
-                let rel_path = rel_path_from_abs(&abs_source, &walked.abs_path);
-                SequentialWalkItem::Entry {
-                    abs_path: walked.abs_path,
-                    rel_path,
-                    metadata_summary: walked.metadata,
-                    file_type: walked.file_type,
-                }
-            }
-            Ok(WalkEvent::Skipped) => SequentialWalkItem::Skipped,
-            Err(e) => SequentialWalkItem::HardError(e),
-        }))
-    };
-    #[cfg(not(target_os = "linux"))]
-    let walk_iter: Box<dyn Iterator<Item = SequentialWalkItem>> = {
-        // Canonicalize so abs_paths match the parent reuse index.
-        let canonical_source = std::fs::canonicalize(source).unwrap_or_else(|_| {
-            if source.is_absolute() {
-                source.to_path_buf()
-            } else {
-                std::env::current_dir().unwrap_or_default().join(source)
-            }
-        });
-        let walk_builder = build_configured_walker(
-            &canonical_source,
-            exclude_patterns,
-            exclude_if_present,
-            one_file_system,
-            git_ignore,
-        )?;
-        let walk_source = canonical_source;
-        Box::new(walk_builder.build().filter_map(move |entry_result| {
-            match entry_result {
-                Ok(entry) => {
-                    let rel_path = entry
-                        .path()
-                        .strip_prefix(&walk_source)
-                        .unwrap_or(entry.path())
-                        .to_string_lossy()
-                        .to_string();
-                    let rel_path = super::normalize_rel_path(rel_path);
-                    if rel_path.is_empty() {
-                        return None; // skip root
-                    }
-                    let metadata = match std::fs::symlink_metadata(entry.path()) {
-                        Ok(m) => m,
-                        Err(e) => {
-                            if is_soft_io_error(&e) {
-                                warn!(path = %entry.path().display(), error = %e, "skipping entry (stat error)");
-                                return Some(SequentialWalkItem::Skipped);
-                            }
-                            return Some(SequentialWalkItem::HardError(VykarError::Other(
-                                format!("stat error for {}: {e}", entry.path().display()),
-                            )));
-                        }
-                    };
-                    let file_type = metadata.file_type();
-                    let metadata_summary = fs::summarize_metadata(&metadata, &file_type);
-                    Some(SequentialWalkItem::Entry {
-                        abs_path: entry.path().to_path_buf(),
-                        rel_path,
-                        metadata_summary,
-                        file_type,
-                    })
-                }
-                Err(e) => {
-                    if is_soft_walk_error(&e) {
-                        warn!(error = %e, "skipping entry (walk error)");
-                        Some(SequentialWalkItem::Skipped)
-                    } else {
-                        Some(SequentialWalkItem::HardError(VykarError::Other(
-                            format!("walk error: {e}"),
-                        )))
-                    }
-                }
-            }
-        }))
-    };
+    let inode_walk = InodeSortedWalk::new(
+        source,
+        exclude_patterns,
+        exclude_if_present,
+        one_file_system,
+        git_ignore,
+    )?;
+    let abs_source = inode_walk.abs_source().to_owned();
 
-    for walk_item in walk_iter {
+    for event_result in inode_walk {
         check_interrupted(shutdown)?;
 
-        let (entry_path, rel_path, metadata_summary, file_type) = match walk_item {
-            SequentialWalkItem::Entry {
-                abs_path,
-                rel_path,
-                metadata_summary,
-                file_type,
-            } => (abs_path, rel_path, metadata_summary, file_type),
-            SequentialWalkItem::Skipped => {
+        let walked = match event_result {
+            Ok(WalkEvent::Entry(walked)) => walked,
+            Ok(WalkEvent::Skipped) => {
                 stats.errors += 1;
                 continue;
             }
-            SequentialWalkItem::HardError(e) => {
-                return Err(e);
-            }
+            Err(e) => return Err(e),
         };
+
+        let rel_path = rel_path_from_abs(&abs_source, &walked.abs_path);
+        let entry_path = walked.abs_path;
+        let metadata_summary = walked.metadata;
+        let file_type = walked.file_type;
 
         let (entry_type, link_target) = if file_type.is_dir() {
             (ItemType::Directory, None)
@@ -689,26 +554,12 @@ pub(super) fn process_source_path(
                 // Flush batch before cache-hit check since it may need walk-order items.
                 let abs_path = entry_path.to_string_lossy().to_string();
 
-                let effective_hit = repo
-                    .file_cache()
-                    .lookup(
-                        &abs_path,
-                        metadata_summary.device,
-                        metadata_summary.inode,
-                        metadata_summary.mtime_ns,
-                        metadata_summary.ctime_ns,
-                        metadata_summary.size,
-                    )
-                    .or_else(|| {
-                        parent_reuse_index.and_then(|idx| {
-                            idx.lookup(
-                                &abs_path,
-                                metadata_summary.size,
-                                metadata_summary.mtime_ns,
-                                metadata_summary.ctime_ns,
-                            )
-                        })
-                    });
+                let effective_hit = super::resolve_cache_hit(
+                    repo.file_cache(),
+                    parent_reuse_index,
+                    &abs_path,
+                    &metadata_summary,
+                );
 
                 if let Some(cached_refs) = effective_hit {
                     // Flush batch to preserve walk order before the cache-hit item.

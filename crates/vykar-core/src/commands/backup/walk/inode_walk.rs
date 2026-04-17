@@ -1,22 +1,17 @@
-//! Inode-sorted filesystem walker for Linux.
+//! Cross-platform inode-sorted filesystem walker.
 //!
-//! On filesystems with fixed inode tables (ext4, xfs, reiserfs), sorting
-//! `symlink_metadata()` calls by inode number makes reads sweep sequentially
-//! through the inode table instead of seeking randomly. This yields 3-8x
-//! speedup on HDD for stat-dominated workloads (e.g. incremental backups
-//! where the file cache skips most reads).
+//! On Linux filesystems with fixed inode tables (ext4, xfs, reiserfs),
+//! sorting `symlink_metadata()` calls by inode number makes reads sweep
+//! sequentially through the inode table instead of seeking randomly. This
+//! yields 3-8x speedup on HDD for stat-dominated workloads (e.g. incremental
+//! backups where the file cache skips most reads).
 //!
-//! Filesystem detection via `statfs()` is performed per-directory to handle
-//! mixed-filesystem trees (e.g. ext4 root with Lustre submount). Only
-//! allowlisted filesystems get inode sorting; others fall back to filename
-//! order for deterministic snapshots.
-//!
-//! Non-Linux platforms continue using the `ignore`-based walker.
+//! On macOS and Windows, entries are sorted by filename for deterministic
+//! snapshots. All platforms share the same filtering logic (excludes,
+//! gitignore, markers, cross-device).
 
 use std::collections::VecDeque;
 use std::fs::FileType;
-use std::os::unix::ffi::OsStrExt;
-use std::os::unix::fs::DirEntryExt;
 use std::path::{Path, PathBuf};
 
 use ignore::gitignore::{Gitignore, GitignoreBuilder};
@@ -27,18 +22,32 @@ use vykar_types::error::{Result, VykarError};
 
 use super::{build_explicit_excludes, is_soft_io_error, should_skip_for_device};
 
-/// Filesystem magic numbers from linux/magic.h where inode order
-/// correlates with on-disk position.
-///
-/// The type of `statfs.f_type` differs between glibc (`__fsword_t`, i64) and
-/// musl (`c_ulong`, u64). We compare via `as u64` to work on both.
-const EXT_SUPER_MAGIC: u64 = 0xEF53; // ext2/3/4
-const XFS_SUPER_MAGIC: u64 = 0x5846_5342; // "XFSB"
-const REISERFS_SUPER_MAGIC: u64 = 0x5265_4973;
+#[cfg(unix)]
+fn dir_entry_inode(entry: &std::fs::DirEntry) -> u64 {
+    use std::os::unix::fs::DirEntryExt;
+    entry.ino()
+}
+
+#[cfg(not(unix))]
+fn dir_entry_inode(_entry: &std::fs::DirEntry) -> u64 {
+    0
+}
 
 /// Returns true if inode-sorted stat reduces disk seeks on this filesystem.
-/// Allowlist-only: returns false on error or unknown filesystems.
+/// Only beneficial on Linux ext4/xfs/reiserfs; returns false on all other platforms.
+#[cfg(target_os = "linux")]
 fn inode_sort_beneficial(path: &Path) -> bool {
+    use std::os::unix::ffi::OsStrExt;
+
+    /// Filesystem magic numbers from linux/magic.h where inode order
+    /// correlates with on-disk position.
+    ///
+    /// The type of `statfs.f_type` differs between glibc (`__fsword_t`, i64) and
+    /// musl (`c_ulong`, u64). We compare via `as u64` to work on both.
+    const EXT_SUPER_MAGIC: u64 = 0xEF53; // ext2/3/4
+    const XFS_SUPER_MAGIC: u64 = 0x5846_5342; // "XFSB"
+    const REISERFS_SUPER_MAGIC: u64 = 0x5265_4973;
+
     let c_path = match std::ffi::CString::new(path.as_os_str().as_bytes()) {
         Ok(p) => p,
         Err(_) => {
@@ -56,6 +65,11 @@ fn inode_sort_beneficial(path: &Path) -> bool {
         buf.f_type as u64,
         EXT_SUPER_MAGIC | XFS_SUPER_MAGIC | REISERFS_SUPER_MAGIC
     )
+}
+
+#[cfg(not(target_os = "linux"))]
+fn inode_sort_beneficial(_path: &Path) -> bool {
+    false
 }
 
 /// A filesystem entry that has been statted and passed all filters.
@@ -284,7 +298,7 @@ impl InodeSortedWalk {
                 }
             };
 
-            let ino = entry.ino();
+            let ino = dir_entry_inode(&entry);
             let path = entry.path();
 
             // d_type from readdir — may be DT_UNKNOWN on some filesystems.
@@ -502,7 +516,6 @@ impl Iterator for InodeSortedWalk {
 mod tests {
     use super::*;
     use std::fs;
-    use std::os::unix::fs as unix_fs;
 
     #[test]
     fn walks_basic_directory_structure() {
@@ -580,8 +593,10 @@ mod tests {
         assert_eq!(paths, vec!["included", "included/file.txt"]);
     }
 
+    #[cfg(unix)]
     #[test]
     fn handles_symlinks() {
+        use std::os::unix::fs as unix_fs;
         let tmp = tempfile::tempdir().unwrap();
         let root = tmp.path();
 
@@ -666,12 +681,13 @@ mod tests {
         assert!(!paths.contains(&"root.log".to_string()));
     }
 
-    /// Verify that InodeSortedWalk discovers the same set of paths as the
-    /// ignore-crate walker for a non-trivial directory structure with
-    /// excludes, marker files, and gitignore.
+    /// Verify that InodeSortedWalk discovers the expected set of paths for a
+    /// non-trivial directory structure with excludes, marker files, gitignore,
+    /// and symlinks.
+    #[cfg(unix)]
     #[test]
-    fn filter_equivalence_with_ignore_walker() {
-        use super::super::build_configured_walker;
+    fn filter_combined_excludes_markers_gitignore() {
+        use std::os::unix::fs as unix_fs;
 
         let tmp = tempfile::tempdir().unwrap();
         let root = tmp.path();
@@ -693,6 +709,7 @@ mod tests {
         //     nested/
         //       file.txt
         //       also_skip.log (excluded by *.log)
+        //   link.txt -> keep.txt
 
         fs::write(root.join("keep.txt"), "k").unwrap();
         fs::write(root.join("skip.log"), "s").unwrap();
@@ -713,45 +730,34 @@ mod tests {
         fs::write(root.join("deep/nested/file.txt"), "f").unwrap();
         fs::write(root.join("deep/nested/also_skip.log"), "a").unwrap();
 
-        // Add a symlink for good measure.
         unix_fs::symlink("keep.txt", root.join("link.txt")).unwrap();
 
         let excludes = vec!["*.log".to_string()];
         let markers = vec![".nobackup".to_string()];
 
-        // Collect paths from InodeSortedWalk.
         let inode_walk = InodeSortedWalk::new(root, &excludes, &markers, false, true).unwrap();
         let abs_source = inode_walk.abs_source().to_owned();
-        let mut inode_paths: Vec<String> = Vec::new();
+        let mut paths: Vec<String> = Vec::new();
         for event in inode_walk {
             if let Ok(WalkEvent::Entry(e)) = event {
-                inode_paths.push(rel_path_from_abs(&abs_source, &e.abs_path));
+                paths.push(rel_path_from_abs(&abs_source, &e.abs_path));
             }
         }
 
-        // Collect paths from ignore-crate walker.
-        let walk_builder = build_configured_walker(root, &excludes, &markers, false, true).unwrap();
-        let mut ignore_paths: Vec<String> = Vec::new();
-        for entry in walk_builder.build() {
-            let entry = entry.unwrap();
-            let rel = entry
-                .path()
-                .strip_prefix(root)
-                .unwrap_or(entry.path())
-                .to_string_lossy()
-                .to_string();
-            if rel.is_empty() {
-                continue;
-            }
-            ignore_paths.push(rel);
-        }
-
-        inode_paths.sort();
-        ignore_paths.sort();
-
+        paths.sort();
         assert_eq!(
-            inode_paths, ignore_paths,
-            "InodeSortedWalk and ignore walker must discover identical paths"
+            paths,
+            vec![
+                ".gitignore",
+                "deep",
+                "deep/nested",
+                "deep/nested/file.txt",
+                "keep.txt",
+                "link.txt",
+                "src",
+                "src/lib.rs",
+                "src/main.rs",
+            ]
         );
     }
 
@@ -814,6 +820,7 @@ mod tests {
         assert_eq!(paths, vec!["a.txt"]);
     }
 
+    #[cfg(target_os = "linux")]
     #[test]
     fn inode_sort_beneficial_tmpfs() {
         // /tmp is typically tmpfs on Linux — inode sort should not be beneficial.
@@ -824,6 +831,7 @@ mod tests {
         let _ = result;
     }
 
+    #[cfg(target_os = "linux")]
     #[test]
     fn inode_sort_beneficial_nonexistent() {
         // Non-existent path should return false (statfs fails).
@@ -832,8 +840,10 @@ mod tests {
         )));
     }
 
+    #[cfg(unix)]
     #[test]
     fn symlinked_source_root() {
+        use std::os::unix::fs as unix_fs;
         let tmp = tempfile::tempdir().unwrap();
         let root = tmp.path();
 

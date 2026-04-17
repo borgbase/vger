@@ -53,6 +53,35 @@ jobs:
       - name: Run tests
         run: make test-all
 
+  cross-platform:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: macos-14
+            run_tests: true
+          - os: windows-latest
+            run_tests: false
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 60
+    env:
+      CARGO_TERM_COLOR: always
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: cross-${{ matrix.os }}
+
+      - name: Compile tests
+        run: cargo test -p vykar-core --lib --no-run
+
+      - name: Run tests
+        if: matrix.run_tests
+        run: cargo test -p vykar-core --lib
+
   docs:
     runs-on: ubuntu-latest
     timeout-minutes: 30

@@ -52,6 +52,56 @@ pub(crate) fn normalize_rel_path(path: String) -> String {
     }
 }
 
+/// Build the multi-path prefix basename and synthetic directory item.
+/// Used when backing up multiple source paths to namespace each source.
+fn build_multi_path_prefix(source_path: &str, source: &std::path::Path) -> (String, Item) {
+    use crate::snapshot::item::ItemType;
+    let base = source
+        .file_name()
+        .map(|n| n.to_string_lossy().to_string())
+        .unwrap_or_else(|| source_path.to_string());
+    let dir_item = Item {
+        path: base.clone(),
+        entry_type: ItemType::Directory,
+        mode: 0o755,
+        uid: 0,
+        gid: 0,
+        user: None,
+        group: None,
+        mtime: 0,
+        atime: None,
+        ctime: None,
+        size: 0,
+        chunks: Vec::new(),
+        link_target: None,
+        xattrs: None,
+    };
+    (base, dir_item)
+}
+
+/// Resolve a cache hit by checking the file cache, falling back to the parent reuse index.
+fn resolve_cache_hit(
+    file_cache: &FileCache,
+    parent_reuse_index: Option<&ParentReuseIndex>,
+    abs_path: &str,
+    summary: &fs::MetadataSummary,
+) -> Option<Arc<Vec<crate::snapshot::item::ChunkRef>>> {
+    file_cache
+        .lookup(
+            abs_path,
+            summary.device,
+            summary.inode,
+            summary.mtime_ns,
+            summary.ctime_ns,
+            summary.size,
+        )
+        .or_else(|| {
+            parent_reuse_index.and_then(|idx| {
+                idx.lookup(abs_path, summary.size, summary.mtime_ns, summary.ctime_ns)
+            })
+        })
+}
+
 pub(crate) fn flush_item_stream_chunk(
     repo: &mut Repository,
     item_stream: &mut Vec<u8>,
