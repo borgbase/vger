@@ -636,7 +636,7 @@ fn read_chunk_cached(
 ) -> FsResult<Arc<Vec<u8>>> {
     // Fast path: cache hit
     {
-        let mut guard = cache.lock().expect("mutex poisoned");
+        let mut guard = cache.lock().unwrap_or_else(|e| e.into_inner());
         if let Some(data) = guard.get(chunk_id) {
             return Ok(data.clone());
         }
@@ -644,7 +644,7 @@ fn read_chunk_cached(
 
     // Slow path: read from repository
     let data = {
-        let mut guard = repo.lock().expect("mutex poisoned");
+        let mut guard = repo.lock().unwrap_or_else(|e| e.into_inner());
         guard
             .read_chunk(chunk_id)
             .map_err(|_| FsError::GeneralFailure)?
@@ -653,7 +653,7 @@ fn read_chunk_cached(
     let data = Arc::new(data);
 
     {
-        let mut guard = cache.lock().expect("mutex poisoned");
+        let mut guard = cache.lock().unwrap_or_else(|e| e.into_inner());
         guard.put(*chunk_id, data.clone());
     }
 
