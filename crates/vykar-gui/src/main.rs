@@ -323,7 +323,9 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             let menu_rx = MenuEvent::receiver();
             while let Ok(event) = menu_rx.recv() {
                 if event.id == open_item_id {
-                    let _ = tx.send(AppCommand::ShowWindow);
+                    // Bypass the worker queue so the tray stays responsive even
+                    // while the worker is busy (e.g. initial FetchAllRepoInfo).
+                    let _ = log_tx.send(UiEvent::ShowWindow);
                 } else if event.id == run_now_item_id {
                     let _ = tx.send(AppCommand::RunBackupAll { scheduled: false });
                 } else if event.id == cancel_item_id {
@@ -337,7 +339,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                         "Cancel requested; will stop after current step completes.",
                     );
                 } else if event.id == quit_item_id {
-                    let _ = tx.send(AppCommand::Quit);
+                    let _ = log_tx.send(UiEvent::Quit);
                     break;
                 } else if let Ok(items) = tray_source_items.lock() {
                     if let Some((_, label)) = items.iter().find(|(id, _)| *id == event.id) {

@@ -52,8 +52,6 @@ pub(crate) enum AppCommand {
     SaveAndApplyConfig {
         yaml_text: String,
     },
-    ShowWindow,
-    Quit,
 }
 
 // ── Data transfer structs ──

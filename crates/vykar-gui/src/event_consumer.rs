@@ -283,7 +283,15 @@ pub(crate) fn spawn(
                             use objc2::MainThreadMarker;
                             use objc2_app_kit::NSApplication;
                             if let Some(mtm) = MainThreadMarker::new() {
-                                NSApplication::sharedApplication(mtm).activate();
+                                let app = NSApplication::sharedApplication(mtm);
+                                app.unhide(None);
+                                for window in app.windows().iter() {
+                                    if window.isMiniaturized() {
+                                        window.deminiaturize(None);
+                                    }
+                                    window.makeKeyAndOrderFront(None);
+                                }
+                                app.activate();
                             }
                         }
                     }

@@ -1039,13 +1039,6 @@ pub(crate) fn run_worker(
                     ));
                 }
             }
-            AppCommand::ShowWindow => {
-                let _ = ui_tx.send(UiEvent::ShowWindow);
-            }
-            AppCommand::Quit => {
-                let _ = ui_tx.send(UiEvent::Quit);
-                break;
-            }
         }
     }
 }
