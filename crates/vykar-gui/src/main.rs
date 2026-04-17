@@ -10,6 +10,7 @@ use std::thread;
 use slint::ComponentHandle;
 use tray_icon::menu::MenuEvent;
 
+mod autostart;
 mod config_helpers;
 mod controllers;
 mod event_consumer;
@@ -51,6 +52,11 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         .unwrap_or_else(|_| runtime.source.path().to_path_buf())
         .display()
         .to_string();
+
+    // Persisted user preference for start-in-background (independent of autostart state).
+    let start_in_background_pref = Arc::new(AtomicBool::new(
+        gui_state.start_in_background.unwrap_or(false),
+    ));
 
     // Last captured GUI state — updated on every window hide so we have a valid
     // snapshot even if the window is already destroyed when the process exits.
@@ -190,6 +196,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         snapshot_data.clone(),
         last_gui_state.clone(),
         tray_source_items.clone(),
+        start_in_background_pref.clone(),
     );
 
     // ── Callback wiring ──
@@ -202,14 +209,78 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         snapshot_data,
     );
 
+    // ── Settings tab initialization ──
+
+    let autostart_on = match autostart::is_enabled() {
+        Ok(v) => v,
+        Err(e) => {
+            let _ = ui_tx_for_cancel.send(messages::log_entry_now(format!(
+                "Could not detect autostart state: {e}"
+            )));
+            false
+        }
+    };
+    ui.set_start_at_login(autostart_on);
+    ui.set_start_in_background(start_in_background_pref.load(Ordering::Relaxed) || autostart_on);
+    ui.set_start_in_background_enabled(!autostart_on);
+
+    // "Start at login" toggle — register/remove OS autostart entry.
+    ui.on_start_at_login_toggled({
+        let ui_weak = ui.as_weak();
+        let ui_tx = ui_tx_for_cancel.clone();
+        let pref = start_in_background_pref.clone();
+        move |checked| {
+            let Some(ui) = ui_weak.upgrade() else { return };
+            if let Err(e) = autostart::set_enabled(checked) {
+                // Revert checkbox to previous state.
+                ui.set_start_at_login(!checked);
+                send_log(&ui_tx, format!("Autostart failed: {e}"));
+                return;
+            }
+            if checked {
+                // Force background on (display only), disable the checkbox.
+                ui.set_start_in_background(true);
+                ui.set_start_in_background_enabled(false);
+                send_log(&ui_tx, "Autostart enabled.");
+            } else {
+                // Restore background checkbox to persisted preference.
+                ui.set_start_in_background(pref.load(Ordering::Relaxed));
+                ui.set_start_in_background_enabled(true);
+                send_log(&ui_tx, "Autostart disabled.");
+            }
+        }
+    });
+
+    // "Start in background" toggle — only reachable when autostart is off.
+    ui.on_start_in_background_toggled({
+        let pref = start_in_background_pref.clone();
+        let ui_weak = ui.as_weak();
+        let last = last_gui_state.clone();
+        move |checked| {
+            pref.store(checked, Ordering::Relaxed);
+            // Capture live UI state so we never overwrite config_path / window
+            // size with stale or default values.
+            if let Some(s) = ui_weak
+                .upgrade()
+                .and_then(|ui| event_consumer::capture_gui_state(&ui, &pref))
+            {
+                state::save(&s);
+                if let Ok(mut guard) = last.lock() {
+                    *guard = Some(s);
+                }
+            }
+        }
+    });
+
     // ── Close-to-tray behavior ──
 
     ui.window().on_close_requested({
         let ui_weak = ui.as_weak();
         let last_gui_state = last_gui_state.clone();
+        let pref = start_in_background_pref.clone();
         move || {
             if let Some(ui) = ui_weak.upgrade() {
-                if let Some(s) = event_consumer::capture_gui_state(&ui) {
+                if let Some(s) = event_consumer::capture_gui_state(&ui, &pref) {
                     state::save(&s);
                     if let Ok(mut last) = last_gui_state.lock() {
                         *last = Some(s);
@@ -225,9 +296,10 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     ui.on_close_window({
         let ui_weak = ui.as_weak();
         let last_gui_state = last_gui_state.clone();
+        let pref = start_in_background_pref.clone();
         move || {
             if let Some(ui) = ui_weak.upgrade() {
-                if let Some(s) = event_consumer::capture_gui_state(&ui) {
+                if let Some(s) = event_consumer::capture_gui_state(&ui, &pref) {
                     state::save(&s);
                     if let Ok(mut last) = last_gui_state.lock() {
                         *last = Some(s);
@@ -278,13 +350,15 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         });
     }
 
-    ui.show()?;
+    if !autostart::should_start_hidden(gui_state.start_in_background, autostart_on) {
+        ui.show()?;
+    }
     slint::run_event_loop_until_quit()?;
 
     // Persist GUI state. Eager saves (config change, window hide) cover most
     // paths; this final capture handles Cmd-Q on macOS where the event loop
     // exits without triggering on_close_requested.
-    let final_state = event_consumer::capture_gui_state(&ui)
+    let final_state = event_consumer::capture_gui_state(&ui, &start_in_background_pref)
         .or_else(|| last_gui_state.lock().ok().and_then(|g| g.clone()));
     if let Some(s) = final_state {
         state::save(&s);

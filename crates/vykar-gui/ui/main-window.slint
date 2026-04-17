@@ -101,6 +101,13 @@ export component MainWindow inherits Window {
     callback cancel_clicked();
     callback close_window();
     callback release-focus();
+
+    // Settings tab state
+    in-out property <bool> start_at_login: false;
+    in-out property <bool> start_in_background: false;
+    in-out property <bool> start_in_background_enabled: true;
+    callback start_at_login_toggled(/* checked */ bool);
+    callback start_in_background_toggled(/* checked */ bool);
     release-focus => { focus-sink.focus(); }
     title: "Vykar Backup";
     preferred-width: 1100px;
@@ -468,6 +475,34 @@ export component MainWindow inherits Window {
                             clicked => { root.save_and_apply_clicked(); }
                         }
                     }
+                }
+            }
+
+            Tab {
+                title: "Settings";
+                VerticalBox {
+                    padding: 8px;
+                    spacing: 12px;
+                    Text {
+                        text: "Startup";
+                        font-weight: 700;
+                    }
+                    CheckBox {
+                        text: "Start at login";
+                        checked <=> root.start_at_login;
+                        toggled => {
+                            root.start-at-login-toggled(self.checked);
+                        }
+                    }
+                    CheckBox {
+                        text: "Start in background (tray only)";
+                        checked <=> root.start_in_background;
+                        enabled: root.start_in_background_enabled;
+                        toggled => {
+                            root.start-in-background-toggled(self.checked);
+                        }
+                    }
+                    Rectangle { vertical-stretch: 1; }
                 }
             }
         }

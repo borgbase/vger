@@ -12,6 +12,9 @@ pub struct GuiState {
     /// Window height in logical pixels.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub window_height: Option<f32>,
+    /// Whether to start with the window hidden (tray only).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub start_in_background: Option<bool>,
 }
 
 fn state_file_path() -> Option<PathBuf> {
@@ -40,4 +43,30 @@ pub fn save(state: &GuiState) {
     let _ = serde_json::to_string_pretty(state)
         .ok()
         .map(|json| std::fs::write(&path, json));
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn round_trip_with_start_in_background() {
+        let state = GuiState {
+            config_path: Some("/tmp/vykar.yaml".into()),
+            window_width: Some(1100.0),
+            window_height: Some(760.0),
+            start_in_background: Some(true),
+        };
+        let json = serde_json::to_string(&state).unwrap();
+        let restored: GuiState = serde_json::from_str(&json).unwrap();
+        assert_eq!(restored.start_in_background, Some(true));
+    }
+
+    #[test]
+    fn backwards_compat_missing_field() {
+        // Old gui_state.json without start_in_background.
+        let json = r#"{"config_path":"/tmp/vykar.yaml","window_width":1100.0}"#;
+        let state: GuiState = serde_json::from_str(json).unwrap();
+        assert_eq!(state.start_in_background, None);
+    }
 }

@@ -1,5 +1,6 @@
 use std::cell::RefCell;
 use std::rc::Rc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
 use crossbeam_channel::Receiver;
@@ -60,7 +61,10 @@ fn append_log_row(ui: &MainWindow, date: &str, timestamp: &str, message: &str) {
     prepend_log_entry(&model, date, timestamp, message);
 }
 
-pub(crate) fn capture_gui_state(ui: &MainWindow) -> Option<state::GuiState> {
+pub(crate) fn capture_gui_state(
+    ui: &MainWindow,
+    start_in_background_pref: &AtomicBool,
+) -> Option<state::GuiState> {
     let win_size = ui.window().size();
     let scale = ui.window().scale_factor();
     if win_size.width == 0 || win_size.height == 0 {
@@ -84,6 +88,7 @@ pub(crate) fn capture_gui_state(ui: &MainWindow) -> Option<state::GuiState> {
         config_path,
         window_width: Some(w),
         window_height: Some(h),
+        start_in_background: Some(start_in_background_pref.load(Ordering::Relaxed)),
     })
 }
 
@@ -94,6 +99,7 @@ pub(crate) fn spawn(
     snapshot_data: Arc<Mutex<Vec<SnapshotRowData>>>,
     last_gui_state: Arc<Mutex<Option<state::GuiState>>>,
     tray_source_items: Arc<Mutex<Vec<(MenuId, String)>>>,
+    start_in_background_pref: Arc<AtomicBool>,
 ) {
     std::thread::spawn(move || {
         while let Ok(event) = ui_rx.recv() {
@@ -102,6 +108,7 @@ pub(crate) fn spawn(
             let app_tx = app_tx.clone();
             let last_gui_state = last_gui_state.clone();
             let tray_source_items = tray_source_items.clone();
+            let start_in_background_pref = start_in_background_pref.clone();
 
             let _ = slint::invoke_from_event_loop(move || {
                 let Some(ui) = ui_weak.upgrade() else {
@@ -123,7 +130,7 @@ pub(crate) fn spawn(
                         ui.set_config_path(path.into());
                         ui.set_schedule_text(schedule.into());
                         // Eagerly persist so Cmd-Q keeps the config path.
-                        if let Some(s) = capture_gui_state(&ui) {
+                        if let Some(s) = capture_gui_state(&ui, &start_in_background_pref) {
                             state::save(&s);
                             if let Ok(mut last) = last_gui_state.lock() {
                                 *last = Some(s);
@@ -262,7 +269,7 @@ pub(crate) fn spawn(
                         ui.set_operation_busy(false);
                     }
                     UiEvent::Quit => {
-                        if let Some(s) = capture_gui_state(&ui) {
+                        if let Some(s) = capture_gui_state(&ui, &start_in_background_pref) {
                             if let Ok(mut last) = last_gui_state.lock() {
                                 *last = Some(s);
                             }
