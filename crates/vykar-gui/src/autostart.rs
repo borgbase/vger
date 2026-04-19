@@ -22,8 +22,15 @@ pub fn should_start_hidden(start_in_background: Option<bool>, autostart_enabled:
 }
 
 fn resolve_exe_path() -> Result<String, Box<dyn std::error::Error>> {
+    resolve_exe_path_with(|k| std::env::var(k))
+}
+
+fn resolve_exe_path_with<F>(env_get: F) -> Result<String, Box<dyn std::error::Error>>
+where
+    F: Fn(&str) -> Result<String, std::env::VarError>,
+{
     // AppImage: the FUSE mount path is transient; use the real .AppImage path.
-    if let Ok(appimage) = std::env::var("APPIMAGE") {
+    if let Ok(appimage) = env_get("APPIMAGE") {
         return Ok(appimage);
     }
     Ok(std::env::current_exe()?.display().to_string())
@@ -43,30 +50,23 @@ mod tests {
 
     #[test]
     fn resolve_exe_path_appimage_env() {
-        // Temporarily set APPIMAGE and verify it takes precedence.
-        let key = "APPIMAGE";
-        let prev = std::env::var(key).ok();
-        std::env::set_var(key, "/opt/Vykar-1.0.AppImage");
-        let result = resolve_exe_path().unwrap();
-        assert_eq!(result, "/opt/Vykar-1.0.AppImage");
-        // Restore.
-        match prev {
-            Some(v) => std::env::set_var(key, v),
-            None => std::env::remove_var(key),
-        }
+        let get = |k: &str| {
+            if k == "APPIMAGE" {
+                Ok("/opt/Vykar-1.0.AppImage".to_string())
+            } else {
+                Err(std::env::VarError::NotPresent)
+            }
+        };
+        assert_eq!(
+            resolve_exe_path_with(get).unwrap(),
+            "/opt/Vykar-1.0.AppImage"
+        );
     }
 
     #[test]
     fn resolve_exe_path_fallback() {
-        let key = "APPIMAGE";
-        let prev = std::env::var(key).ok();
-        std::env::remove_var(key);
-        let result = resolve_exe_path().unwrap();
-        // Should return something non-empty (the test binary path).
-        assert!(!result.is_empty());
-        if let Some(v) = prev {
-            std::env::set_var(key, v);
-        }
+        let get = |_: &str| Err(std::env::VarError::NotPresent);
+        assert!(!resolve_exe_path_with(get).unwrap().is_empty());
     }
 
     #[test]
