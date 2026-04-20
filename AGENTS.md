@@ -22,7 +22,7 @@ Fast, encrypted, deduplicated backup tool in Rust. Two crates: `vykar-core` (lib
 - **Two-phase backup** enables concurrent uploads. Phase 1 (no lock) registers a session and uploads packs. Phase 2 (brief exclusive lock) reconciles the index and writes the snapshot blob as the commit point. See `backup/mod.rs` for the implementation.
 - **Manifest is runtime-only**: populated from `snapshots/` blobs on open, never serialized. A local AEAD-encrypted snapshot cache avoids O(n) GETs.
 - **Delete/prune ordering**: delete `snapshots/<id>` first (must succeed, failure aborts), then decrement refcounts and persist index. Crash between the two leaves inflated refcounts (safe).
-- **Maintenance lock** (`with_maintenance_lock()`): acquires advisory lock, cleans stale sessions (72h), refuses if any active sessions remain (`VykarError::ActiveSessions`).
+- **Maintenance lock** (`with_maintenance_lock()`): acquires advisory lock, cleans stale sessions (>45 min since last refresh), refuses if any active sessions remain (`VykarError::ActiveSessions` — its inner `ActiveSessionList` carries host/pid/age for each blocking session).
 
 ## Conventions & gotchas
 

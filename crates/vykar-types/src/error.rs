@@ -1,6 +1,67 @@
+use std::fmt;
+
 use thiserror::Error;
 
 pub type Result<T> = std::result::Result<T, VykarError>;
+
+/// Parsed fields of a session marker, present only when the marker JSON
+/// could be decoded successfully.
+#[derive(Debug, Clone)]
+pub struct ActiveSessionDetails {
+    pub hostname: String,
+    pub pid: u32,
+    /// Age of the session's `last_refresh` timestamp, pre-formatted
+    /// (e.g. `"2h"`, `"3d 4h"`). Pre-formatting keeps this type free of
+    /// chrono so it can live in `vykar-types`.
+    pub age: String,
+}
+
+/// Summary of an active backup session blocking maintenance.
+///
+/// `details` is `None` when the marker's JSON could not be parsed — such
+/// markers are preserved on storage so maintenance fails closed, and they
+/// require operator intervention (`vykar break-lock --sessions`) to remove.
+#[derive(Debug, Clone)]
+pub struct ActiveSessionInfo {
+    pub id: String,
+    pub details: Option<ActiveSessionDetails>,
+}
+
+/// List of active sessions blocking a maintenance command. Always non-empty
+/// (an empty list should be represented by not returning `ActiveSessions`).
+#[derive(Debug, Clone)]
+pub struct ActiveSessionList(pub Vec<ActiveSessionInfo>);
+
+impl ActiveSessionList {
+    /// Returns true if any entry has an unparseable marker.
+    pub fn has_malformed(&self) -> bool {
+        self.0.iter().any(|s| s.details.is_none())
+    }
+}
+
+impl fmt::Display for ActiveSessionList {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        writeln!(
+            f,
+            "{} active backup session(s) blocking maintenance:",
+            self.0.len()
+        )?;
+        for s in &self.0 {
+            match &s.details {
+                Some(d) => writeln!(
+                    f,
+                    "  - {} (host={}, pid={}, last refresh {} ago)",
+                    s.id, d.hostname, d.pid, d.age
+                )?,
+                None => writeln!(f, "  - {} (malformed marker, cannot parse)", s.id)?,
+            }
+        }
+        write!(
+            f,
+            "Wait for in-progress backups to finish, or run `vykar break-lock --sessions` to force-clear."
+        )
+    }
+}
 
 #[derive(Debug, Error)]
 pub enum VykarError {
@@ -67,8 +128,8 @@ pub enum VykarError {
     #[error("operation interrupted by signal")]
     Interrupted,
 
-    #[error("active sessions prevent maintenance: {0:?}")]
-    ActiveSessions(Vec<String>),
+    #[error("active sessions prevent maintenance: {0}")]
+    ActiveSessions(ActiveSessionList),
 
     #[error("commit failed: referenced chunks were deleted since session started")]
     StaleChunksDuringCommit,

@@ -16,7 +16,7 @@ use vykar_types::error::{Result, VykarError};
 use vykar_types::pack_id::PackId;
 
 use super::format::{pack_object_with_context, unpack_object_expect_with_context, ObjectType};
-use super::lock::{session_index_key, SessionEntry, SESSIONS_PREFIX};
+use super::lock::{session_index_key, SessionEntry, SESSIONS_PREFIX, SESSION_STALE_SECS};
 use super::pack::{PackType, PackWriter, PackedChunkEntry};
 
 /// Extra upload handles allowed beyond `max_in_flight_uploads` before blocking.
@@ -27,10 +27,6 @@ const JOURNAL_WRITE_INTERVAL: usize = 8;
 
 const DEFAULT_SESSION_ID: &str = "default";
 const PENDING_INDEX_OBJECT_CONTEXT: &[u8] = b"pending_index";
-
-/// Sessions with markers older than this are considered stale for recovery.
-/// 3x the 15-minute refresh interval — if a session missed 2 refreshes, it's dead.
-const RECOVERY_STALE_SECS: i64 = 45 * 60;
 
 /// Result of recovering pending index journals from interrupted sessions.
 pub struct PendingIndexRecovery {
@@ -53,9 +49,10 @@ enum RecoverResult {
 /// Marker state for a session's `.json` file during recovery scanning.
 #[derive(Debug)]
 enum MarkerState {
-    /// Marker exists, parseable, `last_refresh` < RECOVERY_STALE_SECS ago.
+    /// Marker exists, parseable, `last_refresh` within `SESSION_STALE_SECS`.
     Active,
-    /// Marker exists, parseable, `last_refresh` >= RECOVERY_STALE_SECS ago.
+    /// Marker exists, parseable, `last_refresh` strictly older than
+    /// `SESSION_STALE_SECS`.
     Stale,
     /// Marker exists but unreadable or unparseable.
     Unknown,
@@ -107,7 +104,8 @@ pub(crate) struct WriteSessionState {
     /// `.index` keys to delete after successful commit.
     /// `.json` markers are never deleted here — their lifecycle is managed
     /// exclusively by `deregister_session()` (normal exit) and
-    /// `cleanup_stale_sessions()` (72h threshold, under maintenance lock).
+    /// `cleanup_stale_sessions()` (>45 min since last refresh, under
+    /// maintenance lock).
     pub(crate) recovered_index_keys: Vec<String>,
     /// Number of distinct packs (data + tree) in the persisted index at load time.
     pub(crate) persisted_pack_count: usize,
@@ -116,8 +114,6 @@ pub(crate) struct WriteSessionState {
     /// Session ID for per-session pending_index files.
     /// Defaults to `"default"` for non-backup callers/tests.
     pub(crate) session_id: String,
-    /// Wall-clock time of last session marker refresh (for throttling).
-    pub(crate) last_session_refresh: std::time::Instant,
     /// Active dump rollback tracker (set during streaming command dumps).
     pub(crate) dump_tracker: Option<DumpRollbackTracker>,
 }
@@ -144,20 +140,7 @@ impl WriteSessionState {
             persisted_pack_count: 0,
             session_packs_flushed: 0,
             session_id: DEFAULT_SESSION_ID.to_string(),
-            last_session_refresh: std::time::Instant::now(),
             dump_tracker: None,
-        }
-    }
-
-    /// Refresh the session marker if enough time has passed (~15 min).
-    /// No-op when session_id is the default (non-backup callers don't register sessions).
-    pub(crate) fn maybe_refresh_session(&mut self, storage: &dyn StorageBackend) {
-        const REFRESH_INTERVAL: std::time::Duration = std::time::Duration::from_secs(15 * 60);
-        if self.session_id != DEFAULT_SESSION_ID
-            && self.last_session_refresh.elapsed() >= REFRESH_INTERVAL
-        {
-            crate::repo::lock::refresh_session(storage, &self.session_id);
-            self.last_session_refresh = std::time::Instant::now();
         }
     }
 
@@ -218,16 +201,14 @@ impl WriteSessionState {
     }
 
     /// Apply backpressure to keep the number of in-flight uploads bounded.
-    /// Also refreshes the session marker if enough time has passed.
+    /// Session-marker refreshes run in a dedicated heartbeat thread owned by
+    /// `SessionGuard`, so this path no longer touches the marker.
     pub(crate) fn cap_pending_uploads(
         &mut self,
         storage: &dyn StorageBackend,
         crypto: &dyn CryptoEngine,
     ) -> Result<()> {
         self.drain_finished_uploads(storage, crypto)?;
-        // Refresh session marker (throttled, ~15 min). Placed here so both
-        // sequential and pipeline modes benefit (both call cap_pending_uploads).
-        self.maybe_refresh_session(storage);
         if self.pending_uploads.len()
             >= self
                 .max_in_flight_uploads
@@ -395,7 +376,7 @@ impl WriteSessionState {
                         match ts {
                             Ok(ts) => {
                                 let age = now.signed_duration_since(ts.with_timezone(&chrono::Utc));
-                                if age.num_seconds() >= RECOVERY_STALE_SECS {
+                                if age.num_seconds() > SESSION_STALE_SECS {
                                     MarkerState::Stale
                                 } else {
                                     MarkerState::Active
@@ -443,7 +424,8 @@ impl WriteSessionState {
                 Ok(RecoverResult::Corrupt) => {
                     // Only delete the corrupt .index — never touch .json markers.
                     // Session marker lifecycle is managed by deregister_session()
-                    // and cleanup_stale_sessions() (72h, under maintenance lock).
+                    // and cleanup_stale_sessions() (>45 min since last_refresh,
+                    // under maintenance lock).
                     warn!(key = %index_key, "corrupt pending index journal, deleting");
                     let _ = storage.delete(index_key);
                 }

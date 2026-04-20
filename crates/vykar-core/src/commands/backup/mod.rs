@@ -296,7 +296,8 @@ pub fn run_with_progress(
     debug!(session_id, "backup session registered");
 
     // Open repo after session registration (minimizes T0→commit window).
-    // If open fails, deregister the session so it doesn't block maintenance for 72h.
+    // If open fails, deregister the session so it doesn't block maintenance
+    // until the marker ages out (45 min).
     //
     // When there are no filesystem source paths (command-dump-only backup),
     // skip loading the file cache — it's never consulted for command dumps
@@ -329,6 +330,19 @@ pub fn run_with_progress(
             return Err(e);
         }
     };
+
+    // Adopt the session into a guard so the heartbeat thread is independent
+    // of the upload pipeline. The guard is driven explicitly at each exit
+    // site below via `drop(session_guard.take())` so there is exactly one
+    // deregister path (guard Drop: stop-thread → join-thread → deregister).
+    let mut session_guard: Option<lock::SessionGuard> =
+        match lock::SessionGuard::adopt(Arc::clone(&repo.storage), session_id.clone()) {
+            Ok(g) => Some(g),
+            Err(e) => {
+                lock::deregister_session(repo.storage.as_ref(), &session_id);
+                return Err(e);
+            }
+        };
 
     // Wrap Phase 1 in a closure that deregisters the session on error.
     let phase1_result = (|| -> Result<(SnapshotEntry, Vec<u8>, FileCache, SnapshotStats)> {
@@ -631,7 +645,7 @@ pub fn run_with_progress(
             // Do NOT save file cache on abort — the on-disk cache from the last
             // successful run is still valid. Saving here would persist the
             // depleted (invalidated) cache and destroy future cache hits.
-            lock::deregister_session(repo.storage.as_ref(), &session_id);
+            drop(session_guard.take());
             return Err(e);
         }
     };
@@ -654,8 +668,10 @@ pub fn run_with_progress(
             &mut progress,
         );
 
-        // Deregister session while holding the lock.
-        lock::deregister_session(repo.storage.as_ref(), &session_id);
+        // Deregister session while holding the lock. The guard's Drop stops
+        // the heartbeat thread and joins it before the marker is deleted, so
+        // no concurrent refresh_session call can race with this delete.
+        drop(session_guard.take());
 
         repo.clear_lock_fence();
         match lock::release_lock(repo.storage.as_ref(), guard) {
@@ -682,7 +698,7 @@ pub fn run_with_progress(
         // run's recover_pending_index() can discover our packs. Must run on
         // ALL Phase 2 failures (lock acquisition, commit, lock release).
         repo.flush_on_abort();
-        lock::deregister_session(repo.storage.as_ref(), &session_id);
+        drop(session_guard.take());
     }
     commit_result?;
 

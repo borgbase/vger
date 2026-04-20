@@ -250,8 +250,13 @@ pub fn verify_lock_validity(
 // ── Session markers ──────────────────────────────────────────────────────
 
 pub(crate) const SESSIONS_PREFIX: &str = "sessions/";
-/// Sessions older than this are considered stale and can be reaped.
-const DEFAULT_STALE_SESSION_SECS: i64 = 72 * 60 * 60; // 72 hours
+/// Sessions whose `last_refresh` is strictly older than this threshold are
+/// treated as stale. Shared between maintenance cleanup
+/// ([`cleanup_stale_sessions`]) and pending-index recovery.
+///
+/// Set to 3× the 15-minute session heartbeat interval — two missed refreshes
+/// still keep a session live, a third marks it dead.
+pub(crate) const SESSION_STALE_SECS: i64 = 45 * 60;
 
 /// Storage key for a session's JSON marker: `sessions/<id>.json`.
 pub(crate) fn session_marker_key(session_id: &str) -> String {
@@ -433,30 +438,39 @@ impl Drop for SessionGuard {
 }
 
 /// Refresh a session marker's `last_refresh` timestamp. Best-effort.
+///
+/// Deliberately non-resurrecting: if the marker is missing (successfully
+/// read as `None`) we do **not** recreate it. Missing markers indicate the
+/// session has already been deregistered — either cleanly by
+/// [`deregister_session`] or by maintenance that reaped us as stale — and
+/// resurrecting the key would race with that deletion and could confuse
+/// maintenance into seeing a "live" session that no one owns.
+///
+/// On storage read errors we also bail out without writing, so an
+/// inconclusive `Err` read can't overwrite a live marker's fields with
+/// defaults.
 pub fn refresh_session(storage: &dyn StorageBackend, session_id: &str) {
     let key = session_marker_key(session_id);
     let now = Utc::now();
 
-    // Read existing entry to preserve registered_at, or create a fresh one.
-    let entry = match storage.get(&key) {
-        Ok(Some(data)) => {
-            let mut e: SessionEntry =
-                serde_json::from_slice(&data).unwrap_or_else(|_| SessionEntry {
-                    hostname: crate::platform::hostname(),
-                    pid: std::process::id(),
-                    registered_at: now.to_rfc3339(),
-                    last_refresh: now.to_rfc3339(),
-                });
-            e.last_refresh = now.to_rfc3339();
-            e
-        }
-        _ => SessionEntry {
-            hostname: crate::platform::hostname(),
-            pid: std::process::id(),
-            registered_at: now.to_rfc3339(),
-            last_refresh: now.to_rfc3339(),
+    let mut entry: SessionEntry = match storage.get(&key) {
+        Ok(Some(data)) => match serde_json::from_slice::<SessionEntry>(&data) {
+            Ok(e) => e,
+            Err(e) => {
+                warn!(session_id, error = %e, "session marker parse failed; skipping refresh");
+                return;
+            }
         },
+        Ok(None) => {
+            debug!(session_id, "session marker missing; not resurrecting");
+            return;
+        }
+        Err(e) => {
+            warn!(session_id, error = %e, "storage read failed during refresh; skipping");
+            return;
+        }
     };
+    entry.last_refresh = now.to_rfc3339();
 
     let data = match serde_json::to_vec(&entry) {
         Ok(d) => d,
@@ -518,17 +532,20 @@ pub fn cleanup_stale_sessions(
             continue;
         };
         let Ok(entry) = serde_json::from_slice::<SessionEntry>(&data) else {
-            // Unparseable .json — treat as stale. Keep .index for recovery.
-            let _ = storage.delete(key);
-            cleaned_ids.insert(session_id.to_string());
+            // Unparseable .json — we cannot prove this is stale. Preserve it
+            // so `with_maintenance_lock` reports it as a blocking session
+            // (fail-closed). Operator must use `break-lock --sessions` to
+            // force-clear. Also preserve the companion `.index` so its
+            // journal isn't lost.
+            surviving_markers.insert(session_id.to_string());
             continue;
         };
         let ts = chrono::DateTime::parse_from_rfc3339(&entry.last_refresh)
             .or_else(|_| chrono::DateTime::parse_from_rfc3339(&entry.registered_at));
         let Ok(ts) = ts else {
-            // Bad timestamp — treat as stale. Keep .index for recovery.
-            let _ = storage.delete(key);
-            cleaned_ids.insert(session_id.to_string());
+            // Bad timestamp — same treatment: fail-closed, let maintenance
+            // surface it and require operator intervention.
+            surviving_markers.insert(session_id.to_string());
             continue;
         };
 
@@ -645,5 +662,25 @@ pub fn acquire_lock_with_retry(
 
 /// Default stale session threshold.
 pub fn default_stale_session_duration() -> Duration {
-    Duration::seconds(DEFAULT_STALE_SESSION_SECS)
+    Duration::seconds(SESSION_STALE_SECS)
+}
+
+/// Format the age between `now` and an RFC3339 `timestamp` as a compact
+/// human-readable string (e.g. `"2h"`, `"1d 3h"`, `"42m"`).
+///
+/// Returns `"unknown"` if the timestamp fails to parse.
+pub fn format_age(now: &chrono::DateTime<Utc>, timestamp: &str) -> String {
+    let Ok(ts) = chrono::DateTime::parse_from_rfc3339(timestamp) else {
+        return "unknown".to_string();
+    };
+    let dur = now.signed_duration_since(ts.with_timezone(&Utc));
+    let hours = dur.num_hours();
+    if hours >= 24 {
+        format!("{}d {}h", hours / 24, hours % 24)
+    } else if hours > 0 {
+        format!("{hours}h")
+    } else {
+        let mins = dur.num_minutes().max(0);
+        format!("{mins}m")
+    }
 }

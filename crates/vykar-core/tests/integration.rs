@@ -2140,10 +2140,19 @@ fn session_guard_blocks_maintenance() {
     // with_maintenance_lock must refuse while the session is active
     let mut repo2 = open_local_repo(&repo_dir);
     let err = with_maintenance_lock(&mut repo2, |_| Ok(())).unwrap_err();
-    assert!(
-        matches!(err, vykar_types::error::VykarError::ActiveSessions(_)),
-        "expected ActiveSessions, got: {err}"
-    );
+    match &err {
+        vykar_types::error::VykarError::ActiveSessions(list) => {
+            assert_eq!(list.0.len(), 1, "exactly one active session expected");
+            let info = &list.0[0];
+            assert_eq!(info.id, session_id);
+            let d = info.details.as_ref().expect("parseable marker");
+            assert!(!d.hostname.is_empty(), "hostname should be populated");
+            assert!(d.pid > 0, "pid should be populated");
+            assert!(!d.age.is_empty(), "age should be populated");
+            assert!(!list.has_malformed());
+        }
+        other => panic!("expected ActiveSessions, got: {other}"),
+    }
 
     // Drop the guard — session deregistered
     drop(guard);
@@ -2151,6 +2160,117 @@ fn session_guard_blocks_maintenance() {
     // Maintenance should now succeed
     let mut repo3 = open_local_repo(&repo_dir);
     with_maintenance_lock(&mut repo3, |_| Ok(())).unwrap();
+}
+
+// ---------------------------------------------------------------------------
+// Issue #107: stale (>45 min) session markers must be reaped on maintenance
+// ---------------------------------------------------------------------------
+
+#[test]
+fn maintenance_reaps_session_older_than_45_minutes() {
+    use vykar_core::commands::util::with_maintenance_lock;
+    use vykar_core::repo::lock;
+
+    init_test_environment();
+    let tmp = tempfile::tempdir().unwrap();
+    let repo_dir = tmp.path().join("repo");
+    std::fs::create_dir_all(&repo_dir).unwrap();
+
+    // Init a repo.
+    let storage = Box::new(LocalBackend::new(repo_dir.to_str().unwrap()).unwrap());
+    let repo = Repository::init(
+        storage,
+        EncryptionMode::None,
+        ChunkerConfig::default(),
+        None,
+        None,
+        None,
+    )
+    .unwrap();
+    drop(repo);
+
+    // Fabricate a session marker with last_refresh 50 min ago — no live
+    // process owns it, so maintenance must reap it and proceed.
+    let fifty_min_ago = (chrono::Utc::now() - chrono::Duration::minutes(50)).to_rfc3339();
+    let marker = format!(
+        r#"{{"hostname":"ghost","pid":12345,"registered_at":"{fifty_min_ago}","last_refresh":"{fifty_min_ago}"}}"#
+    );
+    let sessions_dir = repo_dir.join("sessions");
+    std::fs::create_dir_all(&sessions_dir).unwrap();
+    let marker_path = sessions_dir.join("stale-session.json");
+    std::fs::write(&marker_path, marker.as_bytes()).unwrap();
+    assert!(marker_path.exists());
+
+    // Maintenance should clean the stale marker and succeed.
+    let mut repo2 = open_local_repo(&repo_dir);
+    with_maintenance_lock(&mut repo2, |_| Ok(())).unwrap();
+
+    assert!(
+        !marker_path.exists(),
+        "stale marker must be reaped by maintenance"
+    );
+    // Sanity: listing sessions should now be empty.
+    let storage = Box::new(LocalBackend::new(repo_dir.to_str().unwrap()).unwrap());
+    let remaining = lock::list_sessions(storage.as_ref()).unwrap();
+    assert!(remaining.is_empty(), "no sessions should remain");
+}
+
+#[test]
+fn maintenance_blocks_on_malformed_session_marker() {
+    use vykar_core::commands::util::with_maintenance_lock;
+
+    init_test_environment();
+    let tmp = tempfile::tempdir().unwrap();
+    let repo_dir = tmp.path().join("repo");
+    std::fs::create_dir_all(&repo_dir).unwrap();
+
+    // Init a repo.
+    let storage = Box::new(LocalBackend::new(repo_dir.to_str().unwrap()).unwrap());
+    let repo = Repository::init(
+        storage,
+        EncryptionMode::None,
+        ChunkerConfig::default(),
+        None,
+        None,
+        None,
+    )
+    .unwrap();
+    drop(repo);
+
+    // Plant a malformed marker — unparseable JSON.
+    let sessions_dir = repo_dir.join("sessions");
+    std::fs::create_dir_all(&sessions_dir).unwrap();
+    let marker_path = sessions_dir.join("corrupt-session.json");
+    std::fs::write(&marker_path, b"this is not json at all").unwrap();
+
+    // Maintenance must fail-close: we can't prove this marker is stale,
+    // so it blocks as an active session with placeholder host/pid.
+    let mut repo2 = open_local_repo(&repo_dir);
+    let err = with_maintenance_lock(&mut repo2, |_| Ok(())).unwrap_err();
+    match &err {
+        vykar_types::error::VykarError::ActiveSessions(list) => {
+            assert_eq!(list.0.len(), 1);
+            let info = &list.0[0];
+            assert_eq!(info.id, "corrupt-session");
+            assert!(
+                info.details.is_none(),
+                "malformed marker must surface as details=None, got: {info:?}"
+            );
+            assert!(list.has_malformed());
+        }
+        other => panic!("expected ActiveSessions for malformed marker, got: {other}"),
+    }
+    // The rendered error must mention the malformed-marker state and the
+    // remediation command.
+    let rendered = err.to_string();
+    assert!(rendered.contains("malformed marker"));
+    assert!(rendered.contains("break-lock --sessions"));
+
+    // Marker must still be on disk — cleanup does not delete it.
+    assert!(
+        marker_path.exists(),
+        "malformed marker must be preserved for operator intervention"
+    );
 }
 
 /// Verify that pipeline (multi-threaded) and sequential (single-threaded) backup

@@ -252,6 +252,36 @@ impl Repository {
             };
         }
 
+        // 0. Session-existence probe (fail fast, before flushing). If the
+        // marker was reaped by maintenance (e.g. because we missed too many
+        // heartbeats under extreme clock skew), skip the pack flush and
+        // surface the same typed error the later reconcile path would
+        // produce, so callers matching on `StaleChunksDuringCommit` catch
+        // this path too. Inconclusive storage errors fall through — the
+        // reconcile step is still a safety net.
+        let session_id = self
+            .write_session
+            .as_ref()
+            .expect("no active write session")
+            .session_id
+            .clone();
+        if session_id != "default" {
+            let marker_key = super::lock::session_marker_key(&session_id);
+            match self.storage.exists(&marker_key) {
+                Ok(true) => {}
+                Ok(false) => {
+                    warn!(
+                        session_id,
+                        "session marker reaped before commit; retry the backup"
+                    );
+                    return Err(VykarError::StaleChunksDuringCommit);
+                }
+                Err(e) => {
+                    debug!(error = %e, "session-existence probe failed, proceeding to flush");
+                }
+            }
+        }
+
         // 1. Flush all pending packs and wait for uploads.
         self.flush_packs()?;
 

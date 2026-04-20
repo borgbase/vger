@@ -44,7 +44,7 @@ fn clear_sessions(
     eprintln!("Found {} active session(s):", entries.len());
     for (id, entry) in &entries {
         if let Some(e) = entry {
-            let age = format_age(&now, &e.last_refresh);
+            let age = lock::format_age(&now, &e.last_refresh);
             eprintln!("  - {id}: host={}, pid={}, age={age}", e.hostname, e.pid);
         } else {
             eprintln!("  - {id}: (malformed marker)");
@@ -73,20 +73,4 @@ fn clear_sessions(
         .map_err(|e| -> Box<dyn std::error::Error> { Box::new(e) })?;
     println!("Removed {removed} session file(s).");
     Ok(())
-}
-
-fn format_age(now: &chrono::DateTime<Utc>, timestamp: &str) -> String {
-    let Ok(ts) = chrono::DateTime::parse_from_rfc3339(timestamp) else {
-        return "unknown".to_string();
-    };
-    let dur = now.signed_duration_since(ts.with_timezone(&Utc));
-    let hours = dur.num_hours();
-    if hours >= 24 {
-        format!("{}d {}h", hours / 24, hours % 24)
-    } else if hours > 0 {
-        format!("{hours}h")
-    } else {
-        let mins = dur.num_minutes().max(0);
-        format!("{mins}m")
-    }
 }
