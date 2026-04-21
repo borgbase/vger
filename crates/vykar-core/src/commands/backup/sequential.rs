@@ -1,7 +1,6 @@
 use std::fs::File;
 use std::path::Path;
 use std::sync::atomic::AtomicBool;
-use std::sync::Arc;
 
 use rayon::prelude::*;
 use tracing::{debug, warn};
@@ -13,7 +12,7 @@ use crate::compress::Compression;
 use crate::config::ChunkerConfig;
 use crate::limits::{self, ByteRateLimiter};
 use crate::platform::fs;
-use crate::repo::file_cache::{FileCache, ParentReuseIndex};
+use crate::repo::file_cache::{CachedChunks, FileCache, ParentReuseIndex};
 use crate::repo::Repository;
 use crate::snapshot::item::{Item, ItemType};
 use crate::snapshot::SnapshotStats;
@@ -221,7 +220,7 @@ fn flush_cross_file_batch(
             file.metadata_summary.mtime_ns,
             file.metadata_summary.ctime_ns,
             file.metadata_summary.size,
-            Arc::new(std::mem::take(&mut item.chunks)),
+            CachedChunks::from_chunk_refs(&item.chunks),
         );
 
         emit_stats_progress(progress, stats, Some(std::mem::take(&mut item.path)));
@@ -401,7 +400,7 @@ pub(super) fn process_regular_file_item(
         metadata_summary.mtime_ns,
         metadata_summary.ctime_ns,
         file_size,
-        Arc::new(item.chunks.clone()),
+        CachedChunks::from_chunk_refs(&item.chunks),
     );
 
     emit_stats_progress(progress, stats, Some(item.path.clone()));

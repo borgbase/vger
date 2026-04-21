@@ -21,7 +21,9 @@ use std::sync::Arc;
 
 use crate::limits;
 use crate::platform::fs;
-use crate::repo::file_cache::{FileCache, ParentReuseBuilder, ParentReuseIndex, ParentReuseRoot};
+use crate::repo::file_cache::{
+    CachedChunks, FileCache, ParentReuseBuilder, ParentReuseIndex, ParentReuseRoot,
+};
 use crate::repo::format::{pack_object_with_context, ObjectType};
 use crate::repo::lock;
 use crate::repo::manifest::SnapshotEntry;
@@ -59,7 +61,7 @@ fn resolve_cache_hit(
     parent_reuse_index: Option<&ParentReuseIndex>,
     abs_path: &str,
     summary: &fs::MetadataSummary,
-) -> Option<Arc<Vec<crate::snapshot::item::ChunkRef>>> {
+) -> Option<CachedChunks> {
     file_cache
         .lookup(
             abs_path,

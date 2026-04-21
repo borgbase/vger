@@ -6,8 +6,8 @@ use tracing::warn;
 
 use crate::config::ChunkerConfig;
 use crate::platform::fs;
-use crate::repo::file_cache::{FileCache, ParentReuseIndex};
-use crate::snapshot::item::{ChunkRef, Item, ItemType};
+use crate::repo::file_cache::{CachedChunks, FileCache, ParentReuseIndex};
+use crate::snapshot::item::{Item, ItemType};
 use vykar_types::error::{Result, VykarError};
 
 use super::concurrency::ByteBudget;
@@ -234,7 +234,7 @@ pub(super) enum WalkEntry {
         item: Item,
         abs_path: String,
         metadata: fs::MetadataSummary,
-        cached_refs: Arc<Vec<ChunkRef>>,
+        cached_refs: CachedChunks,
     },
     NonFile {
         item: Item,

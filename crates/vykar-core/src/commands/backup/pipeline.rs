@@ -12,9 +12,9 @@ use crate::compress::Compression;
 use crate::config::ChunkerConfig;
 use crate::limits::{self, ByteRateLimiter};
 use crate::platform::fs;
-use crate::repo::file_cache::{FileCache, ParentReuseIndex};
+use crate::repo::file_cache::{CachedChunks, FileCache, ParentReuseIndex};
 use crate::repo::Repository;
-use crate::snapshot::item::{ChunkRef, Item};
+use crate::snapshot::item::Item;
 use crate::snapshot::SnapshotStats;
 use vykar_crypto::CryptoEngine;
 use vykar_types::chunk_id::ChunkId;
@@ -58,7 +58,7 @@ pub(crate) enum ProcessedEntry {
         item: Item,
         abs_path: String,
         metadata: fs::MetadataSummary,
-        cached_refs: Arc<Vec<ChunkRef>>,
+        cached_refs: CachedChunks,
     },
     /// Non-file item (directory, symlink, zero-size file).
     NonFile {
@@ -446,7 +446,7 @@ fn consume_processed_entry(
                 metadata.mtime_ns,
                 metadata.ctime_ns,
                 metadata.size,
-                Arc::new(std::mem::take(&mut item.chunks)),
+                CachedChunks::from_chunk_refs(&item.chunks),
             );
 
             emit_stats_progress(progress, stats, Some(std::mem::take(&mut item.path)));
@@ -546,7 +546,7 @@ fn consume_processed_entry(
                     accum.metadata.mtime_ns,
                     accum.metadata.ctime_ns,
                     accum.metadata.size,
-                    Arc::new(std::mem::take(&mut accum.item.chunks)),
+                    CachedChunks::from_chunk_refs(&accum.item.chunks),
                 );
 
                 emit_stats_progress(progress, stats, Some(std::mem::take(&mut accum.item.path)));

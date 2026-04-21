@@ -690,7 +690,7 @@ fn file_cache_persists_and_matches_snapshot_items() {
                     ms.size,
                 )
                 .unwrap_or_else(|| panic!("cache should have entry for {}", file_item.path));
-            let cached_ids: Vec<_> = cached_refs.iter().map(|c| c.id).collect();
+            let cached_ids: Vec<_> = cached_refs.as_slice().iter().map(|c| c.id).collect();
             let snap_ids: Vec<_> = file_item.chunks.iter().map(|c| c.id).collect();
             assert_eq!(
                 cached_ids, snap_ids,
@@ -872,7 +872,7 @@ fn file_cache_misses_on_modified_file() {
             ms.size,
         )
         .expect("cache should have entry for modified.bin after re-backup");
-    let cached_ids: Vec<_> = cached_refs.iter().map(|c| c.id).collect();
+    let cached_ids: Vec<_> = cached_refs.as_slice().iter().map(|c| c.id).collect();
     assert_eq!(
         cached_ids, files2["modified.bin"],
         "cache should be updated with new chunks for modified.bin"
