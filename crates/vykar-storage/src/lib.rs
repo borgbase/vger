@@ -363,10 +363,10 @@ pub struct RetryConfig {
 
 impl RetryConfig {
     fn default_max_retries() -> usize {
-        3
+        5
     }
     fn default_retry_delay_ms() -> u64 {
-        1000
+        1500
     }
     fn default_retry_max_delay_ms() -> u64 {
         60_000
@@ -726,6 +726,29 @@ mod tests {
         assert!(
             backend.is_ok(),
             "expected HTTP S3 endpoint to be allowed when opted in"
+        );
+    }
+
+    #[test]
+    fn default_retry_reaches_one_minute_average_window() {
+        let cfg = RetryConfig::default();
+        assert_eq!(cfg.max_retries, 5);
+        let mut delay = cfg.retry_delay_ms;
+        let mut base: u64 = 0;
+        let mut avg_x2: u64 = 0;
+        for _ in 0..cfg.max_retries {
+            base += delay;
+            avg_x2 += delay * 3;
+            delay = (delay * 2).min(cfg.retry_max_delay_ms);
+        }
+        let avg_ms = avg_x2 / 2;
+        assert!(
+            base >= 45_000,
+            "default backoff base should span >=45s, got {base}ms"
+        );
+        assert!(
+            (55_000..=85_000).contains(&avg_ms),
+            "expected avg cumulative backoff near 1 minute, got {avg_ms}ms"
         );
     }
 }

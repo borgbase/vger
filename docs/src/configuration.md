@@ -181,9 +181,11 @@ repositories:
 
 | Field | Default | Values | Description |
 |-------|---------|--------|-------------|
-| `max_retries` | `3` | integer | Maximum retry attempts |
-| `retry_delay_ms` | `1000` | integer (ms) | Initial delay between retries |
+| `max_retries` | `5` | integer | Maximum retry attempts |
+| `retry_delay_ms` | `1500` | integer (ms) | Initial delay between retries |
 | `retry_max_delay_ms` | `60000` | integer (ms) | Maximum delay between retries |
+
+> **Note:** The default (5 retries, ~1 minute of cumulative backoff on average with jitter, up to ~90s worst case) is sized to absorb a brief network gap such as WiFi reconnecting after laptop sleep. Raise `max_retries` further if you run on a flaky link; set it to `0` to fail fast for CI or scripted runs.
 
 ### 3-2-1 backup strategy
 
