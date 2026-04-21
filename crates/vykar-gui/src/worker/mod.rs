@@ -2,7 +2,7 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::atomic::AtomicBool;
 use std::sync::{Arc, Mutex};
-use std::time::{Duration, Instant};
+use std::time::{Duration, SystemTime};
 
 use crossbeam_channel::{Receiver, Sender};
 use vykar_core::app;
@@ -48,7 +48,7 @@ fn startup(ctx: &mut WorkerContext) {
             .unwrap_or(Duration::from_secs(24 * 60 * 60));
         state.cron = schedule.cron.clone();
         state.jitter_seconds = schedule.jitter_seconds;
-        state.next_run = Some(Instant::now() + schedule_delay);
+        state.next_run = Some(SystemTime::now() + schedule_delay);
     }
     let _ = ctx.sched_notify_tx.try_send(());
 

@@ -1,5 +1,5 @@
 use std::path::PathBuf;
-use std::time::{Duration, Instant};
+use std::time::{Duration, SystemTime};
 
 use crate::config_helpers;
 use crate::messages::UiEvent;
@@ -104,7 +104,7 @@ pub(super) fn apply_config(
         state.jitter_seconds = schedule.jitter_seconds;
         let delay = vykar_core::app::scheduler::next_run_delay(&schedule)
             .unwrap_or(Duration::from_secs(24 * 60 * 60));
-        state.next_run = Some(Instant::now() + delay);
+        state.next_run = Some(SystemTime::now() + delay);
     }
     let _ = ctx.sched_notify_tx.try_send(());
 

@@ -1,5 +1,5 @@
 use std::sync::atomic::Ordering;
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime};
 
 use vykar_core::app::passphrase::configured_passphrase;
 use vykar_core::app::scheduler::{self, SchedulerLock};
@@ -106,13 +106,14 @@ pub(crate) fn run_daemon(source: ConfigSource) -> Result<(), Box<dyn std::error:
         tracing::info!(repo = name, "repository registered");
     }
 
-    // Compute first run time
+    // Compute first run time. Wall-clock so the target survives system sleep
+    // and monotonic-clock freezes (see GitHub #110).
     let mut next_run = if schedule.on_startup {
-        Instant::now()
+        SystemTime::now()
     } else {
         let delay = scheduler::next_run_delay(&schedule)?;
         log_next_run(delay);
-        Instant::now() + delay
+        SystemTime::now() + delay
     };
 
     loop {
@@ -143,7 +144,7 @@ pub(crate) fn run_daemon(source: ConfigSource) -> Result<(), Box<dyn std::error:
                     // Recalculate next_run from schedule (ignore on_startup)
                     match scheduler::next_run_delay(&schedule) {
                         Ok(delay) => {
-                            next_run = Instant::now() + delay;
+                            next_run = SystemTime::now() + delay;
                             log_next_run(delay);
                         }
                         Err(e) => {
@@ -177,14 +178,14 @@ pub(crate) fn run_daemon(source: ConfigSource) -> Result<(), Box<dyn std::error:
             // If the scheduled slot was missed during the ad-hoc cycle, recalculate
             // next_run from now. Otherwise leave next_run untouched — the scheduled
             // cadence is preserved.
-            if Instant::now() >= next_run {
+            if next_run.duration_since(SystemTime::now()).is_err() {
                 let delay = scheduler::next_run_delay(&schedule)?;
-                next_run = Instant::now() + delay;
+                next_run = SystemTime::now() + delay;
                 log_next_run(delay);
             }
         }
 
-        if Instant::now() >= next_run {
+        if next_run.duration_since(SystemTime::now()).is_err() {
             run_backup_cycle(&repos);
 
             if SHUTDOWN.load(Ordering::SeqCst) {
@@ -194,7 +195,7 @@ pub(crate) fn run_daemon(source: ConfigSource) -> Result<(), Box<dyn std::error:
 
             // Schedule next run
             let delay = scheduler::next_run_delay(&schedule)?;
-            next_run = Instant::now() + delay;
+            next_run = SystemTime::now() + delay;
             log_next_run(delay);
         }
 
