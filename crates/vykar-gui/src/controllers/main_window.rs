@@ -336,6 +336,67 @@ pub(crate) fn wire_callbacks(
     }
 
     {
+        let tx = app_tx.clone();
+        let ui_weak = ui.as_weak();
+        ui.on_mount_selected_snapshot_clicked(move |row| {
+            let Some(ui) = ui_weak.upgrade() else {
+                return;
+            };
+            let r = row as usize;
+            let ids = ui.global::<AppData>().get_snapshot_ids();
+            let rnames = ui.global::<AppData>().get_snapshot_repo_names();
+            let (snap_name, rname) = match (ids.row_data(r), rnames.row_data(r)) {
+                (Some(id), Some(rn)) => (id.to_string(), rn.to_string()),
+                _ => return,
+            };
+            // Optimistically mark active so the Mount buttons disable immediately.
+            // MountStarted will set the real URL; MountFailed will clear this.
+            ui.set_is_mount_active(true);
+            let _ = tx.send(AppCommand::StartMount {
+                repo_name: rname,
+                snapshot_name: Some(snap_name),
+            });
+        });
+    }
+
+    {
+        let tx = app_tx.clone();
+        let ui_weak = ui.as_weak();
+        ui.on_mount_repo_clicked(move |idx| {
+            let Some(ui) = ui_weak.upgrade() else {
+                return;
+            };
+            let labels = ui.global::<AppData>().get_repo_labels();
+            if let Some(name) = labels.row_data(idx as usize) {
+                ui.set_is_mount_active(true);
+                let _ = tx.send(AppCommand::StartMount {
+                    repo_name: name.to_string(),
+                    snapshot_name: None,
+                });
+            }
+        });
+    }
+
+    {
+        let tx = app_tx.clone();
+        ui.on_stop_mount_clicked(move || {
+            let _ = tx.send(AppCommand::StopMount);
+        });
+    }
+
+    {
+        let ui_weak = ui.as_weak();
+        ui.on_open_mount_url_clicked(move || {
+            if let Some(ui) = ui_weak.upgrade() {
+                let url = ui.get_mount_url().to_string();
+                if !url.is_empty() {
+                    let _ = opener::open_browser(&url);
+                }
+            }
+        });
+    }
+
+    {
         let tx = app_tx;
         let ui_weak = ui.as_weak();
         ui.on_delete_selected_snapshot_clicked(move |row| {

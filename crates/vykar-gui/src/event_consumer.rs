@@ -389,6 +389,8 @@ pub(crate) fn spawn(
                                 *last = Some(s);
                             }
                         }
+                        // Best-effort: stop any active mount so the listener is released cleanly.
+                        let _ = app_tx.send(AppCommand::StopMount);
                         let _ = slint::quit_event_loop();
                     }
                     UiEvent::ShowWindow => {
@@ -409,6 +411,34 @@ pub(crate) fn spawn(
                                 app.activate();
                             }
                         }
+                    }
+                    UiEvent::MountStarted { url } => {
+                        ui.set_is_mount_active(true);
+                        ui.set_mount_url(url.clone().into());
+                        if opener::open_browser(&url).is_err() {
+                            let now = chrono::Local::now();
+                            append_log_row(
+                                &ui,
+                                &now.format("%b %d").to_string(),
+                                &now.format("%H:%M:%S").to_string(),
+                                &format!("Mount running at {url} — open it manually"),
+                            );
+                        }
+                    }
+                    UiEvent::MountStopped => {
+                        ui.set_is_mount_active(false);
+                        ui.set_mount_url("".into());
+                    }
+                    UiEvent::MountFailed { message } => {
+                        ui.set_is_mount_active(false);
+                        ui.set_mount_url("".into());
+                        let now = chrono::Local::now();
+                        append_log_row(
+                            &ui,
+                            &now.format("%b %d").to_string(),
+                            &now.format("%H:%M:%S").to_string(),
+                            &format!("Mount failed: {message}"),
+                        );
                     }
                     UiEvent::TriggerSnapshotRefresh => {
                         let idx = ui.get_current_repo_index();

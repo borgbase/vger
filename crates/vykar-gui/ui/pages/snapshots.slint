@@ -4,11 +4,13 @@ export component SnapshotsPage inherits Rectangle {
     in property <string> repo_name;
     in property <[[StandardListViewItem]]> snapshot_rows;
     in property <bool> operation_busy;
+    in property <bool> is_mount_active;
 
     callback refresh_clicked();
     callback prune_clicked();
     callback restore_row(int);
     callback delete_row(int);
+    callback mount_row(int);
     callback sort_ascending(int);
     callback sort_descending(int);
 
@@ -61,9 +63,14 @@ export component SnapshotsPage inherits Rectangle {
                 clicked => { root.restore_row(snapshot-table.current-row); }
             }
             Button {
-                text: "Delete Selected Snapshot";
+                text: "Delete Selected";
                 enabled: !root.operation_busy;
                 clicked => { root.delete_row(snapshot-table.current-row); }
+            }
+            Button {
+                text: "Mount Selected";
+                enabled: !root.operation_busy && !root.is_mount_active;
+                clicked => { root.mount_row(snapshot-table.current-row); }
             }
         }
     }

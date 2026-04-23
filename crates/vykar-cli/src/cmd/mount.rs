@@ -38,6 +38,7 @@ pub(crate) fn run_mount(
             cache_size,
             source_filter,
             Some(&mut on_progress),
+            None,
         )
         .map_err(|e| -> Box<dyn std::error::Error> { Box::new(e) })
     })?;

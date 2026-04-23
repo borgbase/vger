@@ -15,6 +15,7 @@ use crate::view_models::send_structured_data;
 mod actions;
 mod backup;
 mod config_cmds;
+mod mount;
 mod repo_info;
 mod shared;
 
@@ -33,6 +34,8 @@ pub(super) struct WorkerContext {
 
     pub(super) scheduler_lock_held: bool,
     pub(super) schedule_paused: bool,
+
+    pub(super) mount: Option<mount::MountHandle>,
 }
 
 fn startup(ctx: &mut WorkerContext) {
@@ -108,6 +111,7 @@ pub(crate) fn run_worker(
         cancel_requested,
         scheduler_lock_held,
         schedule_paused: !scheduler_lock_held,
+        mount: None,
     };
 
     startup(&mut ctx);
@@ -152,6 +156,14 @@ pub(crate) fn run_worker(
             AppCommand::SaveAndApplyConfig { yaml_text } => {
                 config_cmds::handle_save_and_apply_config(&mut ctx, yaml_text)
             }
+            AppCommand::StartMount {
+                repo_name,
+                snapshot_name,
+            } => mount::handle_start_mount(&mut ctx, repo_name, snapshot_name),
+            AppCommand::StopMount => mount::handle_stop_mount(&mut ctx),
         }
     }
+
+    // On worker shutdown, stop any active mount so we don't leak a listener.
+    mount::handle_stop_mount(&mut ctx);
 }

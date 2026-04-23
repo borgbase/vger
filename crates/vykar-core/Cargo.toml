@@ -76,7 +76,7 @@ percent-encoding = { version = "2", optional = true }
 [features]
 default = []
 backend-sftp = ["vykar-storage/backend-sftp"]
-mount = ["dav-server", "tokio/rt-multi-thread", "tokio/macros", "tokio/signal", "tokio/net", "hyper", "hyper-util", "lru", "bytes", "futures-util", "percent-encoding"]
+mount = ["dav-server", "tokio/rt-multi-thread", "tokio/macros", "tokio/signal", "tokio/net", "tokio/sync", "hyper", "hyper-util", "lru", "bytes", "futures-util", "percent-encoding"]
 
 [dev-dependencies]
 proptest = { workspace = true }

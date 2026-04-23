@@ -794,9 +794,11 @@ pub fn run(
         cache_size,
         source_filter,
         None,
+        None,
     )
 }
 
+#[allow(clippy::too_many_arguments)]
 pub fn run_with_progress(
     config: &VykarConfig,
     passphrase: Option<&str>,
@@ -805,6 +807,7 @@ pub fn run_with_progress(
     cache_size: usize,
     source_filter: &[String],
     mut progress: Option<&mut dyn FnMut(MountProgressEvent)>,
+    shutdown: Option<Arc<tokio::sync::Notify>>,
 ) -> Result<()> {
     let mut repo = open_repo(
         config,
@@ -877,7 +880,17 @@ pub fn run_with_progress(
         .map_err(|e| VykarError::Other(format!("failed to create tokio runtime: {e}")))?;
 
     let is_multi_snapshot = snapshot_name.is_none();
-    rt.block_on(async { serve(handler, tree, address, is_multi_snapshot, &mut progress).await })
+    rt.block_on(async {
+        serve(
+            handler,
+            tree,
+            address,
+            is_multi_snapshot,
+            &mut progress,
+            shutdown,
+        )
+        .await
+    })
 }
 
 async fn serve(
@@ -886,6 +899,7 @@ async fn serve(
     address: &str,
     is_multi_snapshot: bool,
     progress: &mut Option<&mut dyn FnMut(MountProgressEvent)>,
+    shutdown: Option<Arc<tokio::sync::Notify>>,
 ) -> Result<()> {
     let addr: std::net::SocketAddr = address
         .parse()
@@ -894,10 +908,13 @@ async fn serve(
     let listener = TcpListener::bind(addr)
         .await
         .map_err(|e| VykarError::Other(format!("failed to bind to {addr}: {e}")))?;
+    let bound = listener
+        .local_addr()
+        .map_err(|e| VykarError::Other(format!("local_addr failed: {e}")))?;
 
     if let Some(cb) = progress.as_deref_mut() {
         cb(MountProgressEvent::Serving {
-            address: format!("{addr}"),
+            address: format!("{bound}"),
         });
     }
 
@@ -954,6 +971,17 @@ async fn serve(
                 });
             }
             _ = tokio::signal::ctrl_c() => {
+                if let Some(cb) = progress.as_deref_mut() {
+                    cb(MountProgressEvent::ShuttingDown);
+                }
+                break;
+            }
+            _ = async {
+                match shutdown.as_ref() {
+                    Some(n) => n.notified().await,
+                    None => std::future::pending::<()>().await,
+                }
+            } => {
                 if let Some(cb) = progress.as_deref_mut() {
                     cb(MountProgressEvent::ShuttingDown);
                 }

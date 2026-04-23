@@ -57,6 +57,10 @@ export component MainWindow inherits Window {
         || root.current_page == Page.snapshots
         || root.current_page == Page.find;
 
+    // Mount state (WebDAV server)
+    in-out property <bool> is_mount_active: false;
+    in-out property <string> mount_url: "";
+
     // Settings tab state
     in-out property <bool> start_at_login: false;
     in-out property <bool> start_in_background: false;
@@ -76,6 +80,10 @@ export component MainWindow inherits Window {
     callback prune_snapshots_clicked();
     callback restore_selected_snapshot_clicked(/* row */ int);
     callback delete_selected_snapshot_clicked(/* row */ int);
+    callback mount_selected_snapshot_clicked(/* row */ int);
+    callback mount_repo_clicked(/* repo_index */ int);
+    callback stop_mount_clicked();
+    callback open_mount_url_clicked();
     callback snapshot_sort_ascending(/* column */ int);
     callback snapshot_sort_descending(/* column */ int);
     callback find_search_clicked();
@@ -222,7 +230,9 @@ export component MainWindow inherits Window {
                     source_model: root.repo_source_model;
                     snapshot_rows: root.recent_snapshot_rows;
                     operation_busy: root.operation_busy;
+                    is_mount_active: root.is_mount_active;
                     backup_clicked => { root.backup_repo_clicked(root.current_repo_index); }
+                    mount_clicked => { root.mount_repo_clicked(root.current_repo_index); }
                     view_all_snapshots_clicked => {
                         root.select_repo_and_page(root.current_repo_index, Page.snapshots);
                     }
@@ -235,10 +245,12 @@ export component MainWindow inherits Window {
                     repo_name: root.active_repo.name;
                     snapshot_rows: root.snapshot_rows;
                     operation_busy: root.operation_busy;
+                    is_mount_active: root.is_mount_active;
                     refresh_clicked => { root.refresh_snapshots_clicked(); }
                     prune_clicked => { root.prune_snapshots_clicked(); }
                     restore_row(r) => { root.restore_selected_snapshot_clicked(r); }
                     delete_row(r) => { root.delete_selected_snapshot_clicked(r); }
+                    mount_row(r) => { root.mount_selected_snapshot_clicked(r); }
                     sort_ascending(c) => { root.snapshot_sort_ascending(c); }
                     sort_descending(c) => { root.snapshot_sort_descending(c); }
                 }
@@ -293,6 +305,49 @@ export component MainWindow inherits Window {
 
         // ── Footer ──
         Rectangle { height: 1px; background: #d5d5d5; }
+
+        if root.is_mount_active: Rectangle {
+            property <bool> dark: Palette.color-scheme == ColorScheme.dark;
+            background: dark ? #1f3a5f : #e8f4fd;
+            HorizontalBox {
+                padding-left: 12px;
+                padding-right: 12px;
+                padding-top: 6px;
+                padding-bottom: 6px;
+                spacing: 8px;
+                HorizontalLayout {
+                    horizontal-stretch: 1;
+                    spacing: 4px;
+                    if root.mount_url == "": Text {
+                        text: "Loading...";
+                        vertical-alignment: center;
+                        color: Palette.foreground;
+                    }
+                    if root.mount_url != "": Text {
+                        text: "Serving at";
+                        vertical-alignment: center;
+                        color: Palette.foreground;
+                    }
+                    if root.mount_url != "": TouchArea {
+                        mouse-cursor: pointer;
+                        clicked => { root.open_mount_url_clicked(); }
+                        horizontal-stretch: 1;
+                        HorizontalLayout {
+                            alignment: start;
+                            Text {
+                                text: root.mount_url;
+                                color: dark ? #6cb6ff : #0066cc;
+                                vertical-alignment: center;
+                            }
+                        }
+                    }
+                }
+                Button {
+                    text: "Stop Mount";
+                    clicked => { root.stop_mount_clicked(); }
+                }
+            }
+        }
 
         HorizontalBox {
             padding-left: 12px;

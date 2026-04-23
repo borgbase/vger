@@ -55,6 +55,11 @@ pub(crate) enum AppCommand {
     SaveAndApplyConfig {
         yaml_text: String,
     },
+    StartMount {
+        repo_name: String,
+        snapshot_name: Option<String>,
+    },
+    StopMount,
 }
 
 // ── Data transfer structs ──
@@ -154,4 +159,11 @@ pub(crate) enum UiEvent {
     Quit,
     ShowWindow,
     TriggerSnapshotRefresh,
+    MountStarted {
+        url: String,
+    },
+    MountStopped,
+    MountFailed {
+        message: String,
+    },
 }
