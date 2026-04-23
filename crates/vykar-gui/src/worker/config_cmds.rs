@@ -35,7 +35,7 @@ pub(super) fn handle_switch_config(ctx: &mut WorkerContext) {
 pub(super) fn handle_save_and_apply_config(ctx: &mut WorkerContext, yaml_text: String) {
     let config_path = ctx.config_display_path.clone();
     let tmp_path = config_path.with_extension("yaml.tmp");
-    if let Err(e) = std::fs::write(&tmp_path, &yaml_text) {
+    if let Err(e) = config_helpers::write_tmp_secure(&tmp_path, yaml_text.as_bytes()) {
         let _ = ctx
             .ui_tx
             .send(UiEvent::ConfigSaveError(format!("Write failed: {e}")));

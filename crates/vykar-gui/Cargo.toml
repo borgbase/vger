@@ -44,3 +44,6 @@ objc2-app-kit = { version = "0.3", features = ["NSApplication", "NSResponder", "
 [build-dependencies]
 slint-build = "1.15"
 winresource = "0.1"
+
+[dev-dependencies]
+tempfile = { workspace = true }

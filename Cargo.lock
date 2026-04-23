@@ -8297,6 +8297,7 @@ dependencies = [
  "serde_json",
  "slint",
  "slint-build",
+ "tempfile",
  "tinyfiledialogs",
  "tokio",
  "tray-icon",
