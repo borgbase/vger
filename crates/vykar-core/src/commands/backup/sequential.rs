@@ -338,8 +338,13 @@ pub(super) fn process_regular_file_item(
     // undoes them and `stats` byte counters are restored.
     let pre_meta_c = pre_meta;
     with_rollback_checkpoint(repo, stats, |repo, stats| {
+        // Hard-cap at pre_meta.size + 1 so an intra-read append can't feed
+        // unbounded bytes through the chunker; the +1 sentinel trips the
+        // post-read `total_bytes != pre_meta_c.size` drift check below, and
+        // the `with_rollback_checkpoint` unwinds any mid-loop flushes.
+        let reader = std::io::Read::take(&mut source, pre_meta_c.size + 1);
         let chunk_stream = chunker::chunk_stream(
-            limits::LimitedReader::new(&mut source, read_limiter),
+            limits::LimitedReader::new(reader, read_limiter),
             &repo.config.chunker_params,
         );
 
@@ -633,7 +638,12 @@ pub(super) fn process_source_path(
                     }
 
                     let mut data = Vec::with_capacity(pre_meta.size as usize);
-                    if let Err(e) = std::io::Read::read_to_end(&mut file, &mut data) {
+                    // Hard-cap at pre_meta.size + 1 so an intra-read append
+                    // can't grow `data` past the batch's per-file budget; the
+                    // +1 sentinel trips the post-read `data.len() != pre_meta.size`
+                    // drift check below.
+                    let mut reader = std::io::Read::take(&mut file, pre_meta.size + 1);
+                    if let Err(e) = std::io::Read::read_to_end(&mut reader, &mut data) {
                         if is_soft_io_error(&e) {
                             emit_post_commit_warning(
                                 progress,

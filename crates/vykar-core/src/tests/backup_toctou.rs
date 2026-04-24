@@ -1,5 +1,5 @@
 //! End-to-end tests for the backup TOCTOU (walk-to-open / intra-read) drift
-//! detection paths exercised through the sequential backup code.
+//! detection paths exercised through the sequential and parallel backup code.
 //!
 //! Two deterministic mechanisms are used here:
 //!
@@ -93,6 +93,153 @@ fn intra_read_truncation_is_skipped_with_warning() {
             .write(true)
             .truncate(true)
             .open(&truncate_path);
+    });
+
+    let outcome = backup_to(&config, &src_dir, "snap");
+    backup::read_source::test_hooks::clear_hook();
+
+    assert!(outcome.is_partial, "outcome should be partial");
+    assert_eq!(outcome.stats.errors, 1, "one file should have been skipped");
+    assert_eq!(
+        outcome.stats.nfiles, 0,
+        "nothing should have committed for the mutated file"
+    );
+}
+
+/// Mechanism C (append): a mid-read append grows the file between `pre_meta`
+/// and `read_to_end` completion. The read is hard-capped at `pre_meta.size + 1`
+/// so the chunker/classifier cannot consume unbounded appended bytes, and the
+/// `total_bytes != pre_meta.size` post-check then skips the file with a warning.
+/// Exercises the sequential large-file path (`sequential.rs` chunker stream).
+#[cfg(unix)]
+#[test]
+fn intra_read_append_sequential_large_is_skipped_with_warning() {
+    init();
+    let _guard = crate::testutil::CWD_LOCK.lock().unwrap();
+
+    let dir = tempfile::tempdir().unwrap();
+    let repo_dir = dir.path().join("repo");
+    let src_dir = dir.path().join("src");
+    fs::create_dir_all(&src_dir).unwrap();
+
+    let mut config = crate::tests::helpers::make_test_config(&repo_dir);
+    config.limits.threads = 1;
+    config.chunker.min_size = 1024;
+    config.chunker.avg_size = 2048;
+    config.chunker.max_size = 4096;
+    crate::commands::init::run(&config, None).unwrap();
+
+    let file = src_dir.join("big.bin");
+    let data = vec![0x5au8; 64 * 1024];
+    write_file(&file, &data);
+
+    // After the first read, append 1 MiB. Without the `.take()` cap the
+    // chunker would happily feed those appended bytes through compression /
+    // encryption before the post-fstat check ran; with the cap, at most one
+    // extra byte is read and the drift check skips the file.
+    let append_path = file.clone();
+    backup::read_source::test_hooks::install_hook(file.clone(), 1, move || {
+        let mut f = fs::OpenOptions::new()
+            .append(true)
+            .open(&append_path)
+            .unwrap();
+        f.write_all(&vec![0xaau8; 1024 * 1024]).unwrap();
+        f.sync_all().unwrap();
+    });
+
+    let outcome = backup_to(&config, &src_dir, "snap");
+    backup::read_source::test_hooks::clear_hook();
+
+    assert!(outcome.is_partial, "outcome should be partial");
+    assert_eq!(outcome.stats.errors, 1, "one file should have been skipped");
+    assert_eq!(
+        outcome.stats.nfiles, 0,
+        "nothing should have committed for the mutated file"
+    );
+}
+
+/// Parallel-path variant of the append test covering `pipeline.rs` medium-file
+/// chunker stream (site 2). Same regression coverage as the sequential large
+/// test, but routed through the pipeline worker path (`threads > 1`).
+#[cfg(unix)]
+#[test]
+fn intra_read_append_parallel_large_is_skipped_with_warning() {
+    init();
+    let _guard = crate::testutil::CWD_LOCK.lock().unwrap();
+
+    let dir = tempfile::tempdir().unwrap();
+    let repo_dir = dir.path().join("repo");
+    let src_dir = dir.path().join("src");
+    fs::create_dir_all(&src_dir).unwrap();
+
+    let mut config = crate::tests::helpers::make_test_config(&repo_dir);
+    // Force the parallel pipeline path (>1 worker).
+    config.limits.threads = 4;
+    config.chunker.min_size = 1024;
+    config.chunker.avg_size = 2048;
+    config.chunker.max_size = 4096;
+    crate::commands::init::run(&config, None).unwrap();
+
+    let file = src_dir.join("big.bin");
+    let data = vec![0x5au8; 64 * 1024];
+    write_file(&file, &data);
+
+    let append_path = file.clone();
+    backup::read_source::test_hooks::install_hook(file.clone(), 1, move || {
+        let mut f = fs::OpenOptions::new()
+            .append(true)
+            .open(&append_path)
+            .unwrap();
+        f.write_all(&vec![0xaau8; 1024 * 1024]).unwrap();
+        f.sync_all().unwrap();
+    });
+
+    let outcome = backup_to(&config, &src_dir, "snap");
+    backup::read_source::test_hooks::clear_hook();
+
+    assert!(outcome.is_partial, "outcome should be partial");
+    assert_eq!(outcome.stats.errors, 1, "one file should have been skipped");
+    assert_eq!(
+        outcome.stats.nfiles, 0,
+        "nothing should have committed for the mutated file"
+    );
+}
+
+/// Parallel-path small-file variant covering `pipeline.rs` small-file
+/// single-chunk read (site 1). The file starts below `min_chunk_size` so it
+/// takes the `read_to_end`-into-Vec branch; the append grows it past the
+/// pre-sized capacity, and the `.take(size + 1)` cap bounds the allocation.
+#[cfg(unix)]
+#[test]
+fn intra_read_append_parallel_small_is_skipped_with_warning() {
+    init();
+    let _guard = crate::testutil::CWD_LOCK.lock().unwrap();
+
+    let dir = tempfile::tempdir().unwrap();
+    let repo_dir = dir.path().join("repo");
+    let src_dir = dir.path().join("src");
+    fs::create_dir_all(&src_dir).unwrap();
+
+    let mut config = crate::tests::helpers::make_test_config(&repo_dir);
+    config.limits.threads = 4;
+    // Small file must be < min_size to hit the single-chunk Vec path.
+    config.chunker.min_size = 32 * 1024;
+    config.chunker.avg_size = 64 * 1024;
+    config.chunker.max_size = 128 * 1024;
+    crate::commands::init::run(&config, None).unwrap();
+
+    let file = src_dir.join("small.bin");
+    let data = vec![0x5au8; 4 * 1024];
+    write_file(&file, &data);
+
+    let append_path = file.clone();
+    backup::read_source::test_hooks::install_hook(file.clone(), 1, move || {
+        let mut f = fs::OpenOptions::new()
+            .append(true)
+            .open(&append_path)
+            .unwrap();
+        f.write_all(&vec![0xaau8; 1024 * 1024]).unwrap();
+        f.sync_all().unwrap();
     });
 
     let outcome = backup_to(&config, &src_dir, "snap");

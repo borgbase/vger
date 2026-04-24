@@ -229,12 +229,16 @@ fn process_file_worker_inner(
             // Small file (< min_chunk_size): read whole, single chunk.
             if pre_meta.size < chunker_config.min_size as u64 {
                 let mut data = Vec::with_capacity(pre_meta.size as usize);
+                // Hard-cap at pre_meta.size + 1 so an intra-read append can't
+                // grow `data` past budget; the +1 sentinel trips the post-read
+                // `data.len() != pre_meta.size` drift check below.
+                let mut reader = (&mut source).take(pre_meta.size + 1);
                 if let Some(limiter) = read_limiter {
-                    limits::LimitedReader::new(&mut source, Some(limiter))
+                    limits::LimitedReader::new(reader, Some(limiter))
                         .read_to_end(&mut data)
                         .map_err(VykarError::Io)?;
                 } else {
-                    source.read_to_end(&mut data).map_err(VykarError::Io)?;
+                    reader.read_to_end(&mut data).map_err(VykarError::Io)?;
                 }
 
                 let post_meta = fs::fstat_summary(source.file()).map_err(VykarError::Io)?;
@@ -265,8 +269,13 @@ fn process_file_worker_inner(
             let mut worker_chunks =
                 Vec::with_capacity(estimate_chunk_count(pre_meta.size, chunker_config.avg_size));
             {
+                // Hard-cap at pre_meta.size + 1 so an intra-read append can't
+                // feed unbounded bytes through the chunker/classifier; the +1
+                // sentinel trips the post-read `total_bytes != pre_meta.size`
+                // drift check below.
+                let reader = (&mut source).take(pre_meta.size + 1);
                 let chunk_stream = chunker::chunk_stream(
-                    limits::LimitedReader::new(&mut source, read_limiter),
+                    limits::LimitedReader::new(reader, read_limiter),
                     chunker_config,
                 );
 
