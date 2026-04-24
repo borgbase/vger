@@ -47,6 +47,18 @@ pub(super) fn handle_restore_selected(
                             format_bytes(stats.total_bytes),
                         ),
                     );
+                    for w in &stats.warnings {
+                        send_log(&ctx.ui_tx, format!("warning: {w}"));
+                    }
+                    if stats.warnings_suppressed > 0 {
+                        send_log(
+                            &ctx.ui_tx,
+                            format!(
+                                "warning: {} additional metadata warnings suppressed",
+                                stats.warnings_suppressed
+                            ),
+                        );
+                    }
                     let _ = ctx.ui_tx.send(UiEvent::RestoreFinished {
                         success: true,
                         message: format!(

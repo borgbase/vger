@@ -31,5 +31,15 @@ pub(crate) fn run_restore(
         format_bytes(stats.total_bytes),
     );
 
+    for w in &stats.warnings {
+        eprintln!("warning: {w}");
+    }
+    if stats.warnings_suppressed > 0 {
+        eprintln!(
+            "warning: {} additional metadata warnings suppressed",
+            stats.warnings_suppressed
+        );
+    }
+
     Ok(())
 }

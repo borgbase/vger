@@ -168,9 +168,12 @@ where
     // directly via storage.get_range(), so the cache only serves the small
     // item-stream tree-pack chunks. 2 MiB is plenty.
     repo.set_blob_cache_max_bytes(2 * 1024 * 1024);
+    let mut stats = RestoreStats::default();
     let xattrs_enabled = if xattrs_enabled && !fs::xattrs_supported() {
-        tracing::warn!(
+        push_metadata_warning(
+            &mut stats,
             "xattrs requested but not supported on this platform; continuing without xattrs"
+                .to_string(),
         );
         false
     } else {
@@ -227,9 +230,14 @@ where
     };
 
     // Stream items: create dirs/symlinks immediately, build file plan + chunk targets.
-    let (mut planned_files, chunk_targets, mut stats, verified_dirs) =
-        stream_and_plan(&items_stream, &temp_root, &mut include_path, xattrs_enabled)
-            .map_err(&cleanup)?;
+    let (mut planned_files, chunk_targets, verified_dirs) = stream_and_plan(
+        &items_stream,
+        &temp_root,
+        &mut include_path,
+        xattrs_enabled,
+        &mut stats,
+    )
+    .map_err(&cleanup)?;
     drop(items_stream); // free raw bytes before read group building
     planned_files.shrink_to_fit(); // reclaim amortized-doubling slack (~2x → 1x)
 
@@ -314,25 +322,64 @@ where
             let target_path = dest_root.join(&pf.rel_path);
             // xattrs remain path-based (no fd-based xattr API in std).
             if xattrs_enabled {
-                apply_item_xattrs(&target_path, pf.xattrs.as_ref());
+                apply_item_xattrs(&target_path, pf.xattrs.as_ref(), &mut stats);
             }
             let (mtime_secs, mtime_nanos) = split_unix_nanos(pf.mtime);
             // fd-based fchmod/futimens are Unix-only; on other platforms
             // fall through to the path-based calls to avoid silent no-ops.
+            // Only the *final* failure (after the path-based fallback) is
+            // recorded as a warning — intermediate fd failures that succeed
+            // on the fallback are not user-facing.
             #[cfg(unix)]
             {
                 if let Ok(file) = std::fs::File::open(&target_path) {
-                    let _ = fs::apply_mode_fd(&file, pf.mode);
-                    let _ = fs::set_file_mtime_fd(&file, mtime_secs, mtime_nanos);
+                    let mode_res = fs::apply_mode_fd(&file, pf.mode);
+                    if mode_res.is_err() {
+                        warn_metadata_err(
+                            &mut stats,
+                            fs::apply_mode(&target_path, pf.mode),
+                            &target_path,
+                            "mode",
+                        );
+                    }
+                    let mtime_res = fs::set_file_mtime_fd(&file, mtime_secs, mtime_nanos);
+                    if mtime_res.is_err() {
+                        warn_metadata_err(
+                            &mut stats,
+                            fs::set_file_mtime(&target_path, mtime_secs, mtime_nanos),
+                            &target_path,
+                            "mtime",
+                        );
+                    }
                 } else {
-                    let _ = fs::apply_mode(&target_path, pf.mode);
-                    let _ = fs::set_file_mtime(&target_path, mtime_secs, mtime_nanos);
+                    warn_metadata_err(
+                        &mut stats,
+                        fs::apply_mode(&target_path, pf.mode),
+                        &target_path,
+                        "mode",
+                    );
+                    warn_metadata_err(
+                        &mut stats,
+                        fs::set_file_mtime(&target_path, mtime_secs, mtime_nanos),
+                        &target_path,
+                        "mtime",
+                    );
                 }
             }
             #[cfg(not(unix))]
             {
-                let _ = fs::apply_mode(&target_path, pf.mode);
-                let _ = fs::set_file_mtime(&target_path, mtime_secs, mtime_nanos);
+                warn_metadata_err(
+                    &mut stats,
+                    fs::apply_mode(&target_path, pf.mode),
+                    &target_path,
+                    "mode",
+                );
+                warn_metadata_err(
+                    &mut stats,
+                    fs::set_file_mtime(&target_path, mtime_secs, mtime_nanos),
+                    &target_path,
+                    "mtime",
+                );
             }
         }
 
@@ -356,6 +403,13 @@ where
         "Restored {} files, {} dirs, {} symlinks ({} bytes)",
         stats.files, stats.dirs, stats.symlinks, stats.total_bytes
     );
+
+    if stats.warnings_suppressed > 0 {
+        tracing::warn!(
+            "{} additional metadata warnings suppressed",
+            stats.warnings_suppressed
+        );
+    }
 
     Ok(stats)
 }
@@ -384,16 +438,15 @@ fn stream_and_plan<F>(
     dest_root: &Path,
     include_path: &mut F,
     xattrs_enabled: bool,
+    stats: &mut RestoreStats,
 ) -> Result<(
     Vec<PlannedFile>,
     HashMap<ChunkId, ChunkTargets>,
-    RestoreStats,
     HashSet<PathBuf>,
 )>
 where
     F: FnMut(&str) -> bool,
 {
-    let mut stats = RestoreStats::default();
     let mut verified_dirs: HashSet<PathBuf> = HashSet::new();
     verified_dirs.insert(dest_root.to_path_buf());
     let mut planned_files = Vec::new();
@@ -411,9 +464,9 @@ where
                 ensure_path_within_root(&target, dest_root)?;
                 std::fs::create_dir_all(&target)?;
                 ensure_path_within_root(&target, dest_root)?;
-                let _ = fs::apply_mode(&target, item.mode);
+                warn_metadata_err(stats, fs::apply_mode(&target, item.mode), &target, "mode");
                 if xattrs_enabled {
-                    apply_item_xattrs(&target, item.xattrs.as_ref());
+                    apply_item_xattrs(&target, item.xattrs.as_ref(), stats);
                 }
                 verified_dirs.insert(target);
                 stats.dirs += 1;
@@ -428,7 +481,7 @@ where
                     let _ = std::fs::remove_file(&target);
                     fs::create_symlink(Path::new(link_target), &target)?;
                     if xattrs_enabled {
-                        apply_item_xattrs(&target, item.xattrs.as_ref());
+                        apply_item_xattrs(&target, item.xattrs.as_ref(), stats);
                     }
                     stats.symlinks += 1;
                 }
@@ -456,6 +509,12 @@ where
                     });
                     file_offset += chunk_ref.size as u64;
                 }
+                if file_offset != item.size {
+                    return Err(VykarError::InvalidFormat(format!(
+                        "regular file {:?} has size {} but chunk sizes sum to {}",
+                        item.path, item.size, file_offset
+                    )));
+                }
                 planned_files.push(PlannedFile {
                     rel_path: rel_scratch.clone(),
                     total_size: file_offset,
@@ -469,7 +528,7 @@ where
         Ok(())
     })?;
 
-    Ok((planned_files, chunk_targets, stats, verified_dirs))
+    Ok((planned_files, chunk_targets, verified_dirs))
 }
 
 // ---------------------------------------------------------------------------
@@ -517,6 +576,12 @@ where
                 file_offset,
             });
             file_offset += chunk_ref.size as u64;
+        }
+        if file_offset != item.size {
+            return Err(VykarError::InvalidFormat(format!(
+                "regular file {:?} has size {} but chunk sizes sum to {}",
+                item.path, item.size, file_offset
+            )));
         }
         files.push(PlannedFile {
             rel_path: target_path.clone(),
@@ -1087,7 +1152,11 @@ fn path_matches_selection(path: &str, selected: &HashSet<String>) -> bool {
     false
 }
 
-fn apply_item_xattrs(target: &Path, xattrs: Option<&HashMap<String, Vec<u8>>>) {
+fn apply_item_xattrs(
+    target: &Path,
+    xattrs: Option<&HashMap<String, Vec<u8>>>,
+    stats: &mut RestoreStats,
+) {
     let Some(xattrs) = xattrs else {
         return;
     };
@@ -1102,11 +1171,9 @@ fn apply_item_xattrs(target: &Path, xattrs: Option<&HashMap<String, Vec<u8>>>) {
 
         #[cfg(unix)]
         if let Err(e) = xattr::set(target, name, value) {
-            tracing::warn!(
-                path = %target.display(),
-                attr = %name,
-                error = %e,
-                "failed to restore extended attribute"
+            push_metadata_warning(
+                stats,
+                format!("failed to apply xattr {name} on {}: {e}", target.display()),
             );
         }
         #[cfg(not(unix))]
@@ -1114,6 +1181,7 @@ fn apply_item_xattrs(target: &Path, xattrs: Option<&HashMap<String, Vec<u8>>>) {
             let _ = target;
             let _ = name;
             let _ = value;
+            let _ = stats;
         }
     }
 }
@@ -1124,6 +1192,41 @@ pub struct RestoreStats {
     pub dirs: u64,
     pub symlinks: u64,
     pub total_bytes: u64,
+    pub warnings: Vec<String>,
+    pub warnings_suppressed: u64,
+}
+
+/// Cap on non-fatal metadata warnings retained in `RestoreStats.warnings`.
+/// Failures past this cap are counted in `warnings_suppressed` only — this
+/// prevents an unbounded `Vec` (and matching unbounded `tracing::warn!`
+/// stream) when the destination filesystem rejects every metadata call.
+const MAX_RESTORE_WARNINGS: usize = 64;
+
+/// Record a non-fatal metadata failure. Up to `MAX_RESTORE_WARNINGS` are
+/// both logged via `tracing::warn!` and stored in `stats.warnings`; beyond
+/// that, only `stats.warnings_suppressed` is incremented.
+fn push_metadata_warning(stats: &mut RestoreStats, msg: String) {
+    if stats.warnings.len() < MAX_RESTORE_WARNINGS {
+        tracing::warn!("{msg}");
+        stats.warnings.push(msg);
+    } else {
+        stats.warnings_suppressed += 1;
+    }
+}
+
+/// If `result` is `Err`, record a metadata warning describing the failure.
+fn warn_metadata_err<T>(
+    stats: &mut RestoreStats,
+    result: std::io::Result<T>,
+    path: &Path,
+    op: &str,
+) {
+    if let Err(e) = result {
+        push_metadata_warning(
+            stats,
+            format!("failed to apply {op} on {}: {e}", path.display()),
+        );
+    }
 }
 
 /// Sanitize and write a snapshot item path into a caller-provided scratch buffer.
@@ -1992,8 +2095,9 @@ mod tests {
         ];
         let stream = serialize_items(&items);
 
-        let (planned_files, chunk_targets, stats, _verified_dirs) =
-            stream_and_plan(&stream, dest, &mut |_| true, false).unwrap();
+        let mut stats = RestoreStats::default();
+        let (planned_files, chunk_targets, _verified_dirs) =
+            stream_and_plan(&stream, dest, &mut |_| true, false, &mut stats).unwrap();
 
         // Directory was created (pass 1 runs before pass 2).
         assert!(dest.join("mydir").is_dir());
@@ -2018,11 +2122,13 @@ mod tests {
         ];
         let stream = serialize_items(&items);
 
-        let (planned_files, _chunk_targets, stats, _verified_dirs) = stream_and_plan(
+        let mut stats = RestoreStats::default();
+        let (planned_files, _chunk_targets, _verified_dirs) = stream_and_plan(
             &stream,
             dest,
             &mut |p: &str| p.starts_with("included"),
             false,
+            &mut stats,
         )
         .unwrap();
 
@@ -2057,8 +2163,9 @@ mod tests {
         items.push(make_symlink_item("dir0/link", "file0.txt"));
         let stream = serialize_items(&items);
 
-        let (planned_files, _chunk_targets, stats, _verified_dirs) =
-            stream_and_plan(&stream, dest, &mut |_| true, false).unwrap();
+        let mut stats = RestoreStats::default();
+        let (planned_files, _chunk_targets, _verified_dirs) =
+            stream_and_plan(&stream, dest, &mut |_| true, false, &mut stats).unwrap();
 
         assert_eq!(planned_files.len(), m_files as usize);
         assert_eq!(stats.dirs, n_dirs);
@@ -2077,7 +2184,8 @@ mod tests {
         // Append garbage bytes to trigger a decode error after the first item.
         stream.extend_from_slice(&[0xFF, 0xFF, 0xFF]);
 
-        let result = stream_and_plan(&stream, dest, &mut |_| true, false);
+        let mut stats = RestoreStats::default();
+        let result = stream_and_plan(&stream, dest, &mut |_| true, false, &mut stats);
         assert!(result.is_err());
         // The directory from before the corrupt bytes was still created.
         assert!(dest.join("aaa").is_dir());
@@ -2097,8 +2205,9 @@ mod tests {
         ];
         let stream = serialize_items(&items);
 
-        let (_planned_files, _chunk_targets, stats, verified_dirs) =
-            stream_and_plan(&stream, dest, &mut |_| true, false).unwrap();
+        let mut stats = RestoreStats::default();
+        let (_planned_files, _chunk_targets, verified_dirs) =
+            stream_and_plan(&stream, dest, &mut |_| true, false, &mut stats).unwrap();
 
         // Directory exists and is in verified_dirs.
         assert!(dest.join("mydir").is_dir());
@@ -2146,8 +2255,9 @@ mod tests {
         ];
         let stream = serialize_items(&items);
 
-        let (planned_files, chunk_targets, stats, verified_dirs) =
-            stream_and_plan(&stream, dest, &mut |_| true, false).unwrap();
+        let mut stats = RestoreStats::default();
+        let (planned_files, chunk_targets, verified_dirs) =
+            stream_and_plan(&stream, dest, &mut |_| true, false, &mut stats).unwrap();
 
         // Directory exists with correct mode.
         assert!(dest.join("mydir").is_dir());
@@ -2211,5 +2321,90 @@ mod tests {
         assert!(!new_dir.exists());
         let dest = validate_and_prepare_dest(new_dir.to_str().unwrap()).unwrap();
         assert!(dest.is_dir());
+    }
+
+    // -----------------------------------------------------------------------
+    // item.size invariant tests
+    // -----------------------------------------------------------------------
+
+    /// Build a file Item whose `size` field is set independently from the
+    /// chunk sizes, so tests can construct malformed snapshot items.
+    fn make_file_item_with_size(path: &str, size: u64, chunks: Vec<(u8, u32)>) -> Item {
+        let mut item = make_file_item(path, chunks);
+        item.size = size;
+        item
+    }
+
+    #[test]
+    fn stream_and_plan_rejects_size_without_chunks() {
+        let temp = tempdir().unwrap();
+        let dest = &temp.path().canonicalize().unwrap();
+
+        let items = vec![make_file_item_with_size("a.txt", 100, vec![])];
+        let stream = serialize_items(&items);
+
+        let mut stats = RestoreStats::default();
+        let err = match stream_and_plan(&stream, dest, &mut |_| true, false, &mut stats) {
+            Ok(_) => panic!("expected size-vs-chunks mismatch error"),
+            Err(e) => e.to_string(),
+        };
+        assert!(
+            err.contains("chunk sizes sum to"),
+            "expected size-vs-chunks mismatch error, got: {err}"
+        );
+    }
+
+    #[test]
+    fn stream_and_plan_rejects_size_mismatch_with_chunks() {
+        let temp = tempdir().unwrap();
+        let dest = &temp.path().canonicalize().unwrap();
+
+        // item.size = 100 but chunk sums to 50.
+        let items = vec![make_file_item_with_size("a.txt", 100, vec![(0xAA, 50)])];
+        let stream = serialize_items(&items);
+
+        let mut stats = RestoreStats::default();
+        let err = match stream_and_plan(&stream, dest, &mut |_| true, false, &mut stats) {
+            Ok(_) => panic!("expected size-vs-chunks mismatch error"),
+            Err(e) => e.to_string(),
+        };
+        assert!(
+            err.contains("chunk sizes sum to"),
+            "expected size-vs-chunks mismatch error, got: {err}"
+        );
+    }
+
+    #[test]
+    fn plan_reads_rejects_size_mismatch_with_chunks() {
+        let index = ChunkIndex::new();
+        let item = make_file_item_with_size("a.txt", 100, vec![(0xAA, 50)]);
+        let file_items = vec![(&item, PathBuf::from("/tmp/out/a.txt"))];
+
+        let err = match plan_reads(&file_items, index_lookup(&index)) {
+            Ok(_) => panic!("expected size-vs-chunks mismatch error"),
+            Err(e) => e.to_string(),
+        };
+        assert!(
+            err.contains("chunk sizes sum to"),
+            "expected size-vs-chunks mismatch error, got: {err}"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // warning cap tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn push_metadata_warning_caps_vec_and_counts_suppressed() {
+        let mut stats = RestoreStats::default();
+        for i in 0..MAX_RESTORE_WARNINGS + 1 {
+            push_metadata_warning(&mut stats, format!("msg {i}"));
+        }
+        assert_eq!(stats.warnings.len(), MAX_RESTORE_WARNINGS);
+        assert_eq!(stats.warnings_suppressed, 1);
+        // The 65th message is the one that should have been suppressed, not a
+        // replacement of an earlier one.
+        let suppressed = format!("msg {}", MAX_RESTORE_WARNINGS);
+        assert!(!stats.warnings.iter().any(|w| w == &suppressed));
     }
 }
