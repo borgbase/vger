@@ -61,6 +61,10 @@ pub(crate) fn run_prune(
         );
     }
 
+    for w in &stats.warnings {
+        eprintln!("warning: {w}");
+    }
+
     if compact {
         super::compact::run_compact(
             config,

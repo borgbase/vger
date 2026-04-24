@@ -103,6 +103,13 @@ pub enum CycleEvent {
         scope: HookScope,
         warning: String,
     },
+    /// Non-fatal warning from a cycle step (e.g. prune post-commit refcount
+    /// cleanup failed). `tracing::warn!` has already fired — this is for GUI
+    /// visibility since the GUI does not subscribe to tracing.
+    StepWarning {
+        step: CycleStep,
+        message: String,
+    },
 }
 
 pub struct FullCycleResult {
@@ -423,8 +430,8 @@ pub fn run_full_cycle_for_repo(
                 repo,
                 on_event,
                 &mut steps,
-                |_evt| {
-                    commands::prune::run(
+                |evt| {
+                    let stats = commands::prune::run(
                         config,
                         passphrase,
                         false,
@@ -433,7 +440,17 @@ pub fn run_full_cycle_for_repo(
                         source_filter,
                         shutdown,
                     )
-                    .map(|(stats, _)| stats)
+                    .map(|(stats, _)| stats)?;
+                    // Surface post-commit warnings as cycle events so GUI/CLI
+                    // consumers can log them as persistent entries. tracing
+                    // already fired inside commands::prune::run.
+                    for w in &stats.warnings {
+                        evt(CycleEvent::StepWarning {
+                            step: CycleStep::Prune,
+                            message: w.clone(),
+                        });
+                    }
+                    Ok(stats)
                 },
                 |_| StepOutcome::Ok,
             );
@@ -718,7 +735,6 @@ pub fn delete_snapshot(
     config: &VykarConfig,
     passphrase: Option<&str>,
     snapshot_name: &str,
-) -> Result<commands::delete::DeleteStats> {
-    let mut results = commands::delete::run(config, passphrase, &[snapshot_name], false, None)?;
-    Ok(results.remove(0))
+) -> Result<commands::delete::DeleteResult> {
+    commands::delete::run(config, passphrase, &[snapshot_name], false, None)
 }

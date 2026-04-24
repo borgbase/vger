@@ -86,6 +86,12 @@ pub(crate) fn run_default_actions(
                     // HookWarning: tracing::warn! already fired inside log_hook_errors.
                     // Events are for GUI consumers only.
                     CycleEvent::HookWarning { .. } => {}
+                    CycleEvent::StepWarning { step, message } => {
+                        // tracing::warn! already fired inside the step;
+                        // duplicate to stderr so CLI users see the warning
+                        // even without the tracing subscriber.
+                        eprintln!("warning: [{}] {message}", step.command_name());
+                    }
                 }
             },
         );

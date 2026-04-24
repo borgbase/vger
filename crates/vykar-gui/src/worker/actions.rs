@@ -120,16 +120,29 @@ pub(super) fn handle_delete_snapshot(
         passphrase.as_deref().map(|s| s.as_str()),
         &snapshot_name,
     ) {
-        Ok(stats) => {
-            send_log(
-                &ctx.ui_tx,
-                format!(
-                    "[{repo_name}] Deleted snapshot '{}': {} chunks freed, {} reclaimed",
-                    stats.snapshot_name,
-                    stats.chunks_deleted,
-                    format_bytes(stats.space_freed),
-                ),
-            );
+        Ok(result) => {
+            if let Some(stats) = result.stats.first() {
+                send_log(
+                    &ctx.ui_tx,
+                    format!(
+                        "[{repo_name}] Deleted snapshot '{}': {} chunks freed, {} reclaimed",
+                        stats.snapshot_name,
+                        stats.chunks_deleted,
+                        format_bytes(stats.space_freed),
+                    ),
+                );
+            } else {
+                send_log(
+                    &ctx.ui_tx,
+                    format!(
+                        "[{repo_name}] Deleted snapshot '{snapshot_name}' \
+                         (post-commit cleanup stats unavailable; see warnings)"
+                    ),
+                );
+            }
+            for w in &result.warnings {
+                send_log(&ctx.ui_tx, format!("[{repo_name}] warning: {w}"));
+            }
             let _ = ctx.app_tx.send(AppCommand::RefreshSnapshots {
                 repo_selector: repo_name,
             });
@@ -182,6 +195,9 @@ pub(super) fn handle_prune_repo(ctx: &mut WorkerContext, repo_name: String) {
                     format_bytes(stats.space_freed),
                 ),
             );
+            for w in &stats.warnings {
+                send_log(&ctx.ui_tx, format!("[{repo_name}] warning: {w}"));
+            }
             let _ = ctx.app_tx.send(AppCommand::RefreshSnapshots {
                 repo_selector: repo_name,
             });

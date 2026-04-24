@@ -111,3 +111,53 @@ fn prune_source_filter_only_prunes_matching_label() {
     assert!(names.contains(&"snap-a-2"));
     assert!(names.contains(&"snap-b-1"));
 }
+
+/// When the snapshot blobs have been deleted from storage (commit point
+/// reached) but Phase 3 refcount cleanup fails, `prune::run` must return
+/// `Ok((stats, _))` with `stats.warnings` populated rather than propagating
+/// an error that would falsely suggest the prune failed.
+#[test]
+fn prune_phase3_refcount_failure_returns_warning_not_error() {
+    let tmp = tempfile::tempdir().unwrap();
+    let repo_dir = tmp.path().join("repo");
+    let source_dir = tmp.path().join("source");
+    std::fs::create_dir_all(&repo_dir).unwrap();
+    std::fs::create_dir_all(&source_dir).unwrap();
+    std::fs::write(source_dir.join("f.txt"), b"prune-fault").unwrap();
+
+    let mut config = init_repo(&repo_dir);
+    config.retention = RetentionConfig {
+        keep_last: Some(1),
+        ..RetentionConfig::default()
+    };
+
+    backup_single_source(&config, &source_dir, "src-a", "snap-a-1");
+    std::thread::sleep(Duration::from_millis(2));
+    backup_single_source(&config, &source_dir, "src-a", "snap-a-2");
+
+    // Break Phase 3 by removing every pack file. Phase 2 only deletes
+    // `snapshots/<id>` and still succeeds.
+    let packs_dir = repo_dir.join("packs");
+    for shard in std::fs::read_dir(&packs_dir).unwrap() {
+        let shard = shard.unwrap().path();
+        if !shard.is_dir() {
+            continue;
+        }
+        for entry in std::fs::read_dir(&shard).unwrap() {
+            std::fs::remove_file(entry.unwrap().path()).unwrap();
+        }
+    }
+
+    let sources = vec![source_entry(&source_dir, "src-a")];
+    let (stats, _) = commands::prune::run(&config, None, false, false, &sources, &[], None)
+        .expect("prune must not fail after commit point — Phase 3 errors become warnings");
+
+    // One snapshot was pruned (blob deleted) but its Phase 3 cleanup failed.
+    assert_eq!(stats.pruned, 1);
+    assert!(!stats.warnings.is_empty(), "expected a Phase 3 warning");
+    let combined = stats.warnings.join("\n");
+    assert!(
+        combined.contains("vykar check --repair"),
+        "warning should point operators at the recovery tool: {combined}"
+    );
+}

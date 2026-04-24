@@ -172,6 +172,17 @@ impl BackupProgressRenderer {
                 }
                 return;
             }
+            commands::backup::BackupProgressEvent::Warning { message } => {
+                // Defensive duplicate of tracing::warn! — guarantees the
+                // warning reaches stderr even without the tracing subscriber.
+                let _guard = acquire_stderr_lock();
+                if self.is_tty {
+                    eprint!("\r\x1b[2K");
+                    self.last_line_len = 0;
+                }
+                eprintln!("warning: {message}");
+                return;
+            }
             commands::backup::BackupProgressEvent::SourceStarted { .. }
             | commands::backup::BackupProgressEvent::SourceFinished { .. } => return,
         }

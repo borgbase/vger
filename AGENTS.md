@@ -1,6 +1,16 @@
 # AGENTS.md — vykar
 
-Fast, encrypted, deduplicated backup tool in Rust. Two crates: `vykar-core` (library) and `vykar-cli` (thin CLI). Build with `make pre-commit` to run fmt-check + clippy + tests.
+Fast, encrypted, deduplicated backup tool in Rust. Two crates: `vykar-core` (library) and `vykar-cli` (thin CLI).
+
+## Verification
+
+`make pre-commit` runs `fmt-check` + `lint` (clippy with `-D warnings`) + `doc-check` + `test` (`cargo test --workspace`). It is slow (~2 minutes). Run it **once** at the end of a change and capture its output to a file so downstream checks can consult the logs instead of re-running:
+
+```
+make pre-commit 2>&1 | tee /tmp/vykar-pre-commit.log
+```
+
+Do not keep re-invoking `cargo check`, `cargo test`, `cargo clippy`, or `make pre-commit` to inspect partial progress — they duplicate the same work. When iterating on a single test, run that test only (e.g. `cargo test -p vykar-core --lib tests::delete::delete_phase3_refcount_failure_returns_warning_not_error`).
 
 ## Repository on-disk layout
 

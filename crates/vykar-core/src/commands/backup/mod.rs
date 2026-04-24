@@ -152,6 +152,12 @@ pub enum BackupProgressEvent {
     CommitStage {
         stage: &'static str,
     },
+    /// A non-fatal post-commit issue. The snapshot is durably committed.
+    /// `tracing::warn!` has already fired; this surfaces the warning to the
+    /// progress callback (CLI/GUI) since the GUI does not subscribe to tracing.
+    Warning {
+        message: String,
+    },
 }
 
 pub(crate) fn emit_progress(
@@ -160,6 +166,24 @@ pub(crate) fn emit_progress(
 ) {
     if let Some(callback) = progress.as_deref_mut() {
         callback(event);
+    }
+}
+
+/// Emit a post-commit warning: `tracing::warn!` + `BackupProgressEvent::Warning`
+/// always happen together. The tracing half reaches stderr (via the tracing
+/// subscriber in the CLI); the progress event half reaches the GUI log panel.
+/// Keeping both sides in one helper prevents drift.
+///
+/// Generic over `F: FnMut(..)` so callers that hold either a concrete closure
+/// (`&mut Option<impl FnMut(..)>`) or a type-erased one
+/// (`&mut Option<&mut dyn FnMut(..)>`) can use it.
+pub(crate) fn emit_post_commit_warning<F: FnMut(BackupProgressEvent)>(
+    progress: &mut Option<F>,
+    msg: String,
+) {
+    warn!("{msg}");
+    if let Some(ref mut cb) = progress {
+        cb(BackupProgressEvent::Warning { message: msg });
     }
 }
 
@@ -676,12 +700,23 @@ pub fn run_with_progress(
         drop(session_guard.take());
 
         repo.clear_lock_fence();
+        let lock_key = guard.key().to_string();
         match lock::release_lock(repo.storage.as_ref(), guard) {
             Ok(()) => {}
             Err(release_err) => {
-                warn!("failed to release repository lock: {release_err}");
                 if result.is_ok() {
-                    return Err(release_err);
+                    emit_post_commit_warning(
+                        &mut progress,
+                        format!(
+                            "snapshot was successfully committed, but releasing the \
+                             repository lock failed: {release_err}. The advisory lock at \
+                             `{lock_key}` may persist; future operations on this repository \
+                             may be blocked for up to 6 hours until automatic stale-lock \
+                             cleanup, or run `vykar break-lock` to clear it manually."
+                        ),
+                    );
+                } else {
+                    warn!("failed to release repository lock: {release_err}");
                 }
             }
         }

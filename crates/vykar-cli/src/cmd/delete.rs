@@ -15,12 +15,12 @@ pub(crate) fn run_delete(
     shutdown: Option<&AtomicBool>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let name_refs: Vec<&str> = snapshot_names.iter().map(|s| s.as_str()).collect();
-    let all_stats = with_repo_passphrase(config, label, |passphrase| {
+    let result = with_repo_passphrase(config, label, |passphrase| {
         commands::delete::run(config, passphrase, &name_refs, dry_run, shutdown)
             .map_err(|e| -> Box<dyn std::error::Error> { Box::new(e) })
     })?;
 
-    for stats in &all_stats {
+    for stats in &result.stats {
         if dry_run {
             println!("Dry run: would delete snapshot '{}'", stats.snapshot_name);
             println!(
@@ -38,9 +38,9 @@ pub(crate) fn run_delete(
         }
     }
 
-    if all_stats.len() > 1 {
-        let total_chunks: u64 = all_stats.iter().map(|s| s.chunks_deleted).sum();
-        let total_space: u64 = all_stats.iter().map(|s| s.space_freed).sum();
+    if result.stats.len() > 1 {
+        let total_chunks: u64 = result.stats.iter().map(|s| s.chunks_deleted).sum();
+        let total_space: u64 = result.stats.iter().map(|s| s.space_freed).sum();
         if dry_run {
             println!(
                 "Total: would free {} chunks, {}",
@@ -54,6 +54,10 @@ pub(crate) fn run_delete(
                 format_bytes(total_space),
             );
         }
+    }
+
+    for w in &result.warnings {
+        eprintln!("warning: {w}");
     }
 
     Ok(())

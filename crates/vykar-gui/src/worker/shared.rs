@@ -1,6 +1,7 @@
 use std::sync::atomic::Ordering;
 
 use vykar_core::app::operations;
+use vykar_core::commands::backup::BackupProgressEvent;
 use vykar_core::config::{self, ResolvedRepo, SourceEntry};
 use vykar_types::error::Result;
 
@@ -65,6 +66,9 @@ pub(super) fn run_selection_with_progress(
         Some(&ctx.cancel_requested),
         false,
         Some(&mut |evt| match evt {
+            operations::BackupRunEvent::Backup(BackupProgressEvent::Warning { message }) => {
+                send_log(&ui_tx_progress, format!("[{repo_name}] warning: {message}"));
+            }
             operations::BackupRunEvent::Backup(bpe) => {
                 if let Some(status) = tracker.format(&bpe) {
                     let _ = ui_tx_progress.send(UiEvent::Status(status));

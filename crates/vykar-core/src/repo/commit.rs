@@ -384,11 +384,14 @@ impl Repository {
         self.manifest.snapshots.push(snapshot_entry);
 
         // Hydrate chunk_index after the commit point (fast-path deferred).
-        // Best-effort: a local cache read failure here is non-fatal since the
-        // remote index is already committed. Falls back to remote reload.
+        // Best-effort: a failure here is non-fatal since the remote index is
+        // already committed. `rebuild_local_caches(true)` (below) derives
+        // caches from the on-disk full_index_cache and does not read
+        // `self.chunk_index`, so leaving it stale is safe. The next Repository
+        // operation calls `reload_full_index` and rehydrates from remote.
         if deferred_chunk_index_hydrate {
             let cd = self.cache_dir_override.as_deref();
-            self.chunk_index = dedup_cache::load_chunk_index_from_full_cache(
+            match dedup_cache::load_chunk_index_from_full_cache(
                 &self.config.id,
                 self.index_generation,
                 cd,
@@ -396,7 +399,22 @@ impl Repository {
             .or_else(|e| {
                 warn!("fast path: local cache hydration failed ({e}), reloading from remote");
                 self.reload_full_index()
-            })?;
+            }) {
+                Ok(idx) => {
+                    self.chunk_index = idx;
+                }
+                Err(e) => {
+                    crate::commands::backup::emit_post_commit_warning(
+                        progress,
+                        format!(
+                            "snapshot was successfully committed, but hydrating the \
+                             in-memory chunk index from local cache and remote storage \
+                             both failed: {e}. The on-disk chunk index is intact; the \
+                             next repository operation will reload it."
+                        ),
+                    );
+                }
+            }
         }
 
         // Merge active sections if any were produced (filesystem backup).
@@ -413,7 +431,15 @@ impl Repository {
         // invalidation that set the dirty flag (e.g., stale sections removed
         // at backup start).
         if let Err(e) = self.save_file_cache_if_dirty() {
-            warn!("failed to save file cache after concurrent commit: {e}");
+            crate::commands::backup::emit_post_commit_warning(
+                progress,
+                format!(
+                    "snapshot was successfully committed, but saving the local file \
+                     cache failed: {e}. The next backup run will fall back to a \
+                     cold-start walk for any affected sources instead of using cached \
+                     metadata."
+                ),
+            );
         }
 
         // Rebuild local caches if needed. When the fast path already wrote the

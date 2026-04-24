@@ -158,6 +158,23 @@ pub fn with_repo_lock<T>(
 
 /// Shared epilogue for lock-guarded operations: installs a lock fence, runs
 /// the action, performs best-effort cleanup on error, then releases the lock.
+///
+/// # Failure policy
+///
+/// - **Action errors are fatal.** Propagated to the caller as-is; any
+///   subsequent release failure is logged via `tracing::warn!` but does not
+///   replace the original error.
+/// - **Release errors after a successful action are warning-only.** The
+///   action has already committed to storage (e.g. the snapshot blob was
+///   written), so reporting a failure would misrepresent the outcome. A
+///   `tracing::warn!` fires referencing `vykar break-lock` and the 6-hour
+///   stale-lock TTL; the caller receives the action's `Ok` value.
+///
+/// There is no progress sink here, so the release warning is tracing-only —
+/// GUI consumers do not see it. Acceptable trade-off: leaked advisory locks
+/// self-heal in 6 hours and `vykar break-lock` is available for immediate
+/// recovery. Callers that do have a progress sink (backup's commit path)
+/// surface the same warning via `BackupProgressEvent::Warning` instead.
 fn run_under_fence<T>(
     repo: &mut Repository,
     guard: lock::LockGuard,
@@ -173,15 +190,22 @@ fn run_under_fence<T>(
     }
 
     repo.clear_lock_fence();
+    let lock_key = guard.key().to_string();
     match lock::release_lock(repo.storage.as_ref(), guard) {
         Ok(()) => result,
         Err(release_err) => {
             if result.is_err() {
                 tracing::warn!("failed to release repository lock: {release_err}");
-                result
             } else {
-                Err(release_err)
+                tracing::warn!(
+                    "operation completed successfully, but releasing the repository lock \
+                     failed: {release_err}. The advisory lock at `{lock_key}` may persist; \
+                     future operations on this repository may be blocked for up to 6 hours \
+                     until automatic stale-lock cleanup, or run `vykar break-lock` to clear \
+                     it manually."
+                );
             }
+            result
         }
     }
 }
