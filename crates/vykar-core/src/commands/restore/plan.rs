@@ -12,7 +12,33 @@ use crate::snapshot::item::ItemType;
 use vykar_types::chunk_id::ChunkId;
 use vykar_types::error::{Result, VykarError};
 
-use super::{apply_item_xattrs, warn_metadata_err, RestoreStats};
+use super::{apply_item_xattrs, push_metadata_warning, warn_metadata_err, RestoreStats};
+
+/// Classification of a symlink's stored target for restore-time auditing.
+/// Used to warn the operator when a snapshot carries symlinks that escape the
+/// restore root or point at absolute system paths. The link itself is still
+/// restored as-is — these are flags, not rejections.
+#[derive(Debug, PartialEq, Eq)]
+enum SymlinkSafety {
+    Safe,
+    Absolute,
+    EscapesParent,
+}
+
+/// Classify a symlink's stored target string using host-platform path
+/// semantics. Assumes snapshots are restored on the same platform they were
+/// captured on (a Linux snapshot is restored on Linux, etc.); cross-platform
+/// restore is unsupported.
+fn classify_symlink_target(target: &str) -> SymlinkSafety {
+    let path = Path::new(target);
+    if path.is_absolute() {
+        return SymlinkSafety::Absolute;
+    }
+    if path.components().any(|c| matches!(c, Component::ParentDir)) {
+        return SymlinkSafety::EscapesParent;
+    }
+    SymlinkSafety::Safe
+}
 
 /// Where to write a chunk's decompressed data.
 pub(super) struct WriteTarget {
@@ -113,6 +139,23 @@ where
                     let target = dest_root.join(&rel_scratch);
                     if target.parent().is_none_or(|p| !verified_dirs.contains(p)) {
                         ensure_parent_exists_within_root(&target, dest_root)?;
+                    }
+                    match classify_symlink_target(link_target) {
+                        SymlinkSafety::Safe => {}
+                        SymlinkSafety::Absolute => push_metadata_warning(
+                            stats,
+                            format!(
+                                "symlink '{}' points to absolute target '{}' (restored as-is)",
+                                item.path, link_target
+                            ),
+                        ),
+                        SymlinkSafety::EscapesParent => push_metadata_warning(
+                            stats,
+                            format!(
+                                "symlink '{}' points outside its parent ('..') target '{}' (restored as-is)",
+                                item.path, link_target
+                            ),
+                        ),
                     }
                     let _ = std::fs::remove_file(&target);
                     fs::create_symlink(Path::new(link_target), &target)?;
@@ -326,6 +369,110 @@ mod tests {
             },
         )?;
         Ok((all_files, all_chunks, all_verified))
+    }
+
+    #[test]
+    fn classify_symlink_target_safe_relative() {
+        assert_eq!(classify_symlink_target("foo/bar"), SymlinkSafety::Safe);
+        assert_eq!(classify_symlink_target("file.txt"), SymlinkSafety::Safe);
+        assert_eq!(classify_symlink_target("./foo"), SymlinkSafety::Safe);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn classify_symlink_target_absolute_unix() {
+        assert_eq!(
+            classify_symlink_target("/etc/passwd"),
+            SymlinkSafety::Absolute
+        );
+        assert_eq!(classify_symlink_target("/"), SymlinkSafety::Absolute);
+    }
+
+    #[test]
+    fn classify_symlink_target_dotdot_traversal() {
+        assert_eq!(
+            classify_symlink_target("../etc/passwd"),
+            SymlinkSafety::EscapesParent
+        );
+        assert_eq!(
+            classify_symlink_target("../../escape"),
+            SymlinkSafety::EscapesParent
+        );
+    }
+
+    #[test]
+    fn classify_symlink_target_dotdot_in_middle() {
+        // Even targets that net-resolve inside warrant a warning — we do not
+        // canonicalize because the snapshot's paths are not on disk yet.
+        assert_eq!(
+            classify_symlink_target("foo/../bar"),
+            SymlinkSafety::EscapesParent
+        );
+    }
+
+    #[test]
+    fn stream_and_plan_warns_on_absolute_symlink() {
+        let temp = tempdir().unwrap();
+        let dest = &temp.path().canonicalize().unwrap();
+
+        let items = vec![make_symlink_item("link", "/etc/passwd")];
+        let stream = serialize_items(&items);
+
+        let mut stats = RestoreStats::default();
+        collect_all(&stream, dest, |_| true, false, &mut stats).unwrap();
+
+        assert_eq!(stats.symlinks, 1);
+        assert_eq!(stats.warnings.len(), 1);
+        assert!(
+            stats.warnings[0].contains("absolute target"),
+            "got: {}",
+            stats.warnings[0]
+        );
+        // Symlink was still created.
+        assert!(dest
+            .join("link")
+            .symlink_metadata()
+            .unwrap()
+            .file_type()
+            .is_symlink());
+    }
+
+    #[test]
+    fn stream_and_plan_warns_on_dotdot_symlink() {
+        let temp = tempdir().unwrap();
+        let dest = &temp.path().canonicalize().unwrap();
+
+        let items = vec![make_symlink_item("link", "../../escape")];
+        let stream = serialize_items(&items);
+
+        let mut stats = RestoreStats::default();
+        collect_all(&stream, dest, |_| true, false, &mut stats).unwrap();
+
+        assert_eq!(stats.symlinks, 1);
+        assert_eq!(stats.warnings.len(), 1);
+        assert!(
+            stats.warnings[0].contains("outside its parent"),
+            "got: {}",
+            stats.warnings[0]
+        );
+    }
+
+    #[test]
+    fn stream_and_plan_no_warning_on_safe_symlink() {
+        let temp = tempdir().unwrap();
+        let dest = &temp.path().canonicalize().unwrap();
+
+        let items = vec![
+            make_dir_item("d", 0o755),
+            make_symlink_item("d/link", "sibling.txt"),
+        ];
+        let stream = serialize_items(&items);
+
+        let mut stats = RestoreStats::default();
+        collect_all(&stream, dest, |_| true, false, &mut stats).unwrap();
+
+        assert_eq!(stats.symlinks, 1);
+        assert!(stats.warnings.is_empty(), "got: {:?}", stats.warnings);
     }
 
     #[test]

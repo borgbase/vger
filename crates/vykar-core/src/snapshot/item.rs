@@ -97,10 +97,29 @@ impl Item {
                         self.chunks.len()
                     )));
                 }
-                if self.link_target.is_none() {
+                let Some(target) = self.link_target.as_deref() else {
                     return Err(VykarError::InvalidFormat(format!(
                         "item '{}': symlink missing link_target",
                         self.path
+                    )));
+                };
+                if target.is_empty() {
+                    return Err(VykarError::InvalidFormat(format!(
+                        "item '{}': symlink link_target is empty",
+                        self.path
+                    )));
+                }
+                if target.as_bytes().contains(&0) {
+                    return Err(VykarError::InvalidFormat(format!(
+                        "item '{}': symlink link_target contains NUL byte",
+                        self.path
+                    )));
+                }
+                if target.len() > 4096 {
+                    return Err(VykarError::InvalidFormat(format!(
+                        "item '{}': symlink link_target exceeds PATH_MAX ({} bytes)",
+                        self.path,
+                        target.len()
                     )));
                 }
             }
@@ -205,6 +224,36 @@ mod tests {
         let item = base_item(ItemType::Symlink, "link");
         let err = item.validate().unwrap_err().to_string();
         assert!(err.contains("symlink missing link_target"), "got: {err}");
+    }
+
+    #[test]
+    fn validate_rejects_symlink_with_empty_target() {
+        let mut item = base_item(ItemType::Symlink, "link");
+        item.link_target = Some(String::new());
+        let err = item.validate().unwrap_err().to_string();
+        assert!(err.contains("symlink link_target is empty"), "got: {err}");
+    }
+
+    #[test]
+    fn validate_rejects_symlink_with_nul_byte_target() {
+        let mut item = base_item(ItemType::Symlink, "link");
+        item.link_target = Some("foo\0bar".into());
+        let err = item.validate().unwrap_err().to_string();
+        assert!(
+            err.contains("symlink link_target contains NUL byte"),
+            "got: {err}"
+        );
+    }
+
+    #[test]
+    fn validate_rejects_symlink_with_overlong_target() {
+        let mut item = base_item(ItemType::Symlink, "link");
+        item.link_target = Some("a".repeat(4097));
+        let err = item.validate().unwrap_err().to_string();
+        assert!(
+            err.contains("symlink link_target exceeds PATH_MAX"),
+            "got: {err}"
+        );
     }
 
     #[test]
