@@ -1,11 +1,13 @@
-import { VerticalBox, HorizontalBox, Button, LineEdit, StandardTableView } from "std-widgets.slint";
+import { VerticalBox, HorizontalBox, Button, LineEdit, ScrollView, StandardTableView } from "std-widgets.slint";
+import { FindSnapshotGroup } from "../components/types.slint";
 
 export component FindPage inherits Rectangle {
     in property <string> repo_name;
     in property <bool> operation_busy;
     in-out property <string> name_pattern;
     in property <string> status_text;
-    in property <[[StandardListViewItem]]> result_rows;
+    in property <[FindSnapshotGroup]> groups;
+    in property <bool> has_searched;
 
     callback search_clicked();
 
@@ -50,16 +52,41 @@ export component FindPage inherits Rectangle {
             }
         }
 
-        StandardTableView {
+        ScrollView {
             vertical-stretch: 1;
-            columns: [
-                { title: "Snapshot", width: 160px },
-                { title: "Path", horizontal-stretch: 1 },
-                { title: "Date", width: 150px },
-                { title: "Size", width: 90px },
-                { title: "Status", width: 90px },
-            ];
-            rows: root.result_rows;
+            VerticalLayout {
+                spacing: 12px;
+                if root.groups.length == 0 && root.has_searched && !root.operation_busy: Text {
+                    text: "No results.";
+                    color: #888888;
+                }
+                for group in root.groups: VerticalLayout {
+                    spacing: 4px;
+                    HorizontalLayout {
+                        spacing: 8px;
+                        Text {
+                            text: "Snapshot " + group.snapshot_id + " — " + group.snapshot_time;
+                            font-weight: 700;
+                            horizontal-stretch: 1;
+                        }
+                        Text {
+                            text: group.row_count + " match" + (group.row_count == 1 ? "" : "es");
+                            color: #888888;
+                            vertical-alignment: center;
+                        }
+                    }
+                    StandardTableView {
+                        height: (group.row_count + 1) * 28px + 6px;
+                        columns: [
+                            { title: "Path", horizontal-stretch: 1 },
+                            { title: "Modified", width: 150px },
+                            { title: "Size", width: 90px },
+                            { title: "Status", width: 100px },
+                        ];
+                        rows: group.rows;
+                    }
+                }
+            }
         }
 
         HorizontalBox {

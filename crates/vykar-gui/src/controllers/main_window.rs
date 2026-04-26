@@ -8,7 +8,7 @@ use crate::controllers;
 use crate::messages::{AppCommand, SnapshotRowData, SourceInfoData, UiEvent};
 use crate::repo_helpers::send_log;
 use crate::view_models::{
-    build_repo_source_model, current_repo_name, sort_snapshot_table, to_table_model,
+    build_repo_source_model, current_repo_name, sort_snapshot_table, to_find_groups_model,
 };
 use crate::{AppData, MainWindow, SourceInfo, TreeRowData};
 
@@ -276,7 +276,8 @@ pub(crate) fn wire_callbacks(
                 return;
             }
             ui.set_find_status_text("Searching...".into());
-            ui.set_find_result_rows(to_table_model(vec![]));
+            ui.set_find_groups(to_find_groups_model(vec![]));
+            ui.set_find_has_searched(false);
             let _ = tx.send(AppCommand::FindFiles {
                 repo_name: repo,
                 name_pattern: pattern,

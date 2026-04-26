@@ -107,10 +107,16 @@ pub(crate) struct SourceInfoData {
 #[derive(Debug, Clone)]
 pub(crate) struct FindResultRow {
     pub path: String,
-    pub snapshot: String,
-    pub date: String,
+    pub mtime: String,
     pub size: String,
     pub status: String,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct FindSnapshotGroup {
+    pub snapshot_id: String,
+    pub snapshot_time: String,
+    pub rows: Vec<FindResultRow>,
 }
 
 // ── Events (worker → UI) ──
@@ -150,7 +156,7 @@ pub(crate) enum UiEvent {
         message: String,
     },
     FindResultsData {
-        rows: Vec<FindResultRow>,
+        groups: Vec<FindSnapshotGroup>,
     },
     ConfigText(String),
     ConfigSaveError(String),

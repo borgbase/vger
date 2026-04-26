@@ -17,6 +17,13 @@ export struct RepoInfo {
     size: string,
 }
 
+export struct FindSnapshotGroup {
+    snapshot_id: string,
+    snapshot_time: string,
+    row_count: int,
+    rows: [[StandardListViewItem]],
+}
+
 export struct SourceInfo {
     label: string,
     paths: string,

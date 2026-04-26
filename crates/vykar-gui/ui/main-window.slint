@@ -1,5 +1,5 @@
 import { VerticalBox, HorizontalBox, Button, ScrollView, Palette, StandardButton } from "std-widgets.slint";
-import { RepoInfo, SourceInfo, Page } from "components/types.slint";
+import { RepoInfo, SourceInfo, Page, FindSnapshotGroup } from "components/types.slint";
 import { SideBarSection, SideBarItem, SideBarSubItem, SideBarActionRow } from "components/side_bar.slint";
 import { OverviewPage } from "pages/overview.slint";
 import { SnapshotsPage } from "pages/snapshots.slint";
@@ -9,7 +9,7 @@ import { AdvancedPage } from "pages/advanced.slint";
 import { LogPage } from "pages/log.slint";
 import { SettingsPage } from "pages/settings.slint";
 
-export { RepoInfo, SourceInfo, Page }
+export { RepoInfo, SourceInfo, Page, FindSnapshotGroup }
 
 export component MainWindow inherits Window {
     in-out property <string> config_path;
@@ -38,7 +38,8 @@ export component MainWindow inherits Window {
     // Find state (embedded page)
     in-out property <string> find_name_pattern;
     in-out property <string> find_status_text: "Enter a name pattern and click Search.";
-    in-out property <[[StandardListViewItem]]> find_result_rows: [];
+    in-out property <[FindSnapshotGroup]> find_groups: [];
+    in-out property <bool> find_has_searched: false;
 
     // Editor state (Advanced page)
     in-out property <string> editor_text: "";
@@ -269,7 +270,8 @@ export component MainWindow inherits Window {
                     operation_busy: root.operation_busy;
                     name_pattern <=> root.find_name_pattern;
                     status_text: root.find_status_text;
-                    result_rows: root.find_result_rows;
+                    groups: root.find_groups;
+                    has_searched: root.find_has_searched;
                     search_clicked => { root.find_search_clicked(); }
                 }
 

@@ -1,9 +1,11 @@
-use chrono::{DateTime, Local};
+use std::collections::BTreeMap;
+
+use chrono::{DateTime, Local, Utc};
 use vykar_core::app::operations;
 use vykar_core::commands;
 use vykar_core::commands::find::{FileStatus, FindFilter, FindScope};
 
-use crate::messages::{AppCommand, FindResultRow, UiEvent};
+use crate::messages::{AppCommand, FindResultRow, FindSnapshotGroup, UiEvent};
 use crate::repo_helpers::{find_repo_for_snapshot, get_or_resolve_passphrase, send_log};
 use vykar_common::display::format_bytes;
 
@@ -223,6 +225,18 @@ pub(super) fn handle_prune_repo(ctx: &mut WorkerContext, repo_name: String) {
     end_ui_operation(ctx);
 }
 
+fn format_mtime_nanos(mtime_nanos: i64) -> String {
+    let secs = mtime_nanos.div_euclid(1_000_000_000);
+    let nsecs = mtime_nanos.rem_euclid(1_000_000_000) as u32;
+    match DateTime::<Utc>::from_timestamp(secs, nsecs) {
+        Some(dt) => dt
+            .with_timezone(&Local)
+            .format("%Y-%m-%d %H:%M:%S")
+            .to_string(),
+        None => String::new(),
+    }
+}
+
 pub(super) fn handle_find_files(ctx: &mut WorkerContext, repo_name: String, name_pattern: String) {
     begin_ui_operation(ctx, "Searching files...");
 
@@ -264,33 +278,51 @@ pub(super) fn handle_find_files(ctx: &mut WorkerContext, repo_name: String, name
         &filter,
     ) {
         Ok(timelines) => {
-            let mut rows = Vec::new();
+            let mut by_snap: BTreeMap<(DateTime<Utc>, String), Vec<FindResultRow>> =
+                BTreeMap::new();
+            let mut total_hits: usize = 0;
             for tl in &timelines {
                 for ah in &tl.hits {
-                    let ts: DateTime<Local> = ah.hit.snapshot_time.with_timezone(&Local);
-                    rows.push(FindResultRow {
-                        path: tl.path.clone(),
-                        snapshot: ah.hit.snapshot_name.clone(),
-                        date: ts.format("%Y-%m-%d %H:%M:%S").to_string(),
-                        size: format_bytes(ah.hit.size),
-                        status: match ah.status {
-                            FileStatus::Added => "Added".to_string(),
-                            FileStatus::Modified => "Modified".to_string(),
-                            FileStatus::Unchanged => "Unchanged".to_string(),
-                        },
-                    });
+                    by_snap
+                        .entry((ah.hit.snapshot_time, ah.hit.snapshot_name.clone()))
+                        .or_default()
+                        .push(FindResultRow {
+                            path: tl.path.clone(),
+                            mtime: format_mtime_nanos(ah.hit.mtime),
+                            size: format_bytes(ah.hit.size),
+                            status: match ah.status {
+                                FileStatus::Added => "Added".to_string(),
+                                FileStatus::Modified => "Modified".to_string(),
+                                FileStatus::Unchanged => "Unchanged".to_string(),
+                            },
+                        });
+                    total_hits += 1;
                 }
             }
+            // Newest snapshot first.
+            let groups: Vec<FindSnapshotGroup> = by_snap
+                .into_iter()
+                .rev()
+                .map(|((ts, id), rows)| {
+                    let local: DateTime<Local> = ts.with_timezone(&Local);
+                    FindSnapshotGroup {
+                        snapshot_id: id,
+                        snapshot_time: local.format("%Y-%m-%d %H:%M:%S").to_string(),
+                        rows,
+                    }
+                })
+                .collect();
             send_log(
                 &ctx.ui_tx,
                 format!(
-                    "[{repo_name}] Find '{}': {} paths, {} total hits",
+                    "[{repo_name}] Find '{}': {} paths, {} total hits, {} snapshots",
                     name_pattern,
                     timelines.len(),
-                    rows.len(),
+                    total_hits,
+                    groups.len(),
                 ),
             );
-            let _ = ctx.ui_tx.send(UiEvent::FindResultsData { rows });
+            let _ = ctx.ui_tx.send(UiEvent::FindResultsData { groups });
         }
         Err(e) => {
             send_log(&ctx.ui_tx, format!("[{repo_name}] find failed: {e}"));

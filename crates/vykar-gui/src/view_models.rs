@@ -4,9 +4,9 @@ use crossbeam_channel::Sender;
 use slint::{ComponentHandle, Model, ModelRc, SharedString, StandardListViewItem, VecModel};
 use vykar_core::config::ResolvedRepo;
 
-use crate::messages::{SnapshotRowData, SourceInfoData, UiEvent};
+use crate::messages::{FindSnapshotGroup, SnapshotRowData, SourceInfoData, UiEvent};
 use crate::repo_helpers::format_repo_name;
-use crate::{AppData, MainWindow, SourceInfo};
+use crate::{AppData, FindSnapshotGroup as UiFindSnapshotGroup, MainWindow, SourceInfo};
 
 pub(crate) fn to_table_model(rows: Vec<Vec<String>>) -> ModelRc<ModelRc<StandardListViewItem>> {
     let outer: Vec<ModelRc<StandardListViewItem>> = rows
@@ -20,6 +20,27 @@ pub(crate) fn to_table_model(rows: Vec<Vec<String>>) -> ModelRc<ModelRc<Standard
         })
         .collect();
     ModelRc::new(VecModel::from(outer))
+}
+
+pub(crate) fn to_find_groups_model(groups: Vec<FindSnapshotGroup>) -> ModelRc<UiFindSnapshotGroup> {
+    let items: Vec<UiFindSnapshotGroup> = groups
+        .into_iter()
+        .map(|g| {
+            let row_count = g.rows.len() as i32;
+            let table_rows: Vec<Vec<String>> = g
+                .rows
+                .into_iter()
+                .map(|r| vec![r.path, r.mtime, r.size, r.status])
+                .collect();
+            UiFindSnapshotGroup {
+                snapshot_id: g.snapshot_id.into(),
+                snapshot_time: g.snapshot_time.into(),
+                row_count,
+                rows: to_table_model(table_rows),
+            }
+        })
+        .collect();
+    ModelRc::new(VecModel::from(items))
 }
 
 pub(crate) fn to_string_model(items: Vec<String>) -> ModelRc<SharedString> {

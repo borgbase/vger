@@ -12,7 +12,8 @@ use crate::messages::{AppCommand, SnapshotRowData, SourceInfoData, UiEvent};
 use crate::state;
 use crate::tray_state;
 use crate::view_models::{
-    build_repo_source_model, current_repo_name, to_string_model, to_table_model,
+    build_repo_source_model, current_repo_name, to_find_groups_model, to_string_model,
+    to_table_model,
 };
 use crate::{AppData, MainWindow, RepoInfo, SourceInfo};
 
@@ -357,14 +358,14 @@ pub(crate) fn spawn(
                             controllers::restore::handle_restore_finished(rw, success, message);
                         });
                     }
-                    UiEvent::FindResultsData { rows } => {
-                        let count = rows.len();
-                        let table_rows: Vec<Vec<String>> = rows
-                            .into_iter()
-                            .map(|r| vec![r.snapshot, r.path, r.date, r.size, r.status])
-                            .collect();
-                        ui.set_find_result_rows(to_table_model(table_rows));
-                        ui.set_find_status_text(format!("{count} results found.").into());
+                    UiEvent::FindResultsData { groups } => {
+                        let total: usize = groups.iter().map(|g| g.rows.len()).sum();
+                        let snap_count = groups.len();
+                        ui.set_find_groups(to_find_groups_model(groups));
+                        ui.set_find_has_searched(true);
+                        ui.set_find_status_text(
+                            format!("{total} results across {snap_count} snapshots.").into(),
+                        );
                     }
                     UiEvent::ConfigText(text) => {
                         ui.set_editor_baseline(text.clone().into());
