@@ -258,7 +258,7 @@ pub(super) fn handle_refresh_snapshots(ctx: &mut WorkerContext, repo_selector: S
                     data.push(SnapshotRowData {
                         id: s.name.clone(),
                         hostname,
-                        time_str: ts.format("%Y-%m-%d %H:%M:%S").to_string(),
+                        time_str: ts.format("%Y-%m-%d %H:%M").to_string(),
                         label,
                         files,
                         size,

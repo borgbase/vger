@@ -70,8 +70,8 @@ pub(crate) fn build_snapshot_table_rows(
             };
             vec![
                 id,
-                d.hostname.clone(),
                 d.time_str.clone(),
+                d.hostname.clone(),
                 d.label.clone(),
                 d.files.clone(),
                 d.size.clone(),
@@ -113,11 +113,11 @@ pub(crate) fn sort_snapshot_table(
         return;
     };
 
-    // Columns: 0=ID, 1=Host, 2=Time, 3=Label, 4=Files, 5=Size
+    // Columns: 0=ID, 1=Time, 2=Host, 3=Label, 4=Files, 5=Size
     match col_idx {
         0 => data.sort_by(|a, b| a.id.cmp(&b.id)),
-        1 => data.sort_by(|a, b| a.hostname.cmp(&b.hostname)),
-        2 => data.sort_by_key(|a| a.time_epoch),
+        1 => data.sort_by_key(|a| a.time_epoch),
+        2 => data.sort_by(|a, b| a.hostname.cmp(&b.hostname)),
         3 => data.sort_by(|a, b| a.label.cmp(&b.label)),
         4 => data.sort_by(|a, b| match (a.nfiles, b.nfiles) {
             (Some(a), Some(b)) => a.cmp(&b),
