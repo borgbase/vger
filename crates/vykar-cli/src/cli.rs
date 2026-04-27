@@ -1,3 +1,5 @@
+use std::net::SocketAddr;
+
 use clap::{Parser, Subcommand};
 
 #[derive(Parser)]
@@ -247,7 +249,15 @@ pub(crate) enum Commands {
     },
 
     /// Run scheduled backups as a foreground daemon
-    Daemon,
+    Daemon {
+        /// Bind a read-only HTTP status page at this address (e.g. 127.0.0.1:7575)
+        #[arg(long = "http-listen", value_name = "ADDR", env = "VYKAR_HTTP_LISTEN")]
+        http_listen: Option<SocketAddr>,
+
+        /// Permit binding --http-listen to a non-loopback address
+        #[arg(long = "http-allow-public", env = "VYKAR_HTTP_ALLOW_PUBLIC")]
+        http_allow_public: bool,
+    },
 
     /// Free repository space by compacting pack files
     Compact {
@@ -390,7 +400,7 @@ impl Commands {
             | Self::BreakLock { repo, .. }
             | Self::Compact { repo, .. } => repo.as_deref(),
             Self::Snapshot { command, .. } => command.repo(),
-            Self::Config { .. } | Self::Daemon => None,
+            Self::Config { .. } | Self::Daemon { .. } => None,
         }
     }
 
@@ -427,7 +437,7 @@ impl Commands {
             Self::Compact { .. } => "compact",
             Self::Snapshot { .. } => "snapshot",
             Self::Config { .. } => "config",
-            Self::Daemon => "daemon",
+            Self::Daemon { .. } => "daemon",
         }
     }
 }

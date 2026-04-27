@@ -326,7 +326,7 @@ pub(crate) fn dispatch_command(
         Commands::Config { .. } => {
             Err("'config' command should be handled before config resolution".into())
         }
-        Commands::Daemon => {
+        Commands::Daemon { .. } => {
             Err("'daemon' command should be handled before per-repo dispatch".into())
         }
     }

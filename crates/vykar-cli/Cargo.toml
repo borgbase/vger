@@ -26,9 +26,12 @@ chrono.workspace = true
 hex.workspace = true
 rand.workspace = true
 zeroize.workspace = true
+tiny_http = "0.12"
+serde_json.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true
+ureq = "2"
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"

@@ -38,7 +38,7 @@ fn main() {
 
     // Initialize logging — auto-upgrade to info for daemon
     let filter = match cli.verbose {
-        0 if matches!(&cli.command, Some(Commands::Daemon)) => "info",
+        0 if matches!(&cli.command, Some(Commands::Daemon { .. })) => "info",
         0 => "warn",
         1 => "info",
         2 => "debug",
@@ -93,12 +93,25 @@ fn main() {
 
     // Handle `daemon` subcommand early — it owns its own config lifecycle
     // (loads, validates, and reloads config internally).
-    if matches!(&cli.command, Some(Commands::Daemon)) {
+    if let Some(Commands::Daemon {
+        http_listen,
+        http_allow_public,
+    }) = &cli.command
+    {
         if cli.trust_repo {
             eprintln!("Error: --trust-repo cannot be used with the daemon command");
             std::process::exit(1);
         }
-        if let Err(e) = cmd::daemon::run_daemon(source) {
+        if let Some(addr) = http_listen {
+            if !addr.ip().is_loopback() && !*http_allow_public {
+                eprintln!(
+                    "Error: --http-listen {addr} binds to a non-loopback address; \
+                     pass --http-allow-public (or set VYKAR_HTTP_ALLOW_PUBLIC=1) to confirm"
+                );
+                std::process::exit(1);
+            }
+        }
+        if let Err(e) = cmd::daemon::run_daemon(source, *http_listen) {
             eprintln!("Error: {e}");
             std::process::exit(1);
         }
