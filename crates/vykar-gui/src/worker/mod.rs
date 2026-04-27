@@ -141,6 +141,11 @@ pub(crate) fn run_worker(
                 dest,
                 paths,
             } => actions::handle_restore_selected(&mut ctx, repo_name, snapshot, dest, paths),
+            AppCommand::DiffSnapshots {
+                repo_name,
+                snapshot_a,
+                snapshot_b,
+            } => actions::handle_diff_snapshots(&mut ctx, repo_name, snapshot_a, snapshot_b),
             AppCommand::DeleteSnapshots {
                 repo_name,
                 snapshot_names,

@@ -30,6 +30,17 @@ fn single_selected_index(sel: &Arc<Mutex<SnapshotSelection>>) -> Option<usize> {
     Some(only)
 }
 
+fn selected_indices(sel: &Arc<Mutex<SnapshotSelection>>, expected: usize) -> Option<Vec<usize>> {
+    let guard = sel.lock().ok()?;
+    let indices: Vec<usize> = guard
+        .selected
+        .iter()
+        .enumerate()
+        .filter_map(|(i, s)| s.then_some(i))
+        .collect();
+    (indices.len() == expected).then_some(indices)
+}
+
 /// Toggle the `expanded` flag on a `SourceInfo` row in the given model, which
 /// must be a `VecModel<SourceInfo>`. Rebuilds the model since Slint's
 /// `ModelRc` doesn't expose mutable row access.
@@ -441,6 +452,50 @@ pub(crate) fn wire_callbacks(
             let _ = tx.send(AppCommand::StartMount {
                 repo_name: rname,
                 snapshot_name: Some(snap_name),
+            });
+        });
+    }
+
+    {
+        let tx = app_tx.clone();
+        let sel = snapshot_selection.clone();
+        let ui_tx = ui_tx.clone();
+        let ui_weak = ui.as_weak();
+        ui.on_diff_selected_snapshots_clicked(move || {
+            let Some(ui) = ui_weak.upgrade() else {
+                return;
+            };
+            let Some(indices) = selected_indices(&sel, 2) else {
+                return;
+            };
+            let ids = ui.global::<AppData>().get_snapshot_ids();
+            let rnames = ui.global::<AppData>().get_snapshot_repo_names();
+            let Some(first_id) = ids.row_data(indices[0]).map(|s| s.to_string()) else {
+                return;
+            };
+            let Some(second_id) = ids.row_data(indices[1]).map(|s| s.to_string()) else {
+                return;
+            };
+            let Some(first_repo) = rnames.row_data(indices[0]).map(|s| s.to_string()) else {
+                return;
+            };
+            let Some(second_repo) = rnames.row_data(indices[1]).map(|s| s.to_string()) else {
+                return;
+            };
+            if first_repo != second_repo {
+                send_log(&ui_tx, "Cannot diff snapshots from different repositories.");
+                return;
+            }
+
+            if let Some(dw) = controllers::diff::ensure_window() {
+                controllers::diff::prepare_loading(&dw, &first_repo, &first_id, &second_id);
+                let _ = dw.show();
+            }
+
+            let _ = tx.send(AppCommand::DiffSnapshots {
+                repo_name: first_repo,
+                snapshot_a: first_id,
+                snapshot_b: second_id,
             });
         });
     }

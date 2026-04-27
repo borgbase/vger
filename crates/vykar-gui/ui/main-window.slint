@@ -82,6 +82,7 @@ export component MainWindow inherits Window {
     callback refresh_snapshots_clicked();
     callback prune_snapshots_clicked();
     callback restore_selected_snapshot_clicked();
+    callback diff_selected_snapshots_clicked();
     callback delete_selected_snapshots_clicked();
     callback mount_selected_snapshot_clicked();
     callback snapshot_row_clicked(/* row */ int, /* toggle */ bool, /* range */ bool);
@@ -263,6 +264,7 @@ export component MainWindow inherits Window {
                     refresh_clicked => { root.refresh_snapshots_clicked(); }
                     prune_clicked => { root.prune_snapshots_clicked(); }
                     restore_selected => { root.restore_selected_snapshot_clicked(); }
+                    diff_selected => { root.diff_selected_snapshots_clicked(); }
                     delete_selected => { root.delete_selected_snapshots_clicked(); }
                     mount_selected => { root.mount_selected_snapshot_clicked(); }
                     row_clicked(r, t, s) => { root.snapshot_row_clicked(r, t, s); }

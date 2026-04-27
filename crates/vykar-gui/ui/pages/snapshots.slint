@@ -10,6 +10,7 @@ export component SnapshotsPage inherits Rectangle {
     callback refresh_clicked();
     callback prune_clicked();
     callback restore_selected();
+    callback diff_selected();
     callback delete_selected();
     callback mount_selected();
     callback row_clicked(/* row */ int, /* toggle */ bool, /* range */ bool);
@@ -88,6 +89,11 @@ export component SnapshotsPage inherits Rectangle {
                 text: "Restore Selected Snapshot";
                 enabled: !root.operation_busy && root.selected_count == 1;
                 clicked => { root.restore_selected(); }
+            }
+            Button {
+                text: "Diff Selected";
+                enabled: !root.operation_busy && root.selected_count == 2;
+                clicked => { root.diff_selected(); }
             }
             Button {
                 text: root.selected_count > 0

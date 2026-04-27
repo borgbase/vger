@@ -678,6 +678,15 @@ pub fn list_snapshot_items_with_source_paths(
     commands::list::list_snapshot_items_with_source_paths(config, passphrase, snapshot_name)
 }
 
+pub fn diff_snapshots(
+    config: &VykarConfig,
+    passphrase: Option<&str>,
+    snapshot_a: &str,
+    snapshot_b: &str,
+) -> Result<commands::diff::DiffResult> {
+    commands::diff::run(config, passphrase, snapshot_a, snapshot_b)
+}
+
 pub fn restore_snapshot(
     config: &VykarConfig,
     passphrase: Option<&str>,

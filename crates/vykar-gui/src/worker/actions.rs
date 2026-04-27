@@ -6,7 +6,7 @@ use vykar_core::commands;
 use vykar_core::commands::delete::DeleteResult;
 use vykar_core::commands::find::{FileStatus, FindFilter, FindScope};
 
-use crate::messages::{AppCommand, FindResultRow, FindSnapshotGroup, UiEvent};
+use crate::messages::{AppCommand, DiffResultRow, FindResultRow, FindSnapshotGroup, UiEvent};
 use crate::repo_helpers::{find_repo_for_snapshot, get_or_resolve_passphrase, send_log};
 use vykar_common::display::format_bytes;
 
@@ -226,6 +226,103 @@ pub(super) fn handle_delete_snapshots(
             send_log(&ctx.ui_tx, format!("[{repo_name}] delete failed: {e}"));
         }
     }
+    end_ui_operation(ctx);
+}
+
+fn send_diff_error(
+    ctx: &WorkerContext,
+    repo_name: String,
+    snapshot_a: String,
+    snapshot_b: String,
+    message: String,
+) {
+    let _ = ctx.ui_tx.send(UiEvent::DiffResultsData {
+        repo_name,
+        snapshot_a,
+        snapshot_b,
+        base_snapshot: String::new(),
+        target_snapshot: String::new(),
+        rows: Vec::new(),
+        error: Some(message),
+    });
+}
+
+pub(super) fn handle_diff_snapshots(
+    ctx: &mut WorkerContext,
+    repo_name: String,
+    snapshot_a: String,
+    snapshot_b: String,
+) {
+    begin_ui_operation(ctx, "Diffing snapshots...");
+
+    let repo = match select_repo_or_log(ctx, &ctx.runtime.repos, &repo_name) {
+        Some(r) => r,
+        None => {
+            send_diff_error(
+                ctx,
+                repo_name,
+                snapshot_a,
+                snapshot_b,
+                "repository not found".to_string(),
+            );
+            end_ui_operation(ctx);
+            return;
+        }
+    };
+
+    let passphrase = match get_or_resolve_passphrase(repo, &mut ctx.passphrases) {
+        Ok(p) => p,
+        Err(e) => {
+            send_log(&ctx.ui_tx, format!("[{repo_name}] passphrase error: {e}"));
+            send_diff_error(ctx, repo_name, snapshot_a, snapshot_b, e.to_string());
+            end_ui_operation(ctx);
+            return;
+        }
+    };
+
+    match operations::diff_snapshots(
+        &repo.config,
+        passphrase.as_deref().map(|s| s.as_str()),
+        &snapshot_a,
+        &snapshot_b,
+    ) {
+        Ok(result) => {
+            let rows: Vec<DiffResultRow> = result
+                .entries
+                .iter()
+                .map(|entry| DiffResultRow {
+                    change: entry.change,
+                    path: entry.path.clone(),
+                    old_size_bytes: entry.old_size,
+                    new_size_bytes: entry.new_size,
+                    delta_bytes: entry.size_delta,
+                })
+                .collect();
+            send_log(
+                &ctx.ui_tx,
+                format!(
+                    "[{repo_name}] Diff {} -> {}: {} file changes",
+                    result.base_snapshot,
+                    result.target_snapshot,
+                    rows.len(),
+                ),
+            );
+            let _ = ctx.ui_tx.send(UiEvent::DiffResultsData {
+                repo_name,
+                snapshot_a,
+                snapshot_b,
+                base_snapshot: result.base_snapshot,
+                target_snapshot: result.target_snapshot,
+                rows,
+                error: None,
+            });
+        }
+        Err(e) => {
+            send_log(&ctx.ui_tx, format!("[{repo_name}] diff failed: {e}"));
+            send_diff_error(ctx, repo_name, snapshot_a, snapshot_b, e.to_string());
+        }
+    }
+
     end_ui_operation(ctx);
 }
 

@@ -303,6 +303,16 @@ pub(crate) enum SnapshotCommand {
         /// Snapshot to inspect (name or "latest")
         snapshot: String,
     },
+    /// Compare changed regular files between two snapshots
+    ///
+    /// Both snapshots must live in the same repository; the repo is probed
+    /// automatically across the configured set.
+    Diff {
+        /// First snapshot to compare (name or "latest")
+        snapshot_a: String,
+        /// Second snapshot to compare (name or "latest")
+        snapshot_b: String,
+    },
     /// Delete one or more snapshots
     Delete {
         /// Select repository by label or path
@@ -360,6 +370,7 @@ impl SnapshotCommand {
             | Self::Info { repo, .. }
             | Self::Delete { repo, .. }
             | Self::Find { repo, .. } => repo.as_deref(),
+            Self::Diff { .. } => None,
         }
     }
 }

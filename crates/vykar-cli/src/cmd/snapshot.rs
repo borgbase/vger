@@ -2,6 +2,7 @@ use std::cmp::Reverse;
 use std::sync::atomic::AtomicBool;
 
 use chrono::Local;
+use comfy_table::{Cell, CellAlignment};
 
 use vykar_core::commands;
 use vykar_core::config::VykarConfig;
@@ -89,6 +90,10 @@ pub(crate) fn run_snapshot_command(
         SnapshotCommand::Delete {
             snapshots, dry_run, ..
         } => super::delete::run_delete(config, label, snapshots, *dry_run, shutdown),
+        SnapshotCommand::Diff {
+            snapshot_a,
+            snapshot_b,
+        } => run_snapshot_diff(config, label, snapshot_a, snapshot_b),
         SnapshotCommand::Find {
             path,
             source,
@@ -176,6 +181,60 @@ pub(crate) fn run_snapshot_command(
             Ok(())
         }
     }
+}
+
+fn format_optional_size(size: Option<u64>) -> String {
+    size.map(format_bytes).unwrap_or_else(|| "-".to_string())
+}
+
+fn format_size_delta(delta: i64) -> String {
+    match delta.cmp(&0) {
+        std::cmp::Ordering::Less => format!("-{}", format_bytes(delta.unsigned_abs())),
+        std::cmp::Ordering::Equal => format_bytes(0),
+        std::cmp::Ordering::Greater => format!("+{}", format_bytes(delta as u64)),
+    }
+}
+
+fn run_snapshot_diff(
+    config: &VykarConfig,
+    label: Option<&str>,
+    snapshot_a: &str,
+    snapshot_b: &str,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let diff = with_repo_passphrase(config, label, |passphrase| {
+        commands::diff::run(config, passphrase, snapshot_a, snapshot_b)
+            .map_err(|e| -> Box<dyn std::error::Error> { Box::new(e) })
+    })?;
+
+    if diff.entries.is_empty() {
+        println!("No file changes found.");
+        return Ok(());
+    }
+
+    let theme = CliTableTheme::detect();
+    let mut table = theme.new_data_table(&["Change", "Path", "Old Size", "New Size", "Delta"]);
+    for col_idx in [2, 3, 4] {
+        let col = table.column_mut(col_idx).expect("size column");
+        col.set_cell_alignment(CellAlignment::Right);
+    }
+
+    for entry in &diff.entries {
+        let change = match entry.change {
+            commands::diff::DiffChangeKind::Added => "Added",
+            commands::diff::DiffChangeKind::Removed => "Removed",
+            commands::diff::DiffChangeKind::Modified => "Modified",
+        };
+        table.add_row(vec![
+            Cell::new(change),
+            Cell::new(&entry.path),
+            Cell::new(format_optional_size(entry.old_size)),
+            Cell::new(format_optional_size(entry.new_size)),
+            Cell::new(format_size_delta(entry.size_delta)),
+        ]);
+    }
+
+    println!("{table}");
+    Ok(())
 }
 
 #[allow(clippy::too_many_arguments)]

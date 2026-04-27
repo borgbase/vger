@@ -346,6 +346,30 @@ pub(crate) fn spawn(
                             controllers::restore::handle_restore_finished(rw, success, message);
                         });
                     }
+                    UiEvent::DiffResultsData {
+                        repo_name,
+                        snapshot_a,
+                        snapshot_b,
+                        base_snapshot,
+                        target_snapshot,
+                        rows,
+                        error,
+                    } => {
+                        controllers::diff::with_window(|dw| {
+                            controllers::diff::handle_diff_results(
+                                dw,
+                                controllers::diff::DiffResultsView {
+                                    repo_name,
+                                    snapshot_a,
+                                    snapshot_b,
+                                    base_snapshot,
+                                    target_snapshot,
+                                    rows,
+                                    error,
+                                },
+                            );
+                        });
+                    }
                     UiEvent::FindResultsData { groups } => {
                         let total: usize = groups.iter().map(|g| g.rows.len()).sum();
                         let snap_count = groups.len();

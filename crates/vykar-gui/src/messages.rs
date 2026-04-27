@@ -1,4 +1,5 @@
 use chrono::Local;
+use vykar_core::commands::diff::DiffChangeKind;
 use vykar_core::snapshot::item::Item;
 
 /// Build a `UiEvent::LogEntry` capturing the current local time for both date and timestamp.
@@ -37,6 +38,11 @@ pub(crate) enum AppCommand {
         snapshot: String,
         dest: String,
         paths: Vec<String>,
+    },
+    DiffSnapshots {
+        repo_name: String,
+        snapshot_a: String,
+        snapshot_b: String,
     },
     DeleteSnapshots {
         repo_name: String,
@@ -139,6 +145,15 @@ pub(crate) struct FindSnapshotGroup {
     pub rows: Vec<FindResultRow>,
 }
 
+#[derive(Debug, Clone)]
+pub(crate) struct DiffResultRow {
+    pub change: DiffChangeKind,
+    pub path: String,
+    pub old_size_bytes: Option<u64>,
+    pub new_size_bytes: Option<u64>,
+    pub delta_bytes: i64,
+}
+
 // ── Events (worker → UI) ──
 
 #[derive(Debug, Clone)]
@@ -174,6 +189,15 @@ pub(crate) enum UiEvent {
     RestoreFinished {
         success: bool,
         message: String,
+    },
+    DiffResultsData {
+        repo_name: String,
+        snapshot_a: String,
+        snapshot_b: String,
+        base_snapshot: String,
+        target_snapshot: String,
+        rows: Vec<DiffResultRow>,
+        error: Option<String>,
     },
     FindResultsData {
         groups: Vec<FindSnapshotGroup>,

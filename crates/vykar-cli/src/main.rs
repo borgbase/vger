@@ -186,6 +186,81 @@ fn main() {
         }
     }
 
+    // Smart snapshot diff dispatch in multi-repo configs: probe both snapshot
+    // names and pick the unique containing repo, or error with a helpful
+    // message. Single-repo configs fall through to the default path below.
+    if multi {
+        if let Some(cli::Commands::Snapshot {
+            command:
+                cli::SnapshotCommand::Diff {
+                    snapshot_a,
+                    snapshot_b,
+                },
+        }) = cli.command.as_ref()
+        {
+            for repo in &repos {
+                warn_if_untrusted_rest(&repo.config, repo.label.as_deref());
+            }
+            match classify_diff_target(snapshot_a, snapshot_b, &repos) {
+                DiffDispatch::LatestRequiresRepo => {
+                    eprintln!(
+                        "Error: 'latest' is ambiguous in snapshot diff when multiple repositories \
+                         are configured; rename the snapshot or scope the config"
+                    );
+                    std::process::exit(1);
+                }
+                DiffDispatch::SnapshotNotFound { snapshot } => {
+                    eprintln!(
+                        "Error: snapshot '{snapshot}' not found in any configured repository"
+                    );
+                    std::process::exit(1);
+                }
+                DiffDispatch::DifferentRepos { a_repo, b_repo } => {
+                    eprintln!(
+                        "Error: snapshot diff requires both snapshots to live in the same \
+                         repository: '{snapshot_a}' is in '{a_repo}', '{snapshot_b}' is in '{b_repo}'"
+                    );
+                    std::process::exit(1);
+                }
+                DiffDispatch::Ambiguous {
+                    snapshot,
+                    repos: rs,
+                } => {
+                    let names: Vec<&str> =
+                        rs.iter().map(|i| repo_display_name(repos[*i])).collect();
+                    eprintln!(
+                        "Error: snapshot '{snapshot}' is present in multiple repositories: {}. \
+                         Rename the snapshot or scope the config.",
+                        names.join(", ")
+                    );
+                    std::process::exit(1);
+                }
+                DiffDispatch::ProbeError { errors } => {
+                    eprintln!("Error: could not probe all repositories");
+                    for (i, err) in &errors {
+                        eprintln!("  {}:  {err}", repo_display_name(repos[*i]));
+                    }
+                    std::process::exit(1);
+                }
+                DiffDispatch::Unique(idx) => {
+                    let result = run_repo_command(&cli, repos[idx]);
+                    if signal::SHUTDOWN.load(Ordering::SeqCst) {
+                        eprintln!("Interrupted");
+                        std::process::exit(EXIT_INTERRUPTED);
+                    }
+                    match result {
+                        Ok(true) => std::process::exit(EXIT_PARTIAL),
+                        Ok(false) => return,
+                        Err(e) => {
+                            eprintln!("Error: {e}");
+                            std::process::exit(EXIT_ERROR);
+                        }
+                    }
+                }
+            }
+        }
+    }
+
     // Smart snapshot dispatch: when multiple repos are configured and the
     // command targets a specific snapshot, probe repos to find the one that
     // actually contains it, rather than running against all repos.
@@ -380,6 +455,94 @@ fn probe_snapshot(
         .map_err(|e| -> Box<dyn std::error::Error> { Box::new(e) })?;
         Ok(repo.manifest().find_snapshot(snapshot_name).is_some())
     })
+}
+
+/// Result of probing multiple repos for two snapshot names (snapshot diff).
+enum DiffDispatch {
+    /// Both snapshots found uniquely in the same repo.
+    Unique(usize),
+    /// One of the snapshots is missing in every probed repo.
+    SnapshotNotFound { snapshot: String },
+    /// Snapshots resolve to different repos.
+    DifferentRepos { a_repo: String, b_repo: String },
+    /// One of the snapshots matches multiple repos with no unique pairing.
+    Ambiguous { snapshot: String, repos: Vec<usize> },
+    /// "latest" is meaningless across repos.
+    LatestRequiresRepo,
+    /// At least one probe failed.
+    ProbeError { errors: Vec<(usize, String)> },
+}
+
+/// Classify where two snapshots live across multiple repos.
+fn classify_diff_target(snap_a: &str, snap_b: &str, repos: &[&ResolvedRepo]) -> DiffDispatch {
+    if snap_a.eq_ignore_ascii_case("latest") || snap_b.eq_ignore_ascii_case("latest") {
+        return DiffDispatch::LatestRequiresRepo;
+    }
+
+    let mut matches_a: Vec<usize> = Vec::new();
+    let mut matches_b: Vec<usize> = Vec::new();
+    let mut errors: Vec<(usize, String)> = Vec::new();
+
+    for (i, repo) in repos.iter().enumerate() {
+        let a = probe_snapshot(&repo.config, repo.label.as_deref(), snap_a);
+        let b = probe_snapshot(&repo.config, repo.label.as_deref(), snap_b);
+        match (a, b) {
+            (Ok(found_a), Ok(found_b)) => {
+                if found_a {
+                    matches_a.push(i);
+                }
+                if found_b {
+                    matches_b.push(i);
+                }
+            }
+            (Err(e), _) | (_, Err(e)) => errors.push((i, e.to_string())),
+        }
+    }
+
+    if !errors.is_empty() {
+        return DiffDispatch::ProbeError { errors };
+    }
+
+    if matches_a.is_empty() {
+        return DiffDispatch::SnapshotNotFound {
+            snapshot: snap_a.to_string(),
+        };
+    }
+    if matches_b.is_empty() {
+        return DiffDispatch::SnapshotNotFound {
+            snapshot: snap_b.to_string(),
+        };
+    }
+
+    // Classify by intersection: the diff can run iff there is exactly one
+    // repo containing both snapshots, even if one name is also present in
+    // other repos that lack the other snapshot.
+    let intersection: Vec<usize> = matches_a
+        .iter()
+        .copied()
+        .filter(|i| matches_b.contains(i))
+        .collect();
+    match intersection.len() {
+        1 => DiffDispatch::Unique(intersection[0]),
+        0 => DiffDispatch::DifferentRepos {
+            a_repo: repo_display_name(repos[matches_a[0]]).to_string(),
+            b_repo: repo_display_name(repos[matches_b[0]]).to_string(),
+        },
+        _ => {
+            // Both snapshot names collide in multiple repos. Report the
+            // narrower of the two name's match sets so the user can see
+            // exactly where the ambiguity is.
+            let (snapshot, ambiguous_in) = if matches_a.len() <= matches_b.len() {
+                (snap_a, intersection)
+            } else {
+                (snap_b, intersection)
+            };
+            DiffDispatch::Ambiguous {
+                snapshot: snapshot.to_string(),
+                repos: ambiguous_in,
+            }
+        }
+    }
 }
 
 /// Execute the CLI command (or default actions) against one repo.
