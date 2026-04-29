@@ -4,7 +4,7 @@ use std::sync::Arc;
 use crate::commands;
 use crate::commands::check::{
     process_verify_response, try_server_verify, verify_pack_full, CheckError, IntegrityIssue,
-    ServerVerifyOutcome,
+    RepairMode, ServerVerifyOutcome,
 };
 use crate::index::ChunkIndexEntry;
 use vykar_storage::local_backend::LocalBackend;
@@ -15,7 +15,9 @@ use vykar_types::chunk_id::ChunkId;
 use vykar_types::error::{Result, VykarError};
 use vykar_types::pack_id::PackId;
 
-use super::helpers::{backup_single_source, init_repo, init_test_environment, open_local_repo};
+use super::helpers::{
+    backup_single_source, init_repo, init_test_environment, make_test_config, open_local_repo,
+};
 
 /// Mock storage backend that returns a transient error from server_verify_packs.
 struct TransientFailBackend;
@@ -440,4 +442,231 @@ fn test_verify_pack_full_overflow_add() {
         msg.contains("blob range overflows"),
         "expected overflow error, got: {msg}",
     );
+}
+
+// ---------------------------------------------------------------------------
+// Item-level impact reporting (issue #122)
+// ---------------------------------------------------------------------------
+
+/// Build a config with very small pack sizes so each chunk lands in its own
+/// pack. Needed by the item-impact tests below: they delete a pack containing
+/// only file data, and this only works reliably when item_ptrs chunks live in
+/// a *different* pack from the file data chunks.
+fn init_repo_small_packs(repo_dir: &std::path::Path) -> crate::config::VykarConfig {
+    let mut config = make_test_config(repo_dir);
+    config.repository.min_pack_size = 1;
+    config.repository.max_pack_size = 4 * 1024;
+    commands::init::run(&config, None).unwrap();
+    config
+}
+
+/// Pick a pack that contains no item_ptrs chunks for any snapshot in `repo`.
+/// Returns the pack id and the set of `(snapshot_name, item_path, item_index)`
+/// tuples whose chunks live in that pack.
+fn pick_data_only_pack(
+    repo_dir: &std::path::Path,
+) -> (
+    PackId,
+    Vec<(String, String, usize, vykar_types::snapshot_id::SnapshotId)>,
+) {
+    use crate::commands::list::{for_each_decoded_item, load_snapshot_item_stream};
+    use crate::snapshot::item::ItemType;
+
+    let mut repo = open_local_repo(repo_dir);
+
+    // Collect item_ptrs chunk ids across every snapshot — these must NOT be in
+    // the pack we delete (otherwise the snapshot becomes unreadable).
+    let entries = repo.manifest().snapshots.clone();
+    let mut item_ptrs_chunks: std::collections::HashSet<ChunkId> = std::collections::HashSet::new();
+    for entry in &entries {
+        let meta = crate::commands::list::load_snapshot_meta(&repo, &entry.name).unwrap();
+        for chunk_id in &meta.item_ptrs {
+            item_ptrs_chunks.insert(*chunk_id);
+        }
+    }
+
+    // Pack candidates: any pack whose chunks are all data (none in item_ptrs).
+    let mut pack_to_chunks: HashMap<PackId, Vec<ChunkId>> = HashMap::new();
+    for (chunk_id, entry) in repo.chunk_index().iter() {
+        pack_to_chunks
+            .entry(entry.pack_id)
+            .or_default()
+            .push(*chunk_id);
+    }
+    let candidate = pack_to_chunks
+        .iter()
+        .find(|(_, chunks)| chunks.iter().all(|c| !item_ptrs_chunks.contains(c)))
+        .map(|(pid, chunks)| (*pid, chunks.clone()))
+        .expect("expected at least one data-only pack — small pack size should ensure this");
+    let candidate_chunks: std::collections::HashSet<ChunkId> =
+        candidate.1.iter().copied().collect();
+
+    // Walk every snapshot's items_stream to find affected items.
+    let mut affected: Vec<(String, String, usize, vykar_types::snapshot_id::SnapshotId)> =
+        Vec::new();
+    for entry in &entries {
+        let stream = load_snapshot_item_stream(&mut repo, &entry.name).unwrap();
+        let mut idx: usize = 0;
+        for_each_decoded_item(&stream, |item| {
+            let i = idx;
+            idx += 1;
+            if item.entry_type == ItemType::RegularFile
+                && item.chunks.iter().any(|c| candidate_chunks.contains(&c.id))
+            {
+                affected.push((entry.name.clone(), item.path.clone(), i, entry.id));
+            }
+            Ok(())
+        })
+        .unwrap();
+    }
+
+    (candidate.0, affected)
+}
+
+#[test]
+fn check_reports_items_affected_by_missing_pack() {
+    let tmp = tempfile::tempdir().unwrap();
+    let repo_dir = tmp.path().join("repo");
+    let source_dir = tmp.path().join("source");
+    std::fs::create_dir_all(&repo_dir).unwrap();
+    std::fs::create_dir_all(&source_dir).unwrap();
+    // Several distinct files large enough that each lands in its own pack
+    // (config below sets max_pack_size to 4 KiB).
+    let file_names = ["alpha.bin", "beta.bin", "gamma.bin"];
+    for (i, name) in file_names.iter().enumerate() {
+        // Distinct content so chunk ids don't dedup across files.
+        let payload: Vec<u8> = (0..2048u32)
+            .map(|x| (x as u8).wrapping_add(i as u8))
+            .collect();
+        std::fs::write(source_dir.join(name), payload).unwrap();
+    }
+
+    let config = init_repo_small_packs(&repo_dir);
+    backup_single_source(&config, &source_dir, "src-impact", "snap-impact");
+
+    let (deleted_pack, expected_items) = pick_data_only_pack(&repo_dir);
+    let pack_path = repo_dir.join(deleted_pack.storage_key());
+    assert!(pack_path.exists(), "pack file missing before deletion");
+    std::fs::remove_file(&pack_path).unwrap();
+    assert!(
+        !expected_items.is_empty(),
+        "test setup picked a pack with no referencing items"
+    );
+
+    let result = commands::check::run(&config, None, false, false).unwrap();
+
+    // Pack-level error from Phase 2 must still be present (existing behavior).
+    assert!(
+        result
+            .errors
+            .iter()
+            .any(|e| e.message.contains("missing from storage")),
+        "expected pack-level missing error, got: {:?}",
+        result
+            .errors
+            .iter()
+            .map(|e| (e.context.clone(), e.message.clone()))
+            .collect::<Vec<_>>()
+    );
+
+    // Item-level rendered errors: one per affected item.
+    let item_error_count = result
+        .errors
+        .iter()
+        .filter(|e| e.message.starts_with("references missing pack"))
+        .count();
+    assert_eq!(
+        item_error_count,
+        expected_items.len(),
+        "expected {} item-level errors, got: {:?}",
+        expected_items.len(),
+        result
+            .errors
+            .iter()
+            .map(|e| (e.context.clone(), e.message.clone()))
+            .collect::<Vec<_>>()
+    );
+
+    // Structured impacts: one per affected file, all pointing to the same snapshot.
+    assert_eq!(result.item_impacts.len(), expected_items.len());
+    let snapshot_id = expected_items[0].3;
+    for impact in &result.item_impacts {
+        assert_eq!(impact.snapshot_id, snapshot_id);
+        assert_eq!(impact.snapshot_name, "snap-impact");
+        assert!(!impact.affected_chunks.is_empty());
+        // Every chunk in this impact must point at the deleted pack.
+        for (_chunk_id, pack_id) in &impact.affected_chunks {
+            assert_eq!(*pack_id, deleted_pack);
+        }
+    }
+
+    // Pre-walked expected (item_path, item_index) tuples must match exactly,
+    // catching any ordinal regression — not just shuffles within the set.
+    let mut expected_pairs: Vec<(&str, usize)> = expected_items
+        .iter()
+        .map(|(_name, path, idx, _id)| (path.as_str(), *idx))
+        .collect();
+    expected_pairs.sort();
+    let mut actual_pairs: Vec<(&str, usize)> = result
+        .item_impacts
+        .iter()
+        .map(|i| (i.item_path.as_str(), i.item_index))
+        .collect();
+    actual_pairs.sort();
+    assert_eq!(actual_pairs, expected_pairs);
+
+    // Impacts are emitted in ascending stream order.
+    let indexes: Vec<usize> = result.item_impacts.iter().map(|i| i.item_index).collect();
+    let mut sorted = indexes.clone();
+    sorted.sort();
+    assert_eq!(
+        indexes, sorted,
+        "impacts should be emitted in ascending stream order"
+    );
+}
+
+#[test]
+fn check_repair_dry_run_includes_item_impact() {
+    let tmp = tempfile::tempdir().unwrap();
+    let repo_dir = tmp.path().join("repo");
+    let source_dir = tmp.path().join("source");
+    std::fs::create_dir_all(&repo_dir).unwrap();
+    std::fs::create_dir_all(&source_dir).unwrap();
+    for (i, name) in ["one.bin", "two.bin"].iter().enumerate() {
+        let payload: Vec<u8> = (0..2048u32)
+            .map(|x| (x as u8).wrapping_add(i as u8))
+            .collect();
+        std::fs::write(source_dir.join(name), payload).unwrap();
+    }
+
+    let config = init_repo_small_packs(&repo_dir);
+    backup_single_source(&config, &source_dir, "src-dry", "snap-dry");
+
+    let (deleted_pack, expected_items) = pick_data_only_pack(&repo_dir);
+    std::fs::remove_file(repo_dir.join(deleted_pack.storage_key())).unwrap();
+    assert!(!expected_items.is_empty());
+
+    let result =
+        commands::check::run_with_repair(&config, None, false, RepairMode::PlanOnly, None).unwrap();
+
+    assert!(
+        !result.check_result.item_impacts.is_empty(),
+        "PlanOnly should expose item_impacts on CheckResult"
+    );
+    assert!(
+        result
+            .check_result
+            .errors
+            .iter()
+            .any(|e| e.message.starts_with("references missing pack")),
+        "PlanOnly's CheckResult.errors should include item-level lines, got: {:?}",
+        result
+            .check_result
+            .errors
+            .iter()
+            .map(|e| (e.context.clone(), e.message.clone()))
+            .collect::<Vec<_>>()
+    );
+    // No repair was applied (PlanOnly mode).
+    assert!(result.applied.is_empty());
 }

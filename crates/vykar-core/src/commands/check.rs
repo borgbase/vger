@@ -49,6 +49,9 @@ pub struct CheckResult {
     pub packs_existence_checked: usize,
     pub chunks_data_verified: usize,
     pub errors: Vec<CheckError>,
+    /// Per-item impact records for snapshot items whose chunks live in a pack
+    /// the existence check confirmed missing. Empty on healthy repos.
+    pub item_impacts: Vec<ItemImpact>,
     /// True when the check was skipped entirely (e.g. max_percent=0 and full_every not due).
     pub skipped: bool,
 }
@@ -201,6 +204,56 @@ impl IntegrityIssue {
 /// considered evidence of corruption.
 fn is_transient_io(err: &VykarError) -> bool {
     matches!(err, VykarError::Storage(_) | VykarError::Io(_))
+}
+
+// ---------------------------------------------------------------------------
+// Per-item impact records (drives item-level repair in #123)
+// ---------------------------------------------------------------------------
+
+/// A snapshot item whose chunks live in a pack that is missing from storage.
+///
+/// Carries enough identity (`snapshot_id` + `item_index`) for #123's surgical
+/// repair to locate the exact decoded record when rewriting a snapshot's
+/// `items_stream`. `item_path` alone is not unique — duplicate paths can occur.
+#[derive(Debug, Clone)]
+pub struct ItemImpact {
+    pub snapshot_id: SnapshotId,
+    pub snapshot_name: String,
+    /// 0-based ordinal of this item within the decoded items_stream. Stable
+    /// across re-walks of the same stream.
+    pub item_index: usize,
+    pub item_path: String,
+    /// `(chunk_id, pack_id)` pairs for this item's chunks that live in a pack
+    /// the existence check confirmed missing. Always non-empty.
+    pub affected_chunks: Vec<(ChunkId, PackId)>,
+}
+
+impl ItemImpact {
+    /// Render this impact as a user-facing CheckError.
+    pub fn to_check_error(&self) -> CheckError {
+        let mut packs: Vec<PackId> = self.affected_chunks.iter().map(|(_, p)| *p).collect();
+        packs.sort_by(|a, b| a.0.cmp(&b.0));
+        packs.dedup();
+
+        let message = if packs.len() == 1 {
+            format!("references missing pack {}", packs[0])
+        } else {
+            let list = packs
+                .iter()
+                .map(|p| p.to_string())
+                .collect::<Vec<_>>()
+                .join(", ");
+            format!("references missing packs {list}")
+        };
+
+        CheckError {
+            context: format!(
+                "snapshot '{}' item '{}'",
+                self.snapshot_name, self.item_path
+            ),
+            message,
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -485,6 +538,7 @@ pub fn run_with_progress(
 
     let mut errors: Vec<CheckError> = srv_errors;
     errors.extend(scan.issues.iter().map(|i| i.to_check_error()));
+    errors.extend(scan.item_impacts.iter().map(|i| i.to_check_error()));
 
     let result = CheckResult {
         snapshots_checked: scan.counters.snapshots_checked,
@@ -494,6 +548,7 @@ pub fn run_with_progress(
         chunks_data_verified: scan.counters.chunks_data_verified
             + if verify_data { srv_chunks_verified } else { 0 },
         errors,
+        item_impacts: scan.item_impacts,
         skipped: false,
     };
 
@@ -513,6 +568,7 @@ fn skipped_result() -> CheckResult {
         packs_existence_checked: 0,
         chunks_data_verified: 0,
         errors: Vec::new(),
+        item_impacts: Vec::new(),
         skipped: true,
     }
 }
@@ -832,6 +888,9 @@ struct ScanResult {
     issues: Vec<IntegrityIssue>,
     /// Maps each snapshot name to the set of chunk IDs it references.
     snapshot_chunk_refs: HashMap<String, HashSet<ChunkId>>,
+    /// Items whose chunks reference a pack confirmed missing in Phase 2.
+    /// Empty when no missing packs were detected.
+    item_impacts: Vec<ItemImpact>,
 }
 
 /// Run the integrity scan, producing structured issues.
@@ -1071,6 +1130,7 @@ fn integrity_scan(
         .map(|(pack_id, chunks)| (*pack_id, chunks.len()))
         .collect();
 
+    let mut missing_packs: HashSet<PackId> = HashSet::new();
     if !packs_for_existence.is_empty() {
         emit_progress(
             progress,
@@ -1098,6 +1158,12 @@ fn integrity_scan(
             .map(|(_, chunks)| chunks.len())
             .sum();
 
+        for issue in &pack_issues {
+            if let IntegrityIssue::MissingPack { pack_id } = issue {
+                missing_packs.insert(*pack_id);
+            }
+        }
+
         issues.extend(pack_issues);
 
         emit_progress(
@@ -1109,6 +1175,10 @@ fn integrity_scan(
             },
         );
     }
+
+    // Phase 2b: Locate snapshot items affected by missing packs (issue #122).
+    // Cheap on healthy repos — short-circuits when no packs are missing.
+    let item_impacts = locate_items_in_missing_packs(repo, &missing_packs);
 
     // Phase 3: Verify data (client-side crypto verification)
     if opts.verify_data {
@@ -1148,7 +1218,78 @@ fn integrity_scan(
         counters,
         issues,
         snapshot_chunk_refs,
+        item_impacts,
     })
+}
+
+/// Walk every snapshot's item stream and emit one [`ItemImpact`] per
+/// regular-file item that references a chunk in `missing_packs`.
+///
+/// Snapshots whose item stream fails to load — or whose decode aborts mid-stream
+/// — are silently skipped. Such failures are already surfaced by the main scan
+/// as `UnreadableSnapshot` / `SnapshotReadFailed` issues.
+fn locate_items_in_missing_packs(
+    repo: &mut Repository,
+    missing_packs: &HashSet<PackId>,
+) -> Vec<ItemImpact> {
+    if missing_packs.is_empty() {
+        return Vec::new();
+    }
+
+    // Restrict the chunk → pack lookup to chunks in missing packs.
+    let chunk_to_missing_pack: HashMap<ChunkId, PackId> = repo
+        .chunk_index()
+        .iter()
+        .filter(|(_, entry)| missing_packs.contains(&entry.pack_id))
+        .map(|(chunk_id, entry)| (*chunk_id, entry.pack_id))
+        .collect();
+
+    if chunk_to_missing_pack.is_empty() {
+        return Vec::new();
+    }
+
+    let entries = repo.manifest().snapshots.clone();
+    let mut impacts: Vec<ItemImpact> = Vec::new();
+
+    for entry in &entries {
+        let items_stream = match load_snapshot_item_stream(repo, &entry.name) {
+            Ok(s) => s,
+            Err(_) => continue,
+        };
+
+        let mut item_index: usize = 0;
+        let mut local: Vec<ItemImpact> = Vec::new();
+        let walk = for_each_decoded_item(&items_stream, |item| {
+            let idx = item_index;
+            item_index += 1;
+            if item.entry_type == ItemType::RegularFile {
+                let mut affected: Vec<(ChunkId, PackId)> = Vec::new();
+                for chunk_ref in &item.chunks {
+                    if let Some(pack_id) = chunk_to_missing_pack.get(&chunk_ref.id) {
+                        affected.push((chunk_ref.id, *pack_id));
+                    }
+                }
+                if !affected.is_empty() {
+                    local.push(ItemImpact {
+                        snapshot_id: entry.id,
+                        snapshot_name: entry.name.clone(),
+                        item_index: idx,
+                        item_path: item.path.clone(),
+                        affected_chunks: affected,
+                    });
+                }
+            }
+            Ok(())
+        });
+        // Drop partial impacts if decode aborted mid-stream — the snapshot is
+        // already reported as UnreadableSnapshot by the main scan, and #123
+        // will treat it as whole-snapshot doomed.
+        if walk.is_ok() {
+            impacts.extend(local);
+        }
+    }
+
+    impacts
 }
 
 /// Parallel pack existence check producing IntegrityIssue variants.
@@ -1688,13 +1829,16 @@ pub fn run_with_repair(
         }
 
         let plan = build_repair_plan(&scan.issues, &pack_chunks, &scan.snapshot_chunk_refs);
+        let mut errors: Vec<CheckError> = scan.issues.iter().map(|i| i.to_check_error()).collect();
+        errors.extend(scan.item_impacts.iter().map(|i| i.to_check_error()));
         let check_result = CheckResult {
             snapshots_checked: scan.counters.snapshots_checked,
             items_checked: scan.counters.items_checked,
             chunks_existence_checked: scan.counters.chunks_existence_checked,
             packs_existence_checked: scan.counters.packs_existence_checked,
             chunks_data_verified: scan.counters.chunks_data_verified,
-            errors: scan.issues.iter().map(|i| i.to_check_error()).collect(),
+            errors,
+            item_impacts: scan.item_impacts,
             skipped: false,
         };
 
@@ -1741,13 +1885,17 @@ pub fn run_with_repair(
                 let (applied, repair_errors) =
                     execute_repair(repo, &plan, &scan.issues, &pack_chunks)?;
 
+                let mut errors: Vec<CheckError> =
+                    scan.issues.iter().map(|i| i.to_check_error()).collect();
+                errors.extend(scan.item_impacts.iter().map(|i| i.to_check_error()));
                 let check_result = CheckResult {
                     snapshots_checked: scan.counters.snapshots_checked,
                     items_checked: scan.counters.items_checked,
                     chunks_existence_checked: scan.counters.chunks_existence_checked,
                     packs_existence_checked: scan.counters.packs_existence_checked,
                     chunks_data_verified: scan.counters.chunks_data_verified,
-                    errors: scan.issues.iter().map(|i| i.to_check_error()).collect(),
+                    errors,
+                    item_impacts: scan.item_impacts,
                     skipped: false,
                 };
 
