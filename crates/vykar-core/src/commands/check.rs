@@ -247,7 +247,7 @@ impl ItemImpact {
     /// Render this impact as a user-facing CheckError.
     pub fn to_check_error(&self) -> CheckError {
         let mut packs: Vec<PackId> = self.affected_chunks.iter().map(|(_, p)| *p).collect();
-        packs.sort_by(|a, b| a.0.cmp(&b.0));
+        packs.sort_by_key(|a| a.0);
         packs.dedup();
 
         let message = if packs.len() == 1 {
@@ -1739,7 +1739,7 @@ fn build_repair_plan(
 
     for impact in &scan.item_impacts {
         let mut packs: Vec<PackId> = impact.affected_chunks.iter().map(|(_, p)| *p).collect();
-        packs.sort_by(|a, b| a.0.cmp(&b.0));
+        packs.sort_by_key(|a| a.0);
         packs.dedup();
         let reason = if packs.len() == 1 {
             format!("chunks in missing pack {}", packs[0])

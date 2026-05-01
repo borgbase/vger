@@ -430,11 +430,9 @@ pub(crate) fn run_parallel_pipeline(
                             ProcessedEntry::SourceStarted { .. } => {
                                 dataless_skipped = 0;
                             }
-                            ProcessedEntry::SourceFinished { .. } => {
-                                if dataless_skipped > 0 {
-                                    super::emit_dataless_summary(progress, dataless_skipped);
-                                    dataless_skipped = 0;
-                                }
+                            ProcessedEntry::SourceFinished { .. } if dataless_skipped > 0 => {
+                                super::emit_dataless_summary(progress, dataless_skipped);
+                                dataless_skipped = 0;
                             }
                             _ => {}
                         }
