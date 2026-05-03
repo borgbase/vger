@@ -32,12 +32,21 @@ for f in "$@"; do
     fi
 done
 
+dump_windows() {
+    echo "==> X11 windows snapshot:"
+    for wid in $(xdotool search --name "" 2>/dev/null); do
+        local name
+        name=$(xdotool getwindowname "$wid" 2>/dev/null || true)
+        [[ -n "$name" ]] && echo "    wid=$wid name='$name'"
+    done
+}
+
 # --- Install dependencies ---
 
 echo "==> Installing dependencies..."
 sudo apt-get update -qq
 sudo apt-get install -y -qq \
-    xvfb xdotool oathtool osslsigncode \
+    xvfb xdotool oathtool osslsigncode scrot \
     p11-kit opensc stalonetray \
     libpulse-mainloop-glib0 libxss1 libnss3 libxkbcommon0 \
     > /dev/null 2>&1
@@ -92,6 +101,14 @@ XVFB_PID=$!
 export DISPLAY=:99
 sleep 2
 
+mkdir -p /tmp/sign-screens
+( while true; do
+    scrot -o "/tmp/sign-screens/$(date +%s.%N).png" 2>/dev/null
+    sleep 2
+  done ) &
+SCROT_PID=$!
+trap "kill $SCROT_PID 2>/dev/null || true" EXIT
+
 stalonetray --geometry 1x1+0+0 --grow-gravity W &
 sleep 1
 
@@ -101,6 +118,7 @@ echo "==> Launching SimplySign Desktop..."
 "$SSD_EXE" &
 SSD_PID=$!
 sleep 8
+dump_windows
 
 echo "==> Searching for login window..."
 WINDOW_ID=$(timeout 30 xdotool search --sync --onlyvisible --name "SimplySign" 2>/dev/null | head -1 || true)
@@ -120,6 +138,8 @@ fi
 
 xdotool windowactivate --sync "$WINDOW_ID" 2>/dev/null || true
 sleep 1
+
+dump_windows
 
 # Generate TOTP right before typing to avoid expiration
 TOTP=$(oathtool --totp=sha256 -b --digits=6 "$CERTUM_TOTP_SECRET")
@@ -172,6 +192,7 @@ if [[ "$TOKEN_READY" != "true" ]]; then
     exit 1
 fi
 echo "==> PKCS#11 token available"
+dump_windows
 
 # --- Start p11-kit server ---
 
@@ -211,6 +232,7 @@ echo "==> Key alias: $KEY_ALIAS"
 
 for f in "$@"; do
     echo "==> Signing $f..."
+    dump_windows
 
     java -jar "$JSIGN_JAR" \
         --storetype PKCS11 \
