@@ -54,7 +54,7 @@ echo "==> Dependencies installed"
 
 # --- Install SimplySign Desktop ---
 
-SSD_URL="https://files.certum.eu/software/SimplySignDesktop/Linux-Ubuntu/2.9.13-9.4.2.0/SimplySignDesktop-2.9.13-9.4.2.0-x86_64-prod-ubuntu.bin"
+SSD_URL="https://files.certum.eu/software/SimplySignDesktop/Linux-Ubuntu/2.9.14-9.4.3.0/SimplySignDesktop-2.9.14-9.4.3.0-x86_64-prod-ubuntu.bin"
 SSD_DIR="/opt/SimplySignDesktop"
 
 if [[ ! -d "$SSD_DIR" ]]; then
@@ -119,6 +119,19 @@ echo "==> Launching SimplySign Desktop..."
 SSD_PID=$!
 sleep 8
 dump_windows
+
+# Dismiss "Newer application version is available" modal if it appeared.
+# It steals focus from the login form; if SSD ever falls behind Certum's
+# advertised version again we still want signing to proceed.
+VERSION_MODAL=$(xdotool search --name "Application version check" 2>/dev/null | head -1 || true)
+if [[ -n "$VERSION_MODAL" ]]; then
+    echo "==> Dismissing version-check modal (wid=$VERSION_MODAL)"
+    xdotool windowactivate --sync "$VERSION_MODAL" 2>/dev/null || true
+    sleep 0.5
+    xdotool key --window "$VERSION_MODAL" Escape
+    sleep 1
+    dump_windows
+fi
 
 echo "==> Searching for login window..."
 WINDOW_ID=$(timeout 30 xdotool search --sync --onlyvisible --name "SimplySign" 2>/dev/null | head -1 || true)
