@@ -13,9 +13,20 @@ use super::shared::select_repo_or_log;
 use super::WorkerContext;
 
 pub(super) fn handle_open_config_file(ctx: &WorkerContext) {
-    let path = ctx.runtime.source.path().display().to_string();
-    send_log(&ctx.ui_tx, format!("Opening config file: {path}"));
-    let _ = std::process::Command::new("open").arg(&path).spawn();
+    let path = ctx.runtime.source.path();
+    send_log(
+        &ctx.ui_tx,
+        format!("Opening config file: {}", path.display()),
+    );
+    if let Err(e) = opener::open(path) {
+        send_log(
+            &ctx.ui_tx,
+            format!(
+                "Failed to open config file in system editor ({}): {e}",
+                path.display()
+            ),
+        );
+    }
 }
 
 pub(super) fn handle_reload_config(ctx: &mut WorkerContext) {

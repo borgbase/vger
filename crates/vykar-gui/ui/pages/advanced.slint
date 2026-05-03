@@ -56,7 +56,7 @@ export component AdvancedPage inherits Rectangle {
             spacing: 8px;
             Text { text: "Config:"; vertical-alignment: center; font-weight: 700; }
             TouchArea {
-                horizontal-stretch: 1;
+                max-width: parent.width * 0.6;
                 mouse-cursor: pointer;
                 clicked => { root.open_config_clicked(); }
                 Text { text: root.config_path; color: #4a90d9; vertical-alignment: center; overflow: elide; }
@@ -66,10 +66,11 @@ export component AdvancedPage inherits Rectangle {
                 clicked => { root.switch_config_clicked(); }
                 Text { text: "(Change)"; color: #4a90d9; vertical-alignment: center; font-size: 12px; }
             }
+            Rectangle { horizontal-stretch: 1; }
         }
 
         Text {
-            text: "You can edit Vykar's YAML config below. This will be saved to disk and can also be used by the command line client. We plan on adding a prettier interface for editing the configuration in the future.";
+            text: "Edit Vykar's YAML config below for quick changes, or click the path above to open it in your system editor (recommended for larger edits — gives you syntax highlighting and search).";
             wrap: word-wrap;
             color: #888888;
             font-size: 12px;
