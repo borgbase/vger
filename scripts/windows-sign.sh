@@ -236,11 +236,25 @@ library = $P11_CLIENT
 slotListIndex = 0
 CFGEOF
 
-# Discover key alias
-KEY_ALIAS=$(keytool -list -keystore NONE -storetype PKCS11 \
+# Discover key alias. Capture full keytool output so failures surface in CI
+# logs — previously this had `2>/dev/null` and `set -o pipefail` killed the
+# script silently when keytool errored.
+KEYTOOL_LOG="/tmp/keytool.log"
+echo "==> Running keytool to discover key alias..."
+if ! keytool -list -keystore NONE -storetype PKCS11 \
     -providerClass sun.security.pkcs11.SunPKCS11 \
-    -providerArg "$PKCS11_CFG" -storepass "" 2>/dev/null \
-    | grep "PrivateKeyEntry" | head -1 | cut -d, -f1 | tr -d ' ')
+    -providerArg "$PKCS11_CFG" -storepass "" > "$KEYTOOL_LOG" 2>&1; then
+    echo "==> keytool failed (exit $?). Output:"
+    cat "$KEYTOOL_LOG"
+    exit 1
+fi
+echo "==> keytool output:"
+cat "$KEYTOOL_LOG"
+KEY_ALIAS=$(grep "PrivateKeyEntry" "$KEYTOOL_LOG" | head -1 | cut -d, -f1 | tr -d ' ')
+if [[ -z "$KEY_ALIAS" ]]; then
+    echo "==> Error: no PrivateKeyEntry found in keytool output"
+    exit 1
+fi
 echo "==> Key alias: $KEY_ALIAS"
 
 for f in "$@"; do
