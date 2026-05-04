@@ -8,10 +8,13 @@ use crate::format::{format_bytes, format_count};
 use crate::passphrase::with_repo_passphrase;
 use crate::table::CliTableTheme;
 
+use serde_json::{json,Value};
+
 pub(crate) fn run_list(
     config: &VykarConfig,
     label: Option<&str>,
     source_filter: &[String],
+    json: &bool,
     last: Option<usize>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let mut snapshots = with_repo_passphrase(config, label, |passphrase| {
@@ -31,8 +34,13 @@ pub(crate) fn run_list(
             snapshots.drain(..len - n);
         }
     }
+
     if snapshots.is_empty() {
-        println!("No snapshots found.");
+        if *json {
+            println!("[]");
+        } else {
+            println!("No snapshots found.");
+        }
         return Ok(());
     }
 
@@ -47,6 +55,7 @@ pub(crate) fn run_list(
     col.set_cell_alignment(CellAlignment::Right);
 
     let mut prev_group: Option<(String, String)> = None;
+    let mut json_data: Vec<Value> = [].to_vec();
 
     for (entry, stats) in &snapshots {
         let effective_label = if !entry.label.is_empty() {
@@ -96,17 +105,34 @@ pub(crate) fn run_list(
             None => ("-".to_string(), "-".to_string()),
         };
 
-        table.add_row(vec![
-            Cell::new(&entry.name),
-            Cell::new(date_col),
-            Cell::new(host_col),
-            Cell::new(label_col),
-            Cell::new(source_col),
-            Cell::new(files_col),
-            Cell::new(size_col),
-        ]);
+        if *json {
+            json_data.push(json!({
+                "ID":     &entry.name,
+                "Date":   date_col,
+                "Host":   host_col,
+                "Label":  label_col,
+                "Source": source_col,
+                "Files":  files_col,
+                "Size":   size_col,
+            }));
+        } else {
+            table.add_row(vec![
+                Cell::new(&entry.name),
+                Cell::new(date_col),
+                Cell::new(host_col),
+                Cell::new(label_col),
+                Cell::new(source_col),
+                Cell::new(files_col),
+                Cell::new(size_col),
+            ]);
+        }
     }
-    println!("{table}");
+
+    if *json {
+        println!("{}", serde_json::to_string_pretty(&json_data)?);
+    } else {
+        println!("{table}");
+    }
 
     Ok(())
 }
