@@ -29,6 +29,10 @@ pub(crate) fn format_size_with_savings(bytes: u64, reference: u64, label: &str) 
     if reference == 0 {
         return format_bytes(bytes);
     }
+    #[allow(
+        clippy::cast_precision_loss,
+        reason = "human-readable savings percentage; exact byte precision is not required"
+    )]
     let pct = (1.0 - bytes as f64 / reference as f64) * 100.0;
     format!("{}  ({:.1}% {label})", format_bytes(bytes), pct)
 }

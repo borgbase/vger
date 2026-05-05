@@ -10,6 +10,9 @@
 //! snapshots. All platforms share the same filtering logic (excludes,
 //! gitignore, markers, cross-device).
 
+// libc::statfs to detect filesystems where inode-sorted stat helps; SAFETY per block.
+#![allow(unsafe_code)]
+
 use std::collections::VecDeque;
 use std::fs::FileType;
 use std::path::{Path, PathBuf};
@@ -56,7 +59,13 @@ fn inode_sort_beneficial(path: &Path) -> bool {
             return false;
         }
     };
+    // SAFETY: `libc::statfs` is a C plain-old-data struct of integer fields;
+    // an all-zero bit pattern is a valid (if uninitialized) instance and
+    // statfs(2) overwrites every field on success.
     let mut buf: libc::statfs = unsafe { std::mem::zeroed() };
+    // SAFETY: `c_path` is a valid NUL-terminated CString owned in this scope;
+    // `&mut buf` is a unique exclusive reference to a properly-aligned statfs
+    // for the kernel to populate.
     let rc = unsafe { libc::statfs(c_path.as_ptr(), &mut buf) };
     if rc != 0 {
         tracing::debug!(path = %path.display(), "statfs failed, disabling inode sort");

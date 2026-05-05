@@ -36,11 +36,12 @@ pub(super) async fn repack(
     let results = tokio::task::spawn_blocking(move || execute_repack(&state_clone, &plan))
         .await
         .map_err(|e| ServerError::Internal(e.to_string()))?
-        .map_err(|e| ServerError::Internal(e.to_string()))?;
+        .map_err(ServerError::Internal)?;
 
     Ok(axum::Json(results).into_response())
 }
 
+#[allow(clippy::too_many_lines)]
 fn execute_repack(
     state: &AppState,
     plan: &RepackPlanRequest,
@@ -89,7 +90,8 @@ fn execute_repack(
         let mut writer = BufWriter::new(temp_file);
         let mut hasher = Blake2bVar::new(32).expect("valid output size");
 
-        let mut pack_offset: u64 = PACK_HEADER_SIZE as u64;
+        let mut pack_offset: u64 =
+            u64::try_from(PACK_HEADER_SIZE).expect("pack header size fits u64");
         let mut new_offsets = Vec::with_capacity(op.keep_blobs.len());
         let mut scratch = Vec::new();
 
@@ -132,7 +134,7 @@ fn execute_repack(
                     .read_exact(&mut prefix_buf)
                     .map_err(|e| format!("read prefix: {e}"))?;
                 let on_disk_len = u32::from_le_bytes(prefix_buf);
-                if on_disk_len as u64 != blob_ref.length {
+                if u64::from(on_disk_len) != blob_ref.length {
                     return Err(format!(
                         "repack blob at offset {}: on-disk length prefix ({}) \
                          does not match requested length ({})",
@@ -142,13 +144,16 @@ fn execute_repack(
 
                 // Read blob from source into reusable scratch buffer
                 // (cursor is already at blob_ref.offset after reading the prefix).
-                scratch.resize(blob_ref.length as usize, 0);
+                let blob_len_usize = usize::try_from(blob_ref.length)
+                    .map_err(|_| "repack blob length does not fit usize".to_string())?;
+                scratch.resize(blob_len_usize, 0);
                 source
                     .read_exact(&mut scratch)
                     .map_err(|e| format!("read: {e}"))?;
 
                 // Write length prefix.
-                let blob_len = blob_ref.length as u32;
+                let blob_len = u32::try_from(blob_ref.length)
+                    .map_err(|_| "repack blob length exceeds pack format max".to_string())?;
                 write_and_hash(&mut writer, &mut hasher, &blob_len.to_le_bytes())
                     .map_err(|e| format!("write len: {e}"))?;
 

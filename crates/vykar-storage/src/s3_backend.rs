@@ -1,3 +1,10 @@
+#![allow(
+    clippy::duration_suboptimal_units,
+    clippy::manual_let_else,
+    clippy::missing_errors_doc,
+    clippy::needless_pass_by_value
+)]
+
 use std::io::Read;
 use std::time::Duration;
 

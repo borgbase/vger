@@ -1,3 +1,12 @@
+// memmap2::Mmap::map for read-only cache files; SAFETY documented per block.
+#![allow(unsafe_code)]
+// Wire-format reads against header-validated cache files. Every reader checks
+// `mmap.len() >= HEADER_SIZE` and validates `entry_count` matches the file
+// size before slicing into entries; out-of-bounds is therefore unreachable
+// for well-formed input. Corrupted input is filtered upstream by magic /
+// version / generation checks (callers fall back to a cache miss on `None`).
+#![allow(clippy::indexing_slicing)]
+
 use std::collections::HashMap;
 use std::io::{BufWriter, Write};
 use std::path::{Path, PathBuf};
@@ -12,6 +21,14 @@ use crate::repo::file_cache::repo_cache_dir;
 use vykar_types::chunk_id::ChunkId;
 use vykar_types::error::Result;
 use vykar_types::pack_id::PackId;
+
+fn read_u32_le(bytes: [u8; 4]) -> u32 {
+    u32::from_le_bytes(bytes)
+}
+
+fn read_u64_le(bytes: [u8; 8]) -> u64 {
+    u64::from_le_bytes(bytes)
+}
 
 /// Magic bytes at the start of the dedup cache file.
 // Wire-format constant — DO NOT rename (backward compatibility)
@@ -140,8 +157,12 @@ impl MmapDedupCache {
 
         let file = std::fs::File::open(path).ok()?;
 
-        // SAFETY: we only read the file, and the file is written atomically
-        // (temp + rename) so it's always in a consistent state.
+        // SAFETY: the cache file is treated as read-only — we only read from
+        // the mapping, never write through it. Concurrent modification by
+        // another process would only invalidate cache entries (a recoverable
+        // condition), not produce undefined behavior at the Rust level: we
+        // bound-check every slice access and treat decode failures as a cache
+        // miss.
         let mmap = unsafe { Mmap::map(&file) }.ok()?;
 
         if mmap.len() < HEADER_SIZE {
@@ -155,15 +176,16 @@ impl MmapDedupCache {
             return None;
         }
 
-        // Validate version
-        let version = u32::from_le_bytes(mmap[8..12].try_into().unwrap());
+        // Validate version. HEADER_SIZE check above guarantees these slices.
+        let version = read_u32_le(mmap[8..12].try_into().expect("4-byte slice from header"));
         if version != VERSION {
             debug!(version, "dedup cache: unsupported version");
             return None;
         }
 
         // Validate generation
-        let index_generation = u64::from_le_bytes(mmap[12..20].try_into().unwrap());
+        let index_generation =
+            read_u64_le(mmap[12..20].try_into().expect("8-byte slice from header"));
         if index_generation != expected_generation {
             debug!(
                 cache_gen = index_generation,
@@ -173,7 +195,7 @@ impl MmapDedupCache {
             return None;
         }
 
-        let entry_count = u32::from_le_bytes(mmap[20..24].try_into().unwrap());
+        let entry_count = read_u32_le(mmap[20..24].try_into().expect("4-byte slice from header"));
 
         // Validate file size
         let expected_size = HEADER_SIZE + (entry_count as usize) * ENTRY_SIZE;
@@ -219,8 +241,11 @@ impl MmapDedupCache {
             match entry_id.cmp(target.as_slice()) {
                 std::cmp::Ordering::Equal => {
                     let size_offset = offset + 32;
-                    let stored_size =
-                        u32::from_le_bytes(data[size_offset..size_offset + 4].try_into().unwrap());
+                    let stored_size = read_u32_le(
+                        data[size_offset..size_offset + 4]
+                            .try_into()
+                            .expect("4-byte slice within validated entry"),
+                    );
                     return Some(stored_size);
                 }
                 std::cmp::Ordering::Less => lo = mid + 1,
@@ -246,7 +271,11 @@ impl MmapDedupCache {
         let data = &self.mmap[HEADER_SIZE..];
         (0..self.entry_count as usize).map(move |i| {
             let offset = i * ENTRY_SIZE;
-            u64::from_le_bytes(data[offset..offset + 8].try_into().unwrap())
+            read_u64_le(
+                data[offset..offset + 8]
+                    .try_into()
+                    .expect("8-byte slice within validated entry"),
+            )
         })
     }
 }
@@ -258,7 +287,7 @@ impl MmapDedupCache {
 /// Extract the first 8 bytes of a ChunkId as a little-endian u64.
 /// BLAKE2b output has excellent entropy, so this is a high-quality hash key.
 pub(crate) fn chunk_id_to_u64(id: &ChunkId) -> u64 {
-    u64::from_le_bytes(id.0[..8].try_into().unwrap())
+    read_u64_le(id.0[..8].try_into().expect("ChunkId is 32 bytes"))
 }
 
 /// Build an Xor8 filter from pre-computed u64 keys.
@@ -500,7 +529,10 @@ impl MmapRestoreCache {
 
         let file = std::fs::File::open(path).ok()?;
 
-        // SAFETY: we only read the file, and the file is written atomically.
+        // SAFETY: read-only map of an atomically-written cache file (temp +
+        // rename). Concurrent modification by another process can only
+        // invalidate cache entries; all reads are bound-checked and decode
+        // failures fall back to a cache miss.
         let mmap = unsafe { Mmap::map(&file) }.ok()?;
 
         if mmap.len() < RESTORE_HEADER_SIZE {
@@ -513,13 +545,14 @@ impl MmapRestoreCache {
             return None;
         }
 
-        let version = u32::from_le_bytes(mmap[8..12].try_into().unwrap());
+        let version = read_u32_le(mmap[8..12].try_into().expect("4-byte slice from header"));
         if version != RESTORE_VERSION {
             debug!(version, "restore cache: unsupported version");
             return None;
         }
 
-        let index_generation = u64::from_le_bytes(mmap[12..20].try_into().unwrap());
+        let index_generation =
+            read_u64_le(mmap[12..20].try_into().expect("8-byte slice from header"));
         if index_generation != expected_generation {
             debug!(
                 cache_gen = index_generation,
@@ -529,7 +562,7 @@ impl MmapRestoreCache {
             return None;
         }
 
-        let entry_count = u32::from_le_bytes(mmap[20..24].try_into().unwrap());
+        let entry_count = read_u32_le(mmap[20..24].try_into().expect("4-byte slice from header"));
 
         let expected_size = RESTORE_HEADER_SIZE + (entry_count as usize) * RESTORE_ENTRY_SIZE;
         if mmap.len() != expected_size {
@@ -570,13 +603,19 @@ impl MmapRestoreCache {
 
             match entry_id.cmp(target.as_slice()) {
                 std::cmp::Ordering::Equal => {
-                    let stored_size =
-                        u32::from_le_bytes(data[offset + 32..offset + 36].try_into().unwrap());
+                    let stored_size = read_u32_le(
+                        data[offset + 32..offset + 36]
+                            .try_into()
+                            .expect("4-byte slice within validated entry"),
+                    );
                     let mut pack_bytes = [0u8; 32];
                     pack_bytes.copy_from_slice(&data[offset + 36..offset + 68]);
                     let pack_id = PackId(pack_bytes);
-                    let pack_offset =
-                        u64::from_le_bytes(data[offset + 68..offset + 76].try_into().unwrap());
+                    let pack_offset = read_u64_le(
+                        data[offset + 68..offset + 76]
+                            .try_into()
+                            .expect("8-byte slice within validated entry"),
+                    );
                     return Some((pack_id, pack_offset, stored_size));
                 }
                 std::cmp::Ordering::Less => lo = mid + 1,
@@ -653,6 +692,9 @@ impl MmapFullIndexCache {
         }
 
         let file = std::fs::File::open(path).ok()?;
+        // SAFETY: read-only map of an atomically-written cache file. See
+        // the dedup-cache `open_path` SAFETY comment for the full argument;
+        // the same invariants hold here (bounded reads, miss on corruption).
         let mmap = unsafe { Mmap::map(&file) }.ok()?;
 
         if mmap.len() < FULL_HEADER_SIZE {
@@ -665,13 +707,14 @@ impl MmapFullIndexCache {
             return None;
         }
 
-        let version = u32::from_le_bytes(mmap[8..12].try_into().unwrap());
+        let version = read_u32_le(mmap[8..12].try_into().expect("4-byte slice from header"));
         if version != FULL_VERSION {
             debug!(version, "full index cache: unsupported version");
             return None;
         }
 
-        let index_generation = u64::from_le_bytes(mmap[12..20].try_into().unwrap());
+        let index_generation =
+            read_u64_le(mmap[12..20].try_into().expect("8-byte slice from header"));
         if index_generation != expected_generation {
             debug!(
                 cache_gen = index_generation,
@@ -681,7 +724,7 @@ impl MmapFullIndexCache {
             return None;
         }
 
-        let entry_count = u32::from_le_bytes(mmap[20..24].try_into().unwrap());
+        let entry_count = read_u32_le(mmap[20..24].try_into().expect("4-byte slice from header"));
 
         let expected_size = FULL_HEADER_SIZE + (entry_count as usize) * FULL_ENTRY_SIZE;
         if mmap.len() != expected_size {
@@ -713,11 +756,23 @@ impl MmapFullIndexCache {
         let offset = i * FULL_ENTRY_SIZE;
         let mut chunk_bytes = [0u8; 32];
         chunk_bytes.copy_from_slice(&data[offset..offset + 32]);
-        let refcount = u32::from_le_bytes(data[offset + 32..offset + 36].try_into().unwrap());
-        let stored_size = u32::from_le_bytes(data[offset + 36..offset + 40].try_into().unwrap());
+        let refcount = read_u32_le(
+            data[offset + 32..offset + 36]
+                .try_into()
+                .expect("4-byte slice within validated entry"),
+        );
+        let stored_size = read_u32_le(
+            data[offset + 36..offset + 40]
+                .try_into()
+                .expect("4-byte slice within validated entry"),
+        );
         let mut pack_bytes = [0u8; 32];
         pack_bytes.copy_from_slice(&data[offset + 40..offset + 72]);
-        let pack_offset = u64::from_le_bytes(data[offset + 72..offset + 80].try_into().unwrap());
+        let pack_offset = read_u64_le(
+            data[offset + 72..offset + 80]
+                .try_into()
+                .expect("8-byte slice within validated entry"),
+        );
         FullCacheEntry {
             chunk_id: ChunkId(chunk_bytes),
             refcount,
@@ -1203,13 +1258,13 @@ pub fn read_index_blob_cache(
         return None;
     }
 
-    let version = u32::from_le_bytes(data[8..12].try_into().unwrap());
+    let version = read_u32_le(data[8..12].try_into().expect("4-byte slice from header"));
     if version != INDEX_BLOB_VERSION {
         debug!(version, "index blob cache: unsupported version");
         return None;
     }
 
-    let generation = u64::from_le_bytes(data[12..20].try_into().unwrap());
+    let generation = read_u64_le(data[12..20].try_into().expect("8-byte slice from header"));
     if generation != expected_generation {
         debug!(
             cache_gen = generation,

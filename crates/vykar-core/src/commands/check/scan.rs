@@ -548,10 +548,9 @@ fn parallel_pack_existence(
         for _ in 0..concurrency {
             s.spawn(|| loop {
                 let idx = work_idx.fetch_add(1, Ordering::Relaxed);
-                if idx >= packs.len() {
+                let Some((pack_id, _chunk_count)) = packs.get(idx) else {
                     break;
-                }
-                let (pack_id, _chunk_count) = &packs[idx];
+                };
                 let pack_key = pack_id.storage_key();
                 match storage.exists(&pack_key) {
                     Ok(true) => {
@@ -561,13 +560,13 @@ fn parallel_pack_existence(
                         missing_count.fetch_add(1, Ordering::Relaxed);
                         issues
                             .lock()
-                            .unwrap()
+                            .expect("scan present issues lock not poisoned")
                             .push(IntegrityIssue::MissingPack { pack_id: *pack_id });
                     }
                     Err(e) => {
                         issues
                             .lock()
-                            .unwrap()
+                            .expect("scan present issues lock not poisoned")
                             .push(IntegrityIssue::PackExistenceCheckFailed {
                                 pack_id: *pack_id,
                                 detail: e.to_string(),
@@ -580,7 +579,13 @@ fn parallel_pack_existence(
 
     let present = present_ok.load(Ordering::Relaxed);
     let missing = missing_count.load(Ordering::Relaxed);
-    (present + missing, missing, issues.into_inner().unwrap())
+    (
+        present + missing,
+        missing,
+        issues
+            .into_inner()
+            .expect("scan present issues lock not poisoned"),
+    )
 }
 
 /// Parallel verify-data producing IntegrityIssue variants.
@@ -604,10 +609,9 @@ fn parallel_verify_data(
         for _ in 0..concurrency {
             s.spawn(|| loop {
                 let idx = work_idx.fetch_add(1, Ordering::Relaxed);
-                if idx >= packs.len() {
+                let Some((pack_id, chunks)) = packs.get(idx) else {
                     break;
-                }
-                let (pack_id, chunks) = &packs[idx];
+                };
 
                 let mut local_issues = Vec::new();
                 let count = if chunks.len() >= batch_threshold {
@@ -632,7 +636,10 @@ fn parallel_verify_data(
 
                 verified.fetch_add(count, Ordering::Relaxed);
                 if !local_issues.is_empty() {
-                    issues.lock().unwrap().extend(local_issues);
+                    issues
+                        .lock()
+                        .expect("scan verify issues lock not poisoned")
+                        .extend(local_issues);
                 }
             });
         }
@@ -640,7 +647,9 @@ fn parallel_verify_data(
 
     (
         verified.load(Ordering::Relaxed),
-        issues.into_inner().unwrap(),
+        issues
+            .into_inner()
+            .expect("scan verify issues lock not poisoned"),
     )
 }
 
@@ -672,12 +681,13 @@ pub(crate) fn verify_pack_full(
         }
     };
 
-    // Validate header
-    if pack_data.len() < PACK_HEADER_SIZE
+    // Validate header — first slice/index is gated by the length check.
+    #[allow(clippy::indexing_slicing)]
+    let header_invalid = pack_data.len() < PACK_HEADER_SIZE
         || &pack_data[..8] != PACK_MAGIC
         || pack_data[8] < PACK_VERSION_MIN
-        || pack_data[8] > PACK_VERSION_MAX
-    {
+        || pack_data[8] > PACK_VERSION_MAX;
+    if header_invalid {
         issues.push(IntegrityIssue::CorruptPackContent {
             pack_id: *pack_id,
             detail: "invalid pack header".into(),
@@ -741,7 +751,9 @@ pub(crate) fn verify_pack_full(
             continue;
         }
 
-        let raw = &pack_data[start..end];
+        let raw = pack_data
+            .get(start..end)
+            .expect("end <= pack_data.len() (checked above)");
         count += verify_single_chunk(crypto, chunk_id_key, chunk_id, pack_id, raw, issues);
     }
     count

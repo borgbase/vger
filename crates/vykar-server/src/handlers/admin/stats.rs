@@ -36,41 +36,42 @@ pub(super) async fn repo_stats(state: AppState) -> Result<Response, ServerError>
     .into_response())
 }
 
+fn walk(dir: &std::path::Path, bytes: &mut u64, objects: &mut u64) {
+    if let Ok(entries) = std::fs::read_dir(dir) {
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                walk(&path, bytes, objects);
+            } else if let Ok(meta) = path.metadata() {
+                *bytes += meta.len();
+                *objects += 1;
+            }
+        }
+    }
+}
+
+fn count_packs(dir: &std::path::Path, count: &mut u64) {
+    if let Ok(entries) = std::fs::read_dir(dir) {
+        for entry in entries.flatten() {
+            if entry.path().is_dir() {
+                count_packs(&entry.path(), count);
+            } else {
+                *count += 1;
+            }
+        }
+    }
+}
+
 fn count_repo_stats(repo_dir: &std::path::Path) -> (u64, u64, u64) {
     let mut total_bytes = 0u64;
     let mut total_objects = 0u64;
     let mut total_packs = 0u64;
-
-    fn walk(dir: &std::path::Path, bytes: &mut u64, objects: &mut u64) {
-        if let Ok(entries) = std::fs::read_dir(dir) {
-            for entry in entries.flatten() {
-                let path = entry.path();
-                if path.is_dir() {
-                    walk(&path, bytes, objects);
-                } else if let Ok(meta) = path.metadata() {
-                    *bytes += meta.len();
-                    *objects += 1;
-                }
-            }
-        }
-    }
 
     walk(repo_dir, &mut total_bytes, &mut total_objects);
 
     // Count packs specifically.
     let packs_dir = repo_dir.join("packs");
     if packs_dir.exists() {
-        fn count_packs(dir: &std::path::Path, count: &mut u64) {
-            if let Ok(entries) = std::fs::read_dir(dir) {
-                for entry in entries.flatten() {
-                    if entry.path().is_dir() {
-                        count_packs(&entry.path(), count);
-                    } else {
-                        *count += 1;
-                    }
-                }
-            }
-        }
         count_packs(&packs_dir, &mut total_packs);
     }
 

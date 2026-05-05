@@ -209,8 +209,8 @@ impl ItemImpact {
         packs.sort_by_key(|a| a.0);
         packs.dedup();
 
-        let message = if packs.len() == 1 {
-            format!("references missing pack {}", packs[0])
+        let message = if let [only] = packs.as_slice() {
+            format!("references missing pack {only}")
         } else {
             let list = packs
                 .iter()

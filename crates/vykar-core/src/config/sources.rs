@@ -171,10 +171,9 @@ pub(super) fn normalize_sources(
                     ));
                 }
 
-                let label = if resolved_paths.is_empty() {
-                    label.unwrap()
-                } else {
-                    label.unwrap_or_else(|| label_from_path(&resolved_paths[0]))
+                let label = match resolved_paths.first() {
+                    None => label.expect("dump-only source label was validated"),
+                    Some(first) => label.unwrap_or_else(|| label_from_path(first)),
                 };
 
                 // Validate no duplicate basenames within a multi-path entry
@@ -212,8 +211,8 @@ pub(super) fn normalize_sources(
 
     // Group all simple entries into one SourceEntry
     if !simple_paths.is_empty() {
-        let label = if simple_paths.len() == 1 {
-            label_from_path(&simple_paths[0])
+        let label = if let [only] = simple_paths.as_slice() {
+            label_from_path(only)
         } else {
             // Validate no duplicate basenames
             let mut basenames = std::collections::HashSet::new();

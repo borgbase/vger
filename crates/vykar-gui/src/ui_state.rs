@@ -405,8 +405,10 @@ pub(crate) fn apply_snapshot_selection(
         for selected in selection.selected.iter_mut() {
             *selected = false;
         }
-        for selected in &mut selection.selected[lo..=hi] {
-            *selected = true;
+        if let Some(range_slice) = selection.selected.get_mut(lo..=hi) {
+            for selected in range_slice {
+                *selected = true;
+            }
         }
     } else if toggle {
         if let Some(selected) = selection.selected.get_mut(row) {
@@ -544,10 +546,13 @@ mod tests {
         assert!(sort_snapshot_data(&mut rows, 0, true));
         selection.reset(rows.len());
 
-        assert_eq!(rows[0].id, SharedString::from("a"));
-        assert_eq!(rows[0].repo_name, SharedString::from("repo-a"));
-        assert_eq!(rows[1].id, SharedString::from("b"));
-        assert_eq!(rows[1].repo_name, SharedString::from("repo-b"));
+        assert_eq!(rows.len(), 2);
+        let first = rows.first().expect("non-empty");
+        let second = rows.get(1).expect("len == 2");
+        assert_eq!(first.id, SharedString::from("a"));
+        assert_eq!(first.repo_name, SharedString::from("repo-a"));
+        assert_eq!(second.id, SharedString::from("b"));
+        assert_eq!(second.repo_name, SharedString::from("repo-b"));
         assert_eq!(selection.selected, vec![false, false]);
         assert_eq!(selection.anchor, None);
     }

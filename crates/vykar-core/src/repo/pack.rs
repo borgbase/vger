@@ -281,6 +281,11 @@ pub fn read_blob_from_pack(
 
 /// Forward-scan pack bytes using per-blob length prefixes.
 /// Returns (offset, length) pairs for each blob.
+//
+// Indexing into `pack_data` is gated by `pack_data.len() < PACK_HEADER_SIZE`
+// up-front and `pos + 4 <= blobs_end` / `pos + 4 + blob_len ...` per loop
+// iteration; out-of-bounds is unreachable for inputs that pass those checks.
+#[allow(clippy::indexing_slicing)]
 pub fn scan_pack_blobs_bytes(pack_data: &[u8]) -> Result<Vec<(u64, u32)>> {
     if pack_data.len() < PACK_HEADER_SIZE {
         return Err(VykarError::InvalidFormat("pack too small".into()));
@@ -344,6 +349,10 @@ pub fn compute_data_pack_target(
 ) -> usize {
     let min = min_pack_size as f64;
     let max = max_pack_size as f64;
+    #[allow(
+        clippy::cast_precision_loss,
+        reason = "pack-target sizing; usize range fits f64 mantissa for realistic counts"
+    )]
     let target = min * (num_data_packs as f64 / 50.0).sqrt();
     target.clamp(min, max) as usize
 }

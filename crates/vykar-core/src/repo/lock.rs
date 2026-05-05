@@ -80,7 +80,11 @@ pub fn acquire_lock(storage: &dyn StorageBackend) -> Result<LockGuard> {
     }
     if keys.first() != Some(&key) {
         let _ = storage.delete(&key);
-        let holder = format_lock_holder(storage, keys.first().unwrap());
+        let holder = format_lock_holder(
+            storage,
+            keys.first()
+                .expect("lock list contains our key or an older winner"),
+        );
         return Err(VykarError::Locked(holder));
     }
 
@@ -429,17 +433,17 @@ impl StopSignal {
 
     /// Block up to `timeout`. Returns true immediately if signalled.
     fn wait_timeout(&self, timeout: std::time::Duration) -> bool {
-        let guard = self.mutex.lock().unwrap();
+        let guard = self.mutex.lock().expect("StopSignal mutex not poisoned");
         let (guard, _) = self
             .condvar
             .wait_timeout_while(guard, timeout, |stopped| !*stopped)
-            .unwrap();
+            .expect("StopSignal condvar wait not poisoned");
         *guard
     }
 
     /// Wake the thread immediately.
     fn signal(&self) {
-        *self.mutex.lock().unwrap() = true;
+        *self.mutex.lock().expect("StopSignal mutex not poisoned") = true;
         self.condvar.notify_all();
     }
 }
@@ -726,7 +730,11 @@ pub fn acquire_lock_with_retry(
             Err(e) => return Err(e),
         }
     }
-    unreachable!()
+    // Loop only falls through when `max_attempts == 0`; every other path
+    // returns inside the match.
+    Err(VykarError::Other(
+        "acquire_lock_with_retry called with max_attempts == 0".to_string(),
+    ))
 }
 
 /// Default stale session threshold.

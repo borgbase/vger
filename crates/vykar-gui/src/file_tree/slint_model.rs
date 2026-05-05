@@ -1,3 +1,7 @@
+// Tree-arena indexing — `visible_rows` only contains indices stored when
+// the corresponding `arena` entry was created. See file_tree/builder.rs.
+#![allow(clippy::indexing_slicing)]
+
 use slint::SharedString;
 
 use crate::TreeRowData;

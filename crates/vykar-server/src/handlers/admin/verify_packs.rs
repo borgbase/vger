@@ -11,7 +11,7 @@ use vykar_protocol::{
 use crate::error::ServerError;
 use crate::state::AppState;
 
-/// Must match or slightly exceed client-side SERVER_VERIFY_BATCH_SIZE (100).
+/// Must match or slightly exceed client-side `SERVER_VERIFY_BATCH_SIZE` (100).
 const MAX_VERIFY_PACKS: usize = 100;
 /// Maximum estimated bytes of pack I/O per verify request (matches client-side cap).
 const MAX_VERIFY_BYTES: u64 = 2 * 1024 * 1024 * 1024; // 2 GiB
@@ -86,18 +86,15 @@ fn execute_verify_packs(state: &AppState, plan: &VerifyPacksPlanRequest) -> Veri
 
     for entry in &plan.packs {
         // Stat before reading to enforce byte cap with actual file sizes.
-        let file_path = match state.file_path(&entry.pack_key) {
-            Some(p) => p,
-            None => {
-                results.push(VerifyPackResult {
-                    pack_key: entry.pack_key.clone(),
-                    hash_valid: false,
-                    header_valid: false,
-                    blobs_valid: false,
-                    error: Some("invalid pack path".into()),
-                });
-                continue;
-            }
+        let Some(file_path) = state.file_path(&entry.pack_key) else {
+            results.push(VerifyPackResult {
+                pack_key: entry.pack_key.clone(),
+                hash_valid: false,
+                header_valid: false,
+                blobs_valid: false,
+                error: Some("invalid pack path".into()),
+            });
+            continue;
         };
         let file_size = match std::fs::metadata(&file_path) {
             Ok(m) => m.len(),
@@ -156,6 +153,10 @@ fn verify_single_pack(file_path: &std::path::Path, entry: &VerifyPackRequest) ->
 ///
 /// Accepts a generic reader so tests can use `Cursor<Vec<u8>>` with small
 /// buffer sizes to exercise boundary splits.
+#[allow(clippy::too_many_lines)]
+// Bounds for indexing here are enforced by `min(avail.len(), total - filled)`
+// and `header_buf[..8]` length checks; clippy can't prove these.
+#[allow(clippy::indexing_slicing)]
 fn verify_pack_from_reader<R: std::io::Read>(
     reader: R,
     file_len: u64,
@@ -220,7 +221,7 @@ fn verify_pack_from_reader<R: std::io::Read>(
     // 2. Forward-scan blob boundaries while hashing all remaining bytes.
     let mut blobs_valid = header_valid;
     if header_valid {
-        let mut pos = PACK_HEADER_SIZE as u64;
+        let mut pos = u64::try_from(PACK_HEADER_SIZE).expect("pack header size fits u64");
 
         loop {
             // Need at least 4 bytes for a length prefix.
@@ -238,7 +239,7 @@ fn verify_pack_from_reader<R: std::io::Read>(
                 blobs_valid = false;
                 break;
             }
-            let blob_len = u32::from_le_bytes(len_buf) as u64;
+            let blob_len = u64::from(u32::from_le_bytes(len_buf));
             pos += 4;
 
             // Check blob fits within file.
@@ -255,7 +256,10 @@ fn verify_pack_from_reader<R: std::io::Read>(
             let mut blob_remaining = blob_len;
             let mut skip_buf = [0u8; 8192];
             while blob_remaining > 0 {
-                let to_read = std::cmp::min(blob_remaining as usize, skip_buf.len());
+                let to_read = std::cmp::min(
+                    usize::try_from(blob_remaining).unwrap_or(usize::MAX),
+                    skip_buf.len(),
+                );
                 let n = read_exact_hashed!(reader, hasher, &mut skip_buf[..to_read]);
                 if n == 0 {
                     blobs_valid = false;

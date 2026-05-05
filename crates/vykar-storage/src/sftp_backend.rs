@@ -1,3 +1,14 @@
+#![allow(
+    clippy::duration_suboptimal_units,
+    clippy::elidable_lifetime_names,
+    clippy::map_unwrap_or,
+    clippy::match_same_arms,
+    clippy::missing_errors_doc,
+    clippy::needless_pass_by_value,
+    clippy::redundant_closure_for_method_calls,
+    clippy::ref_option
+)]
+
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Condvar, Mutex};
@@ -497,7 +508,11 @@ impl SftpBackend {
             }
         }
 
-        unreachable!()
+        // The loop body always returns on the final iteration; reaching here
+        // requires `max_retries + 1` to wrap to zero, which the type prevents.
+        Err(VykarError::Other(
+            "retry_op: loop exited without producing a result".to_string(),
+        ))
     }
 }
 
@@ -637,7 +652,9 @@ fn verify_or_learn_host_key(
         return Ok(HostKeyState::Learned);
     }
 
-    Err(russh::Error::KeyChanged { line: known[0].0 })
+    Err(russh::Error::KeyChanged {
+        line: known.first().expect("known is non-empty (checked above)").0,
+    })
 }
 
 /// Load SSH private key, trying explicit path first, then default locations.
@@ -999,7 +1016,10 @@ impl StorageBackend for SftpBackend {
                 let mut buf = vec![0u8; requested_len];
                 let mut total = 0;
                 while total < buf.len() {
-                    match file.read(&mut buf[total..]).await {
+                    match file
+                        .read(buf.get_mut(total..).expect("total <= buf.len()"))
+                        .await
+                    {
                         Ok(0) => break,
                         Ok(n) => total += n,
                         Err(e) => return Err(io_retry_error("read_range", &path, e)),

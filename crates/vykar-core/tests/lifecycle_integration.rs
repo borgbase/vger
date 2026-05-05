@@ -1,3 +1,8 @@
+#![allow(clippy::unwrap_used)]
+#![allow(clippy::pedantic)]
+// Test-only env mutation; SAFETY per block.
+#![allow(unsafe_code)]
+
 use std::path::Path;
 use std::sync::Once;
 use std::time::Duration;
@@ -23,6 +28,8 @@ fn init_test_environment() {
         let cache = base.join("cache");
         let _ = std::fs::create_dir_all(&home);
         let _ = std::fs::create_dir_all(&cache);
+        // SAFETY: Once::call_once runs this single-threaded at test-process
+        // startup before any threads are spawned.
         unsafe {
             std::env::set_var("HOME", &home);
             std::env::set_var("XDG_CACHE_HOME", &cache);
@@ -153,8 +160,12 @@ fn lifecycle_delete_compact_check_and_restore() {
 
     let delete_result = commands::delete::run(&config, None, &["snap-v1"], false, None).unwrap();
     assert!(delete_result.warnings.is_empty());
-    assert_eq!(delete_result.stats[0].snapshot_name, "snap-v1");
-    assert!(delete_result.stats[0].chunks_deleted > 0);
+    let stats = delete_result
+        .stats
+        .first()
+        .expect("delete returned no stats");
+    assert_eq!(stats.snapshot_name, "snap-v1");
+    assert!(stats.chunks_deleted > 0);
 
     let compact_stats = commands::compact::run(&config, None, 0.0, None, false, None).unwrap();
     assert!(compact_stats.space_freed > 0);

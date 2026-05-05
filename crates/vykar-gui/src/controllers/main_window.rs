@@ -363,8 +363,10 @@ pub(crate) fn wire_callbacks(
             let Some(snapshots) = ui_state::selected_snapshots(2) else {
                 return;
             };
-            let first = &snapshots[0];
-            let second = &snapshots[1];
+            let [first, second] = match snapshots.as_slice() {
+                [a, b] => [a, b],
+                _ => return,
+            };
             if first.repo_name != second.repo_name {
                 send_log(&ui_tx, "Cannot diff snapshots from different repositories.");
                 return;

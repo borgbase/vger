@@ -156,7 +156,12 @@ pub(super) fn apply_config(
             return false;
         }
     };
-    let schedule = repos[0].config.schedule.clone();
+    let schedule = repos
+        .first()
+        .expect("validate_config guarantees at least one repo")
+        .config
+        .schedule
+        .clone();
 
     if update_source {
         use vykar_core::config::ConfigSource;

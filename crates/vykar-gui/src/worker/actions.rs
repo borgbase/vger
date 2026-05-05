@@ -103,11 +103,8 @@ pub(super) fn handle_delete_snapshots(
         return;
     }
 
-    let prompt = if snapshot_names.len() == 1 {
-        format!(
-            "Are you sure you want to delete snapshot {} from {repo_name}?",
-            snapshot_names[0]
-        )
+    let prompt = if let [only] = snapshot_names.as_slice() {
+        format!("Are you sure you want to delete snapshot {only} from {repo_name}?")
     } else {
         format!(
             "Are you sure you want to delete {} snapshots from {repo_name}?\n\nThis is a batch \
@@ -171,8 +168,7 @@ pub(super) fn handle_delete_snapshots(
                 total_chunks += stats.chunks_deleted;
                 total_freed += stats.space_freed;
             }
-            if result.stats.len() == 1 {
-                let s = &result.stats[0];
+            if let [s] = result.stats.as_slice() {
                 send_log(
                     &ctx.ui_tx,
                     format!(

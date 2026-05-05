@@ -145,7 +145,7 @@ pub enum VykarError {
         path: String,
         /// macOS hint: the file was reported dataless on the post-read fstat,
         /// suggesting hydration is in progress. Surfaced in the message so
-        /// the user can recognize the iCloud Drive / Dropbox / OneDrive case.
+        /// the user can recognize the iCloud Drive / Dropbox / `OneDrive` case.
         ///
         /// Kept structural (rather than inlined into `path`) so consumers
         /// that round-trip, prefix-strip, or render `path` as a clickable
@@ -171,13 +171,13 @@ fn is_eio(e: &std::io::Error) -> bool {
 }
 
 /// Soft I/O errors that should yield a per-entry skip rather than abort the
-/// backup. Used both at raw-`io::Error` call sites (readlink, read_dir,
-/// File::open, fstat, read_to_end) and as the `VykarError::Io` arm of
+/// backup. Used both at raw-`io::Error` call sites (`readlink`, `read_dir`,
+/// `File::open`, `fstat`, `read_to_end`) and as the `VykarError::Io` arm of
 /// [`VykarError::is_soft_file_error`].
 ///
 /// Windows-specific cases:
 /// - **Synthetic `read_link` error from std** for unsupported reparse tags
-///   (OneDrive Cloud Files, AppExecLink, dedup, HSM, WSL volume). std emits
+///   (`OneDrive` Cloud Files, `AppExecLink`, dedup, HSM, WSL volume). std emits
 ///   `io::Error::new(ErrorKind::Uncategorized, "Unsupported reparse point type")`
 ///   with no `raw_os_error`; `Uncategorized` is unstable on stable Rust so we
 ///   match by message. If std rewords it, behavior reverts to today's "abort

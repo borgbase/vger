@@ -1,3 +1,12 @@
+#![allow(
+    clippy::doc_markdown,
+    clippy::if_not_else,
+    clippy::implicit_hasher,
+    clippy::missing_errors_doc,
+    clippy::redundant_closure_for_method_calls,
+    clippy::too_many_lines
+)]
+
 use std::borrow::Cow;
 use std::sync::atomic::{AtomicBool, Ordering};
 

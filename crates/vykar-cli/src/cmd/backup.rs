@@ -62,8 +62,8 @@ pub(crate) fn run_backup(
             let expanded: Vec<String> = paths.iter().map(|p| config::expand_tilde(p)).collect();
             let source_label = if let Some(ref lbl) = user_label {
                 lbl.clone()
-            } else if expanded.len() == 1 {
-                config::label_from_path(&expanded[0])
+            } else if let [only] = expanded.as_slice() {
+                config::label_from_path(only)
             } else {
                 "adhoc".to_string()
             };

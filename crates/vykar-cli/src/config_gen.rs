@@ -92,7 +92,11 @@ fn pick_config_location() -> Result<std::path::PathBuf, Box<dyn std::error::Erro
         n - 1
     };
 
-    Ok(search_paths[selection].0.clone())
+    Ok(search_paths
+        .get(selection)
+        .expect("selection is bounded above by search_paths.len()")
+        .0
+        .clone())
 }
 
 #[cfg(test)]

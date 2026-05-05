@@ -70,6 +70,10 @@ fn validate_kdf_params(kdf: &KdfParams) -> Result<()> {
 
 impl MasterKey {
     /// Generate a new random master key using OS entropy.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the operating system entropy source is unavailable.
     pub fn generate() -> Self {
         let mut encryption_key = [0u8; 32];
         let mut chunk_id_key = [0u8; 32];
@@ -86,6 +90,15 @@ impl MasterKey {
     }
 
     /// Encrypt the master key with a passphrase using Argon2id + AES-256-GCM.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when key derivation, serialization, or encryption
+    /// fails.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the operating system entropy source is unavailable.
     pub fn to_encrypted<P: AsRef<[u8]>>(&self, passphrase: P) -> Result<EncryptedKey> {
         let passphrase = passphrase.as_ref();
 
@@ -145,6 +158,11 @@ impl MasterKey {
     /// 1. v1 AAD (stable manual encoding)
     /// 2. Legacy msgpack AAD (pre-v1 repos)
     /// 3. No AAD (pre-AAD repos)
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when KDF parameters are invalid, authentication fails,
+    /// or the decrypted key payload is malformed.
     pub fn from_encrypted<P: AsRef<[u8]>>(encrypted: &EncryptedKey, passphrase: P) -> Result<Self> {
         let passphrase = passphrase.as_ref();
 
@@ -236,12 +254,12 @@ fn try_decrypt_no_aad(
 
 /// Compute stable v1 AAD bytes from KDF parameters.
 ///
-/// Format: `b"vger:kdf-aad:v1\0"` || algorithm_len (u32 LE) || algorithm_bytes
-/// || time_cost (u32 LE) || memory_cost (u32 LE) || parallelism (u32 LE)
-/// || salt_len (u32 LE) || salt_bytes
+/// Format: `b"vger:kdf-aad:v1\0"` || `algorithm_len` (u32 LE) ||
+/// `algorithm_bytes` || `time_cost` (u32 LE) || `memory_cost` (u32 LE) ||
+/// `parallelism` (u32 LE) || `salt_len` (u32 LE) || `salt_bytes`
 ///
 /// This uses manual byte encoding with no serde dependency, ensuring
-/// stability across rmp_serde versions.
+/// stability across `rmp_serde` versions.
 fn kdf_params_aad_v1(kdf: &KdfParams) -> Vec<u8> {
     // Wire-format constant — DO NOT rename (backward compatibility)
     let prefix = b"vger:kdf-aad:v1\0";
@@ -249,12 +267,20 @@ fn kdf_params_aad_v1(kdf: &KdfParams) -> Vec<u8> {
     let capacity = prefix.len() + 4 + algo_bytes.len() + 4 + 4 + 4 + 4 + kdf.salt.len();
     let mut buf = Vec::with_capacity(capacity);
     buf.extend_from_slice(prefix);
-    buf.extend_from_slice(&(algo_bytes.len() as u32).to_le_bytes());
+    buf.extend_from_slice(
+        &u32::try_from(algo_bytes.len())
+            .expect("KDF algorithm name length fits u32")
+            .to_le_bytes(),
+    );
     buf.extend_from_slice(algo_bytes);
     buf.extend_from_slice(&kdf.time_cost.to_le_bytes());
     buf.extend_from_slice(&kdf.memory_cost.to_le_bytes());
     buf.extend_from_slice(&kdf.parallelism.to_le_bytes());
-    buf.extend_from_slice(&(kdf.salt.len() as u32).to_le_bytes());
+    buf.extend_from_slice(
+        &u32::try_from(kdf.salt.len())
+            .expect("KDF salt length fits u32")
+            .to_le_bytes(),
+    );
     buf.extend_from_slice(&kdf.salt);
     buf
 }

@@ -1,3 +1,17 @@
+#![forbid(unsafe_code)]
+#![cfg_attr(
+    test,
+    allow(
+        clippy::doc_markdown,
+        clippy::expect_used,
+        clippy::format_push_string,
+        clippy::indexing_slicing,
+        clippy::manual_let_else,
+        clippy::panic,
+        clippy::unwrap_used
+    )
+)]
+
 pub mod local_backend;
 pub mod rest_backend;
 pub mod s3_backend;
@@ -26,6 +40,7 @@ pub use vykar_protocol::{
 
 /// Abstract key-value storage for repository objects.
 /// Keys are `/`-separated string paths (e.g. "packs/ab/ab01cd02...").
+#[allow(clippy::missing_errors_doc)]
 pub trait StorageBackend: Send + Sync {
     /// Read an object by key. Returns `None` if not found.
     fn get(&self, key: &str) -> Result<Option<Vec<u8>>>;
@@ -52,7 +67,7 @@ pub trait StorageBackend: Send + Sync {
     /// Read a byte range from an object into a caller-provided buffer.
     ///
     /// Returns `Ok(true)` when the key exists (buf filled), `Ok(false)` when
-    /// not found (buf cleared). LocalBackend overrides this to read directly
+    /// not found (buf cleared). `LocalBackend` overrides this to read directly
     /// into `buf`, achieving true buffer reuse. Other backends fall through to
     /// `get_range()` + move.
     fn get_range_into(
@@ -62,15 +77,12 @@ pub trait StorageBackend: Send + Sync {
         length: u64,
         buf: &mut Vec<u8>,
     ) -> Result<bool> {
-        match self.get_range(key, offset, length)? {
-            Some(data) => {
-                *buf = data;
-                Ok(true)
-            }
-            None => {
-                buf.clear();
-                Ok(false)
-            }
+        if let Some(data) = self.get_range(key, offset, length)? {
+            *buf = data;
+            Ok(true)
+        } else {
+            buf.clear();
+            Ok(false)
         }
     }
 
@@ -88,7 +100,12 @@ pub trait StorageBackend: Send + Sync {
     /// Backends should override this with a metadata-only operation (e.g.
     /// HTTP HEAD, `stat()`, `fs::metadata`) to avoid downloading the object.
     fn size(&self, key: &str) -> Result<Option<u64>> {
-        Ok(self.get(key)?.map(|v| v.len() as u64))
+        self.get(key)?
+            .map(|v| {
+                u64::try_from(v.len())
+                    .map_err(|_| VykarError::Other("object length does not fit u64".into()))
+            })
+            .transpose()
     }
 
     /// Execute a server-side repack plan when supported by the backend.
@@ -208,6 +225,11 @@ impl ParsedUrl {
 /// - `s3+http://endpoint[:port]/bucket/prefix` -> `S3` over HTTP (unsafe; blocked by default)
 /// - `sftp://[user@]host[:port]/path` -> `Sftp`
 /// - `http(s)://...` -> `Rest`
+///
+/// # Errors
+///
+/// Returns an error when the URL is empty, has an unsupported scheme, or is
+/// missing required scheme-specific parts.
 pub fn parse_repo_url(raw: &str) -> Result<ParsedUrl> {
     let trimmed = raw.trim();
     if trimmed.is_empty() {
@@ -384,6 +406,11 @@ impl Default for RetryConfig {
 }
 
 /// Build a storage backend from a `StorageConfig`.
+///
+/// # Errors
+///
+/// Returns an error when the repository URL is invalid, insecure HTTP is not
+/// explicitly allowed, or backend initialization fails.
 pub fn backend_from_config(cfg: &StorageConfig) -> Result<Box<dyn StorageBackend>> {
     let parsed = parse_repo_url(&cfg.url)?;
 

@@ -47,11 +47,11 @@ pub(crate) fn validate_config(
     config_path: &std::path::Path,
 ) -> Result<Vec<config::ResolvedRepo>, String> {
     let repos = app::load_runtime_config_from_path(config_path).map_err(|e| format!("{e}"))?;
-    if repos.is_empty() {
-        return Err("Config is empty (no repositories defined).".into());
-    }
+    let first = repos
+        .first()
+        .ok_or("Config is empty (no repositories defined).")?;
     // Validate schedule is usable (parses interval or cron)
-    vykar_core::app::scheduler::next_run_delay(&repos[0].config.schedule)
+    vykar_core::app::scheduler::next_run_delay(&first.config.schedule)
         .map_err(|e| format!("Invalid schedule: {e}"))?;
     Ok(repos)
 }

@@ -1,3 +1,14 @@
+#![allow(clippy::print_stderr, clippy::print_stdout)]
+#![cfg_attr(
+    test,
+    allow(
+        clippy::expect_used,
+        clippy::indexing_slicing,
+        clippy::panic,
+        clippy::unwrap_used
+    )
+)]
+
 mod cli;
 mod cmd;
 mod config_gen;
@@ -172,10 +183,14 @@ fn main() {
         }
     } else if cli.trust_repo {
         // Single-repo config (multi-repo already rejected above).
-        all_repos[0].config.trust_repo = true;
+        all_repos
+            .first_mut()
+            .expect("single-repo config was validated")
+            .config
+            .trust_repo = true;
     }
     let repos: Vec<&ResolvedRepo> = if let Some(selector) = repo_selector {
-        vec![config::select_repo(&all_repos, selector).unwrap()]
+        vec![config::select_repo(&all_repos, selector).expect("repo selector was validated")]
     } else {
         all_repos.iter().collect()
     };
@@ -239,8 +254,17 @@ fn main() {
                     snapshot,
                     repos: rs,
                 } => {
-                    let names: Vec<&str> =
-                        rs.iter().map(|i| repo_display_name(repos[*i])).collect();
+                    let names: Vec<&str> = rs
+                        .iter()
+                        .map(|i| {
+                            repo_display_name(
+                                repos
+                                    .get(*i)
+                                    .copied()
+                                    .expect("dispatch repo index is valid"),
+                            )
+                        })
+                        .collect();
                     eprintln!(
                         "Error: snapshot '{snapshot}' is present in multiple repositories: {}. \
                          Rename the snapshot or scope the config.",
@@ -251,12 +275,20 @@ fn main() {
                 DiffDispatch::ProbeError { errors } => {
                     eprintln!("Error: could not probe all repositories");
                     for (i, err) in &errors {
-                        eprintln!("  {}:  {err}", repo_display_name(repos[*i]));
+                        let repo = repos
+                            .get(*i)
+                            .copied()
+                            .expect("dispatch repo index is valid");
+                        eprintln!("  {}:  {err}", repo_display_name(repo));
                     }
                     std::process::exit(1);
                 }
                 DiffDispatch::Unique(idx) => {
-                    let result = run_repo_command(&cli, repos[idx]);
+                    let Some(repo) = repos.get(idx).copied() else {
+                        eprintln!("Internal error: diff target repo index out of range");
+                        std::process::exit(EXIT_ERROR);
+                    };
+                    let result = run_repo_command(&cli, repo);
                     if signal::SHUTDOWN.load(Ordering::SeqCst) {
                         eprintln!("Interrupted");
                         std::process::exit(EXIT_INTERRUPTED);
@@ -296,7 +328,11 @@ fn main() {
             }
             SnapshotDispatch::Unique(idx) => {
                 // Single match — dispatch without banner
-                let result = run_repo_command(&cli, repos[idx]);
+                let Some(repo) = repos.get(idx).copied() else {
+                    eprintln!("Internal error: snapshot dispatch index out of range");
+                    std::process::exit(EXIT_ERROR);
+                };
+                let result = run_repo_command(&cli, repo);
                 if signal::SHUTDOWN.load(Ordering::SeqCst) {
                     eprintln!("Interrupted");
                     std::process::exit(EXIT_INTERRUPTED);
@@ -313,7 +349,14 @@ fn main() {
             SnapshotDispatch::Ambiguous(indices) => {
                 let names: Vec<&str> = indices
                     .iter()
-                    .map(|i| repo_display_name(repos[*i]))
+                    .map(|i| {
+                        repo_display_name(
+                            repos
+                                .get(*i)
+                                .copied()
+                                .expect("dispatch repo index is valid"),
+                        )
+                    })
                     .collect();
                 eprintln!(
                     "Error: snapshot '{snap}' found in multiple repositories: {}. \
@@ -325,10 +368,18 @@ fn main() {
             SnapshotDispatch::ProbeError { matches, errors } => {
                 eprintln!("Error: could not probe all repositories");
                 for (i, err) in &errors {
-                    eprintln!("  {}:  {err}", repo_display_name(repos[*i]));
+                    let repo = repos
+                        .get(*i)
+                        .copied()
+                        .expect("dispatch repo index is valid");
+                    eprintln!("  {}:  {err}", repo_display_name(repo));
                 }
                 for i in &matches {
-                    eprintln!("  {}:  found '{snap}'", repo_display_name(repos[*i]));
+                    let repo = repos
+                        .get(*i)
+                        .copied()
+                        .expect("dispatch repo index is valid");
+                    eprintln!("  {}:  found '{snap}'", repo_display_name(repo));
                 }
                 eprintln!("Use -R / --repo to target a specific repository.");
                 std::process::exit(1);
@@ -446,9 +497,9 @@ fn classify_snapshot_target(snap: &str, repos: &[&ResolvedRepo]) -> SnapshotDisp
         return SnapshotDispatch::ProbeError { matches, errors };
     }
 
-    match matches.len() {
-        0 => SnapshotDispatch::NotFound,
-        1 => SnapshotDispatch::Unique(matches[0]),
+    match matches.as_slice() {
+        [] => SnapshotDispatch::NotFound,
+        [only] => SnapshotDispatch::Unique(*only),
         _ => SnapshotDispatch::Ambiguous(matches),
     }
 }
@@ -535,12 +586,28 @@ fn classify_diff_target(snap_a: &str, snap_b: &str, repos: &[&ResolvedRepo]) -> 
         .copied()
         .filter(|i| matches_b.contains(i))
         .collect();
-    match intersection.len() {
-        1 => DiffDispatch::Unique(intersection[0]),
-        0 => DiffDispatch::DifferentRepos {
-            a_repo: repo_display_name(repos[matches_a[0]]).to_string(),
-            b_repo: repo_display_name(repos[matches_b[0]]).to_string(),
-        },
+    match intersection.as_slice() {
+        [unique] => DiffDispatch::Unique(*unique),
+        [] => {
+            // matches_a/matches_b are non-empty (checked above), so .first() is Some.
+            let a_idx = *matches_a.first().expect("matches_a non-empty");
+            let b_idx = *matches_b.first().expect("matches_b non-empty");
+            let a_repo = repo_display_name(
+                repos
+                    .get(a_idx)
+                    .copied()
+                    .expect("diff repo index for snapshot A is valid"),
+            )
+            .to_string();
+            let b_repo = repo_display_name(
+                repos
+                    .get(b_idx)
+                    .copied()
+                    .expect("diff repo index for snapshot B is valid"),
+            )
+            .to_string();
+            DiffDispatch::DifferentRepos { a_repo, b_repo }
+        }
         _ => {
             // Both snapshot names collide in multiple repos. Report the
             // narrower of the two name's match sets so the user can see

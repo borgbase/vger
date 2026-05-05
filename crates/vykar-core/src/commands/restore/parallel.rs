@@ -89,7 +89,7 @@ impl LruHandles {
             // Move to back (MRU position).
             let entry = self.entries.remove(pos);
             self.entries.push(entry);
-            Some(&mut self.entries.last_mut().unwrap().1)
+            Some(&mut self.entries.last_mut().expect("entry was just pushed").1)
         } else {
             None
         }
@@ -113,6 +113,11 @@ impl LruHandles {
 /// buckets with pack-affinity: groups sharing a pack_id are assigned to the
 /// same bucket when possible, falling back to the lightest bucket when the
 /// affinity bucket would become a straggler.
+//
+// `bucket_bytes`/`buckets` are sized to `num_threads` and never resized; every
+// index used here (`aff`, `dest`) comes from `lightest_bucket(&bucket_bytes)`
+// or a prior `pack_affinity.insert(_, dest)`, both bounded by `num_threads`.
+#[allow(clippy::indexing_slicing)]
 fn partition_groups(groups: Vec<ReadGroup>, num_threads: usize) -> Vec<Vec<ReadGroup>> {
     let total_bytes: u64 = groups.iter().map(|g| g.read_end - g.read_start).sum();
     let cap = total_bytes / num_threads as u64 * 13 / 10; // 1.3x fair share
@@ -313,7 +318,9 @@ fn process_read_group(
             )));
         }
 
-        let raw = &data[local_offset..local_end];
+        let raw = data
+            .get(local_offset..local_end)
+            .expect("local_end <= data.len() (checked above)");
         unpack_object_expect_with_context_into(
             raw,
             ObjectType::ChunkData,
@@ -433,7 +440,9 @@ fn write_buf(
     root: &Path,
 ) -> Result<()> {
     if file_handles.get(file_idx).is_none() {
-        let pf = &files[file_idx];
+        let pf = files
+            .get(file_idx)
+            .ok_or_else(|| VykarError::Other(format!("file_idx {file_idx} out of range")))?;
         let full_path = root.join(&pf.rel_path);
         // Create-on-first-write: truncate(false) prevents one worker from
         // destroying another worker's writes to the same file.

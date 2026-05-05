@@ -12,6 +12,11 @@ pub struct ChunkId(pub [u8; 32]);
 
 impl ChunkId {
     /// Compute a chunk ID using keyed BLAKE2b-256 (BLAKE2b-MAC with 32-byte output).
+    ///
+    /// # Panics
+    ///
+    /// Panics only if the `BLAKE2b` implementation rejects a 32-byte key, which
+    /// would violate this function's fixed-size key contract.
     pub fn compute(key: &[u8; 32], data: &[u8]) -> Self {
         let mut hasher =
             KeyedBlake2b256::new_from_slice(key).expect("valid 32-byte key for BLAKE2b");

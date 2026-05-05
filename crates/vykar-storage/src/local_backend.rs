@@ -13,6 +13,10 @@ pub struct LocalBackend {
 
 impl LocalBackend {
     /// Create a backend rooted at the given directory path.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if an existing root path cannot be canonicalized.
     pub fn new(root: &str) -> Result<Self> {
         let root_path = PathBuf::from(root);
         // Canonicalize if the path already exists for clearer errors and
@@ -171,17 +175,19 @@ impl StorageBackend for LocalBackend {
             Err(e) => return Err(e.into()),
         };
         file.seek(SeekFrom::Start(offset))?;
-        let mut buf = vec![0u8; length as usize];
+        let length_usize = usize::try_from(length)
+            .map_err(|_| VykarError::Other(format!("range length too large: {length}")))?;
+        let mut buf = vec![0u8; length_usize];
         let mut filled = 0;
         while filled < buf.len() {
-            match file.read(&mut buf[filled..]) {
+            match file.read(buf.get_mut(filled..).expect("filled <= buf.len()")) {
                 Ok(0) => break,
                 Ok(n) => filled += n,
                 Err(e) => return Err(e.into()),
             }
         }
         buf.truncate(filled);
-        if filled != length as usize {
+        if filled != length_usize {
             return Err(VykarError::Other(format!(
                 "short read on {key} at offset {offset}: expected {length} bytes, got {filled}"
             )));
@@ -207,16 +213,18 @@ impl StorageBackend for LocalBackend {
         };
         file.seek(SeekFrom::Start(offset))?;
         buf.clear();
-        buf.resize(length as usize, 0);
+        let length_usize = usize::try_from(length)
+            .map_err(|_| VykarError::Other(format!("range length too large: {length}")))?;
+        buf.resize(length_usize, 0);
         let mut filled = 0;
         while filled < buf.len() {
-            match file.read(&mut buf[filled..]) {
+            match file.read(buf.get_mut(filled..).expect("filled <= buf.len()")) {
                 Ok(0) => break,
                 Ok(n) => filled += n,
                 Err(e) => return Err(e.into()),
             }
         }
-        if filled != length as usize {
+        if filled != length_usize {
             return Err(VykarError::Other(format!(
                 "short read on {key} at offset {offset}: expected {length} bytes, got {filled}"
             )));

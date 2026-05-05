@@ -678,7 +678,9 @@ mod tests {
                     PipelineResult::Ok(idx, entry) => {
                         pending.insert(idx, *entry);
                     }
-                    PipelineResult::WorkerErr(_, _) => unreachable!(),
+                    PipelineResult::WorkerErr(_, _) => {
+                        panic!("workers do not produce errors in this test")
+                    }
                     PipelineResult::WalkErr(e) => {
                         budget_ref.poison();
                         walk_err = Some(e);

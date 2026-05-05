@@ -68,21 +68,27 @@ pub(crate) fn try_server_verify(
 
     let mut offset = 0;
     while offset < pack_list.len() {
-        // Compute batch end respecting both pack count and byte volume
+        // Compute batch end respecting both pack count and byte volume.
+        // The `end < pack_list.len()` guard makes `pack_list[end]` and
+        // `pack_list[offset..end]` in-bounds throughout this block.
         let mut end = offset;
         let mut batch_bytes: u64 = 0;
         while end < pack_list.len()
             && end - offset < SERVER_VERIFY_BATCH_SIZE
             && (end == offset
-                || batch_bytes + estimate_pack_bytes(pack_list[end].1) <= SERVER_VERIFY_MAX_BYTES)
+                || batch_bytes + pack_list.get(end).map_or(0, |p| estimate_pack_bytes(p.1))
+                    <= SERVER_VERIFY_MAX_BYTES)
         {
-            batch_bytes += estimate_pack_bytes(pack_list[end].1);
+            batch_bytes += pack_list.get(end).map_or(0, |p| estimate_pack_bytes(p.1));
             end += 1;
         }
 
-        let batch = build_verify_request(&pack_list[offset..end], verify_data);
+        let slice = pack_list
+            .get(offset..end)
+            .expect("offset..end is bounded by the outer/inner while loops");
+        let batch = build_verify_request(slice, verify_data);
 
-        let requested: Vec<(String, usize)> = pack_list[offset..end]
+        let requested: Vec<(String, usize)> = slice
             .iter()
             .map(|(pack_id, chunks)| (pack_id.storage_key(), chunks.len()))
             .collect();

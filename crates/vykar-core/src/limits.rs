@@ -1,3 +1,7 @@
+// libc syscalls for niceness control (getpriority/setpriority/SYS_gettid).
+// Each `unsafe { }` has a SAFETY comment (enforced by undocumented_unsafe_blocks).
+#![allow(unsafe_code)]
+
 use std::io::Read;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -55,6 +59,10 @@ impl ByteRateLimiter {
             state.bytes_consumed = state.bytes_consumed.saturating_add(bytes as u128);
 
             let elapsed_secs = state.start.elapsed().as_secs_f64();
+            #[allow(
+                clippy::cast_precision_loss,
+                reason = "rate-limit time math; precision loss bounded by u128/u64 magnitudes"
+            )]
             let expected_secs = state.bytes_consumed as f64 / self.bytes_per_sec as f64;
             if expected_secs > elapsed_secs {
                 Some(Duration::from_secs_f64(expected_secs - elapsed_secs))
@@ -375,6 +383,9 @@ mod tests {
         // Read this thread's nice and apply a higher (lower-priority) value so
         // we don't need CAP_SYS_NICE. We never restore to a lower nice in this
         // test, so RLIMIT_NICE cannot trip the assertion.
+        // SAFETY: Errno::clear is a thread-local store; getpriority with
+        // PRIO_PROCESS/0 reads the calling thread's nice value with no pointer
+        // arguments.
         let start = unsafe {
             Errno::clear();
             nix::libc::getpriority(nix::libc::PRIO_PROCESS, 0)
@@ -396,6 +407,8 @@ mod tests {
                 let release = Arc::clone(&release);
                 let tids = Arc::clone(&tids);
                 thread::spawn(move || {
+                    // SAFETY: SYS_gettid takes no arguments and returns the
+                    // calling kernel thread id; always sound on Linux.
                     let tid = unsafe { nix::libc::syscall(nix::libc::SYS_gettid) } as i32;
                     tids.lock().unwrap().push(tid);
                     park.wait();
@@ -413,6 +426,8 @@ mod tests {
 
         for tid in tids.lock().unwrap().iter().copied() {
             Errno::clear();
+            // SAFETY: getpriority with PRIO_PROCESS and a TID reads that
+            // task's nice value; no pointer arguments.
             let actual = unsafe { nix::libc::getpriority(nix::libc::PRIO_PROCESS, tid as u32) };
             let errno = Errno::last_raw();
             assert!(
@@ -423,6 +438,8 @@ mod tests {
         }
 
         // Also verify the calling thread.
+        // SAFETY: getpriority with PRIO_PROCESS/0 reads the calling thread's
+        // nice value; no pointer arguments.
         let calling = unsafe { nix::libc::getpriority(nix::libc::PRIO_PROCESS, 0) };
         assert_eq!(calling, target, "calling thread not reniced");
 

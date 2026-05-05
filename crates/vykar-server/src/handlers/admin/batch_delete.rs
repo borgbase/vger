@@ -23,12 +23,9 @@ pub(super) async fn batch_delete(
     for key in &keys {
         // Use lenient path validation for cleanup - allows .tmp.* leftovers
         // from interrupted PUTs while still preventing path traversal.
-        let file_path = match state_clone.file_path_for_cleanup(key) {
-            Some(p) => p,
-            None => {
-                tracing::warn!(key = %key, "batch-delete: skipping key with unsafe path");
-                continue;
-            }
+        let Some(file_path) = state_clone.file_path_for_cleanup(key) else {
+            tracing::warn!(key = %key, "batch-delete: skipping key with unsafe path");
+            continue;
         };
 
         let old_size = match tokio::fs::metadata(&file_path).await {
@@ -51,13 +48,13 @@ pub(super) async fn batch_delete(
             std::collections::BTreeSet::new();
         for key in &keys {
             if let Some(p) = state_clone.file_path_for_cleanup(key) {
-                let mut cur = p.parent().map(|d| d.to_path_buf());
+                let mut cur = p.parent().map(std::path::Path::to_path_buf);
                 while let Some(d) = cur {
                     if d == *data_dir || !d.starts_with(data_dir) {
                         break;
                     }
                     dirs.insert(d.clone());
-                    cur = d.parent().map(|d| d.to_path_buf());
+                    cur = d.parent().map(std::path::Path::to_path_buf);
                 }
             }
         }

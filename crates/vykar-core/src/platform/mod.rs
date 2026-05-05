@@ -1,3 +1,6 @@
+// libc::kill liveness probe; SAFETY documented per block.
+#![allow(unsafe_code)]
+
 pub mod fs;
 pub use vykar_common::paths;
 pub mod shell;

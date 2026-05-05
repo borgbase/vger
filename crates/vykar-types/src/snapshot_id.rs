@@ -24,7 +24,12 @@ impl SnapshotId {
         format!("snapshots/{}", self.to_hex())
     }
 
-    /// Parse a SnapshotId from a 64-character hex string.
+    /// Parse a `SnapshotId` from a 64-character hex string.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if `hex_str` is not valid hex or does not decode to
+    /// exactly 32 bytes.
     pub fn from_hex(hex_str: &str) -> std::result::Result<Self, String> {
         let bytes = hex::decode(hex_str).map_err(|e| format!("invalid hex: {e}"))?;
         if bytes.len() != 32 {

@@ -280,7 +280,7 @@ impl Repository {
         let key = pack_id.storage_key();
         self.write_session
             .as_mut()
-            .unwrap()
+            .expect("write session active while flushing writer")
             .pending_uploads
             .push(std::thread::spawn(move || data.put_to(&*storage, &key)));
 
@@ -334,7 +334,7 @@ impl Repository {
         // Wait for all background uploads to complete before returning.
         self.write_session
             .as_mut()
-            .unwrap()
+            .expect("write session active after pending writer flush")
             .wait_pending_uploads(&*self.storage, &*self.crypto)?;
         Ok(())
     }

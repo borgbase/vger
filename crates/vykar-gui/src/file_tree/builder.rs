@@ -1,3 +1,8 @@
+// Tree-arena indexing: every `arena[idx]` access uses an index returned by
+// `arena.push()` or stored in a `TreeNode.parent` / `.children` field, both
+// of which are populated only with valid in-bounds indices in this module.
+#![allow(clippy::indexing_slicing)]
+
 use std::collections::HashMap;
 
 use vykar_common::display::format_bytes;
@@ -46,7 +51,9 @@ impl FileTree {
                 }
 
                 let parent_path = if i > 0 {
-                    let idx = current_path.rfind('/').unwrap();
+                    let idx = current_path
+                        .rfind('/')
+                        .expect("nested path contains separator");
                     Some(current_path[..idx].to_string())
                 } else {
                     None
@@ -116,12 +123,14 @@ impl FileTree {
             };
 
             let parent_idx = parent_path.as_ref().and_then(|p| dir_map.get(p).copied());
-            let name = parts.last().unwrap().to_string();
+            let name = parts
+                .last()
+                .expect("split path has at least one part")
+                .to_string();
 
             let type_str = match ti.entry_type {
-                ItemType::RegularFile => "file",
                 ItemType::Symlink => "link",
-                ItemType::Directory => unreachable!(),
+                ItemType::RegularFile | ItemType::Directory => "file",
             }
             .to_string();
 

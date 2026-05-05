@@ -13,6 +13,9 @@
 //! Synthetic pipeline / rollback tests (Mechanism B) live next to the code
 //! they exercise in `commands/backup/pipeline.rs`.
 
+// libc::geteuid for root detection; SAFETY documented per block.
+#![allow(unsafe_code)]
+
 use std::fs;
 use std::io::Write;
 use std::path::Path;
@@ -292,6 +295,8 @@ fn sequential_soft_open_error_skips_bad_commits_good() {
     // When running as root the chmod-000 has no effect; in that case the
     // test degenerates to a happy-path check (the readable-file assertion
     // still holds).
+    // SAFETY: geteuid takes no arguments and is always sound; the result is
+    // a plain u32.
     let is_root = unsafe { libc::geteuid() == 0 };
     if !is_root {
         assert_eq!(outcome.stats.errors, 1, "permission denied should skip 1");

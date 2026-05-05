@@ -1,3 +1,7 @@
+// libc fchmod/futimens/utimensat for fd- and path-based file metadata writes;
+// SAFETY documented per block.
+#![allow(unsafe_code)]
+
 use std::fs::{FileType, Metadata};
 use std::path::Path;
 
@@ -56,7 +60,7 @@ pub fn summarize_metadata(metadata: &Metadata, file_type: &FileType) -> Metadata
                 // SF_DATALESS (BSD): inode is a FileProvider placeholder
                 // (iCloud Drive, Dropbox, OneDrive, etc.). Reading the file
                 // would trigger asynchronous hydration via `fileproviderd`.
-                const SF_DATALESS: u32 = 0x40000000;
+                const SF_DATALESS: u32 = 0x4000_0000;
                 (MacExt::st_flags(metadata) & SF_DATALESS) != 0
             }
             #[cfg(not(target_os = "macos"))]
@@ -151,6 +155,8 @@ pub fn apply_mode_fd(file: &std::fs::File, mode: u32) -> std::io::Result<()> {
     #[cfg(unix)]
     {
         use std::os::unix::io::AsRawFd;
+        // SAFETY: fd is borrowed from the open `file` and remains valid for
+        // this call; mode is a plain integer with no pointer dereference.
         let ret = unsafe { libc::fchmod(file.as_raw_fd(), mode as libc::mode_t) };
         if ret == 0 {
             Ok(())
@@ -181,6 +187,9 @@ pub fn set_file_mtime_fd(file: &std::fs::File, secs: i64, nanos: u32) -> std::io
                 tv_nsec: nanos as _,
             },
         ];
+        // SAFETY: fd is borrowed from the open `file` (valid for the call);
+        // `times` is a stack-owned 2-element array of timespec — well-defined
+        // input for futimens.
         let ret = unsafe { libc::futimens(file.as_raw_fd(), times.as_ptr()) };
         if ret == 0 {
             Ok(())
@@ -228,7 +237,7 @@ pub fn create_symlink(link_target: &Path, target: &Path) -> std::io::Result<()> 
                 dir_err.kind(),
                 format!(
                     "failed to create symlink as file ({}) and directory ({})",
-                    file_err.unwrap(),
+                    file_err.expect("symlink_file failed before symlink_dir fallback"),
                     dir_err
                 ),
             )),
@@ -265,6 +274,9 @@ pub fn set_file_mtime(path: &Path, secs: i64, nanos: u32) -> std::io::Result<()>
                 tv_nsec: nanos as _,
             },
         ];
+        // SAFETY: `c_path` is a valid NUL-terminated CString owned in this
+        // scope; `times` is a stack-owned 2-element array of timespec; the
+        // flag `0` is a valid utimensat flag set.
         if unsafe { libc::utimensat(libc::AT_FDCWD, c_path.as_ptr(), times.as_ptr(), 0) } == 0 {
             Ok(())
         } else {

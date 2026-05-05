@@ -1,3 +1,8 @@
+// Tree-arena indexing — see file_tree/builder.rs for the invariant. All
+// `arena[idx]` accesses use indices produced by `arena.push()` or stored in
+// `TreeNode.parent` / `.children`, which are bounds-safe by construction.
+#![allow(clippy::indexing_slicing)]
+
 use super::{CheckState, FileTree};
 
 impl FileTree {

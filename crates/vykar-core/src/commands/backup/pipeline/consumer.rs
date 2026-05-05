@@ -309,11 +309,9 @@ pub(super) fn consume_processed_entry(
         | ProcessedEntry::SegmentSkipped { .. }
         | ProcessedEntry::WalkSkip { .. }
         | ProcessedEntry::DatalessSkipped { .. } => {
-            // Not reached: the orchestrator handles these variants before
-            // calling into `consume_processed_entry`.
-            unreachable!(
-                "Skipped/SegmentSkipped/WalkSkip/DatalessSkipped should be handled before consume_processed_entry"
-            );
+            return Err(VykarError::Other(
+                "internal error: skipped backup entry reached consume_processed_entry".into(),
+            ));
         }
     }
 

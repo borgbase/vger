@@ -136,7 +136,10 @@ impl Repository {
             debug!(?tiered, "tiered dedup mode: using mmap cache");
             // Drop the full index to reclaim memory.
             self.chunk_index = ChunkIndex::new();
-            let ws = self.write_session.as_mut().unwrap();
+            let ws = self
+                .write_session
+                .as_mut()
+                .expect("write session active while enabling tiered dedup");
             ws.tiered_dedup = Some(tiered);
             ws.index_delta = Some(IndexDelta::new());
         } else {
@@ -192,31 +195,29 @@ impl Repository {
         warn!("saving progress for next run\u{2026}");
 
         // Seal and flush any partial data/tree pack writers.
-        if self
-            .write_session
-            .as_ref()
-            .unwrap()
-            .data_pack_writer
-            .has_pending()
-        {
+        // Sample both has_pending() flags before flushing either writer:
+        // the data and tree pack writers are independent, so flushing one
+        // can't change the other's pending state. This avoids reborrowing
+        // `self.write_session` between the two if-checks.
+        let flush_data = ws.data_pack_writer.has_pending();
+        let flush_tree = ws.tree_pack_writer.has_pending();
+
+        if flush_data {
             if let Err(e) = self.flush_writer_async(PackType::Data) {
                 warn!("flush_on_abort: failed to seal data pack: {e}");
             }
         }
-        if self
-            .write_session
-            .as_ref()
-            .unwrap()
-            .tree_pack_writer
-            .has_pending()
-        {
+        if flush_tree {
             if let Err(e) = self.flush_writer_async(PackType::Tree) {
                 warn!("flush_on_abort: failed to seal tree pack: {e}");
             }
         }
 
         // Join all in-flight upload threads so packs land on storage.
-        let ws = self.write_session.as_mut().unwrap();
+        let ws = self
+            .write_session
+            .as_mut()
+            .expect("write session active while flushing abort state");
         for handle in ws.pending_uploads.drain(..) {
             match handle
                 .join()
@@ -231,7 +232,7 @@ impl Repository {
         // Write final pending_index so next run can recover.
         self.write_session
             .as_mut()
-            .unwrap()
+            .expect("write session active while writing abort journal")
             .write_pending_index_best_effort(&*self.storage, &*self.crypto);
 
         // Clear the session so Drop doesn't fire the debug_assert.
@@ -269,6 +270,10 @@ impl Repository {
     /// Requires an active dedup mode (tiered or plain). The backup pipeline
     /// always enables one of these before any callsite, and the rollback
     /// machinery only tracks mutations that flow through `index_delta`.
+    #[allow(
+        clippy::panic_in_result_fn,
+        reason = "asserts encode programmer invariants on internal state"
+    )]
     pub(crate) fn begin_rollback_checkpoint(&mut self) -> Result<()> {
         {
             let ws = self

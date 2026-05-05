@@ -2,6 +2,10 @@
     all(target_os = "windows", not(debug_assertions)),
     windows_subsystem = "windows"
 )]
+// `slint!`-generated code expands `todo!()`/`unreachable!()` for unsupported
+// embedding paths; the lints fire on macro-expanded source we cannot edit.
+#![allow(clippy::todo, clippy::unimplemented, clippy::unreachable)]
+#![cfg_attr(test, allow(clippy::expect_used, clippy::unwrap_used))]
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
@@ -30,7 +34,19 @@ use repo_helpers::send_log;
 
 const APP_TITLE: &str = "Vykar Backup";
 
-slint::include_modules!();
+// slint::include_modules!() — generated code, not subject to our lints.
+#[allow(
+    warnings,
+    clippy::all,
+    clippy::pedantic,
+    clippy::unwrap_used,
+    clippy::panic,
+    clippy::indexing_slicing
+)]
+mod generated_ui {
+    slint::include_modules!();
+}
+use generated_ui::*;
 
 fn main() {
     if let Err(e) = run() {

@@ -15,28 +15,28 @@ pub(super) struct TransformedItem {
 /// Returns empty string if paths is empty. Preserves the leading `/` for
 /// absolute Unix paths; omits it for Windows-style paths (e.g. `C:/...`).
 fn common_directory_prefix(paths: &[String]) -> String {
-    if paths.is_empty() {
-        return String::new();
-    }
-
     fn split_components(p: &str) -> Vec<&str> {
         p.split('/').filter(|c| !c.is_empty()).collect()
     }
 
-    let has_leading_slash = paths[0].starts_with('/');
+    let (first, rest) = match paths.split_first() {
+        Some(parts) => parts,
+        None => return String::new(),
+    };
 
-    let first_components = split_components(&paths[0]);
+    let has_leading_slash = first.starts_with('/');
+    let first_components = split_components(first);
     let mut common_len = first_components.len();
 
-    for path in &paths[1..] {
+    for path in rest {
         let components = split_components(path);
-        common_len = common_len.min(components.len());
-        for i in 0..common_len {
-            if first_components[i] != components[i] {
-                common_len = i;
-                break;
-            }
-        }
+        let limit = common_len.min(components.len());
+        common_len = first_components
+            .iter()
+            .zip(components.iter())
+            .take(limit)
+            .take_while(|(a, b)| a == b)
+            .count();
     }
 
     if common_len == 0 {
@@ -47,7 +47,10 @@ fn common_directory_prefix(paths: &[String]) -> String {
         };
     }
 
-    let joined = first_components[..common_len].join("/");
+    let joined = first_components
+        .get(..common_len)
+        .expect("common_len <= first_components.len()")
+        .join("/");
     if has_leading_slash {
         format!("/{joined}")
     } else {
@@ -95,8 +98,7 @@ pub(super) fn transform_items(
         common_prefix.as_str()
     };
 
-    if source_paths.len() == 1 {
-        let source = &source_paths[0];
+    if let [source] = source_paths {
         let display_prefix = source
             .strip_prefix(strip_prefix)
             .unwrap_or(source)

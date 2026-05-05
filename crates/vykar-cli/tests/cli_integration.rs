@@ -1,3 +1,7 @@
+#![allow(clippy::unwrap_used)]
+#![allow(clippy::pedantic)]
+#![allow(clippy::panic, clippy::indexing_slicing)]
+
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 use std::time::Duration;

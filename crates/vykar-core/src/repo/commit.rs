@@ -86,7 +86,10 @@ impl Repository {
 
         // Drop tiered dedup index (releases mmap) before reloading full index.
         // Take delta and dedup_index out of the session for processing.
-        let ws = self.write_session.as_mut().unwrap();
+        let ws = self
+            .write_session
+            .as_mut()
+            .expect("write session active while applying commit");
         ws.tiered_dedup.take();
         let delta = ws.index_delta.take();
         if delta.is_some() {

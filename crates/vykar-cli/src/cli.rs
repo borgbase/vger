@@ -416,7 +416,10 @@ impl Commands {
             } => Some(snapshot),
             Self::Snapshot {
                 command: SnapshotCommand::Delete { snapshots, .. },
-            } if snapshots.len() == 1 => Some(&snapshots[0]),
+            } => match snapshots.as_slice() {
+                [only] => Some(only),
+                _ => None,
+            },
             Self::Mount { snapshot, .. } => snapshot.as_deref(),
             _ => None,
         }

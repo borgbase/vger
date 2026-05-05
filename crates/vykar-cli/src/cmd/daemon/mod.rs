@@ -1,3 +1,6 @@
+// glibc malloc_trim to release arena pages between cycles; SAFETY documented per block.
+#![allow(unsafe_code)]
+
 mod http;
 mod render;
 mod status;

@@ -164,8 +164,8 @@ impl WriteSessionState {
         crypto: &dyn CryptoEngine,
     ) -> Result<()> {
         let mut i = 0;
-        while i < self.pending_uploads.len() {
-            if self.pending_uploads[i].is_finished() {
+        while let Some(slot) = self.pending_uploads.get(i) {
+            if slot.is_finished() {
                 let handle = self.pending_uploads.swap_remove(i);
                 handle
                     .join()

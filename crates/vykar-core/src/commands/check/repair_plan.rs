@@ -76,8 +76,8 @@ pub(super) fn build_repair_plan(
         let mut packs: Vec<PackId> = impact.affected_chunks.iter().map(|(_, p)| *p).collect();
         packs.sort_by_key(|a| a.0);
         packs.dedup();
-        let reason = if packs.len() == 1 {
-            format!("chunks in missing pack {}", packs[0])
+        let reason = if let [only] = packs.as_slice() {
+            format!("chunks in missing pack {only}")
         } else {
             let list = packs
                 .iter()
@@ -207,7 +207,9 @@ pub(super) fn build_repair_plan(
         if per_snapshot_whole.contains(&id) {
             continue;
         }
-        let drops = &per_snapshot_drops[&id];
+        let drops = per_snapshot_drops
+            .get(&id)
+            .expect("id came from per_snapshot_drops.keys()");
 
         // Gate 0: data-presence.
         let count = match scan.snapshot_item_counts.get(&id) {

@@ -131,7 +131,14 @@ fn apply_item_level_rewrites(
 
         // 5c. DELETE old blob; on failure, attempt rollback.
         match repo.storage.delete(&rw.old_id.storage_key()) {
-            Ok(()) => applied.push(plan.actions[rw.action_idx].clone()),
+            Ok(()) => {
+                applied.push(
+                    plan.actions
+                        .get(rw.action_idx)
+                        .expect("rw.action_idx was assigned from enumerate(plan.actions)")
+                        .clone(),
+                );
+            }
             Err(e) => {
                 let new_delete = repo.storage.delete(&rw.new_id.storage_key());
                 repo.manifest_mut().remove_snapshot(&rw.new_entry.name);

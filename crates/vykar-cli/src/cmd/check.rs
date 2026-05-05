@@ -82,10 +82,9 @@ pub(crate) fn run_check(
     print_check_summary(&plan_result.check_result);
     print_repair_plan(&plan_result.plan);
 
+    let only_action = plan_result.plan.actions.as_slice();
     if !plan_result.plan.has_data_loss
-        && (plan_result.plan.actions.is_empty()
-            || (plan_result.plan.actions.len() == 1
-                && matches!(plan_result.plan.actions[0], RepairAction::RebuildRefcounts)))
+        && (only_action.is_empty() || matches!(only_action, [RepairAction::RebuildRefcounts]))
     {
         // Tier 1 only — apply without prompt.
         eprintln!("No data-loss actions; applying safe repairs...");

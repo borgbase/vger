@@ -26,7 +26,7 @@ fn ensure_log_model(ui: &MainWindow) -> Rc<VecModel<ModelRc<StandardListViewItem
             ui.set_log_rows(ModelRc::from(model.clone()));
             *borrow = Some(model);
         }
-        borrow.as_ref().unwrap().clone()
+        borrow.as_ref().expect("log model initialized").clone()
     })
 }
 
@@ -50,7 +50,7 @@ pub(crate) fn prepend_log_entry(
     if model.row_count() > MAX_LOG_ROWS {
         // Keep the first TRIM_TARGET rows (newest) and drop the rest.
         let keep: Vec<_> = (0..TRIM_TARGET)
-            .map(|i| model.row_data(i).unwrap())
+            .map(|i| model.row_data(i).expect("row index below trim target"))
             .collect();
         model.set_vec(keep);
     }
@@ -104,7 +104,15 @@ pub(crate) fn capture_gui_state(
     if !scale.is_finite() || scale <= 0.0 {
         return None;
     }
+    #[allow(
+        clippy::cast_precision_loss,
+        reason = "window dimensions are small u32 values; f32 mantissa is sufficient"
+    )]
     let w = win_size.width as f32 / scale;
+    #[allow(
+        clippy::cast_precision_loss,
+        reason = "window dimensions are small u32 values; f32 mantissa is sufficient"
+    )]
     let h = win_size.height as f32 / scale;
     if !w.is_finite() || !h.is_finite() || w <= 0.0 || h <= 0.0 {
         return None;

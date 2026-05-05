@@ -131,10 +131,9 @@ pub enum CachedChunks {
 impl CachedChunks {
     /// Build from a `Vec`, picking the inline variant for 1-chunk entries.
     pub fn from_vec(v: Vec<CachedChunkRef>) -> Self {
-        if v.len() == 1 {
-            CachedChunks::Single(v[0])
-        } else {
-            CachedChunks::Many(Arc::new(v))
+        match v.as_slice() {
+            [only] => CachedChunks::Single(*only),
+            _ => CachedChunks::Many(Arc::new(v)),
         }
     }
 
@@ -166,7 +165,7 @@ impl CachedChunks {
     /// `Vec` is dropped without a second walk.
     pub fn from_owned_chunk_refs(mut refs: Vec<ChunkRef>) -> Self {
         if refs.len() == 1 {
-            let cr = refs.pop().unwrap();
+            let cr = refs.pop().expect("checked exactly one chunk ref");
             CachedChunks::Single(CachedChunkRef {
                 id: cr.id,
                 size: cr.size,
@@ -477,7 +476,11 @@ impl FileCache {
         );
         // Insert into all matching sections (handles overlapping roots).
         // Clone for all but the last, move for the last.
-        for key in &matching[..matching.len() - 1] {
+        let head = matching
+            .split_last()
+            .expect("matching is non-empty (asserted above)")
+            .1;
+        for key in head {
             self.sections
                 .get_mut(key)
                 .expect("insert called without active section")
@@ -485,7 +488,11 @@ impl FileCache {
                 .insert(path_hash, entry.clone());
         }
         self.sections
-            .get_mut(matching.last().unwrap())
+            .get_mut(
+                matching
+                    .last()
+                    .expect("insert called without active section"),
+            )
             .expect("insert called without active section")
             .entries
             .insert(path_hash, entry);
