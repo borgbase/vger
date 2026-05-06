@@ -278,7 +278,7 @@ fn xfs_get_quota_fd(fd: std::os::unix::io::RawFd, id: u32, quota_type: libc::c_i
             fd as libc::c_uint,
             cmd as libc::c_uint,
             id as libc::c_int,
-            &mut dq as *mut FsDiskQuota as *mut libc::c_void,
+            std::ptr::from_mut::<FsDiskQuota>(&mut dq).cast::<libc::c_void>(),
         )
     };
 
@@ -334,7 +334,7 @@ fn get_project_id(path: &Path) -> Option<u32> {
         libc::ioctl(
             file.as_raw_fd(),
             FS_IOC_FSGETXATTR,
-            &mut attr as *mut FsxAttr,
+            std::ptr::from_mut::<FsxAttr>(&mut attr),
         )
     };
 
