@@ -185,10 +185,17 @@ pub(super) fn materialize_item(walked: WalkedEntry, xattrs_enabled: bool) -> Res
         xattrs: None,
     };
 
-    // Skip xattrs on dataless inodes: macOS `getxattr` on FileProvider-managed
-    // attrs round-trips through `fileproviderd`, serializing the single-thread
-    // walker. Dataless entries are either propagated from the parent snapshot
-    // (xattrs come from the cached Item) or routed to SkipDataless.
+    // Skip xattrs on dataless inodes: on macOS, `getxattr` for FileProvider-
+    // managed attrs round-trips through `fileproviderd` and serialises this
+    // single-threaded walker. See issue #133 for the diagnosis.
+    //
+    // Trade-off: on the cache-hit path, `lookup_dataless` returns only chunk
+    // refs (not xattrs), so dataless cache hits now record `xattrs: None` in
+    // the new snapshot. Restoring a dataless file therefore loses any
+    // user-set xattrs (Finder tags etc.) it had on the source. This is
+    // deliberate — preserving them would require either re-reading from disk
+    // (defeats the fix) or threading them through ParentReuseIndex (out of
+    // scope; see #133 fix #2).
     if xattrs_enabled && !metadata_summary.is_dataless {
         item.xattrs = read_item_xattrs(&walked.abs_path);
     }
