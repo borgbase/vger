@@ -341,13 +341,13 @@ pub(super) fn emit_progress(
 }
 
 /// Outcome of attempting server-side pack verification.
-#[allow(dead_code)] // packs_passed is used in tests only
 pub(crate) enum ServerVerifyOutcome {
     /// Server handled some or all packs. `verified_packs` is the set that was
     /// actually checked; any packs not in this set still need client-side work.
     Ok {
         errors: Vec<CheckError>,
         packs_responded: usize,
+        #[allow(dead_code)] // used in tests only
         packs_passed: usize,
         chunks_verified: usize,
         verified_packs: HashSet<PackId>,

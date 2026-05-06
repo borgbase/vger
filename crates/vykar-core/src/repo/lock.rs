@@ -397,6 +397,10 @@ pub fn register_session(storage: &dyn StorageBackend, session_id: &str) -> Resul
 }
 
 /// Deregister a backup session. Best-effort: retries twice on failure.
+///
+/// Performs blocking `std::thread::sleep` between retries. Callers running
+/// inside an async runtime must invoke this via `tokio::task::spawn_blocking`
+/// (see `commands/mount.rs` for the established pattern).
 pub fn deregister_session(storage: &dyn StorageBackend, session_id: &str) {
     let key = session_marker_key(session_id);
     for attempt in 0..3 {
@@ -701,6 +705,10 @@ pub fn clear_all_sessions(storage: &dyn StorageBackend) -> Result<usize> {
 
 /// Acquire a repo lock with retry and exponential backoff + jitter.
 /// Returns the lock guard on success, or the last error on failure.
+///
+/// Performs blocking `std::thread::sleep` between attempts. Callers running
+/// inside an async runtime must invoke this via `tokio::task::spawn_blocking`
+/// (see `commands/mount.rs` for the established pattern).
 pub fn acquire_lock_with_retry(
     storage: &dyn StorageBackend,
     max_attempts: usize,

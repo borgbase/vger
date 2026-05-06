@@ -529,7 +529,8 @@ impl WriteSessionState {
         }
 
         let mut recovered = 0usize;
-        for pack_entry in &wire {
+        let pack_count = wire.len();
+        for pack_entry in wire {
             let pack_key = pack_entry.pack_id.storage_key();
             if !known_packs.contains(&pack_key) {
                 warn!(
@@ -557,12 +558,12 @@ impl WriteSessionState {
 
             // Seed journal so re-interruption preserves these entries.
             self.pending_journal
-                .record_pack(pack_entry.pack_id, pack_entry.chunks.clone());
+                .record_pack(pack_entry.pack_id, pack_entry.chunks);
         }
 
         debug!(
             key = %key,
-            packs = wire.len(),
+            packs = pack_count,
             recovered_chunks = recovered,
             "recovered pending_index entries"
         );
@@ -604,17 +605,13 @@ impl WriteSessionState {
         chunk_id: &ChunkId,
         chunk_index: &mut ChunkIndex,
     ) -> Option<(u32, bool)> {
-        // Record for rollback before removing from recovered_chunks.
-        if let Some(ref mut tracker) = self.rollback_tracker {
-            if let Some(recovered) = self.recovered_chunks.get(chunk_id) {
-                tracker
-                    .promoted_recovered
-                    .push((*chunk_id, recovered.clone()));
-                tracker.dedup_inserts.push(*chunk_id);
-            }
-        }
-
         let entry = self.recovered_chunks.remove(chunk_id)?;
+
+        // Record for rollback now that we own the entry.
+        if let Some(ref mut tracker) = self.rollback_tracker {
+            tracker.promoted_recovered.push((*chunk_id, entry.clone()));
+            tracker.dedup_inserts.push(*chunk_id);
+        }
 
         // Promote into active dedup structure.
         if let Some(ref mut tiered) = self.tiered_dedup {

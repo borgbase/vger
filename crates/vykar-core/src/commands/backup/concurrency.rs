@@ -101,7 +101,7 @@ pub(super) struct BudgetGuard<'a> {
 impl<'a> BudgetGuard<'a> {
     /// Acquire `n` bytes from the budget, returning a guard that will release
     /// them on drop if not defused.
-    #[allow(dead_code)] // Used in tests; production code uses from_pre_acquired.
+    #[cfg(test)] // Used in tests; production code uses from_pre_acquired.
     pub(super) fn new(budget: &'a ByteBudget, n: usize) -> Result<Self> {
         let acquired = budget.acquire(n)?;
         Ok(Self {
