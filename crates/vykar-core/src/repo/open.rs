@@ -88,7 +88,7 @@ impl Repository {
                     (Arc::new(PlaintextEngine::new(&chunk_id_key)), None)
                 }
                 EncryptionMode::Aes256Gcm => {
-                    let master_key = MasterKey::generate();
+                    let master_key = MasterKey::generate()?;
                     let pass = passphrase.ok_or_else(|| {
                         VykarError::Config("passphrase required for encrypted repository".into())
                     })?;
@@ -100,7 +100,7 @@ impl Repository {
                     (Arc::new(engine), Some(enc_key))
                 }
                 EncryptionMode::Chacha20Poly1305 => {
-                    let master_key = MasterKey::generate();
+                    let master_key = MasterKey::generate()?;
                     let pass = passphrase.ok_or_else(|| {
                         VykarError::Config("passphrase required for encrypted repository".into())
                     })?;

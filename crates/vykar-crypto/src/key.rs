@@ -71,22 +71,22 @@ fn validate_kdf_params(kdf: &KdfParams) -> Result<()> {
 impl MasterKey {
     /// Generate a new random master key using OS entropy.
     ///
-    /// # Panics
+    /// # Errors
     ///
-    /// Panics if the operating system entropy source is unavailable.
-    pub fn generate() -> Self {
+    /// Returns an error if the operating system entropy source is unavailable.
+    pub fn generate() -> Result<Self> {
         let mut encryption_key = [0u8; 32];
         let mut chunk_id_key = [0u8; 32];
         rand::rngs::OsRng
             .try_fill_bytes(&mut encryption_key)
-            .expect("OS entropy source unavailable");
+            .map_err(|e| VykarError::KeyDerivation(format!("OS entropy unavailable: {e}")))?;
         rand::rngs::OsRng
             .try_fill_bytes(&mut chunk_id_key)
-            .expect("OS entropy source unavailable");
-        Self {
+            .map_err(|e| VykarError::KeyDerivation(format!("OS entropy unavailable: {e}")))?;
+        Ok(Self {
             encryption_key,
             chunk_id_key,
-        }
+        })
     }
 
     /// Encrypt the master key with a passphrase using Argon2id + AES-256-GCM.
@@ -94,11 +94,7 @@ impl MasterKey {
     /// # Errors
     ///
     /// Returns an error when key derivation, serialization, or encryption
-    /// fails.
-    ///
-    /// # Panics
-    ///
-    /// Panics if the operating system entropy source is unavailable.
+    /// fails, or when the operating system entropy source is unavailable.
     pub fn to_encrypted<P: AsRef<[u8]>>(&self, passphrase: P) -> Result<EncryptedKey> {
         let passphrase = passphrase.as_ref();
 
@@ -106,7 +102,7 @@ impl MasterKey {
         let mut salt = vec![0u8; 32];
         rand::rngs::OsRng
             .try_fill_bytes(&mut salt)
-            .expect("OS entropy source unavailable");
+            .map_err(|e| VykarError::KeyDerivation(format!("OS entropy unavailable: {e}")))?;
 
         // Derive a wrapping key from the passphrase
         let kdf = KdfParams {
@@ -133,7 +129,7 @@ impl MasterKey {
         let mut nonce_bytes = [0u8; 12];
         rand::rngs::OsRng
             .try_fill_bytes(&mut nonce_bytes)
-            .expect("OS entropy source unavailable");
+            .map_err(|e| VykarError::KeyDerivation(format!("OS entropy unavailable: {e}")))?;
         let nonce = Nonce::from_slice(&nonce_bytes);
         let ciphertext = cipher
             .encrypt(
@@ -342,7 +338,7 @@ mod tests {
 
     #[test]
     fn test_nonce_wrong_length() {
-        let key = MasterKey::generate();
+        let key = MasterKey::generate().unwrap();
         let mut encrypted = key.to_encrypted(TEST_PASSPHRASE).unwrap();
         // Replace nonce with wrong length
         encrypted.nonce = vec![0u8; 8];
@@ -415,7 +411,7 @@ mod tests {
 
     #[test]
     fn test_aad_v1_roundtrip() {
-        let key = MasterKey::generate();
+        let key = MasterKey::generate().unwrap();
         let encrypted = key.to_encrypted(TEST_PASSPHRASE).unwrap();
         let decrypted = MasterKey::from_encrypted(&encrypted, TEST_PASSPHRASE).unwrap();
         assert_eq!(key.encryption_key, decrypted.encryption_key);
@@ -425,7 +421,7 @@ mod tests {
     #[test]
     fn test_aad_legacy_compat() {
         // Simulate a key encrypted with the old msgpack AAD
-        let key = MasterKey::generate();
+        let key = MasterKey::generate().unwrap();
         let kdf = make_test_kdf();
         let wrapping_key = derive_key_from_passphrase(TEST_PASSPHRASE, &kdf).unwrap();
 
@@ -463,28 +459,28 @@ mod tests {
 
     #[test]
     fn generate_produces_nonzero_keys() {
-        let key = MasterKey::generate();
+        let key = MasterKey::generate().unwrap();
         assert_ne!(key.encryption_key, [0u8; 32]);
         assert_ne!(key.chunk_id_key, [0u8; 32]);
     }
 
     #[test]
     fn generate_produces_different_keys_each_time() {
-        let k1 = MasterKey::generate();
-        let k2 = MasterKey::generate();
+        let k1 = MasterKey::generate().unwrap();
+        let k2 = MasterKey::generate().unwrap();
         assert_ne!(k1.encryption_key, k2.encryption_key);
         assert_ne!(k1.chunk_id_key, k2.chunk_id_key);
     }
 
     #[test]
     fn encryption_key_and_chunk_id_key_are_different() {
-        let key = MasterKey::generate();
+        let key = MasterKey::generate().unwrap();
         assert_ne!(key.encryption_key, key.chunk_id_key);
     }
 
     #[test]
     fn wrong_passphrase_fails_decrypt() {
-        let key = MasterKey::generate();
+        let key = MasterKey::generate().unwrap();
         let encrypted = key.to_encrypted("correct").unwrap();
         let result = MasterKey::from_encrypted(&encrypted, "wrong");
         assert!(result.is_err());
@@ -492,7 +488,7 @@ mod tests {
 
     #[test]
     fn encrypted_key_serde_roundtrip() {
-        let key = MasterKey::generate();
+        let key = MasterKey::generate().unwrap();
         let encrypted = key.to_encrypted("pass").unwrap();
         let serialized = rmp_serde::to_vec(&encrypted).unwrap();
         let deserialized: EncryptedKey = rmp_serde::from_slice(&serialized).unwrap();
@@ -503,7 +499,7 @@ mod tests {
 
     #[test]
     fn byte_buffer_passphrase_roundtrip() {
-        let key = MasterKey::generate();
+        let key = MasterKey::generate().unwrap();
         let passphrase = Zeroizing::new(TEST_PASSPHRASE.as_bytes().to_vec());
 
         let encrypted = key.to_encrypted(passphrase.clone()).unwrap();
@@ -516,7 +512,7 @@ mod tests {
     #[test]
     fn test_aad_none_compat() {
         // Simulate a key encrypted with no AAD (pre-AAD repos)
-        let key = MasterKey::generate();
+        let key = MasterKey::generate().unwrap();
         let kdf = make_test_kdf();
         let wrapping_key = derive_key_from_passphrase(TEST_PASSPHRASE, &kdf).unwrap();
 
